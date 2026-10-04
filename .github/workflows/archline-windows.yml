@@ -1,0 +1,42 @@
+# ArchLine: compila su Windows e pubblica l'eseguibile come artefatto scaricabile
+# (Actions -> run -> Artifacts). Nessun segreto richiesto; non firma e non crea release.
+name: ArchLine Windows build
+
+on:
+  push:
+    branches: ["claude/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: archline-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --locked --release --bin OpenCADStudio
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\OpenCADStudio.exe dist\OpenCADStudio.exe
+          $info = "ArchLine build`ncommit: ${{ github.sha }}`nbranch: ${{ github.ref_name }}`n"
+          Set-Content -Path dist\BUILD.txt -Value $info
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArchLine-windows-${{ github.run_number }}
+          path: dist
+          retention-days: 14

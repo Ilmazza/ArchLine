@@ -31,5 +31,7 @@ rustflags = [
 ]
 
 [env]
-RUST_MIN_STACK = "8388608"
+# ArchLine: 64 MiB (upstream: 8 MiB). With the extra UI code rustc overflowed its
+# stack on Windows release builds; this only raises the compiler thread stack.
+RUST_MIN_STACK = "67108864"
 
