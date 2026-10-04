@@ -117,6 +117,31 @@ fn strip_style(theme: &Theme) -> container::Style {
     }
 }
 
+/// Top toolbar row (Annotation / Block / Measure).
+///
+/// Kept out of `view_main` on purpose: that function is so large that extra
+/// nesting there can overflow rustc's stack on Windows release builds.
+#[inline(never)]
+pub fn top_bar() -> Element<'static, Message> {
+    horizontal(&tools().extra)
+}
+
+/// Surround the canvas with the Draw (left) and Modify (right) toolbars when
+/// `classic` is set; otherwise return it untouched.
+#[inline(never)]
+pub fn wrap_center<'a>(classic: bool, center: Element<'a, Message>) -> Element<'a, Message> {
+    if !classic {
+        return center;
+    }
+    row![
+        vertical(&tools().draw),
+        container(center).width(Length::Fill).height(Length::Fill),
+        vertical(&tools().modify),
+    ]
+    .height(Length::Fill)
+    .into()
+}
+
 /// Vertical docked toolbar, pinned to the full height of its side.
 pub fn vertical(tools: &'static [ToolDef]) -> Element<'static, Message> {
     let col = column(tools.iter().map(tool_button)).spacing(2);

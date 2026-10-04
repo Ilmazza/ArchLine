@@ -6,6 +6,11 @@
 
 use std::sync::OnceLock;
 
+/// `true` when the classic toolbars replace the ribbon on this tab.
+pub fn classic_active(is_start_tab: bool, clean_screen: bool) -> bool {
+    is_classic() && !is_start_tab && !clean_screen
+}
+
 /// `true` for the AutoCAD-classic workspace (default).
 pub fn is_classic() -> bool {
     static CLASSIC: OnceLock<bool> = OnceLock::new();
