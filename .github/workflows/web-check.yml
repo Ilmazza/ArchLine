@@ -19,6 +19,10 @@ concurrency:
 
 jobs:
   wasm32:
+    # ArchLine: skipped in the fork. The check is already red on upstream
+    # (blocks_palette.rs uses desktop-only APIs on wasm32) and ArchLine ships
+    # the desktop build only. Runs unchanged on upstream.
+    if: github.repository_owner == 'HakanSeven12'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
