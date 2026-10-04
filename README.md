@@ -26,7 +26,12 @@
   <img src="assets/logo.svg" width="112" alt="Open CAD Studio logo">
 </p>
 
-<h1 align="center">Open CAD Studio</h1>
+<h1 align="center">ArchLine</h1>
+
+<p align="center">
+  Fork di <a href="https://github.com/HakanSeven12/OpenCADStudio">Open CAD Studio</a> per lo studio di architettura. Vedi <a href="FORK.md">FORK.md</a>.<br>
+  Offline di default: nessuna richiesta di rete all'avvio (aggiornamenti, Discussions, video, Patreon). Per riattivarle: <code>ARCHLINE_ONLINE=1</code>.
+</p>
 
 <p align="center">
   Open-source 2D drafting and 3D modeling for desktop and web, built with Rust.

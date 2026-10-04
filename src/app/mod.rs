@@ -4672,10 +4672,14 @@ impl OpenCADStudio {
         let mut s = state;
         s.main_window = Some(id);
         let open_main = open_task.map(|_| Message::Noop);
-        let check_update = Task::perform(
-            crate::io::update_check::check_for_update(),
-            Message::UpdateCheckResult,
-        );
+        let check_update = if crate::privacy::online() {
+            Task::perform(
+                crate::io::update_check::check_for_update(),
+                Message::UpdateCheckResult,
+            )
+        } else {
+            Task::none()
+        };
         let focus_cmd = s.focus_cmd_input();
         // Startup configuration from the command line (see `cli`). File
         // arguments — also how the OS file association launches us when
@@ -4729,10 +4733,14 @@ impl OpenCADStudio {
         s.queue_startup_prompts();
         // Fetch the Patreon supporters list once at boot for the Start page.
         #[cfg(not(target_arch = "wasm32"))]
-        let patrons_fetch = Task::perform(
-            async { crate::patreon::fetch_patrons() },
-            Message::PatronsFetched,
-        );
+        let patrons_fetch = if crate::privacy::online() {
+            Task::perform(
+                async { crate::patreon::fetch_patrons() },
+                Message::PatronsFetched,
+            )
+        } else {
+            Task::none()
+        };
         #[cfg(target_arch = "wasm32")]
         let patrons_fetch = Task::none();
         // Tutorial videos: show the on-disk cache instantly, refresh from the
@@ -4741,7 +4749,9 @@ impl OpenCADStudio {
         // requests would otherwise sit on the async executor and hold up the
         // rest of the boot tasks (the Start page waited on it).
         #[cfg(not(target_arch = "wasm32"))]
-        let videos_fetch = {
+        let videos_fetch = if !crate::privacy::online() {
+            Task::none()
+        } else {
             s.set_videos(crate::videos::load_cached());
             s.videos_loading = true;
             let (tx, rx) = iced::futures::channel::oneshot::channel();
@@ -4761,7 +4771,9 @@ impl OpenCADStudio {
         // GitHub Discussions: seed from the last successful fetch, then refresh
         // the public feed and pinned section on a background thread.
         #[cfg(not(target_arch = "wasm32"))]
-        let discussions_fetch = {
+        let discussions_fetch = if !crate::privacy::online() {
+            Task::none()
+        } else {
             s.discussions = crate::discussions::load_cached();
             s.discussions_loading = true;
             let (tx, rx) = iced::futures::channel::oneshot::channel();
@@ -4850,13 +4862,14 @@ pub fn run() -> iced::Result {
             let dot = if tab.dirty { "● " } else { "" };
             let name = tab.tab_display_name();
             format!(
-                "{}Open CAD Studio {} - {}",
+                "{}{} {} - {}",
                 dot,
+                crate::privacy::APP_NAME,
                 env!("OCS_APP_VERSION"),
                 name
             )
         } else {
-            concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string()
+            format!("{} {}", crate::privacy::APP_NAME, env!("OCS_APP_VERSION"))
         }
     })
     .theme(|state: &OpenCADStudio, _| state.active_theme.clone())
@@ -4889,7 +4902,7 @@ pub fn run_web() -> iced::Result {
     )
     .subscription(OpenCADStudio::subscription)
     .title(|_state: &OpenCADStudio| {
-        concat!("Open CAD Studio ", env!("OCS_APP_VERSION")).to_string()
+        format!("{} {}", crate::privacy::APP_NAME, env!("OCS_APP_VERSION"))
     })
     .theme(|state: &OpenCADStudio| state.active_theme.clone())
     .backend(iced::Backend::Hardware(iced::backend::Api::OpenGL))
