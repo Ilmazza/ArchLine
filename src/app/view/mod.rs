@@ -3549,23 +3549,28 @@ fn start_page_content<'a>(
     .report_natural_width(action_width_out.clone());
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-    let mut secondary_items: Vec<Element<'a, Message>> = vec![
-        outline_btn(
-            crate::tr!("start", "send-feedback"),
-            Message::RibbonToolClick {
-                tool_id: "REPORT".to_string(),
-                event: crate::modules::ModuleEvent::Command("REPORT".to_string()),
-            },
-        )
-        .into(),
-        outline_btn(crate::tr!("action", "options"), Message::OptionsOpen).into(),
-    ];
+    let mut secondary_items: Vec<Element<'a, Message>> = Vec::new();
+    // ArchLine: Send Feedback reports to the upstream project; shown only with
+    // ARCHLINE_PROMO=1.
+    if promo {
+        secondary_items.push(
+            outline_btn(
+                crate::tr!("start", "send-feedback"),
+                Message::RibbonToolClick {
+                    tool_id: "REPORT".to_string(),
+                    event: crate::modules::ModuleEvent::Command("REPORT".to_string()),
+                },
+            )
+            .into(),
+        );
+    }
+    secondary_items.push(outline_btn(crate::tr!("action", "options"), Message::OptionsOpen).into());
     secondary_items
         .push(outline_btn(crate::tr!("action", "plugins"), Message::PluginManagerOpen).into());
     // The web build is already in the browser, so only the desktop offers a
     // link to the web version.
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    if promo {
         // Filled with the active theme's primary colour.
         secondary_items.push(
             button(text(crate::t!("OCS Web")).size(14))
