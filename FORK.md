@@ -24,10 +24,14 @@ Progetto indipendente, non affiliato ad Autodesk. "AutoCAD" e "DWG" sono marchi 
 |---|---|---|
 | F1 | Rebrand (nome, logo), pagina iniziale senza sponsor/Donate/contenuti da rete, aggiornamenti disattivabili | da fare |
 | F2 | Analisi di gap vs AutoCAD (`docs/gap-ocs-vs-autocad.md`) | da fare |
-| F3 | Workspace "AutoCAD-like" (modello di interfaccia da decidere) | da fare |
+| F3 | Workspace "AutoCAD classico": barra dei menu, barre strumenti Draw/Modify/Layers/Properties, riga di comando ancorata in basso, palette Properties/Layers, tema scuro; ribbon opzionale | da fare |
 | F4 | Banco di conformità (`tests/conformance/`, oracolo ezdxf, corpus reale) | da fare |
 | F5 | Strato architettonico come plugin: locali, abachi, IFC, quantità con fonte e stato | da fare |
 | F6 | Contributi a monte (es. codepage R2000: accenti corrotti con header ANSI_1252) | da fare |
 
 Analisi di partenza: repository `Ilmazza/Autocad_clone`, `docs/analisi-open-cad-studio.md`
 e `docs/baseline-ocs-f0.md`.
+
+## Decisioni
+- Modello di interfaccia: **AutoCAD classico** (scelta dell'utente).
+- Nome: ArchLine (scelta dell'utente; verifica di marchio a carico dell'utente).
