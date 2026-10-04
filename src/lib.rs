@@ -23,6 +23,7 @@ pub(crate) mod network;
 pub mod par;
 pub mod patreon;
 pub mod privacy;
+pub mod workspace;
 pub mod perf;
 pub mod plugin;
 #[cfg(not(target_arch = "wasm32"))]

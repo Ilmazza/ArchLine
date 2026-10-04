@@ -12,6 +12,7 @@ pub mod overlay;
 pub mod popup;
 pub mod properties;
 pub mod read_only;
+pub mod classic_toolbar;
 pub mod ribbon;
 pub mod side_toolbar;
 pub mod statusbar;

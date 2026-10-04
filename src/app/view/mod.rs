@@ -2161,7 +2161,10 @@ bg={bg_ms:.1}ms n={view_count}"
             // Clean-screen mode drops the ribbon for a full-canvas view; the
             // status bar stays so the mode can be toggled back off.
             let mut col = column![];
-            if !self.clean_screen {
+            let classic = crate::workspace::is_classic()
+                && !self.tabs[self.active_tab].is_start
+                && !self.clean_screen;
+            if !self.clean_screen && !classic {
                 col = col.push(self.ribbon.view(
                     is_paper,
                     self.tabs[self.active_tab].is_start,
@@ -2181,6 +2184,26 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.hovered_doc_tab,
                 ));
             }
+            if classic {
+                col = col.push(crate::ui::classic_toolbar::horizontal(
+                    &crate::ui::classic_toolbar::tools().extra,
+                ));
+            }
+            let center_stack: Element<'_, Message> = if classic {
+                row![
+                    crate::ui::classic_toolbar::vertical(&crate::ui::classic_toolbar::tools().draw),
+                    container(center_stack)
+                        .width(iced::Length::Fill)
+                        .height(iced::Length::Fill),
+                    crate::ui::classic_toolbar::vertical(
+                        &crate::ui::classic_toolbar::tools().modify
+                    ),
+                ]
+                .height(iced::Length::Fill)
+                .into()
+            } else {
+                center_stack
+            };
             col.push(center_stack)
                 .push({
                     let is_model = tab.scene.current_layout == "Model";

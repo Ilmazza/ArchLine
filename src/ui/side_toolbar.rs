@@ -21,14 +21,14 @@ const EDGE_MARGIN: f32 = 8.0;
 /// toolbar is centred in the height below it.
 const TOP_RESERVE: f32 = 200.0;
 
-fn icon_el(icon: IconKind) -> Element<'static, Message> {
+pub(crate) fn icon_el(icon: IconKind) -> Element<'static, Message> {
     match icon {
         IconKind::Glyph(s) => text(s).size(ICON_SIZE * 0.85).into(),
         IconKind::Svg(bytes) => crate::ui::icons::semantic(bytes, ICON_SIZE),
     }
 }
 
-fn tip_panel(label: &'static str) -> Element<'static, Message> {
+pub(crate) fn tip_panel(label: &'static str) -> Element<'static, Message> {
     // Ribbon labels break over two lines; a tooltip reads them on one.
     let label = crate::t!(label).replace('\n', " ");
     container(text(label).size(11))
