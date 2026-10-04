@@ -14,3 +14,13 @@ pub fn online() -> bool {
         Ok("1") | Ok("true") | Ok("yes")
     )
 }
+
+/// `true` when the upstream promotional blocks of the Start page (Donate,
+/// Sponsors, Reddit, Patreon supporters) are shown. Hidden by default;
+/// `ARCHLINE_PROMO=1` restores them.
+pub fn show_promo() -> bool {
+    matches!(
+        std::env::var("ARCHLINE_PROMO").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}

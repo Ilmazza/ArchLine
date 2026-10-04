@@ -3535,11 +3535,15 @@ fn start_page_content<'a>(
         .style(|theme: &Theme, status| start_action_shape(button::danger(theme, status)))
     };
 
-    let primary_row = WrapFlow::new(vec![
+    let promo = crate::privacy::show_promo();
+    let mut primary_items: Vec<Element<'a, Message>> = vec![
         outline_btn(crate::tr!("start", "new-drawing"), Message::TabNew).into(),
         outline_btn(crate::tr!("start", "open-file"), Message::OpenFile).into(),
-        donate_btn.into(),
-    ])
+    ];
+    if promo {
+        primary_items.push(donate_btn.into());
+    }
+    let primary_row = WrapFlow::new(primary_items)
     .spacing_x(12.0)
     .row_h(48.0)
     .report_natural_width(action_width_out.clone());
@@ -3643,6 +3647,16 @@ fn start_page_content<'a>(
     .align_x(iced::alignment::Horizontal::Center)
     .width(Fill);
 
+    let reddit_row: Element<'a, Message> = if promo {
+        container(reddit_btn).center_x(Fill).into()
+    } else {
+        Space::new().into()
+    };
+    let sponsors: Element<'a, Message> = if promo {
+        sponsors.into()
+    } else {
+        Space::new().into()
+    };
     let content = column![
         Space::new().height(iced::Length::Fixed(28.0)),
         container(headline).center_x(Fill),
@@ -3651,7 +3665,7 @@ fn start_page_content<'a>(
         Space::new().height(iced::Length::Fixed(10.0)),
         container(secondary_row).center_x(Fill),
         Space::new().height(iced::Length::Fixed(10.0)),
-        container(reddit_btn).center_x(Fill),
+        reddit_row,
         Space::new().height(iced::Length::Fixed(20.0)),
         sponsors,
         Space::new().height(iced::Length::Fixed(52.0)),
@@ -4016,6 +4030,12 @@ fn start_page_content<'a>(
         .into()
     };
 
+    let supporters: Element<'a, Message> = if promo {
+        supporters
+    } else {
+        Space::new().into()
+    };
+
     let body: Element<'a, Message> = match start_layout {
         StartLayout::AllPanels => {
             iced::widget::row![recent, videos_panel, welcome, discussions_panel, supporters,]
@@ -4068,7 +4088,7 @@ fn start_page_content<'a>(
                         }
                     })
             };
-            let tab_bar = Row::with_children(vec![
+            let mut tabs: Vec<Element<'a, Message>> = vec![
                 tab_btn(
                     crate::tr!("start", "recent-files"),
                     super::StartSection::Recent,
@@ -4081,12 +4101,17 @@ fn start_page_content<'a>(
                     super::StartSection::Discussions,
                 )
                 .into(),
-                tab_btn(
-                    crate::tr!("start", "supporters"),
-                    super::StartSection::Supporters,
-                )
-                .into(),
-            ])
+            ];
+            if promo {
+                tabs.push(
+                    tab_btn(
+                        crate::tr!("start", "supporters"),
+                        super::StartSection::Supporters,
+                    )
+                    .into(),
+                );
+            }
+            let tab_bar = Row::with_children(tabs)
             .spacing(6.0)
             .align_y(iced::Center)
             .wrap()
