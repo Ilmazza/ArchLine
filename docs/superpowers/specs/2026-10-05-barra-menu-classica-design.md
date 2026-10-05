@@ -72,21 +72,21 @@ Note sui dati:
 Nuovo file `src/ui/classic_menu.rs`. L'albero è un dato statico (`OnceLock`), come in `classic_toolbar`.
 
 ```text
-Menu   { key, entries: Vec<Entry> }
-Entry  = Item { key, action, accel: Option<&'static str> }
-       | Sub  { key, entries }
+MenuDef { title, entries: Vec<Entry> }
+Entry  = Item { label, action, accel: Option<&'static str> }
+       | Sub  { label, entries }
        | Sep
-       | Dynamic(DynKind)
+       | Tabs                        // elenco schede (Window), costruito a runtime
 
-Action = Cmd(&'static str)          // Message::Command(...)
+Action = Cmd(String)                 // Message::Command(...)
        | Msg(fn() -> Message)        // messaggio diretto (COMMANDHISTORY, DocTabCloseAll)
-
-DynKind = Tabs                       // elenco schede (Window)
-        | RibbonGroup { module, group }   // voci derivate dal registro
 ```
 
-- `key` è la chiave inglese di traduzione e anche l'etichetta di ripiego.
-- Le voci `Dynamic` servono anche alle parti 2 e 3 (per esempio un elenco di barre o "Blocca posizione").
+- `label` è la chiave inglese di traduzione e anche l'etichetta di ripiego.
+- I gruppi del ribbon (Visual Style, Parametric) sono risolti quando l'albero viene costruito
+  (funzione `group()`): a runtime resta solo `Tabs`. `Cmd` tiene una `String` perché le voci derivate
+  hanno il comando in una `String`. Le parti 2 e 3 potranno aggiungere altre voci a runtime (un
+  elenco di barre, "Blocca posizione").
 - Per le voci con un id nel registro del ribbon l'icona è quella del registro, se presente.
 - Costruzione: `fn menu_bar(ctx: &MenuCtx) -> Element<'static, Message>`, con
   `MenuCtx { bindings, tabs: Vec<TabEntry> }`. Il file `ui` non conosce `OpenCADStudio`.
