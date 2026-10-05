@@ -8,6 +8,7 @@
 
 use std::sync::OnceLock;
 
+use rustc_hash::FxHashMap;
 use crate::app::Message;
 use crate::modules::{registry, ModuleEvent, RibbonItem, ToolDef};
 
@@ -310,6 +311,40 @@ pub fn menus() -> &'static [MenuDef] {
     MENUS.get_or_init(build)
 }
 
+/// `CTRL+SHIFT+S` → `Ctrl+Shift+S`. Single keys and function keys stay as
+/// written (`S`, `F8`).
+pub fn format_accel(key: &str) -> String {
+    key.split('+')
+        .map(|part| {
+            let is_function_key = part.len() > 1
+                && part.starts_with('F')
+                && part[1..].chars().all(|c| c.is_ascii_digit());
+            if part.chars().count() == 1 || is_function_key {
+                return part.to_string();
+            }
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// The shortcut shown for `action`: the shortest key bound to it, ties broken
+/// alphabetically (so Redo shows `Ctrl+Y`, not `Ctrl+Shift+Z`).
+pub fn accel_for(bindings: &FxHashMap<String, String>, action: &str) -> Option<String> {
+    bindings
+        .iter()
+        .filter(|(_, bound)| bound.eq_ignore_ascii_case(action))
+        .map(|(key, _)| key)
+        .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .map(|key| format_accel(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +474,46 @@ mod tests {
             e,
             Entry::Item { action: Action::Cmd(c), .. } if c.starts_with("VISUALSTYLES ")
         )));
+    }
+
+    use rustc_hash::FxHashMap;
+
+    fn bindings(pairs: &[(&str, &str)]) -> FxHashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, a)| (k.to_string(), a.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn accelerators_are_written_like_a_menu() {
+        assert_eq!(format_accel("CTRL+SHIFT+S"), "Ctrl+Shift+S");
+        assert_eq!(format_accel("CTRL+O"), "Ctrl+O");
+        assert_eq!(format_accel("F8"), "F8");
+        assert_eq!(format_accel("F12"), "F12");
+        assert_eq!(format_accel("DELETE"), "Delete");
+    }
+
+    #[test]
+    fn the_shortest_key_wins_and_ties_are_alphabetical() {
+        let b = bindings(&[("CTRL+SHIFT+Z", "REDO"), ("CTRL+Y", "REDO"), ("CTRL+Z", "UNDO")]);
+        assert_eq!(accel_for(&b, "REDO").as_deref(), Some("Ctrl+Y"));
+        assert_eq!(accel_for(&b, "UNDO").as_deref(), Some("Ctrl+Z"));
+        let tie = bindings(&[("CTRL+H", "FIND"), ("CTRL+F", "FIND")]);
+        assert_eq!(accel_for(&tie, "FIND").as_deref(), Some("Ctrl+F"));
+    }
+
+    #[test]
+    fn no_binding_means_no_accelerator() {
+        assert_eq!(accel_for(&FxHashMap::default(), "SAVE"), None);
+        let b = bindings(&[("CTRL+S", "SAVE")]);
+        assert_eq!(accel_for(&b, "SAVEAS"), None);
+        assert_eq!(accel_for(&b, "DOCTABCLOSEALL"), None);
+    }
+
+    #[test]
+    fn the_action_name_is_matched_without_regard_to_case() {
+        let b = bindings(&[("CTRL+S", "save")]);
+        assert_eq!(accel_for(&b, "SAVE").as_deref(), Some("Ctrl+S"));
     }
 }
