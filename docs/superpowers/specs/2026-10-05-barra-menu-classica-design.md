@@ -1,6 +1,6 @@
 # Barra dei menu classica (parte 1 di 4)
 
-Stato: bozza da rivedere. Branch `lavoro`. Data: 2026-10-05.
+Stato: bozza da rivedere (rivista dopo la richiesta di inglese di default). Branch `lavoro`. Data: 2026-10-05.
 
 ## 1. Contesto e scopo
 
@@ -23,7 +23,7 @@ Questa spec non decide nulla sulle parti 2–4, ma non le ostacola (vedi §10).
 
 Barre con nome e spunte, docking, barre flottanti, menu Express (non esiste codice corrispondente),
 mnemonici Alt+lettera, voci disabilitate in base allo stato (per esempio Undo senza storia), spunte
-dentro i menu, icone per le voci che non hanno un id nel registro del ribbon.
+dentro i menu, icone per le voci che non hanno un id nel registro del ribbon, tabella italiana dedicata (§6).
 
 ## 3. Posizione e comportamento
 
@@ -91,29 +91,41 @@ DynKind = Tabs                       // elenco schede (Window)
 - Costruzione: `fn menu_bar(ctx: &MenuCtx) -> Element<'static, Message>`, con
   `MenuCtx { bindings, tabs: Vec<TabEntry> }`. Il file `ui` non conosce `OpenCADStudio`.
 
-## 6. Etichette e traduzioni
+## 6. Etichette e lingua
 
-- Le etichette passano da una funzione dedicata che prova prima la lingua italiana, poi `t!()`.
-- **Decisione presa con Mauro: "b"** (titoli italiani come nel suo elenco, *Quota* e *?*). La
-  verifica ha trovato un costo non previsto: il test `i18n::tests::every_catalog_covers_and_formats_the_source_catalog`
-  impone le **stesse chiavi Fluent in tutte e 20 le lingue**, e 19 etichette della bozza non hanno una
-  voce nel catalogo. Farlo nel catalogo vorrebbe dire circa 30 chiavi nuove × 20 file `.ftl` più righe in
-  `locale_catalog.rs`, file che il `CLAUDE.md` tiene intenzionalmente intatti per i merge da upstream.
-- **Scelta di questa spec (b′, da confermare in revisione):** tabella italiana **di proprietà ArchLine**
-  in un file nuovo, consultata solo quando la lingua corrente è l'italiano (`crate::i18n::loader()`,
-  `current_languages()`: da confermare in implementazione). Per l'utente italiano il risultato è lo stesso
-  di "b". Le altre lingue vedono la traduzione del catalogo dove esiste, l'inglese altrove.
-  Se Mauro preferisce "b" alla lettera, si cambia solo questo capitolo.
-- Titoli italiani: File · Modifica · Visualizza · Inserisci · Formato · Strumenti · Disegna · Quota ·
-  Modifica · Parametrico (proposta) · Finestra · ?
-- Nella tabella vanno le etichette senza voce nel catalogo (misurate: Tools, Parametric, Regen All,
-  Visual Styles, Command History, Xref, Dimension Style, Inquiry, ID, UCS, Aliases, Construction Line,
-  Rectangle, Donut, Single Line Text, Multiline Text, Arc Length, Quick Dimension, Polyline Edit) più
-  quelle dove la traduzione del catalogo non è quella voluta (Dimension, Help). Proposte di testo, da
-  rivedere da chi conosce la terminologia di AutoCAD in italiano: Rigenera tutto · Stili visivi ·
-  Cronologia comandi · Riferimento esterno · Stile di quota · Interroga · SCU · Alias · Linea di
-  costruzione · Rettangolo · Ciambella · Testo a riga singola · Testo multilinea · Lunghezza arco ·
-  Quota rapida · Modifica polilinea.
+- **Lingua predefinita: inglese.** Cambio separato, fatto prima della parte 1: `#[default]` passa da
+  `System` a `EnUs` in `src/i18n.rs`, con il test
+  `default_language_is_english_and_system_stays_selectable`. `System` resta selezionabile. Vale per chi
+  non ha impostazioni salvate: il `settings.json` di Mauro ha `"language": "it-IT"` esplicito, quindi per
+  vedere l'inglese deve sceglierlo in Opzioni, Lingua.
+- **Etichette.** Ogni voce ha una chiave inglese nella forma dei menu di AutoCAD in inglese (screenshot
+  di riferimento). Viene tradotta con `t!(chiave)` non letterale, come fa `classic_toolbar`: se il
+  catalogo ha una voce la usa, altrimenti resta l'inglese. Nessuna modifica a `locale_catalog.rs` né ai
+  file `.ftl`; `scripts/test_locales.py` controlla solo le chiamate letterali, quindi non interviene.
+- **Con l'interfaccia in italiano** i titoli vengono dal catalogo esistente (Edit e Modify entrambi
+  "Modifica", Dimension "Dimensione", Help "Guida") e circa 19 etichette restano in inglese (Tools,
+  Parametric, Regen All, Visual Styles, Command History, Xref, Dimension Style, Inquiry, ID, UCS,
+  Aliases, Construction Line, Rectangle, Donut, Single Line Text, Multiline Text, Arc Length, Quick
+  Dimension, Polyline Edit). Accettato in questa parte.
+- **Rimandata:** una tabella italiana dedicata (Quota, ?, Strumenti, …) senza toccare il catalogo. Era
+  la scelta "b"/"b′" della prima versione di questa spec; è superata dall'inglese di default. Si farà
+  solo se l'interfaccia italiana verrà usata davvero.
+
+### Riferimento per la parte italiana (confronto con AutoCAD italiano)
+
+Fonti: indice comandi italiano-inglese di AutoCAD 2000 (camillotrevisan.it), elenco comandi con alias
+(marcocampana.net), guida italiana Autodesk 2023 (pagina "Modifica"). Sono nomi di **comandi**, non per
+forza etichette dei menu attuali, e le pagine sono state lette con uno strumento di estrazione.
+
+- Confermati: `?` per Help; Stile di quota; Rettangolo, Poligono, Ellisse, Testo, Testo multilinea
+  (TESTOM); Cancella, Copia, Specchio, Sposta, Ruota, Scala, Stira, Taglia, Estendi, Raccordo, Serie,
+  Offset, Annulla, Trova, Blocco, Unità, Limiti, Distanza, Area, Lista.
+- Correzioni a proposte fatte a memoria: Chamfer = CIMA (non Smusso); Explode = ESPLODI (non Scomponi);
+  Break = SPEZZA (non Interrompi); Donut = ANELLO (non Ciambella); UCS resta UCS (non SCU);
+  Polyline Edit = EDITPL; Redo = RIFARE (etichetta di menu non verificata); Hatch = RETINO (2000) o
+  TRATTEGGIO (fonte più recente). Il gruppo Modify del ribbon italiano si chiama "Edita" nella guida 2023.
+- Non trovati: Stili visivi, Cronologia comandi, Seleziona tutto, Campo, Multidirettrice, Lunghezza arco,
+  Linea di costruzione, Parametrico, Alias, Riferimento esterno.
 
 ## 7. Scorciatoie
 
@@ -138,8 +150,7 @@ Modulo `classic_menu::tests`, eseguibile con `cargo test --locked --lib classic_
 4. Le voci `RibbonGroup` risolvono: ogni gruppo nominato esiste e non è vuoto.
 5. Formato e scelta delle scorciatoie (Redo → `Ctrl+Y`; `F8`; azione senza binding → nessuna scritta).
 6. Elenco schede: una riga per scheda, spunta solo sulla attiva.
-7. Etichette: con lingua italiana *Dimension* → *Quota*, *Help* → *?*; ogni chiave della tabella
-   italiana è usata da almeno una voce (niente override morti).
+7. Etichette: ogni voce ha una chiave non vuota.
 
 Fuori test, a carico di Mauro (non c'è GPU in cloud): verifica visiva, §9.
 
@@ -157,7 +168,8 @@ Fuori test, a carico di Mauro (non c'è GPU in cloud): verifica visiva, §9.
 - Build: `cargo build --locked --bin OpenCADStudio`; exe in `target\debug\OpenCADStudio.exe`.
 
 Cosa deve controllare Mauro a video, su una scheda disegno:
-1. La barra dei menu è sopra le schede, in solo testo, con 12 titoli.
+1. La barra dei menu è sopra le schede, in solo testo, con 12 titoli (in inglese: scegli English in
+   Opzioni, Lingua).
 2. Un menu aperto copre le barre sotto e si chiude con un clic fuori o con Esc.
 3. Aprendo un menu e passando sul titolo accanto, si apre quello.
 4. Un comando parte e il menu si chiude (per esempio Draw → Line).
@@ -178,5 +190,5 @@ Cosa deve controllare Mauro a video, su una scheda disegno:
 - `MenuBar` e i `button` nelle righe (stesso schema della barra di stato, non provato qui).
 - Cambio di barra al passaggio del mouse: non verificato.
 - Stack di `rustc` in `view_main`: mitigato con funzione separata.
-- Terminologia italiana: proposte mie, non verificate su AutoCAD italiano.
+- Con l'interfaccia in italiano restano in inglese circa 19 etichette (accettato, §6).
 - Merge da upstream: toccati solo `view_main` (2 righe) e, se serve, la visibilità di un elemento `pub(crate)`.
