@@ -20,11 +20,12 @@ struct Localizations;
 
 /// User-selectable UI language. `System` keeps following the platform's
 /// preferred locale while explicit choices remain stable across restarts.
+/// ArchLine starts in English (like AutoCAD) unless a language was saved.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Language {
-    #[default]
     #[serde(rename = "system")]
     System,
+    #[default]
     #[serde(rename = "en-US")]
     EnUs,
     #[serde(rename = "bg-BG")]
@@ -548,6 +549,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn default_language_is_english_and_system_stays_selectable() {
+        assert_eq!(Language::default(), Language::EnUs);
+        assert!(Language::ALL.contains(&Language::System));
     }
 
     #[test]
