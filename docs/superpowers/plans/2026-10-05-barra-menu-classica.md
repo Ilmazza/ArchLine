@@ -744,22 +744,31 @@ mod build_tests {
             .collect()
     }
 
+    /// The bar is a full-width strip. Reading its size asserts something real
+    /// and proves the whole widget tree was built without panicking.
+    fn spans_the_window(el: &Element<'static, Message>) -> bool {
+        use iced::advanced::Widget;
+        el.as_widget().size().width == Length::Fill
+    }
+
     #[test]
     fn the_bar_builds_without_bindings_or_tabs() {
         let bindings = FxHashMap::default();
-        let _ = menu_bar(&MenuCtx {
+        let bar = menu_bar(&MenuCtx {
             bindings: &bindings,
             tabs: Vec::new(),
         });
+        assert!(spans_the_window(&bar));
     }
 
     #[test]
     fn the_bar_builds_with_many_long_non_ascii_tabs() {
         let bindings = FxHashMap::default();
-        let _ = menu_bar(&MenuCtx {
+        let bar = menu_bar(&MenuCtx {
             bindings: &bindings,
             tabs: tabs(60, "Pianta piano terra — lungo nome àèìòù con molte parole"),
         });
+        assert!(spans_the_window(&bar));
     }
 
     #[test]
@@ -1065,8 +1074,10 @@ mod tests {
 
     #[test]
     fn the_bar_builds_from_app_state() {
+        use iced::advanced::Widget;
         let app = OpenCADStudio::new_for_test();
-        let _ = app.classic_menu_bar();
+        let bar = app.classic_menu_bar();
+        assert_eq!(bar.as_widget().size().width, iced::Length::Fill);
     }
 
     #[test]
