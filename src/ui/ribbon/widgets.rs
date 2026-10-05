@@ -308,12 +308,12 @@ pub(super) const TOP_HIST_GAP: f32 = 4.0;
 
 pub(crate) const UNDO_HISTORY_ID: &str = "UNDO_HISTORY";
 pub(crate) const REDO_HISTORY_ID: &str = "REDO_HISTORY";
-pub(super) const LAYER_COMBO_ID: &str = "LAYER_COMBO";
+pub(crate) const LAYER_COMBO_ID: &str = "LAYER_COMBO";
 /// Dropdown id for the tab-bar panel-density selector.
 pub(super) const COLLAPSE_MODE_ID: &str = "COLLAPSE_MODE";
-pub(super) const PROP_COLOR_ID: &str = "PROP_COLOR";
-pub(super) const PROP_LINETYPE_ID: &str = "PROP_LINETYPE";
-pub(super) const PROP_LW_ID: &str = "PROP_LW";
+pub(crate) const PROP_COLOR_ID: &str = "PROP_COLOR";
+pub(crate) const PROP_LINETYPE_ID: &str = "PROP_LINETYPE";
+pub(crate) const PROP_LW_ID: &str = "PROP_LW";
 
 // ── Style context (passed from Ribbon to render_large) ────────────────────
 
@@ -416,7 +416,7 @@ pub(super) fn tool_btn_style(
     }
 }
 
-pub(super) fn combo_btn_style(
+pub(crate) fn combo_btn_style(
     theme: &Theme,
     is_open: bool,
     status: button::Status,

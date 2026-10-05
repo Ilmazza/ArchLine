@@ -28,7 +28,10 @@ mod color_dropdown;
 mod context_tools;
 pub use context_tools::{pdf_underlay_tools, point_cloud_tools, xref_tools, UnderlayContext};
 use widgets::{StyleContext, *};
-pub(crate) use widgets::{REDO_HISTORY_ID, UNDO_HISTORY_ID};
+pub(crate) use widgets::{
+    combo_btn_style, LAYER_COMBO_ID, PROP_COLOR_ID, PROP_LINETYPE_ID, PROP_LW_ID, REDO_HISTORY_ID,
+    UNDO_HISTORY_ID,
+};
 mod collapse;
 mod locate;
 use collapse::{CollapsePanels, Panel};

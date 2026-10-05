@@ -2187,6 +2187,7 @@ bg={bg_ms:.1}ms n={view_count}"
             }
             if classic {
                 col = col.push(crate::ui::classic_toolbar::top_bar());
+                col = col.push(crate::ui::classic_layers::layer_bar(&self.ribbon));
             }
             let center_stack = crate::ui::classic_toolbar::wrap_center(classic, center_stack);
             col.push(center_stack)

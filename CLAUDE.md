@@ -24,7 +24,8 @@ cargo test --locked --lib classic_toolbar        # altri filtri: start, i18n
 - `src/privacy.rs`: `APP_NAME`, `online()` (`ARCHLINE_ONLINE=1` riattiva aggiornamenti/Discussions/video/Patreon), `show_promo()` (`ARCHLINE_PROMO=1` riporta Donate, Sponsors, Reddit, Patreon, OCS Web, Send Feedback).
 - `src/workspace.rs`: `is_classic()` (`ARCHLINE_WORKSPACE=ribbon` ripristina il ribbon); la pagina iniziale tiene sempre il ribbon.
 - `src/ui/classic_toolbar.rs`: barre Draw (sinistra), Modify (destra), Annotation/Block/Measure (alto), generate dai `RibbonGroup` esistenti. Un pulsante per dropdown (voce `default`); clic destro = flyout con le varianti (`iced_aw::ContextMenu`).
-- Punti di aggancio in codice upstream (tenerli minimi): `src/app/mod.rs` (task di rete all'avvio), `src/app/view/mod.rs` (`view_main`, `start_page_content`).
+- `src/ui/classic_layers.rs`: seconda riga sotto la barra alta: gestione layer, menu layer, i 10 comandi layer del ribbon, menu Colore/Tipo linea/Spessore. Riusa overlay e messaggi del ribbon (`ToggleRibbonDropdown` + `PosReport`); i comandi si leggono dal gruppo "Layers" del ribbon. Mostra layer/proprietà *correnti*, non quelli dell'oggetto selezionato (come il ribbon).
+- Punti di aggancio in codice upstream (tenerli minimi): `src/app/mod.rs` (task di rete all'avvio), `src/app/view/mod.rs` (`view_main`, `start_page_content`), `src/ui/ribbon` (ID dei menu e `combo_btn_style` resi `pub(crate)`).
 - Non toccati di proposito: chiavi di registro, `locale_catalog.rs`, nome del package Cargo.
 
 ## Trappole già incontrate
@@ -34,4 +35,4 @@ cargo test --locked --lib classic_toolbar        # altri filtri: start, i18n
 4. Il hook di fine turno di Claude (cloud) segnala "commit non pubblicati" sui branch del repo aggiunto in sessione: è un falso positivo se `git ls-remote --heads origin <branch>` mostra lo stesso commit di `git rev-parse HEAD`.
 
 ## Aperti
-Controlli layer/proprietà in alto; barra dei menu (`iced_aw` feature `menu`, già attiva); icone più grandi e contrastate; hover nelle righe del flyout; analisi di gap `docs/gap-ocs-vs-autocad.md`; banco di conformità (oracolo ezdxf; materiale in `Ilmazza/Autocad_clone`, `tests/oracle`, `tests/conformance`); plugin architettonico; segnalazione a monte del bug di codepage R2000 del codec (accenti con header ANSI_1252); verifica di marchio del nome ArchLine (a carico dell'utente).
+Layer/proprietà che seguono l'oggetto selezionato (oggi mostrano i valori correnti); barra dei menu (`iced_aw` feature `menu`, già attiva); icone più grandi e contrastate; hover nelle righe del flyout; analisi di gap `docs/gap-ocs-vs-autocad.md`; banco di conformità (oracolo ezdxf; materiale in `Ilmazza/Autocad_clone`, `tests/oracle`, `tests/conformance`); plugin architettonico; segnalazione a monte del bug di codepage R2000 del codec (accenti con header ANSI_1252); verifica di marchio del nome ArchLine (a carico dell'utente).

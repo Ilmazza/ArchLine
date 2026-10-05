@@ -37,7 +37,7 @@ pub struct ClassicTools {
     pub extra: Vec<ClassicItem>,
 }
 
-fn plain(t: &ToolDef) -> ClassicItem {
+pub(super) fn plain(t: &ToolDef) -> ClassicItem {
     ClassicItem::Button(ClassicButton {
         main: t.clone(),
         variants: Vec::new(),
@@ -223,7 +223,7 @@ fn tool_button(b: &ClassicButton) -> Element<'static, Message> {
     iced_aw::ContextMenu::new(with_tip, move || flyout(&variants)).into()
 }
 
-fn separator(vertical: bool) -> Element<'static, Message> {
+pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
     let line = container(Space::new())
         .style(|theme: &Theme| container::Style {
             background: Some(Background::Color(theme.palette().background.strong.color)),
@@ -236,14 +236,14 @@ fn separator(vertical: bool) -> Element<'static, Message> {
     }
 }
 
-fn item_el(item: &ClassicItem, vertical_bar: bool) -> Element<'static, Message> {
+pub(super) fn item_el(item: &ClassicItem, vertical_bar: bool) -> Element<'static, Message> {
     match item {
         ClassicItem::Button(b) => tool_button(b),
         ClassicItem::Separator => separator(vertical_bar),
     }
 }
 
-fn strip_style(theme: &Theme) -> container::Style {
+pub(super) fn strip_style(theme: &Theme) -> container::Style {
     let palette = theme.palette();
     container::Style {
         background: Some(Background::Color(palette.background.weak.color)),
