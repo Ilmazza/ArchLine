@@ -13,7 +13,7 @@ use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
 use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use rustc_hash::FxHashMap;
 use crate::app::Message;
-use crate::modules::{registry, ModuleEvent, RibbonItem, ToolDef};
+use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
 /// What a menu row does when clicked.
 #[derive(Clone)]
@@ -387,9 +387,64 @@ fn muted(theme: &Theme) -> iced::widget::text::Style {
     }
 }
 
-fn lead(icon: Option<&'static [u8]>) -> Element<'static, Message> {
+/// Where a row's icon comes from. Ribbon icons are coloured and drawn as they
+/// are; the quick-access glyphs are black strokes that need tinting.
+enum MenuIcon {
+    Ribbon(&'static [u8]),
+    Ui(&'static [u8]),
+}
+
+/// Menu commands whose ribbon tool is registered under another id: the ribbon
+/// keeps rectangle and polygon in one dropdown whose items are `RECT` and
+/// `POLY`, arc and array under their first variant.
+const RIBBON_ALIASES: &[(&str, &str)] = &[
+    ("POLYGON", "POLY"),
+    ("RECTANG", "RECT"),
+    ("ARC", "ARC_3P"),
+    ("ARRAY", "ARRAYRECT"),
+];
+
+/// File commands drawn with the glyphs of the quick-access strip.
+fn ui_icon(command: &str) -> Option<&'static [u8]> {
+    use crate::ui::icons;
+    match command {
+        "NEW" => Some(icons::DOC_NEW),
+        "OPEN" => Some(icons::FOLDER_OPEN),
+        "SAVE" => Some(icons::SAVE),
+        "SAVEAS" => Some(icons::FILE_EXPORT),
+        "PLOT" => Some(icons::PRINT),
+        _ => None,
+    }
+}
+
+/// The icon of a menu command: its ribbon icon, the ribbon icon of the tool
+/// registered under another id, the layer manager's icon, or a quick-access
+/// glyph. `None` when the app has no icon for it.
+fn icon_for(command: &str) -> Option<MenuIcon> {
+    let ribbon = |id: &str| registry::command_icon(id).map(MenuIcon::Ribbon);
+    ribbon(command)
+        .or_else(|| {
+            RIBBON_ALIASES
+                .iter()
+                .find(|(menu, _)| *menu == command)
+                .and_then(|(_, id)| ribbon(id))
+        })
+        .or_else(|| {
+            if command != "LAYERS" {
+                return None;
+            }
+            match crate::ui::classic_layers::layer_tools().manager.as_ref()?.icon {
+                IconKind::Svg(bytes) => Some(MenuIcon::Ribbon(bytes)),
+                IconKind::Glyph(_) => None,
+            }
+        })
+        .or_else(|| ui_icon(command).map(MenuIcon::Ui))
+}
+
+fn lead(icon: Option<MenuIcon>) -> Element<'static, Message> {
     match icon {
-        Some(bytes) => crate::ui::icons::semantic(bytes, ICON),
+        Some(MenuIcon::Ribbon(bytes)) => crate::ui::icons::semantic(bytes, ICON),
+        Some(MenuIcon::Ui(bytes)) => crate::ui::icons::themed(bytes, ICON),
         None => Space::new().width(ICON).height(ICON).into(),
     }
 }
@@ -485,7 +540,7 @@ fn entry_items(entries: &[Entry], ctx: &MenuCtx<'_>) -> Vec<BarItem> {
                 });
                 let accel_text = key.and_then(|k| accel_for(ctx.bindings, k));
                 let icon = match action {
-                    Action::Cmd(c) => registry::command_icon(c),
+                    Action::Cmd(c) => icon_for(c),
                     Action::Msg(_) => None,
                 };
                 let content = row_content(lead(icon), label_text(label), accel_text, false);
@@ -784,6 +839,45 @@ mod tests {
     fn the_action_name_is_matched_without_regard_to_case() {
         let b = bindings(&[("CTRL+S", "save")]);
         assert_eq!(accel_for(&b, "SAVE").as_deref(), Some("Ctrl+S"));
+    }
+
+    /// Commands that have no icon anywhere in the app (no ribbon tool, no
+    /// quick-access glyph). Adding a menu row without an icon fails the test
+    /// below until the row gets one or is listed here on purpose.
+    const NO_ICON: &[&str] = &[
+        "CLEANSCREEN", "CLOSE", "COLOR", "COPYBASE", "DIMSTYLE", "DSETTINGS", "FIELD", "HELP",
+        "ID", "IMAGEATTACH", "LIMITS", "LINETYPE", "LIST", "PLUGINS", "POINT", "QUIT", "REDO",
+        "REGEN", "REGENALL", "SELECTALL", "SHORTCUTS", "STYLE", "UCS", "UNDO", "UNITS",
+        "ZOOM ALL", "ZOOM PREVIOUS",
+    ];
+
+    #[test]
+    fn command_rows_without_an_icon_are_the_known_ones() {
+        let mut without: Vec<String> = menus()
+            .iter()
+            .flat_map(commands)
+            .filter(|c| icon_for(c).is_none())
+            .collect();
+        without.sort();
+        without.dedup();
+        let expected: Vec<String> = NO_ICON.iter().map(|c| c.to_string()).collect();
+        assert_eq!(without, expected, "rows without an icon changed");
+    }
+
+    #[test]
+    fn menu_names_that_differ_from_the_ribbon_ids_still_get_the_ribbon_icon() {
+        for command in ["POLYGON", "RECTANG", "ARC", "ARRAY", "LAYERS"] {
+            assert!(
+                matches!(icon_for(command), Some(MenuIcon::Ribbon(_))),
+                "{command} has no ribbon icon"
+            );
+        }
+        for command in ["NEW", "OPEN", "SAVE", "SAVEAS", "PLOT"] {
+            assert!(
+                matches!(icon_for(command), Some(MenuIcon::Ui(_))),
+                "{command} has no quick-access icon"
+            );
+        }
     }
 }
 
