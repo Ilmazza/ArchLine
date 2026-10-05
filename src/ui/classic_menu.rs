@@ -8,6 +8,9 @@
 
 use std::sync::OnceLock;
 
+use iced::widget::{button, container, row, text, Space};
+use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
+use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use rustc_hash::FxHashMap;
 use crate::app::Message;
 use crate::modules::{registry, ModuleEvent, RibbonItem, ToolDef};
@@ -345,6 +348,225 @@ pub fn accel_for(bindings: &FxHashMap<String, String>, action: &str) -> Option<S
         .map(|key| format_accel(key))
 }
 
+type BarItem = Item<'static, Message, Theme, iced::Renderer>;
+type BarMenu = Menu<'static, Message, Theme, iced::Renderer>;
+
+const MENU_W: f32 = 270.0;
+const ICON: f32 = 16.0;
+const TAB_NAME_MAX: usize = 40;
+
+/// One open document tab, for the Window menu.
+pub struct TabEntry {
+    pub index: usize,
+    pub name: String,
+    pub active: bool,
+}
+
+/// App state the menu needs, so this file does not depend on the app type.
+pub struct MenuCtx<'a> {
+    pub bindings: &'a FxHashMap<String, String>,
+    pub tabs: Vec<TabEntry>,
+}
+
+/// Translated label; the English key itself when the catalog has no entry.
+/// Line breaks of ribbon labels become spaces.
+fn label_text(key: &str) -> String {
+    crate::t!(key).replace('\n', " ")
+}
+
+fn tab_label(name: &str) -> String {
+    crate::ui::text_util::elide(name, TAB_NAME_MAX).to_string()
+}
+
+fn muted(theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.palette().background.base.text.scale_alpha(0.6)),
+    }
+}
+
+fn lead(icon: Option<&'static [u8]>) -> Element<'static, Message> {
+    match icon {
+        Some(bytes) => crate::ui::icons::semantic(bytes, ICON),
+        None => Space::new().width(ICON).height(ICON).into(),
+    }
+}
+
+fn row_content(
+    lead: Element<'static, Message>,
+    label: String,
+    accel: Option<String>,
+    arrow: bool,
+) -> Element<'static, Message> {
+    let mut r = row![lead, text(label).size(12), Space::new().width(Length::Fill)]
+        .spacing(8)
+        .align_y(iced::Center);
+    if let Some(accel) = accel {
+        r = r.push(text(accel).size(11).style(muted));
+    }
+    if arrow {
+        r = r.push(text("▸").size(12));
+    }
+    container(r).padding([4, 10]).width(Length::Fill).into()
+}
+
+fn row_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.palette();
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: hovered.then_some(Background::Color(palette.primary.weak.color)),
+        text_color: if hovered {
+            palette.primary.weak.text
+        } else {
+            palette.background.base.text
+        },
+        border: Border {
+            radius: 2.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn row_button(content: Element<'static, Message>, message: Message) -> Element<'static, Message> {
+    button(content)
+        .on_press(message)
+        .width(Length::Fill)
+        .padding(0)
+        .style(row_style)
+        .into()
+}
+
+fn separator_row() -> Element<'static, Message> {
+    let line = container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(theme.palette().background.strong.color)),
+            ..Default::default()
+        });
+    container(line).padding([3, 6]).width(Length::Fill).into()
+}
+
+fn click(action: &Action) -> Message {
+    match action {
+        Action::Cmd(command) => Message::Command(command.clone()),
+        Action::Msg(make) => make(),
+    }
+}
+
+fn entry_items(entries: &[Entry], ctx: &MenuCtx<'_>) -> Vec<BarItem> {
+    let mut out: Vec<BarItem> = Vec::new();
+    for e in entries {
+        match e {
+            Entry::Item {
+                label,
+                action,
+                accel,
+            } => {
+                let key: Option<&str> = (*accel).or(match action {
+                    Action::Cmd(c) => Some(c.as_str()),
+                    Action::Msg(_) => None,
+                });
+                let accel_text = key.and_then(|k| accel_for(ctx.bindings, k));
+                let icon = match action {
+                    Action::Cmd(c) => registry::command_icon(c),
+                    Action::Msg(_) => None,
+                };
+                let content = row_content(lead(icon), label_text(label), accel_text, false);
+                out.push(Item::new(row_button(content, click(action))).close_on_click(true));
+            }
+            Entry::Sub { label, entries } => {
+                let header = row_button(
+                    row_content(lead(None), label_text(label), None, true),
+                    Message::Noop,
+                );
+                let menu: BarMenu = Menu::new(entry_items(entries, ctx))
+                    .width(Length::Fixed(MENU_W))
+                    .padding(2)
+                    .spacing(0)
+                    .offset(0.0);
+                out.push(Item::with_menu(header, menu).close_on_click(false));
+            }
+            Entry::Sep => out.push(Item::new(separator_row())),
+            Entry::Tabs => {
+                for tab in &ctx.tabs {
+                    let mark: Element<'static, Message> = if tab.active {
+                        text("✓").size(12).width(ICON).into()
+                    } else {
+                        lead(None)
+                    };
+                    let content = row_content(mark, tab_label(&tab.name), None, false);
+                    out.push(
+                        Item::new(row_button(content, Message::TabSwitch(tab.index)))
+                            .close_on_click(true),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+fn root_button(title: &'static str) -> Element<'static, Message> {
+    button(text(label_text(title)).size(12))
+        .on_press(Message::Noop)
+        .padding([3, 10])
+        .style(row_style)
+        .into()
+}
+
+/// The menu bar, to sit above the document tabs.
+///
+/// Kept out of `view_main` on purpose (see `classic_toolbar::top_bar`).
+#[inline(never)]
+pub fn menu_bar(ctx: &MenuCtx<'_>) -> Element<'static, Message> {
+    let roots: Vec<BarItem> = menus()
+        .iter()
+        .map(|m| {
+            let menu: BarMenu = Menu::new(entry_items(&m.entries, ctx))
+                .width(Length::Fixed(MENU_W))
+                .padding(2)
+                .spacing(0)
+                .offset(1.0)
+                .close_on_background_click(true);
+            Item::with_menu(root_button(m.title), menu)
+        })
+        .collect();
+    let bar = MenuBar::new(roots)
+        .spacing(0)
+        .draw_path(DrawPath::Backdrop)
+        .close_on_background_click_global(true)
+        .style(|theme: &Theme, _| {
+            let palette = theme.palette();
+            iced_aw::style::menu_bar::Style {
+                bar_background: Background::Color(Color::TRANSPARENT),
+                bar_border: Border::default(),
+                bar_shadow: Shadow::default(),
+                menu_background: Background::Color(palette.background.weakest.color),
+                menu_border: Border {
+                    color: palette.background.neutral.color,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                menu_shadow: Shadow {
+                    color: palette.background.strongest.color.scale_alpha(0.35),
+                    offset: iced::Vector::new(0.0, 2.0),
+                    blur_radius: 6.0,
+                },
+                path: Background::Color(palette.primary.weak.color),
+                path_border: Border {
+                    color: palette.primary.base.color,
+                    width: 1.0,
+                    radius: 2.0.into(),
+                },
+            }
+        });
+    container(bar)
+        .width(Length::Fill)
+        .style(super::classic_toolbar::strip_style)
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +737,60 @@ mod tests {
     fn the_action_name_is_matched_without_regard_to_case() {
         let b = bindings(&[("CTRL+S", "save")]);
         assert_eq!(accel_for(&b, "SAVE").as_deref(), Some("Ctrl+S"));
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+
+    fn tabs(n: usize, name: &str) -> Vec<TabEntry> {
+        (0..n)
+            .map(|index| TabEntry {
+                index,
+                name: format!("{name} {index}"),
+                active: index == 0,
+            })
+            .collect()
+    }
+
+    /// The bar is a full-width strip. Reading its size asserts something real
+    /// and proves the whole widget tree was built without panicking.
+    fn spans_the_window(el: &Element<'static, Message>) -> bool {
+        el.as_widget().size().width == Length::Fill
+    }
+
+    #[test]
+    fn the_bar_builds_without_bindings_or_tabs() {
+        let bindings = FxHashMap::default();
+        let bar = menu_bar(&MenuCtx {
+            bindings: &bindings,
+            tabs: Vec::new(),
+        });
+        assert!(spans_the_window(&bar));
+    }
+
+    #[test]
+    fn the_bar_builds_with_many_long_non_ascii_tabs() {
+        let bindings = FxHashMap::default();
+        let bar = menu_bar(&MenuCtx {
+            bindings: &bindings,
+            tabs: tabs(60, "Pianta piano terra — lungo nome àèìòù con molte parole"),
+        });
+        assert!(spans_the_window(&bar));
+    }
+
+    #[test]
+    fn tab_names_are_elided() {
+        let long = "x".repeat(200);
+        assert!(tab_label(&long).chars().count() <= TAB_NAME_MAX + 1);
+        assert_eq!(tab_label("Drawing1.dwg"), "Drawing1.dwg");
+    }
+
+    #[test]
+    fn a_label_without_a_catalog_entry_stays_english() {
+        let key: &str = "Parametric";
+        assert_eq!(label_text(key), "Parametric");
+        assert!(!label_text("Visual\nStyle").contains('\n'));
     }
 }
