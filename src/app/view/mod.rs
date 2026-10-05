@@ -2175,13 +2175,13 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.show_block_palette,
                 ));
             }
+            if classic {
+                col = col.push(self.classic_menu_bar());
+            }
             // Split the `chrome` bucket so live `view-detail` traces show
             // ribbon vs status-bar construction separately (both gated on
             // PERF; zero cost otherwise).
             mark("ribbon");
-            if classic {
-                col = col.push(self.classic_menu_bar());
-            }
             if self.show_file_tabs {
                 col = col.push(doc_tab_bar(
                     &self.tabs,

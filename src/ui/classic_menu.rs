@@ -56,11 +56,13 @@ fn cmd(label: &'static str, command: &str) -> Entry {
     }
 }
 
-fn msg(label: &'static str, make: fn() -> Message, accel: &'static str) -> Entry {
+/// `accel` names the shortcut-table action whose key is shown, or `None` when
+/// no such action exists (then no key is shown, whatever the user binds).
+fn msg(label: &'static str, make: fn() -> Message, accel: Option<&'static str>) -> Entry {
     Entry::Item {
         label,
         action: Action::Msg(make),
-        accel: Some(accel),
+        accel,
     }
 }
 
@@ -103,6 +105,10 @@ fn group(module: &str, group: &str) -> Vec<Entry> {
                             push_tool(&mut out, t);
                         }
                     }
+                    // Style/layer combos and tools that raise a non-command
+                    // event are dropped on purpose. None of the four groups
+                    // used above contains one today; a group that does would
+                    // need its own row kind here.
                     _ => {}
                 }
             }
@@ -163,7 +169,7 @@ fn build() -> Vec<MenuDef> {
                 Sep,
                 cmd("Clean Screen", "CLEANSCREEN"),
                 cmd("Properties", "PROPERTIES"),
-                msg("Command History", || Message::CommandHistoryToggle, "COMMANDHISTORY"),
+                msg("Command History", || Message::CommandHistoryToggle, Some("COMMANDHISTORY")),
             ],
         },
         MenuDef {
@@ -298,7 +304,7 @@ fn build() -> Vec<MenuDef> {
             entries: vec![
                 Entry::Tabs,
                 Sep,
-                msg("Close All", || Message::DocTabCloseAll, "DOCTABCLOSEALL"),
+                msg("Close All", || Message::DocTabCloseAll, None),
             ],
         },
         MenuDef {
@@ -319,10 +325,7 @@ pub fn menus() -> &'static [MenuDef] {
 pub fn format_accel(key: &str) -> String {
     key.split('+')
         .map(|part| {
-            let is_function_key = part.len() > 1
-                && part.starts_with('F')
-                && part[1..].chars().all(|c| c.is_ascii_digit());
-            if part.chars().count() == 1 || is_function_key {
+            if part.chars().count() == 1 {
                 return part.to_string();
             }
             let mut chars = part.chars();
@@ -375,7 +378,7 @@ fn label_text(key: &str) -> String {
 }
 
 fn tab_label(name: &str) -> String {
-    crate::ui::text_util::elide(name, TAB_NAME_MAX).to_string()
+    crate::ui::text_util::elide(name, TAB_NAME_MAX)
 }
 
 fn muted(theme: &Theme) -> iced::widget::text::Style {
@@ -447,6 +450,19 @@ fn separator_row() -> Element<'static, Message> {
     container(line).padding([3, 6]).width(Length::Fill).into()
 }
 
+/// Makes the row answer for the mouse cursor, even where it does nothing (the
+/// separator, the padding of a submenu header). The menu is an overlay: when it
+/// reports no interaction, the cursor is decided by what lies beneath, and over
+/// the drawing that is the canvas hiding it for the crosshair. `mouse_area`
+/// only fills in where the content stays silent, so an enabled button keeps its
+/// own pointer. It publishes nothing here. Same as `statusbar::status_menu`
+/// (#684).
+fn with_cursor(content: Element<'static, Message>) -> Element<'static, Message> {
+    iced::widget::mouse_area(content)
+        .interaction(iced::mouse::Interaction::Idle)
+        .into()
+}
+
 fn click(action: &Action) -> Message {
     match action {
         Action::Cmd(command) => Message::Command(command.clone()),
@@ -473,13 +489,16 @@ fn entry_items(entries: &[Entry], ctx: &MenuCtx<'_>) -> Vec<BarItem> {
                     Action::Msg(_) => None,
                 };
                 let content = row_content(lead(icon), label_text(label), accel_text, false);
-                out.push(Item::new(row_button(content, click(action))).close_on_click(true));
+                out.push(
+                    Item::new(with_cursor(row_button(content, click(action))))
+                        .close_on_click(true),
+                );
             }
             Entry::Sub { label, entries } => {
-                let header = row_button(
+                let header = with_cursor(row_button(
                     row_content(lead(None), label_text(label), None, true),
                     Message::Noop,
-                );
+                ));
                 let menu: BarMenu = Menu::new(entry_items(entries, ctx))
                     .width(Length::Fixed(MENU_W))
                     .padding(2)
@@ -487,7 +506,7 @@ fn entry_items(entries: &[Entry], ctx: &MenuCtx<'_>) -> Vec<BarItem> {
                     .offset(0.0);
                 out.push(Item::with_menu(header, menu).close_on_click(false));
             }
-            Entry::Sep => out.push(Item::new(separator_row())),
+            Entry::Sep => out.push(Item::new(with_cursor(separator_row()))),
             Entry::Tabs => {
                 for tab in &ctx.tabs {
                     let mark: Element<'static, Message> = if tab.active {
@@ -497,8 +516,11 @@ fn entry_items(entries: &[Entry], ctx: &MenuCtx<'_>) -> Vec<BarItem> {
                     };
                     let content = row_content(mark, tab_label(&tab.name), None, false);
                     out.push(
-                        Item::new(row_button(content, Message::TabSwitch(tab.index)))
-                            .close_on_click(true),
+                        Item::new(with_cursor(row_button(
+                            content,
+                            Message::TabSwitch(tab.index),
+                        )))
+                        .close_on_click(true),
                     );
                 }
             }
@@ -659,6 +681,22 @@ mod tests {
         }
     }
 
+    /// The sources of the command dispatcher, where a command line such as
+    /// `ZOOM PREVIOUS` is matched as one quoted literal.
+    const DISPATCHER: &str = concat!(
+        include_str!("../app/commands/mod.rs"),
+        include_str!("../app/commands/fileops.rs"),
+        include_str!("../app/commands/display.rs"),
+        include_str!("../app/commands/blocks.rs"),
+        include_str!("../app/commands/view.rs"),
+        include_str!("../app/commands/styleprops.rs"),
+        include_str!("../app/commands/draw.rs"),
+        include_str!("../app/commands/dim.rs"),
+        include_str!("../app/commands/inquiry.rs"),
+        include_str!("../app/commands/layers.rs"),
+        include_str!("../app/commands/layerprops.rs"),
+    );
+
     #[test]
     fn every_command_exists() {
         let registered: HashSet<String> = crate::command::all_registered_command_names()
@@ -670,9 +708,18 @@ mod tests {
         let mut missing = Vec::new();
         for m in menus() {
             for c in commands(m) {
-                let known = ribbon.contains_key(&c.to_ascii_uppercase())
-                    || registered.contains(&head(&c))
-                    || ribbon_heads.contains(&head(&c));
+                let upper = c.to_ascii_uppercase();
+                let known = if c.split_whitespace().count() > 1 {
+                    // A first word alone proves little (`ZOOM WINDWO` would
+                    // pass): the whole line must come from the ribbon or be a
+                    // literal the dispatcher matches.
+                    ribbon.contains_key(&upper)
+                        || DISPATCHER.contains(&format!("\"{upper}\""))
+                } else {
+                    ribbon.contains_key(&upper)
+                        || registered.contains(&head(&c))
+                        || ribbon_heads.contains(&head(&c))
+                };
                 if !known {
                     missing.push(format!("{}: {c}", m.title));
                 }
@@ -783,13 +830,16 @@ mod build_tests {
     #[test]
     fn tab_names_are_elided() {
         let long = "x".repeat(200);
-        assert!(tab_label(&long).chars().count() <= TAB_NAME_MAX + 1);
+        let elided = tab_label(&long);
+        assert_eq!(elided.chars().count(), TAB_NAME_MAX);
+        assert!(elided.ends_with('…'));
         assert_eq!(tab_label("Drawing1.dwg"), "Drawing1.dwg");
     }
 
     #[test]
     fn a_label_without_a_catalog_entry_stays_english() {
         let key: &str = "Parametric";
+        assert!(!label_text(key).is_empty());
         assert_eq!(label_text(key), "Parametric");
         assert!(!label_text("Visual\nStyle").contains('\n'));
     }

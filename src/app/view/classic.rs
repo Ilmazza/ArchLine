@@ -33,15 +33,23 @@ impl OpenCADStudio {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::OpenCADStudio;
+    use crate::app::{Message, OpenCADStudio};
 
     #[test]
     fn the_window_menu_lists_every_tab_and_flags_the_active_one() {
-        let app = OpenCADStudio::new_for_test();
+        let mut app = OpenCADStudio::new_for_test();
+        // `TabNew` appends a drawing and makes it active.
+        let _ = app.update(Message::TabNew);
+        let _ = app.update(Message::TabNew);
+        assert_eq!(app.tabs.len(), 3);
+        assert_ne!(app.active_tab, 0);
         let tabs = app.classic_menu_tabs();
         assert_eq!(tabs.len(), app.tabs.len());
         assert_eq!(tabs.iter().filter(|t| t.active).count(), 1);
         assert!(tabs[app.active_tab].active);
+        for (i, t) in tabs.iter().enumerate() {
+            assert_eq!(t.index, i);
+        }
         assert!(tabs.iter().all(|t| !t.name.is_empty()));
     }
 
@@ -53,7 +61,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_is_hidden_on_start_and_clean_screen() {
+    fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));
     }
