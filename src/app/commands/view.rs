@@ -78,9 +78,9 @@ impl OpenCADStudio {
 
             "HELP" => {
                 self.command_line
-                    .push_info(crate::t!("Opening OCS Discussions for help and questions...").as_ref());
+                    .push_info("Opening the ArchLine page for help...");
                 return Some(crate::sys::open_url(
-                    "https://github.com/HakanSeven12/OpenCADStudio/discussions",
+                    crate::privacy::HELP_URL,
                     self.main_window,
                 ));
             }
