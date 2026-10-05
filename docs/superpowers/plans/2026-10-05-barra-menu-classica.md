@@ -14,13 +14,14 @@
 - `Action::Cmd` tiene una `String`, non `&'static str`, perché le voci derivate dal ribbon hanno il comando in una `String`.
 - I gruppi del ribbon (Visual Style, Parametric) sono risolti quando l'albero viene costruito, con la funzione `group()`. Non esiste una voce `Dynamic(RibbonGroup)`: resta a runtime solo `Entry::Tabs`.
 - Le icone e il test "il comando esiste" usano `registry::command_icon()` e `registry::ribbon_commands()`, che esistono già.
+- Le voci derivate dal ribbon pubblicano `Message::Command`, non `RibbonToolClick`: è lo stesso percorso di tastiera e riga di comando, e la differenza (evidenziazione dello strumento nel ribbon, che nel workspace classico non esiste) non ha effetto visibile.
 
 ## Global Constraints
 
 - Si lavora sul branch `lavoro`. Commit in italiano, messaggio breve, **senza attribuzioni**. **Niente push.** Non committare `.claude/`. Non toccare `main`.
 - `view_main` riceve al massimo 2 righe (più 1 riga `mod classic;` in `view/mod.rs`): la logica sta in funzioni `#[inline(never)]` in file propri, perché `view_main` è enorme e `rustc` può andare in overflow di stack (trappola 1 del `CLAUDE.md`).
 - `.cargo/config.toml`: `RUST_MIN_STACK` a 64 MiB. Non rimuoverlo.
-- Le righe del menu sono `button` dentro `iced_aw::MenuBar`, come in `src/ui/statusbar/status_menu.rs`. Non usare lo schema del `ContextMenu` (`mouse_area`): lì serve perché l'overlay si ricostruisce a ogni `view`. Il comportamento a video non è verificato.
+- Le righe del menu sono `button` dentro `iced_aw::MenuBar`, come in `src/ui/statusbar/status_menu.rs`, ciascuna avvolta in `mouse_area(..).interaction(Idle)` solo per il cursore (#684), mai con `on_press`. Il `ContextMenu` usa invece `mouse_area` per pubblicare il messaggio al press, perché ricostruisce l'overlay a ogni `view`: sono due usi diversi, qui non si copia il secondo. Il comportamento a video non è verificato.
 - Le etichette passano da `crate::t!(chiave)` **non letterale**. Nessuna modifica a `src/locale_catalog.rs` né ai file `locales/*/opencadstudio.ftl`. Lo script `scripts/test_locales.py` controlla solo le chiamate letterali.
 - La barra compare solo con `crate::workspace::classic_active(is_start, clean_screen)`: mai sulla pagina iniziale, in clean screen, né con `ARCHLINE_WORKSPACE=ribbon`.
 - Titoli, in quest'ordine esatto: File, Edit, View, Insert, Format, Tools, Draw, Dimension, Modify, Parametric, Window, Help.

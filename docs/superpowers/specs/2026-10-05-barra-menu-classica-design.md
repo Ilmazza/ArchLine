@@ -41,7 +41,9 @@ dalla struttura**, non disabilitate. Esclusa: *Lineweight* (non esiste un comand
 si imposta dal combo della riga layer).
 
 Notazione: `CMD` = `Message::Command`; `MSG` = messaggio diretto; `RIB` = derivata dai gruppi del
-ribbon (stesso percorso di clic delle barre classiche).
+ribbon. Anche le voci `RIB` pubblicano `Message::Command`, come tutte le altre: è lo stesso percorso di
+tastiera e riga di comando. Non passano da `RibbonToolClick`: la sola differenza sarebbe l'evidenziazione
+dello strumento nel ribbon, che nel workspace classico non esiste.
 
 | Menu | Voci |
 |---|---|
@@ -138,12 +140,13 @@ forza etichette dei menu attuali, e le pagine sono state lette con uno strumento
 
 ## 8. Test (TDD: scritti prima, visti fallire)
 
-Modulo `classic_menu::tests`, eseguibile con `cargo test --locked --lib classic_`.
+Moduli `ui::classic_menu::tests` e `ui::classic_menu::build_tests` (filtro `cargo test --locked --lib classic_menu`)
+e `app::view::classic::tests` (filtro `cargo test --locked --lib view::classic`). Il filtro `classic_` da solo
+non basta: i test di `app::view::classic` non lo contengono nel nome.
 
-1. Ogni comando di ogni voce esiste: l'id (primo token) è in uno di tre insiemi: id del ribbon
-   (compresi gli item dei dropdown), `crate::command::all_registered_command_names()`, oppure una
-   lista esplicita di comandi gestiti solo dal dispatcher. Per i comandi della lista esplicita, una
-   scansione `include_str!` dei file di `src/app/commands/` deve trovare il literal tra virgolette.
+1. Ogni comando di ogni voce esiste. Per un comando di una sola parola l'id è in uno di tre insiemi:
+   id del ribbon (compresi gli item dei dropdown), `crate::command::all_registered_command_names()`,
+   oppure primo token di un id del ribbon. Per i comandi di più parole vale il punto 8.
 2. Nessun menu vuoto; nessun separatore all'inizio, alla fine o doppio; nessun comando ripetuto
    dentro lo stesso menu.
 3. I 12 titoli sono quelli attesi e nell'ordine atteso.
@@ -151,6 +154,11 @@ Modulo `classic_menu::tests`, eseguibile con `cargo test --locked --lib classic_
 5. Formato e scelta delle scorciatoie (Redo → `Ctrl+Y`; `F8`; azione senza binding → nessuna scritta).
 6. Elenco schede: una riga per scheda, spunta solo sulla attiva.
 7. Etichette: ogni voce ha una chiave non vuota.
+8. Il controllo "il comando esiste" per i comandi di più parole (`ZOOM WINDOW`) non si ferma alla prima
+   parola, che da sola farebbe passare un refuso come `ZOOM WINDWO`: serve che l'intera riga, in maiuscolo,
+   sia un id del ribbon oppure un literal tra virgolette nei sorgenti del dispatcher (`include_str!` dei file
+   di `src/app/commands/`). Un comando di più parole che non passa nessuno dei due si segnala, non si toglie
+   dal menu né si allarga il controllo.
 
 Fuori test, a carico di Mauro (non c'è GPU in cloud): verifica visiva, §9.
 
@@ -161,8 +169,10 @@ Fuori test, a carico di Mauro (non c'è GPU in cloud): verifica visiva, §9.
   proprio (`src/app/view/classic.rs` o equivalente), perché `view_main` è enorme e rustc può andare in
   overflow di stack (trappola 1 del `CLAUDE.md`).
 - Per le righe del menu uso lo schema della barra di stato (`src/ui/statusbar/status_menu.rs`):
-  `iced_aw::MenuBar` con righe `button` in `mouse_area`. Il `ContextMenu` delle barre usa `mouse_area`
-  per un motivo diverso (ricostruisce l'overlay a ogni `view`); `MenuBar` ha uno stato proprio.
+  `iced_aw::MenuBar` con righe `button`, ciascuna avvolta in `mouse_area(..).interaction(Idle)` solo per
+  il cursore (#684: senza, sopra il disegno il cursore sparisce sulle righe che non lo dichiarano),
+  senza `on_press`. Il `ContextMenu` delle barre usa `mouse_area` per un motivo diverso: pubblicare il
+  messaggio al press, perché ricostruisce l'overlay a ogni `view`; `MenuBar` ha uno stato proprio.
   Da confermare a video.
 - Costo: `iced_aw` costruisce tutte le righe a ogni frame (circa 150 elementi). Non misurato.
 - Build: `cargo build --locked --bin OpenCADStudio`; exe in `target\debug\OpenCADStudio.exe`.
@@ -182,7 +192,8 @@ Cosa deve controllare Mauro a video, su una scheda disegno:
 ## 10. Compatibilità con le parti 2–4
 
 - La barra dei menu non è una barra con nome e resta fissa: non entra nell'elenco a spunte né nel docking.
-- `Dynamic` permette di aggiungere un elenco di barre e "Blocca posizione" in Window/View senza toccare il modello.
+- A runtime resta solo `Tabs` (§5). Un elenco di barre e "Blocca posizione" in Window/View si potranno
+  aggiungere come altre voci a runtime, senza toccare il resto del modello.
 - Il codice che costruisce le barre (parte 2) dovrà separare le strisce attuali in barre con nome; non è in questa spec.
 
 ## 11. Rischi
