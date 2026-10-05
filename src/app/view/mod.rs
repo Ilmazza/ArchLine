@@ -17,6 +17,7 @@ use iced::{keyboard, Background, Border, Color, Element, Fill, Length, Subscript
 use iced_aw::ContextMenu;
 use std::sync::Arc;
 
+mod classic;
 mod controls;
 mod modal;
 pub(in crate::app) mod overlay;
@@ -2178,6 +2179,9 @@ bg={bg_ms:.1}ms n={view_count}"
             // ribbon vs status-bar construction separately (both gated on
             // PERF; zero cost otherwise).
             mark("ribbon");
+            if classic {
+                col = col.push(self.classic_menu_bar());
+            }
             if self.show_file_tabs {
                 col = col.push(doc_tab_bar(
                     &self.tabs,
