@@ -380,12 +380,7 @@ pub fn floating_positions(layout: &ToolbarLayout, win: (f32, f32)) -> Vec<(Toolb
 
 /// Widget id of a floating bar's frame (lets tests measure its real layout).
 pub fn floating_id(id: ToolbarId) -> iced::widget::Id {
-    iced::widget::Id::new(match id {
-        ToolbarId::Draw => "toolbar-float-Draw",
-        ToolbarId::Modify => "toolbar-float-Modify",
-        ToolbarId::Layers => "toolbar-float-Layers",
-        ToolbarId::Group(key) => key,
-    })
+    iced::widget::Id::from(format!("toolbar-float-{}", id.key()))
 }
 
 fn floating_el(
@@ -552,6 +547,20 @@ pub fn decorate<'a>(
 mod tests {
     use super::*;
     use crate::ui::toolbar_layout::Target;
+
+    #[test]
+    fn every_floating_frame_id_carries_the_toolbar_prefix_and_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for &id in ToolbarId::all() {
+            assert_eq!(
+                floating_id(id),
+                iced::widget::Id::from(format!("toolbar-float-{}", id.key())),
+                "{}",
+                id.key()
+            );
+            assert!(seen.insert(id.key()));
+        }
+    }
 
     #[test]
     fn floating_positions_are_clamped_into_the_window() {

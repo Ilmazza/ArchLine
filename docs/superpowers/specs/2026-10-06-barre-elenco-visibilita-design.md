@@ -65,28 +65,24 @@ barre di plugin aggiunte a runtime dopo l'avvio (si leggono al lancio).
 
 ## 3. Identità e registro delle barre (`src/ui/toolbar_registry.rs`)
 
-`ToolbarId` resta un enum `Copy` con una variante in più, `Group(&'static str)`, per le barre generate dai gruppi
-del ribbon (anziché diventare un newtype: così non si toccano i ~100 usi esistenti). Il registro dei moduli si
-costruisce una volta (`OnceLock`); `ToolbarId::all()` e `ToolbarId::BUILTIN` prendono il posto di `ALL`.
+`ToolbarId` è un enum `Copy` con tre barre proprie (`Draw`, `Modify`, `Layers`) e `Group(&'static str)` per le barre
+generate dai menu (§1bis). Il registro si costruisce una volta (`OnceLock`); `ToolbarId::all()` e
+`ToolbarId::BUILTIN` elencano le barre.
 
-- **Chiavi.** Le 6 barre attuali mantengono la chiave già salvata in `settings.json`: `Draw`, `Modify`,
-  `Annotation`, `Block`, `Measure`, `Layers`. Tutte le altre: `modulo:Titolo` (es. `annotate:Dimensions`,
-  `insert:Block`).
-- **Quali gruppi diventano barre.** Ogni gruppo `ribbon_groups()` di ogni modulo con almeno un elemento
-  riducibile a pulsante (`Tool`, `LabeledTool`, `LargeTool`, `Dropdown*`, `ToolGrid`: la stessa `flatten` di
-  oggi, ora senza il filtro sul solo modulo `draw`). `Layers` resta il caso speciale con i suoi combo
-  (`classic_layers::layer_row`).
-- **Nomi nell'elenco.** Il titolo del gruppo; se due barre hanno lo stesso titolo, ogni barra non built-in prende il
-  modulo: `Block` (quella storica di Draw) e `Block (Insert)`, `Plot (Layout)` e `Plot (View)`. Ordine alfabetico, senza distinguere
-  maiuscole.
-- **`items_for(id)`** cerca nel registro invece di fare `match` su un enum; `bar_length`, `floating_id` e
-  `allowed_on` lavorano sulla stringa. `allowed_on` resta: solo `Layers` è limitata a Top/Bottom/flottante.
+- **Chiavi.** Le tre barre proprie mantengono la chiave salvata in `settings.json`: `Draw`, `Modify`, `Layers`.
+  Tutte le altre: `menu:Titolo` (es. `menu:Dimension`, `menu:Zoom`).
+- **Quali menu diventano barre.** Ogni menu con comandi propri e ogni sottomenu con almeno 2 comandi (§1bis).
+  `Layers` resta il caso speciale con i suoi combo (`classic_layers::layer_row`).
+- **Nomi nell'elenco.** Il titolo del menu o del sottomenu; ordine alfabetico, senza distinguere maiuscole.
+- **`items_for(id)`** cerca nel registro (le barre `Group`), oppure restituisce le liste di Draw e Modify;
+  `bar_length` e `allowed_on` lavorano sull'`id`. `floating_id` costruisce `toolbar-float-<chiave>` per ogni barra.
+  `allowed_on` resta: solo `Layers` è limitata a Top/Bottom/flottante.
 
 ## 4. Modello (`src/ui/toolbar_layout.rs`)
 
 - Nuova variante `Placement::Hidden { home: Option<DockSlot> }`, serializzata come le altre.
-- **Default** per una chiave non presente nel file: le 6 barre attuali agganciate come oggi; tutte le altre
-  `Hidden`. `lanes(edge)` e `floating()` ignorano le `Hidden`.
+- **Default** per una chiave non presente nel file: Draw (sinistra), Modify (destra), Layers e le tre barre di
+  `ToolbarId::default_visible_groups` (Dimension, Insert, Inquiry) agganciate; tutte le altre `Hidden`. `lanes(edge)` e `floating()` ignorano le `Hidden`.
 - `ToolbarLayout::set_visible(id, bool)` (calcola da solo l'indice di cascata, nessun parametro `cascade_n`):
   - mostrare una barra `Hidden` la rende `Floating { x, y, home }` a cascata: `x = 120 + 28·n`,
     `y = 130 + 28·n`, con `n` = numero di barre flottanti già presenti modulo 8 (il clamp al render la tiene in
@@ -95,8 +91,8 @@ costruisce una volta (`OnceLock`); `ToolbarId::all()` e `ToolbarId::BUILTIN` pre
     le lane che restano vuote si compattano.
 - `sanitized()`: scarta le chiavi che il registro non conosce, riempie le mancanti col default (senza scrivere le
   ~30 barre di gruppo nascoste), corregge `Layers` su un lato.
-- Retrocompatibile: un `settings.json` con solo le 6 chiavi di oggi si legge senza errori; le chiavi `Hidden`
-  non compaiono nei file vecchi.
+- Retrocompatibile: un `settings.json` con le vecchie chiavi (`Annotation`, `Block`, `Measure`, `modulo:Titolo`) si
+  legge senza errori: quelle chiavi vengono scartate e le barre di default riprendono il loro posto.
 
 ## 5. Menu delle barre (tasto destro)
 

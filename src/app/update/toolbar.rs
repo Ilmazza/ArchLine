@@ -7,6 +7,33 @@ use crate::ui::toolbar_dock::{
 use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx, ToolbarId};
 
 impl OpenCADStudio {
+    /// Esc ends a toolbar drag or closes a toolbar flyout. `true` when it did,
+    /// so the key goes no further.
+    #[inline(never)]
+    pub(super) fn toolbar_escape(&mut self, msg: &Message) -> bool {
+        let escape = matches!(msg, Message::CommandEscape)
+            || matches!(msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ESCAPE"));
+        if !escape {
+            return false;
+        }
+        self.toolbar_drag.take().is_some() || self.close_toolbar_flyout()
+    }
+
+    /// Close the variants flyout of a toolbar button, if one is open. Dropdowns
+    /// of the ribbon are left alone.
+    pub(super) fn close_toolbar_flyout(&mut self) -> bool {
+        let open = self
+            .ribbon
+            .open_dropdown
+            .as_deref()
+            .is_some_and(|id| id.starts_with(crate::ui::classic_toolbar::FLYOUT_PREFIX));
+        if open {
+            self.ribbon.open_dropdown = None;
+            self.tool_hold = None;
+        }
+        open
+    }
+
     pub(super) fn on_toolbar(&mut self, m: ToolbarMsg) -> iced::Task<Message> {
         match m {
             ToolbarMsg::Grab(id) => {
@@ -69,7 +96,12 @@ impl OpenCADStudio {
                 });
             }
             ToolbarMsg::HoldCancel => {
-                self.tool_hold = None;
+                // Once the flyout is open the hold stays, so the release that
+                // follows (even after leaving and re-entering the button) is
+                // swallowed instead of running the main command.
+                if self.tool_hold.as_ref().is_some_and(|h| !h.fired) {
+                    self.tool_hold = None;
+                }
             }
             ToolbarMsg::HoldTick(now) => {
                 if let Some(h) = &mut self.tool_hold {
@@ -356,6 +388,44 @@ mod tests {
         );
         assert!(app.tabs[i].active_cmd.is_none(), "the flyout opened instead");
         assert!(app.ribbon.open_dropdown.is_some(), "the flyout stays open");
+    }
+
+    #[test]
+    fn leaving_and_re_entering_after_the_flyout_opened_still_swallows_the_release() {
+        // Review: the flyout was open, the pointer left the button (HoldCancel)
+        // and came back; releasing there must not start the main command.
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let tool = variant_tool();
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
+        tick(&mut app, 600);
+        toolbar(&mut app, ToolbarMsg::HoldCancel);
+        let event = crate::modules::ModuleEvent::Command(tool.to_string());
+        toolbar(&mut app, ToolbarMsg::HoldEnd { tool_id: tool.to_string(), event });
+        assert!(app.tabs[i].active_cmd.is_none(), "the flyout had already opened");
+        assert!(app.ribbon.open_dropdown.is_some(), "the flyout stays open");
+    }
+
+    #[test]
+    fn escape_closes_the_variants_flyout() {
+        let mut app = app();
+        let tool = variant_tool();
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
+        tick(&mut app, 600);
+        assert!(app.ribbon.open_dropdown.is_some());
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.ribbon.open_dropdown.is_none());
+        assert!(app.tool_hold.is_none());
+    }
+
+    #[test]
+    fn escape_leaves_a_ribbon_dropdown_alone() {
+        // Only the toolbar's own flyout is ours to close.
+        let mut app = app();
+        app.ribbon.open_dropdown = Some("SOME_RIBBON_DROPDOWN".to_string());
+        assert!(!app.close_toolbar_flyout());
+        assert_eq!(app.ribbon.open_dropdown.as_deref(), Some("SOME_RIBBON_DROPDOWN"));
     }
 
     #[test]

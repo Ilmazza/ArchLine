@@ -355,12 +355,9 @@ impl OpenCADStudio {
     }
 
     fn update_message(&mut self, msg: Message) -> Task<Message> {
-        // Esc abandons a toolbar drag before it reaches the command line.
-        if self.toolbar_drag.is_some()
-            && (matches!(msg, Message::CommandEscape)
-                || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ESCAPE")))
-        {
-            self.toolbar_drag = None;
+        // Esc abandons a toolbar drag, or closes a toolbar flyout, before it
+        // reaches the command line.
+        if self.toolbar_escape(&msg) {
             return Task::none();
         }
         if let Some(tab) = self.tabs.get(self.active_tab) {
