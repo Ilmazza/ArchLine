@@ -3,14 +3,18 @@
 //! Built from the same `RibbonGroup` definitions the ribbon uses, so tool ids,
 //! icons and commands stay in sync with upstream. Each ribbon dropdown becomes
 //! ONE button that runs its default entry; the other entries open in a flyout
-//! with a right click (`iced_aw::ContextMenu`).
+//! with a long left press (the ribbon's dropdown overlay); a right click opens the
+//! bar list (`toolbar_dock`).
 
 use std::sync::OnceLock;
 
-use iced::widget::{button, column, container, mouse_area, row, text, tooltip, Space};
+use iced::widget::{button, column, container, hover, mouse_area, row, text, tooltip, Space};
 use iced::{Background, Border, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::ui::ribbon::Ribbon;
+use crate::ui::toolbar_dock::ToolbarMsg;
+use crate::ui::wrap_bar::PosReport;
 use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
 pub(super) const BTN_SIZE: f32 = 36.0;
@@ -18,7 +22,32 @@ const ICON_SIZE: f32 = 24.0;
 const FLYOUT_ICON_SIZE: f32 = 18.0;
 const FLYOUT_WIDTH: f32 = 230.0;
 
-/// One toolbar button: runs `main` on click; `variants` (if any) open on right click.
+/// Id prefix of the variants flyout in the ribbon's dropdown machinery.
+pub const FLYOUT_PREFIX: &str = "cflyout:";
+
+fn variants_of(tool_id: &str) -> Option<Vec<ToolDef>> {
+    use crate::ui::toolbar_layout::ToolbarId;
+    ToolbarId::all()
+        .iter()
+        .flat_map(|id| items_for(*id).iter())
+        .find_map(|i| match i {
+            ClassicItem::Button(b) if b.main.id == tool_id && !b.variants.is_empty() => {
+                Some(b.variants.clone())
+            }
+            _ => None,
+        })
+}
+
+/// The open variants flyout, anchored under its button (which reports its
+/// bounds under the same id), if one is open.
+pub fn flyout_overlay<'a>(ribbon: &'a Ribbon, win_w: f32) -> Option<Element<'a, Message>> {
+    let open = ribbon.open_dropdown.as_deref()?;
+    let tool_id = open.strip_prefix(FLYOUT_PREFIX)?;
+    let variants = variants_of(tool_id)?;
+    Some(ribbon.place_dropdown(open, flyout(&variants), FLYOUT_WIDTH, win_w))
+}
+
+/// One toolbar button: runs `main` on click; `variants` (if any) open on a long press.
 pub struct ClassicButton {
     pub main: ToolDef,
     pub variants: Vec<ToolDef>,
@@ -184,7 +213,6 @@ fn tip(label: &'static str, has_variants: bool) -> Element<'static, Message> {
 /// Flyout rows publish on PRESS through a single `mouse_area`: `iced_aw`'s
 /// `ContextMenu` rebuilds its overlay every view, so a nested `button` would
 /// lose its pressed state (see the note in `window/xref_manager.rs`).
-#[allow(dead_code)] // used again by the long-press flyout
 fn flyout_row(t: &ToolDef) -> Element<'static, Message> {
     mouse_area(
         container(
@@ -203,7 +231,6 @@ fn flyout_row(t: &ToolDef) -> Element<'static, Message> {
     .into()
 }
 
-#[allow(dead_code)] // used again by the long-press flyout
 fn flyout(variants: &[ToolDef]) -> Element<'static, Message> {
     container(column(variants.iter().map(flyout_row)))
         .padding(2)
@@ -226,30 +253,64 @@ pub(super) fn panel_style(theme: &Theme) -> container::Style {
 }
 
 fn tool_button(b: &ClassicButton) -> Element<'static, Message> {
-    let btn = button(icon_el(&b.main.icon, ICON_SIZE))
-        .on_press(click(&b.main))
-        .width(Length::Fixed(BTN_SIZE))
-        .height(Length::Fixed(BTN_SIZE))
-        .style(|theme: &Theme, status| {
-            let palette = theme.palette();
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: hovered.then_some(Background::Color(palette.background.strong.color)),
+    let inner: Element<'static, Message> = if b.variants.is_empty() {
+        button(icon_el(&b.main.icon, ICON_SIZE))
+            .on_press(click(&b.main))
+            .width(Length::Fixed(BTN_SIZE))
+            .height(Length::Fixed(BTN_SIZE))
+            .style(|theme: &Theme, status| {
+                let palette = theme.palette();
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hovered.then_some(Background::Color(palette.background.strong.color)),
+                    border: Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    text_color: palette.background.base.text,
+                    ..Default::default()
+                }
+            })
+            .into()
+    } else {
+        // A button with variants is pressed and released as two events: a
+        // short press runs it, a long press opens the flyout. An iced `button`
+        // captures the press, so a `mouse_area` around it would never see it;
+        // draw the hover highlight with `hover` instead.
+        let plain = container(icon_el(&b.main.icon, ICON_SIZE))
+            .width(Length::Fixed(BTN_SIZE))
+            .height(Length::Fixed(BTN_SIZE))
+            .center_x(Length::Fixed(BTN_SIZE))
+            .center_y(Length::Fixed(BTN_SIZE));
+        let lit = container(icon_el(&b.main.icon, ICON_SIZE))
+            .width(Length::Fixed(BTN_SIZE))
+            .height(Length::Fixed(BTN_SIZE))
+            .center_x(Length::Fixed(BTN_SIZE))
+            .center_y(Length::Fixed(BTN_SIZE))
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(theme.palette().background.strong.color)),
                 border: Border {
                     radius: 2.0.into(),
                     ..Default::default()
                 },
-                text_color: palette.background.base.text,
                 ..Default::default()
-            }
-        });
-    let with_tip: Element<'static, Message> =
-        tooltip(btn, tip(b.main.label, !b.variants.is_empty()), tooltip::Position::Bottom)
-            .gap(4)
-            .into();
-    // Variants open on a long press (see the hold flyout); right click now
-    // opens the bar list on the whole bar.
-    with_tip
+            });
+        mouse_area(PosReport::owned(
+            format!("{FLYOUT_PREFIX}{}", b.main.id),
+            hover(plain, lit),
+        ))
+        .on_press(Message::Toolbar(ToolbarMsg::HoldStart(b.main.id)))
+        .on_release(Message::Toolbar(ToolbarMsg::HoldEnd {
+            tool_id: b.main.id.to_string(),
+            event: b.main.event.clone(),
+        }))
+        .on_exit(Message::Toolbar(ToolbarMsg::HoldCancel))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+    };
+    tooltip(inner, tip(b.main.label, !b.variants.is_empty()), tooltip::Position::Bottom)
+        .gap(4)
+        .into()
 }
 
 pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
@@ -265,7 +326,7 @@ pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
     }
 }
 
-pub(super) fn item_el(item: &ClassicItem, vertical_bar: bool) -> Element<'static, Message> {
+pub(crate) fn item_el(item: &ClassicItem, vertical_bar: bool) -> Element<'static, Message> {
     match item {
         ClassicItem::Button(b) => tool_button(b),
         ClassicItem::Separator => separator(vertical_bar),

@@ -2,7 +2,7 @@
 
 use crate::app::{Message, OpenCADStudio};
 use crate::ui::toolbar_dock::{
-    bar_length, bar_size, ToolbarDrag, ToolbarMsg, DRAG_THRESHOLD, GRIP_ANCHOR,
+    bar_length, bar_size, ToolbarDrag, ToolbarMsg, DRAG_THRESHOLD, GRIP_ANCHOR, HOLD_MS,
 };
 use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx};
 
@@ -59,6 +59,35 @@ impl OpenCADStudio {
                 self.toolbar_drag = None;
                 self.toolbars.redock(id);
                 self.save_config();
+            }
+            ToolbarMsg::HoldStart(tool) => {
+                self.tool_hold = Some(crate::app::ToolHold {
+                    tool,
+                    pressed_at: iced::time::Instant::now(),
+                    fired: false,
+                });
+            }
+            ToolbarMsg::HoldCancel => {
+                self.tool_hold = None;
+            }
+            ToolbarMsg::HoldTick(now) => {
+                if let Some(h) = &mut self.tool_hold {
+                    let held = now.saturating_duration_since(h.pressed_at);
+                    if !h.fired && held >= std::time::Duration::from_millis(HOLD_MS) {
+                        h.fired = true;
+                        self.ribbon.open_dropdown = Some(format!(
+                            "{}{}",
+                            crate::ui::classic_toolbar::FLYOUT_PREFIX,
+                            h.tool
+                        ));
+                    }
+                }
+            }
+            ToolbarMsg::HoldEnd { tool_id, event } => {
+                let opened_flyout = self.tool_hold.take().is_some_and(|h| h.fired);
+                if !opened_flyout {
+                    return self.update(Message::RibbonToolClick { tool_id, event });
+                }
             }
             ToolbarMsg::Toggle(id) => {
                 let shown = self.toolbars.is_visible(id);
@@ -224,5 +253,90 @@ mod tests {
             app.toolbars.placement(ToolbarId::Layers),
             Placement::Floating { .. }
         ));
+    }
+
+    /// A draw-bar button that has variants (e.g. CIRCLE).
+    fn variant_tool() -> &'static str {
+        use crate::ui::classic_toolbar::{items_for, ClassicItem};
+        items_for(ToolbarId::Draw)
+            .iter()
+            .find_map(|i| match i {
+                ClassicItem::Button(b) if !b.variants.is_empty() => Some(b.main.id),
+                _ => None,
+            })
+            .expect("the Draw bar has a dropdown")
+    }
+
+    fn tick(app: &mut OpenCADStudio, ms: u64) {
+        let now = iced::time::Instant::now() + std::time::Duration::from_millis(ms);
+        toolbar(app, ToolbarMsg::HoldTick(now));
+    }
+
+    #[test]
+    fn a_long_press_opens_the_variants_flyout() {
+        let mut app = app();
+        let tool = variant_tool();
+        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        tick(&mut app, 100);
+        assert!(app.ribbon.open_dropdown.is_none(), "too early");
+        tick(&mut app, 600);
+        assert_eq!(
+            app.ribbon.open_dropdown.as_deref(),
+            Some(format!("{}{tool}", crate::ui::classic_toolbar::FLYOUT_PREFIX).as_str())
+        );
+        assert!(crate::ui::classic_toolbar::flyout_overlay(&app.ribbon, 1600.0).is_some());
+        // The ribbon's own overlay must leave the id alone, so `view_main` falls
+        // through to the flyout.
+        assert!(app
+            .ribbon
+            .dropdown_overlay(&[], &[], (1600.0, 900.0), false, &[])
+            .is_none());
+    }
+
+    #[test]
+    fn a_short_press_runs_the_command_and_opens_nothing() {
+        // Review focus 5.
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = ToolbarLayout::default();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let tool = variant_tool();
+        let event = crate::modules::ModuleEvent::Command(tool.to_string());
+        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(
+            &mut app,
+            ToolbarMsg::HoldEnd { tool_id: tool.to_string(), event },
+        );
+        assert!(app.tool_hold.is_none());
+        assert!(app.ribbon.open_dropdown.is_none());
+        assert!(app.tabs[i].active_cmd.is_some(), "{tool} should have started");
+    }
+
+    #[test]
+    fn a_held_press_does_not_run_the_command_on_release() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let tool = variant_tool();
+        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        tick(&mut app, 600);
+        let event = crate::modules::ModuleEvent::Command(tool.to_string());
+        toolbar(
+            &mut app,
+            ToolbarMsg::HoldEnd { tool_id: tool.to_string(), event },
+        );
+        assert!(app.tabs[i].active_cmd.is_none(), "the flyout opened instead");
+        assert!(app.ribbon.open_dropdown.is_some(), "the flyout stays open");
+    }
+
+    #[test]
+    fn leaving_the_button_cancels_the_hold() {
+        let mut app = app();
+        let tool = variant_tool();
+        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(&mut app, ToolbarMsg::HoldCancel);
+        tick(&mut app, 600);
+        assert!(app.tool_hold.is_none());
+        assert!(app.ribbon.open_dropdown.is_none());
     }
 }

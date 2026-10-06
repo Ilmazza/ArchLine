@@ -269,6 +269,14 @@ impl From<&QSelectState> for QSelectSettings {
     }
 }
 
+/// A pending press on a toolbar button with variants.
+#[derive(Clone, Debug)]
+pub(crate) struct ToolHold {
+    pub(crate) tool: &'static str,
+    pub(crate) pressed_at: iced::time::Instant,
+    pub(crate) fired: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FindReplaceState {
     pub search: String,
@@ -827,6 +835,9 @@ pub(super) struct OpenCADStudio {
     pub(crate) toolbars: crate::ui::toolbar_layout::ToolbarLayout,
     /// Bar being dragged by its grip, with the live drop target.
     pub(crate) toolbar_drag: Option<crate::ui::toolbar_dock::ToolbarDrag>,
+    /// A press on a toolbar button that has variants, waiting to become a long
+    /// press (flyout) or a click.
+    pub(crate) tool_hold: Option<ToolHold>,
     /// Which panel is currently floated at full height (hovered, or a pinned
     /// panel on top).
     pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
@@ -4237,6 +4248,7 @@ impl OpenCADStudio {
             dock: Default::default(),
             toolbars: Default::default(),
             toolbar_drag: None,
+            tool_hold: None,
             dock_expanded: None,
             dock_dragging: None,
             dock_resizing: None,

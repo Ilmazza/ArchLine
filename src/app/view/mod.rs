@@ -2368,6 +2368,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 self.tabs[self.active_tab].is_start,
                 &self.recent_colors,
             )
+            .or_else(|| crate::ui::classic_toolbar::flyout_overlay(&self.ribbon, self.win_size.0))
             .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into())
         };
 
@@ -2631,6 +2632,14 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
+        // Time a press on a toolbar button with variants until it becomes a
+        // long press (the flyout) — only while one is pending.
+        let tool_hold_tick = if self.tool_hold.as_ref().is_some_and(|h| !h.fired) {
+            iced::time::every(std::time::Duration::from_millis(50))
+                .map(|now| Message::Toolbar(crate::ui::toolbar_dock::ToolbarMsg::HoldTick(now)))
+        } else {
+            Subscription::none()
+        };
         // Web: poll for per-script fonts that a drawing's text needs but hasn't
         // fetched yet. Cheap — `PollWebFonts` is a no-op when nothing is
         // pending. Native has system fonts, so no polling. (#141)
@@ -2868,6 +2877,7 @@ impl OpenCADStudio {
             gpu_probe,
             thumbnail_capture,
             caret_blink,
+            tool_hold_tick,
             web_fonts,
             autosave,
             plugin_drain,

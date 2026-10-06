@@ -25,6 +25,8 @@ pub const GRIP_ANCHOR: f32 = 10.0;
 const GRIP_W: f32 = 8.0;
 /// Distance (px) the pointer must travel from the grab before it is a drag.
 pub const DRAG_THRESHOLD: f32 = 4.0;
+/// How long a press must last to open the variants flyout (ms).
+pub const HOLD_MS: u64 = 400;
 /// Estimated length of the layer / properties bar (combo 220, 3×130 combos,
 /// 11 buttons, separators, spacing).
 const LAYERS_LENGTH: f32 = 1050.0;
@@ -42,6 +44,18 @@ pub enum ToolbarMsg {
     Reset,
     /// Tick / untick a bar in the right-click list.
     Toggle(ToolbarId),
+    /// A button with variants was pressed: start timing the hold.
+    HoldStart(&'static str),
+    /// The pointer left the button before the hold fired.
+    HoldCancel,
+    /// Time passed while a hold is pending.
+    HoldTick(iced::time::Instant),
+    /// The button was released: run it, unless the hold already opened the
+    /// variants flyout.
+    HoldEnd {
+        tool_id: String,
+        event: crate::modules::ModuleEvent,
+    },
 }
 
 /// Transient state of a toolbar drag.

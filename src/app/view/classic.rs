@@ -294,4 +294,47 @@ mod tests {
         }
         assert!(matches!(app.toolbars.placement(dims), Placement::Floating { .. }));
     }
+
+    #[test]
+    fn pressing_a_variant_button_publishes_hold_start_then_hold_end_with_the_real_widget() {
+        use crate::ui::classic_toolbar::{items_for, ClassicItem};
+        use crate::ui::toolbar_dock::ToolbarMsg;
+        use crate::ui::toolbar_layout::ToolbarId;
+        let tool = items_for(ToolbarId::Draw)
+            .iter()
+            .find_map(|i| match i {
+                ClassicItem::Button(b) if !b.variants.is_empty() => Some(b),
+                _ => None,
+            })
+            .expect("a Draw dropdown");
+        let el = crate::ui::classic_toolbar::item_el(
+            &ClassicItem::Button(crate::ui::classic_toolbar::ClassicButton {
+                main: tool.main.clone(),
+                variants: tool.variants.clone(),
+            }),
+            true,
+        );
+        let mut ui = iced_test::simulator(el);
+        let at = iced::Point::new(18.0, 18.0);
+        ui.point_at(at);
+        ui.simulate([
+            iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            iced_core::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)),
+        ]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Toolbar(ToolbarMsg::HoldStart(id)) if *id == tool.main.id)),
+            "press must publish HoldStart: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::Toolbar(ToolbarMsg::HoldEnd { .. }))),
+            "release must publish HoldEnd"
+        );
+        assert!(
+            !messages.iter().any(|m| matches!(m, Message::RibbonToolClick { .. })),
+            "a variant button must not run on press"
+        );
+    }
 }
