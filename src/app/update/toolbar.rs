@@ -156,6 +156,23 @@ mod tests {
     }
 
     #[test]
+    fn dropping_on_the_boundary_between_two_top_rows_opens_a_row_there() {
+        use crate::ui::toolbar_layout::{LANE_THICKNESS, TOP_CHROME};
+        let mut app = app();
+        // Default top: [Dimension, Insert, Inquiry] over [Layers].
+        drag(&mut app, ToolbarId::Draw, Point::new(800.0, TOP_CHROME + LANE_THICKNESS));
+        assert_eq!(
+            app.toolbars.placement(ToolbarId::Draw),
+            Placement::Docked(DockSlot { edge: Edge::Top, lane: 1, index: 0 })
+        );
+        assert_eq!(
+            app.toolbars.placement(ToolbarId::Layers),
+            Placement::Docked(DockSlot { edge: Edge::Top, lane: 2, index: 0 }),
+            "Layers moves down one row"
+        );
+    }
+
+    #[test]
     fn dragging_into_the_middle_floats_the_bar_inside_the_window() {
         let mut app = app();
         drag(&mut app, ToolbarId::Draw, Point::new(800.0, 450.0));

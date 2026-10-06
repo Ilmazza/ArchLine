@@ -18,7 +18,9 @@ use super::classic_toolbar::{
     item_el, items_for, panel_style, strip_style, ClassicItem, BTN_GAP, BTN_SIZE, SEP_SPAN,
 };
 use super::ribbon::Ribbon;
-use super::toolbar_layout::{band_rect, clamp_floating, Edge, Target, ToolbarId, ToolbarLayout};
+use super::toolbar_layout::{
+    band_rect, clamp_floating, insertion_rect, Edge, Target, ToolbarId, ToolbarLayout,
+};
 use crate::app::Message;
 
 /// Offset from the pointer to a dragged bar's top-left: the user holds the
@@ -485,11 +487,22 @@ fn drag_visuals(d: &ToolbarDrag, win: (f32, f32)) -> Vec<Element<'static, Messag
         return Vec::new();
     };
     let mut v = Vec::new();
-    if let Some(Target::Dock(slot)) = d.target {
-        let (x, y, w, h) = band_rect(slot, win);
-        v.push(block_el(x, y, w, h, 0.18));
+    match d.target {
+        Some(Target::Dock(slot)) => {
+            let (x, y, w, h) = band_rect(slot, win);
+            v.push(block_el(x, y, w, h, 0.18));
+        }
+        Some(Target::NewLane { edge, lane }) => {
+            let (x, y, w, h) = insertion_rect(edge, lane, win);
+            v.push(block_el(x, y, w, h, 0.7));
+        }
+        _ => {}
     }
-    let vertical = matches!(d.target, Some(Target::Dock(s)) if s.edge.is_vertical());
+    let vertical = match d.target {
+        Some(Target::Dock(s)) => s.edge.is_vertical(),
+        Some(Target::NewLane { edge, .. }) => edge.is_vertical(),
+        _ => false,
+    };
     let (w, h) = bar_size(d.id, vertical);
     v.push(block_el(cursor.x - GRIP_ANCHOR, cursor.y - GRIP_ANCHOR, w, h, 0.10));
     v

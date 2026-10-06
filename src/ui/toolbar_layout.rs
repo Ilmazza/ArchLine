@@ -125,6 +125,9 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     Dock(DockSlot),
+    /// A row (or column) of its own, inserted at position `lane` of `edge`:
+    /// before the row that is there now, or after the last one.
+    NewLane { edge: Edge, lane: u8 },
     Float { x: f32, y: f32 },
 }
 
@@ -281,6 +284,27 @@ impl ToolbarLayout {
                     }
                 }
             }
+            Target::NewLane { edge, lane } => {
+                // A bar that cannot use `edge` goes to the end of the top rows.
+                let (edge, lane) = if id.allowed_on(edge) {
+                    (edge, lane as usize)
+                } else {
+                    (Edge::Top, usize::MAX)
+                };
+                self.bars.insert(
+                    id.key().to_string(),
+                    Placement::Floating { x: 0.0, y: 0.0, home },
+                );
+                let mut lanes = self.lanes(edge);
+                let at = lane.min(lanes.len());
+                lanes.insert(at, vec![id]);
+                self.write_lanes(edge, &lanes);
+                if let Placement::Docked(s) = previous {
+                    if s.edge != edge {
+                        self.compact(s.edge);
+                    }
+                }
+            }
         }
     }
 
@@ -395,12 +419,12 @@ pub fn resolve_drop(
             home: None,
         },
     );
-    // The snap band covers every existing lane plus one more, so a new lane
-    // can always be opened below the last one.
+    // The snap band covers every existing lane plus two more, so a new lane
+    // is easy to open below the last one.
     let best = candidates
         .into_iter()
         .filter(|(edge, d)| {
-            let band = SNAP_BAND.max((probe.lanes(*edge).len() + 1) as f32 * LANE_THICKNESS);
+            let band = SNAP_BAND.max((probe.lanes(*edge).len() + 2) as f32 * LANE_THICKNESS);
             dragged.allowed_on(*edge) && *d < band
         })
         .min_by(|a, b| a.1.total_cmp(&b.1));
@@ -412,22 +436,34 @@ pub fn resolve_drop(
     };
 
     let lanes = probe.lanes(edge);
-    let lane = ((dist / LANE_THICKNESS) as usize).min(lanes.len());
-    let index = if lane < lanes.len() {
-        let along = if edge.is_vertical() { y - TOP_CHROME } else { x };
-        let mut start = 0.0;
-        let mut index = 0usize;
-        for id in &lanes[lane] {
-            let l = (ctx.length)(*id);
-            if along > start + l / 2.0 {
-                index += 1;
-            }
-            start += l;
-        }
-        index
+    let n = lanes.len();
+    if n == 0 {
+        return Target::Dock(DockSlot { edge, lane: 0, index: 0 });
+    }
+    // The middle of a row joins it; the strip around a boundary between two
+    // rows, and everything past the last row, opens a new row there. The strip
+    // along the window edge itself belongs to the first row.
+    let margin = LANE_THICKNESS / 4.0;
+    let boundary = if dist >= n as f32 * LANE_THICKNESS - margin {
+        Some(n)
     } else {
-        0
+        let k = (dist / LANE_THICKNESS).round() as usize;
+        (k >= 1 && (dist - k as f32 * LANE_THICKNESS).abs() <= margin).then_some(k)
     };
+    if let Some(k) = boundary {
+        return Target::NewLane { edge, lane: k.min(u8::MAX as usize) as u8 };
+    }
+    let lane = ((dist / LANE_THICKNESS) as usize).min(n - 1);
+    let along = if edge.is_vertical() { y - TOP_CHROME } else { x };
+    let mut start = 0.0;
+    let mut index = 0usize;
+    for id in &lanes[lane] {
+        let l = (ctx.length)(*id);
+        if along > start + l / 2.0 {
+            index += 1;
+        }
+        start += l;
+    }
     Target::Dock(DockSlot {
         edge,
         lane: lane.min(u8::MAX as usize) as u8,
@@ -461,6 +497,23 @@ pub fn band_rect(slot: DockSlot, win: (f32, f32)) -> (f32, f32, f32, f32) {
             LANE_THICKNESS,
             side_h,
         ),
+    }
+}
+
+/// Thickness of the marker drawn where a new row would be inserted (px).
+const INSERT_MARK: f32 = 4.0;
+
+/// Rectangle `(x, y, w, h)` of the marker for a new row at position `lane` of
+/// `edge`: a thin strip centred on the boundary between two rows.
+pub fn insertion_rect(edge: Edge, lane: u8, win: (f32, f32)) -> (f32, f32, f32, f32) {
+    let at = lane as f32 * LANE_THICKNESS;
+    let side_h = (win.1 - TOP_CHROME - BOTTOM_CHROME).max(0.0);
+    let half = INSERT_MARK / 2.0;
+    match edge {
+        Edge::Top => (0.0, TOP_CHROME + at - half, win.0, INSERT_MARK),
+        Edge::Bottom => (0.0, win.1 - BOTTOM_CHROME - at - half, win.0, INSERT_MARK),
+        Edge::Left => (at - half, TOP_CHROME, INSERT_MARK, side_h),
+        Edge::Right => (win.0 - at - half, TOP_CHROME, INSERT_MARK, side_h),
     }
 }
 
@@ -612,13 +665,108 @@ mod tests {
                 (0.0, 0.0),
                 &ctx()
             ),
-            Target::Dock(slot(Edge::Top, 2, 0))
+            Target::NewLane { edge: Edge::Top, lane: 2 }
+        );
+        // The zone is generous: a lane and a half below the last row still opens one.
+        assert_eq!(
+            resolve_drop(
+                &l,
+                Draw,
+                (800.0, TOP_CHROME + 3.5 * LANE_THICKNESS),
+                (0.0, 0.0),
+                &ctx()
+            ),
+            Target::NewLane { edge: Edge::Top, lane: 2 }
         );
         // Still far from everything: floating.
         assert_eq!(
             resolve_drop(&l, Draw, (800.0, TOP_CHROME + 300.0), (7.0, 9.0), &ctx()),
             Target::Float { x: 7.0, y: 9.0 }
         );
+    }
+
+    #[test]
+    fn resolve_drop_inserts_a_row_between_two_rows_at_their_boundary() {
+        // Top holds [Dimension, Insert, Inquiry] over [Layers].
+        use ToolbarId::*;
+        let l = ToolbarLayout::default();
+        let at = |d: f32| resolve_drop(&l, Draw, (800.0, TOP_CHROME + d), (0.0, 0.0), &ctx());
+        let t = LANE_THICKNESS;
+        // On the boundary, and a little either side of it: a new row between them.
+        for d in [t - 3.0, t, t + 3.0, 0.8 * t, 1.2 * t] {
+            assert_eq!(at(d), Target::NewLane { edge: Edge::Top, lane: 1 }, "d = {d}");
+        }
+        // The middle of a row still joins that row.
+        assert_eq!(at(0.5 * t), Target::Dock(slot(Edge::Top, 0, 3)));
+        assert_eq!(at(1.5 * t), Target::Dock(slot(Edge::Top, 1, 1)));
+        // The strip hugging the window edge joins the first row: no row is
+        // squeezed in front of it by accident.
+        assert_eq!(at(2.0), Target::Dock(slot(Edge::Top, 0, 3)));
+    }
+
+    #[test]
+    fn an_empty_edge_takes_the_bar_in_its_first_row() {
+        use ToolbarId::*;
+        let l = ToolbarLayout::default();
+        assert_eq!(
+            resolve_drop(&l, Draw, (10.0, 450.0), (0.0, 0.0), &ctx()),
+            Target::Dock(slot(Edge::Left, 0, 0)),
+            "Draw's own column is empty once it is lifted"
+        );
+        assert_eq!(
+            resolve_drop(&l, Draw, (800.0, 900.0 - BOTTOM_CHROME - 5.0), (0.0, 0.0), &ctx()),
+            Target::Dock(slot(Edge::Bottom, 0, 0))
+        );
+    }
+
+    #[test]
+    fn a_new_row_goes_between_the_rows_it_names() {
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        l.move_to(Draw, Target::NewLane { edge: Edge::Top, lane: 1 });
+        assert_eq!(
+            l.lanes(Edge::Top),
+            vec![vec![dim(), ins(), inq()], vec![Draw], vec![Layers]]
+        );
+        assert!(l.lanes(Edge::Left).is_empty(), "the old edge closes up");
+        assert_eq!(l.placement(Draw), Placement::Docked(slot(Edge::Top, 1, 0)));
+        // At the front, and past the end (clamped to a new last row).
+        l.move_to(Modify, Target::NewLane { edge: Edge::Top, lane: 0 });
+        assert_eq!(l.lanes(Edge::Top)[0], vec![Modify]);
+        l.move_to(dim(), Target::NewLane { edge: Edge::Top, lane: 99 });
+        assert_eq!(l.lanes(Edge::Top).last(), Some(&vec![dim()]));
+    }
+
+    #[test]
+    fn a_new_row_for_layers_never_lands_on_a_side() {
+        let mut l = ToolbarLayout::default();
+        l.move_to(ToolbarId::Layers, Target::NewLane { edge: Edge::Left, lane: 0 });
+        match l.placement(ToolbarId::Layers) {
+            Placement::Docked(s) => assert_eq!(s.edge, Edge::Top),
+            other => panic!("expected docked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moving_a_bar_within_its_own_row_list_does_not_leave_a_gap() {
+        // Layers is alone in lane 1: asking for a new lane 1 puts it back there.
+        let mut l = ToolbarLayout::default();
+        l.move_to(ToolbarId::Layers, Target::NewLane { edge: Edge::Top, lane: 1 });
+        assert_eq!(l.lanes(Edge::Top), vec![vec![dim(), ins(), inq()], vec![ToolbarId::Layers]]);
+    }
+
+    #[test]
+    fn the_insertion_marker_sits_on_the_boundary_between_rows() {
+        let win = (1600.0, 900.0);
+        let (x, y, w, h) = insertion_rect(Edge::Top, 1, win);
+        assert_eq!((x, w), (0.0, 1600.0));
+        assert_eq!(y + h / 2.0, TOP_CHROME + LANE_THICKNESS);
+        let (x, _, w, _) = insertion_rect(Edge::Left, 1, win);
+        assert_eq!(x + w / 2.0, LANE_THICKNESS);
+        let (x, _, w, _) = insertion_rect(Edge::Right, 1, win);
+        assert_eq!(x + w / 2.0, 1600.0 - LANE_THICKNESS);
+        let (_, y, _, h) = insertion_rect(Edge::Bottom, 1, win);
+        assert_eq!(y + h / 2.0, 900.0 - BOTTOM_CHROME - LANE_THICKNESS);
     }
 
     #[test]

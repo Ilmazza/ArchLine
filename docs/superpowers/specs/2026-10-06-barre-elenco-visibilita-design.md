@@ -43,6 +43,20 @@ Decisione dell'utente: **una barra per menu, un pulsante per comando**.
   (`ToolbarId::default_visible_groups`); Text resta una barra a scelta dall'elenco. Le chiavi ritirate e quelle dei
   vecchi gruppi del ribbon (`modulo:Titolo`) non esistono più e vengono scartate al caricamento.
 
+## 1ter. Righe multiple: inserire una riga tra due righe
+
+Trascinando una barra su un bordo, `resolve_drop` distingue tre zone (`LANE_THICKNESS` = 32 px, margine = un
+quarto):
+
+- **centro di una riga** (e la fascia a filo della finestra): la barra entra in quella riga (`Target::Dock`);
+- **fascia di ±8 px attorno al confine** tra due righe: nasce una riga nuova in quel punto
+  (`Target::NewLane { edge, lane }`), le righe successive scalano di una;
+- **oltre l'ultima riga**, fino a due righe di spessore: nasce una riga nuova in fondo.
+
+Su un bordo vuoto la barra va nella prima riga. Durante il trascinamento un riquadro tenue evidenzia la riga che
+accoglierebbe la barra; per una riga nuova compare invece un segno sottile (4 px, `insertion_rect`) sul confine.
+Non ho potuto vedere il risultato a schermo (nessuna GPU): da verificare con uno screenshot.
+
 ## 2. Fuori portata
 
 Pulsante di chiusura sulle barre flottanti (si chiudono dall'elenco); personalizzazione dei pulsanti; barre fatte
