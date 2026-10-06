@@ -825,6 +825,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) dock: crate::ui::dock::DockState,
     /// Classic toolbar placement (docked lane / floating position).
     pub(crate) toolbars: crate::ui::toolbar_layout::ToolbarLayout,
+    /// Bar being dragged by its grip, with the live drop target.
+    pub(crate) toolbar_drag: Option<crate::ui::toolbar_dock::ToolbarDrag>,
     /// Which panel is currently floated at full height (hovered, or a pinned
     /// panel on top).
     pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
@@ -4234,6 +4236,7 @@ impl OpenCADStudio {
             xref_manager: Default::default(),
             dock: Default::default(),
             toolbars: Default::default(),
+            toolbar_drag: None,
             dock_expanded: None,
             dock_dragging: None,
             dock_resizing: None,

@@ -8,13 +8,13 @@
 //! Kept out of `view_main` on purpose: that function is so large that extra
 //! nesting there can overflow rustc's stack on Windows release builds.
 
-use iced::widget::{column, container, mouse_area, row, scrollable, Space};
+use iced::widget::{column, container, mouse_area, pin, row, scrollable, Space, Stack};
 use iced::{Background, Border, Color, Element, Length, Point, Theme};
 
 use super::classic_layers::layer_row;
 use super::classic_toolbar::{item_el, items_for, strip_style, ClassicItem, BTN_SIZE};
 use super::ribbon::Ribbon;
-use super::toolbar_layout::{Edge, ToolbarId, ToolbarLayout};
+use super::toolbar_layout::{band_rect, Edge, Target, ToolbarId, ToolbarLayout};
 use crate::app::Message;
 
 /// Offset from the pointer to a dragged bar's top-left: the user holds the
@@ -36,6 +36,16 @@ pub enum ToolbarMsg {
     Redock(ToolbarId),
     /// Put every bar back where it was at first launch.
     Reset,
+}
+
+/// Transient state of a toolbar drag.
+#[derive(Clone, Debug)]
+pub struct ToolbarDrag {
+    pub id: ToolbarId,
+    /// Last pointer position, in the toolbar frame; `None` until it moves.
+    pub cursor: Option<Point>,
+    /// Where releasing now would put the bar; `None` until it moves.
+    pub target: Option<Target>,
 }
 
 /// Estimated length of a bar along its own axis (px), grip included.
@@ -226,4 +236,74 @@ pub fn frame<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+fn block_el(x: f32, y: f32, w: f32, h: f32, fill_alpha: f32) -> Element<'static, Message> {
+    pin(container(Space::new())
+        .width(Length::Fixed(w))
+        .height(Length::Fixed(h))
+        .style(move |theme: &Theme| {
+            let c = theme.palette().primary.base.color;
+            container::Style {
+                background: Some(Background::Color(c.scale_alpha(fill_alpha))),
+                border: Border {
+                    color: c,
+                    width: 1.0,
+                    radius: 2.0.into(),
+                },
+                ..Default::default()
+            }
+        }))
+    .position(Point::new(x.max(0.0), y.max(0.0)))
+    .into()
+}
+
+/// The highlighted lane the bar would dock into, plus a ghost outline
+/// following the pointer.
+fn drag_visuals(d: &ToolbarDrag, win: (f32, f32)) -> Vec<Element<'static, Message>> {
+    let Some(cursor) = d.cursor else {
+        return Vec::new();
+    };
+    let mut v = Vec::new();
+    if let Some(Target::Dock(slot)) = d.target {
+        let (x, y, w, h) = band_rect(slot, win);
+        v.push(block_el(x, y, w, h, 0.18));
+    }
+    let vertical = matches!(d.target, Some(Target::Dock(s)) if s.edge.is_vertical());
+    let (w, h) = bar_size(d.id, vertical);
+    v.push(block_el(cursor.x - GRIP_ANCHOR, cursor.y - GRIP_ANCHOR, w, h, 0.10));
+    v
+}
+
+/// Wrap the main window content with the floating bars and, while a bar is
+/// being dragged, the full-size pointer tracker + previews.
+#[inline(never)]
+pub fn decorate<'a>(
+    base: Element<'a, Message>,
+    _layout: &ToolbarLayout,
+    _ribbon: &Ribbon,
+    drag: Option<&ToolbarDrag>,
+    win: (f32, f32),
+    classic: bool,
+) -> Element<'a, Message> {
+    if !classic {
+        return base;
+    }
+    let mut layers: Vec<Element<'a, Message>> = vec![base];
+    if let Some(d) = drag {
+        layers.extend(drag_visuals(d, win));
+    }
+    let stacked: Element<'a, Message> = Stack::with_children(layers)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    if drag.is_some() {
+        mouse_area(stacked)
+            .on_move(|p| Message::Toolbar(ToolbarMsg::DragMove(p)))
+            .on_release(Message::Toolbar(ToolbarMsg::DragRelease))
+            .interaction(iced::mouse::Interaction::Grabbing)
+            .into()
+    } else {
+        stacked
+    }
 }

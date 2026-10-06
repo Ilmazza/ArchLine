@@ -98,6 +98,7 @@ mod dynamic;
 mod file;
 mod page_setup_import;
 mod style;
+mod toolbar;
 pub(in crate::app) mod util;
 mod viewport;
 mod viewport_snap;
@@ -354,6 +355,14 @@ impl OpenCADStudio {
     }
 
     fn update_message(&mut self, msg: Message) -> Task<Message> {
+        // Esc abandons a toolbar drag before it reaches the command line.
+        if self.toolbar_drag.is_some()
+            && (matches!(msg, Message::CommandEscape)
+                || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ESCAPE")))
+        {
+            self.toolbar_drag = None;
+            return Task::none();
+        }
         if let Some(tab) = self.tabs.get(self.active_tab) {
             crate::entities::common::set_unit_context(
                 crate::entities::common::UnitContext::from_header(&tab.scene.document.header),
@@ -9604,7 +9613,7 @@ impl OpenCADStudio {
             Message::PlotDlg(m) => self.on_plot_dlg(m),
             Message::BlockPalette(m) => self.on_block_palette(m),
             Message::Dock(m) => self.on_dock(m),
-            Message::Toolbar(_) => Task::none(),
+            Message::Toolbar(m) => self.on_toolbar(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {
                 if let Some((_, selected)) = self

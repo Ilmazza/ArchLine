@@ -2193,7 +2193,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 classic,
                 &self.toolbars,
                 &self.ribbon,
-                None,
+                self.toolbar_drag.as_ref().map(|d| d.id),
                 center_stack,
             );
             col.push(center_stack)
@@ -2400,6 +2400,17 @@ bg={bg_ms:.1}ms n={view_count}"
             iced::widget::Space::new().width(0).height(0).into()
         };
 
+        let main_ui = crate::ui::toolbar_dock::decorate(
+            main_ui.into(),
+            &self.toolbars,
+            &self.ribbon,
+            self.toolbar_drag.as_ref(),
+            self.win_size,
+            crate::workspace::classic_active(
+                self.tabs[self.active_tab].is_start,
+                self.clean_screen,
+            ),
+        );
         let composed = stack![
             main_ui,
             dropdown_layer,
