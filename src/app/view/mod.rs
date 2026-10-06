@@ -2194,6 +2194,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 &self.toolbars,
                 &self.ribbon,
                 self.toolbar_drag.as_ref().map(|d| d.id),
+                self.win_size.1,
                 center_stack,
             );
             col.push(center_stack)

@@ -8,11 +8,13 @@
 //! Kept out of `view_main` on purpose: that function is so large that extra
 //! nesting there can overflow rustc's stack on Windows release builds.
 
+use std::sync::Arc;
+
 use iced::widget::{column, container, mouse_area, opaque, pin, row, scrollable, text, Space, Stack};
 use iced::{Background, Border, Color, Element, Length, Point, Theme};
 
 use super::classic_layers::layer_row;
-use super::classic_toolbar::{item_el, items_for, strip_style, ClassicItem, BTN_SIZE};
+use super::classic_toolbar::{item_el, items_for, panel_style, strip_style, ClassicItem, BTN_SIZE};
 use super::ribbon::Ribbon;
 use super::toolbar_layout::{band_rect, clamp_floating, Edge, Target, ToolbarId, ToolbarLayout};
 use crate::app::Message;
@@ -38,6 +40,8 @@ pub enum ToolbarMsg {
     Redock(ToolbarId),
     /// Put every bar back where it was at first launch.
     Reset,
+    /// Tick / untick a bar in the right-click list.
+    Toggle(ToolbarId),
 }
 
 /// Transient state of a toolbar drag.
@@ -52,6 +56,89 @@ pub struct ToolbarDrag {
     pub cursor: Option<Point>,
     /// Where releasing now would put the bar; `None` until it moves.
     pub target: Option<Target>,
+}
+
+/// One row of the right-click bar list.
+#[derive(Clone, Debug)]
+pub struct BarEntry {
+    pub id: ToolbarId,
+    pub name: &'static str,
+    pub visible: bool,
+}
+
+/// What every bar needs to open the list: the entries (built once per view and
+/// shared) and the height the list may take.
+#[derive(Clone)]
+struct BarsMenu {
+    entries: Arc<[BarEntry]>,
+    max_h: f32,
+}
+
+/// Every bar, alphabetical, with whether it is currently shown.
+pub fn menu_entries(layout: &ToolbarLayout) -> Arc<[BarEntry]> {
+    super::toolbar_registry::entries()
+        .iter()
+        .map(|&(id, name)| BarEntry {
+            id,
+            name,
+            visible: layout.is_visible(id),
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// Lower bound of a bar-list row's height (text 12 + padding), in px.
+const BAR_ROW_H: f32 = 22.0;
+
+fn bars_menu_for(layout: &ToolbarLayout, win_h: f32) -> BarsMenu {
+    BarsMenu {
+        entries: menu_entries(layout),
+        max_h: (win_h - 80.0).clamp(160.0, 600.0),
+    }
+}
+
+/// Rows are `mouse_area`s publishing on press, never buttons: `ContextMenu`
+/// rebuilds its overlay every view (trap 2 in CLAUDE.md).
+fn bars_menu_panel(menu: &BarsMenu) -> Element<'static, Message> {
+    let rows: Vec<Element<'static, Message>> = menu
+        .entries
+        .iter()
+        .map(|e| {
+            mouse_area(
+                container(
+                    row![
+                        super::icons::themed_check_cell::<Message>(e.visible),
+                        text(crate::t!(e.name).into_owned()).size(12)
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                )
+                .padding([3, 10])
+                .width(Length::Fill),
+            )
+            .on_press(Message::Toolbar(ToolbarMsg::Toggle(e.id)))
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into()
+        })
+        .collect();
+    // `container` has no max height in this iced: cap the scrollable instead,
+    // from a (slightly low) row-height estimate; shorter lists shrink to fit.
+    let est = menu.entries.len() as f32 * BAR_ROW_H;
+    let height = if est > menu.max_h {
+        Length::Fixed(menu.max_h)
+    } else {
+        Length::Shrink
+    };
+    container(scrollable(column(rows)).height(height))
+        .padding(2)
+        .width(Length::Fixed(260.0))
+        .style(panel_style)
+        .into()
+}
+
+fn with_bars_menu(el: Element<'static, Message>, menu: &BarsMenu) -> Element<'static, Message> {
+    let menu = menu.clone();
+    iced_aw::ContextMenu::new(el, move || bars_menu_panel(&menu)).into()
 }
 
 /// Estimated length of a bar along its own axis (px), grip included.
@@ -126,6 +213,7 @@ fn bar_el(
     vertical: bool,
     ribbon: &Ribbon,
     being_dragged: bool,
+    menu: &BarsMenu,
 ) -> Element<'static, Message> {
     let body = bar_body(id, vertical, ribbon);
     let inner: Element<'static, Message> = if vertical {
@@ -136,7 +224,7 @@ fn bar_el(
             .align_y(iced::Center)
             .into()
     };
-    container(inner)
+    let bar = container(inner)
         .padding(2)
         .style(move |theme: &Theme| {
             let p = theme.palette();
@@ -154,8 +242,8 @@ fn bar_el(
                 },
                 ..Default::default()
             }
-        })
-        .into()
+        });
+    with_bars_menu(bar.into(), menu)
 }
 
 fn lane_el(
@@ -163,10 +251,11 @@ fn lane_el(
     vertical: bool,
     ribbon: &Ribbon,
     dragging: Option<ToolbarId>,
+    menu: &BarsMenu,
 ) -> Element<'static, Message> {
     let els: Vec<Element<'static, Message>> = bars
         .iter()
-        .map(|&id| bar_el(id, vertical, ribbon, dragging == Some(id)))
+        .map(|&id| bar_el(id, vertical, ribbon, dragging == Some(id), menu))
         .collect();
     if vertical {
         container(scrollable(column(els).spacing(3)))
@@ -194,6 +283,7 @@ fn edge_el(
     edge: Edge,
     ribbon: &Ribbon,
     dragging: Option<ToolbarId>,
+    menu: &BarsMenu,
 ) -> Element<'static, Message> {
     let mut lanes = layout.lanes(edge);
     if lanes.is_empty() {
@@ -206,7 +296,7 @@ fn edge_el(
     let vertical = edge.is_vertical();
     let els: Vec<Element<'static, Message>> = lanes
         .iter()
-        .map(|l| lane_el(l, vertical, ribbon, dragging))
+        .map(|l| lane_el(l, vertical, ribbon, dragging, menu))
         .collect();
     if vertical {
         row(els).height(Length::Fill).into()
@@ -223,21 +313,23 @@ pub fn frame<'a>(
     layout: &ToolbarLayout,
     ribbon: &Ribbon,
     dragging: Option<ToolbarId>,
+    win_h: f32,
     center: Element<'a, Message>,
 ) -> Element<'a, Message> {
     if !classic {
         return center;
     }
+    let menu = bars_menu_for(layout, win_h);
     let middle = row![
-        edge_el(layout, Edge::Left, ribbon, dragging),
+        edge_el(layout, Edge::Left, ribbon, dragging, &menu),
         container(center).width(Length::Fill).height(Length::Fill),
-        edge_el(layout, Edge::Right, ribbon, dragging),
+        edge_el(layout, Edge::Right, ribbon, dragging, &menu),
     ]
     .height(Length::Fill);
     column![
-        edge_el(layout, Edge::Top, ribbon, dragging),
+        edge_el(layout, Edge::Top, ribbon, dragging, &menu),
         middle,
-        edge_el(layout, Edge::Bottom, ribbon, dragging),
+        edge_el(layout, Edge::Bottom, ribbon, dragging, &menu),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -279,7 +371,12 @@ pub fn floating_id(id: ToolbarId) -> iced::widget::Id {
     })
 }
 
-fn floating_el(id: ToolbarId, ribbon: &Ribbon, being_dragged: bool) -> Element<'static, Message> {
+fn floating_el(
+    id: ToolbarId,
+    ribbon: &Ribbon,
+    being_dragged: bool,
+    menu: &BarsMenu,
+) -> Element<'static, Message> {
     // Every part has its natural width: the title band is just the frame's
     // own background showing above the buttons (a `Fill` strip would stretch
     // the whole bar across the window).
@@ -312,11 +409,11 @@ fn floating_el(id: ToolbarId, ribbon: &Ribbon, being_dragged: bool) -> Element<'
         });
     // Buttons capture their own presses, so only the band and the padding
     // around them start a drag or a redock.
-    mouse_area(frame)
+    let grab = mouse_area(frame)
         .on_press(Message::Toolbar(ToolbarMsg::Grab(id)))
         .on_double_click(Message::Toolbar(ToolbarMsg::Redock(id)))
-        .interaction(iced::mouse::Interaction::Grab)
-        .into()
+        .interaction(iced::mouse::Interaction::Grab);
+    with_bars_menu(grab.into(), menu)
 }
 
 fn floating_layer(
@@ -324,6 +421,7 @@ fn floating_layer(
     ribbon: &Ribbon,
     win: (f32, f32),
     dragging: Option<ToolbarId>,
+    menu: &BarsMenu,
 ) -> Option<Element<'static, Message>> {
     let bars = floating_positions(layout, win);
     if bars.is_empty() {
@@ -332,7 +430,7 @@ fn floating_layer(
     let layers: Vec<Element<'static, Message>> = bars
         .into_iter()
         .map(|(id, at)| {
-            pin(opaque(floating_el(id, ribbon, dragging == Some(id))))
+            pin(opaque(floating_el(id, ribbon, dragging == Some(id), menu)))
                 .position(at)
                 .into()
         })
@@ -397,7 +495,8 @@ pub fn decorate<'a>(
         return base;
     }
     let mut layers: Vec<Element<'a, Message>> = vec![base];
-    if let Some(floating) = floating_layer(layout, ribbon, win, drag.map(|d| d.id)) {
+    let menu = bars_menu_for(layout, win.1);
+    if let Some(floating) = floating_layer(layout, ribbon, win, drag.map(|d| d.id), &menu) {
         layers.push(floating);
     }
     if let Some(d) = drag {

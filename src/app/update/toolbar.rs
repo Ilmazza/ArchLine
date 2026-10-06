@@ -60,6 +60,11 @@ impl OpenCADStudio {
                 self.toolbars.redock(id);
                 self.save_config();
             }
+            ToolbarMsg::Toggle(id) => {
+                let shown = self.toolbars.is_visible(id);
+                self.toolbars.set_visible(id, !shown);
+                self.save_config();
+            }
             ToolbarMsg::Reset => {
                 self.toolbars = Default::default();
                 self.toolbar_drag = None;
@@ -192,5 +197,32 @@ mod tests {
         drag(&mut app, ToolbarId::Draw, Point::new(800.0, 450.0));
         toolbar(&mut app, ToolbarMsg::Reset);
         assert_eq!(app.toolbars, ToolbarLayout::default());
+    }
+
+    #[test]
+    fn toggling_a_hidden_group_bar_opens_it_floating_and_again_hides_it() {
+        let mut app = app();
+        let id = *ToolbarId::all()
+            .iter()
+            .find(|id| !id.is_builtin())
+            .expect("a group bar");
+        assert!(!app.toolbars.is_visible(id));
+        toolbar(&mut app, ToolbarMsg::Toggle(id));
+        assert!(matches!(app.toolbars.placement(id), Placement::Floating { .. }));
+        toolbar(&mut app, ToolbarMsg::Toggle(id));
+        assert!(!app.toolbars.is_visible(id));
+    }
+
+    #[test]
+    fn toggling_a_builtin_hides_it_and_compacts_its_lane() {
+        let mut app = app();
+        toolbar(&mut app, ToolbarMsg::Toggle(ToolbarId::Layers));
+        assert!(!app.toolbars.is_visible(ToolbarId::Layers));
+        assert_eq!(app.toolbars.lanes(Edge::Top).len(), 1);
+        toolbar(&mut app, ToolbarMsg::Toggle(ToolbarId::Layers));
+        assert!(matches!(
+            app.toolbars.placement(ToolbarId::Layers),
+            Placement::Floating { .. }
+        ));
     }
 }

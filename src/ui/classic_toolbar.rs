@@ -184,6 +184,7 @@ fn tip(label: &'static str, has_variants: bool) -> Element<'static, Message> {
 /// Flyout rows publish on PRESS through a single `mouse_area`: `iced_aw`'s
 /// `ContextMenu` rebuilds its overlay every view, so a nested `button` would
 /// lose its pressed state (see the note in `window/xref_manager.rs`).
+#[allow(dead_code)] // used again by the long-press flyout
 fn flyout_row(t: &ToolDef) -> Element<'static, Message> {
     mouse_area(
         container(
@@ -202,6 +203,7 @@ fn flyout_row(t: &ToolDef) -> Element<'static, Message> {
     .into()
 }
 
+#[allow(dead_code)] // used again by the long-press flyout
 fn flyout(variants: &[ToolDef]) -> Element<'static, Message> {
     container(column(variants.iter().map(flyout_row)))
         .padding(2)
@@ -210,7 +212,7 @@ fn flyout(variants: &[ToolDef]) -> Element<'static, Message> {
         .into()
 }
 
-fn panel_style(theme: &Theme) -> container::Style {
+pub(super) fn panel_style(theme: &Theme) -> container::Style {
     let palette = theme.palette();
     container::Style {
         background: Some(Background::Color(palette.background.weak.color)),
@@ -245,11 +247,9 @@ fn tool_button(b: &ClassicButton) -> Element<'static, Message> {
         tooltip(btn, tip(b.main.label, !b.variants.is_empty()), tooltip::Position::Bottom)
             .gap(4)
             .into();
-    if b.variants.is_empty() {
-        return with_tip;
-    }
-    let variants = b.variants.clone();
-    iced_aw::ContextMenu::new(with_tip, move || flyout(&variants)).into()
+    // Variants open on a long press (see the hold flyout); right click now
+    // opens the bar list on the whole bar.
+    with_tip
 }
 
 pub(super) fn separator(vertical: bool) -> Element<'static, Message> {

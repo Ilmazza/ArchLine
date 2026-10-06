@@ -66,7 +66,7 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.toolbars = Default::default();
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
-        let el = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, center);
+        let el = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, app.win_size.1, center);
         assert_eq!(el.as_widget().size().height, iced::Length::Fill);
 
         // Review focus: every bar floating leaves all four edges empty.
@@ -74,11 +74,11 @@ mod tests {
             app.toolbars.move_to(id, Target::Float { x: 10.0 * i as f32, y: 10.0 });
         }
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
-        let _ = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, center);
+        let _ = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, app.win_size.1, center);
 
         // Not classic: the centre comes back untouched.
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
-        let el = crate::ui::toolbar_dock::frame(false, &app.toolbars, &app.ribbon, None, center);
+        let el = crate::ui::toolbar_dock::frame(false, &app.toolbars, &app.ribbon, None, app.win_size.1, center);
         assert_eq!(el.as_widget().size().width, iced::Length::Shrink);
     }
 
@@ -227,5 +227,71 @@ mod tests {
     fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));
+    }
+
+    #[test]
+    fn right_click_on_a_bar_opens_the_list_and_a_row_toggles_it() {
+        use crate::ui::toolbar_layout::ToolbarId;
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.win_size = (1600.0, 900.0);
+        let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = crate::ui::toolbar_dock::frame(
+            true,
+            &app.toolbars,
+            &app.ribbon,
+            None,
+            app.win_size.1,
+            center,
+        );
+        let mut ui = iced_test::simulator(el);
+        // The Draw bar hugs the left edge: (20, 20) is on it.
+        let at = iced::Point::new(20.0, 20.0);
+        ui.point_at(at);
+        ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(
+            iced::mouse::Button::Right,
+        ))]);
+        ui.click("Modify").expect("the bar list shows Modify");
+        for message in ui.into_messages() {
+            let _ = app.update(message);
+        }
+        assert!(
+            !app.toolbars.is_visible(ToolbarId::Modify),
+            "clicking the ticked row hides the bar"
+        );
+    }
+
+    #[test]
+    fn the_bar_list_also_offers_hidden_bars_and_a_row_opens_them() {
+        // Review focus 6.
+        use crate::ui::toolbar_layout::{Placement, ToolbarId};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.win_size = (1600.0, 900.0);
+        let dims = ToolbarId::all()
+            .iter()
+            .copied()
+            .find(|id| id.title() == "Dimensions")
+            .expect("a Dimensions bar");
+        assert!(!app.toolbars.is_visible(dims));
+        let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = crate::ui::toolbar_dock::frame(
+            true,
+            &app.toolbars,
+            &app.ribbon,
+            None,
+            app.win_size.1,
+            center,
+        );
+        let mut ui = iced_test::simulator(el);
+        ui.point_at(iced::Point::new(20.0, 20.0));
+        ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(
+            iced::mouse::Button::Right,
+        ))]);
+        ui.click("Dimensions").expect("the list shows the hidden Dimensions bar");
+        for message in ui.into_messages() {
+            let _ = app.update(message);
+        }
+        assert!(matches!(app.toolbars.placement(dims), Placement::Floating { .. }));
     }
 }
