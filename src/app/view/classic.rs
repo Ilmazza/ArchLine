@@ -196,6 +196,34 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_bar_is_as_wide_as_its_buttons_not_the_window() {
+        use crate::ui::toolbar_dock::{decorate, floating_id};
+        use crate::ui::toolbar_layout::{Target, ToolbarId};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.toolbars
+            .move_to(ToolbarId::Draw, Target::Float { x: 20.0, y: 200.0 });
+        let win = (1600.0, 900.0);
+        let layer = decorate(
+            iced::widget::Space::new().into(),
+            &app.toolbars,
+            &app.ribbon,
+            None,
+            win,
+            true,
+        );
+        let mut ui = iced_test::simulator(layer);
+        let frame = ui
+            .find(floating_id(ToolbarId::Draw))
+            .expect("floating frame present");
+        let b = frame.visible_bounds().expect("frame visible");
+        // Draw has at most 12 buttons of 36 px: far below 600, far from the
+        // simulator window width the old `Fill` title strip stretched to.
+        assert!(b.width < 600.0, "floating Draw bar is {} px wide", b.width);
+        assert!(b.width > 100.0, "floating Draw bar is {} px wide", b.width);
+    }
+
+    #[test]
     fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));

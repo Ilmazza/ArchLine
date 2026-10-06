@@ -266,26 +266,37 @@ pub fn floating_positions(layout: &ToolbarLayout, win: (f32, f32)) -> Vec<(Toolb
         .collect()
 }
 
+/// Widget id of a floating bar's frame (lets tests measure its real layout).
+pub fn floating_id(id: ToolbarId) -> iced::widget::Id {
+    iced::widget::Id::new(match id {
+        ToolbarId::Draw => "toolbar-float-Draw",
+        ToolbarId::Modify => "toolbar-float-Modify",
+        ToolbarId::Annotation => "toolbar-float-Annotation",
+        ToolbarId::Block => "toolbar-float-Block",
+        ToolbarId::Measure => "toolbar-float-Measure",
+        ToolbarId::Layers => "toolbar-float-Layers",
+    })
+}
+
 fn floating_el(id: ToolbarId, ribbon: &Ribbon, being_dragged: bool) -> Element<'static, Message> {
-    let title = mouse_area(
-        container(text(crate::t!(id.title()).into_owned()).size(11))
-            .padding([2, 6])
-            .width(Length::Fill)
-            .style(|theme: &Theme| container::Style {
-                background: Some(Background::Color(theme.palette().background.strong.color)),
-                text_color: Some(theme.palette().background.strong.text),
-                ..Default::default()
-            }),
-    )
-    .on_press(Message::Toolbar(ToolbarMsg::Grab(id)))
-    .on_double_click(Message::Toolbar(ToolbarMsg::Redock(id)))
-    .interaction(iced::mouse::Interaction::Grab);
-    container(column![title, bar_body(id, false, ribbon)].spacing(2))
+    // Every part has its natural width: the title band is just the frame's
+    // own background showing above the buttons (a `Fill` strip would stretch
+    // the whole bar across the window).
+    let title = container(text(crate::t!(id.title()).into_owned()).size(11)).padding([2, 6]);
+    let body = container(bar_body(id, false, ribbon))
         .padding(2)
+        .style(|theme: &Theme| container::Style {
+            background: Some(Background::Color(theme.palette().background.weak.color)),
+            ..Default::default()
+        });
+    let frame = container(column![title, body])
+        .id(floating_id(id))
+        .padding(1)
         .style(move |theme: &Theme| {
             let p = theme.palette();
             container::Style {
-                background: Some(Background::Color(p.background.weak.color)),
+                background: Some(Background::Color(p.background.strong.color)),
+                text_color: Some(p.background.strong.text),
                 border: Border {
                     color: if being_dragged {
                         p.primary.base.color
@@ -297,7 +308,13 @@ fn floating_el(id: ToolbarId, ribbon: &Ribbon, being_dragged: bool) -> Element<'
                 },
                 ..Default::default()
             }
-        })
+        });
+    // Buttons capture their own presses, so only the band and the padding
+    // around them start a drag or a redock.
+    mouse_area(frame)
+        .on_press(Message::Toolbar(ToolbarMsg::Grab(id)))
+        .on_double_click(Message::Toolbar(ToolbarMsg::Redock(id)))
+        .interaction(iced::mouse::Interaction::Grab)
         .into()
 }
 
