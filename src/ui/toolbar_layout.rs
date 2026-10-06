@@ -17,6 +17,12 @@ pub const LANE_THICKNESS: f32 = 46.0;
 pub const TOP_CHROME: f32 = 62.0;
 /// Height of the status bar below the toolbar area (estimate).
 pub const BOTTOM_CHROME: f32 = 30.0;
+/// First floating position given to a bar shown from the list, and the step
+/// between consecutive ones (a cascade, wrapping after `CASCADE_STEPS`).
+pub const CASCADE_X: f32 = 120.0;
+pub const CASCADE_Y: f32 = 130.0;
+pub const CASCADE_STEP: f32 = 28.0;
+pub const CASCADE_STEPS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ToolbarId {
@@ -95,6 +101,8 @@ pub enum Placement {
         y: f32,
         home: Option<DockSlot>,
     },
+    /// Not shown. `home` is the last docked slot, kept for when it comes back.
+    Hidden { home: Option<DockSlot> },
 }
 
 /// Where a drag would drop the bar.
@@ -175,7 +183,7 @@ impl ToolbarLayout {
             .into_iter()
             .filter_map(|id| match self.placement(id) {
                 Placement::Floating { x, y, .. } => Some((id, x, y)),
-                Placement::Docked(_) => None,
+                _ => None,
             })
             .collect()
     }
@@ -207,7 +215,7 @@ impl ToolbarLayout {
         let previous = self.placement(id);
         let home = match previous {
             Placement::Docked(s) => Some(s),
-            Placement::Floating { home, .. } => home,
+            Placement::Floating { home, .. } | Placement::Hidden { home } => home,
         };
         match target {
             Target::Float { x, y } => {
@@ -245,6 +253,37 @@ impl ToolbarLayout {
         }
     }
 
+    pub fn is_visible(&self, id: ToolbarId) -> bool {
+        !matches!(self.placement(id), Placement::Hidden { .. })
+    }
+
+    /// Show a hidden bar (floating, in a cascade) or hide a visible one.
+    /// Anything else is a no-op.
+    pub fn set_visible(&mut self, id: ToolbarId, visible: bool) {
+        let key = id.key().to_string();
+        match (self.placement(id), visible) {
+            (Placement::Hidden { home }, true) => {
+                let n = (self.floating().len() % CASCADE_STEPS) as f32;
+                self.bars.insert(
+                    key,
+                    Placement::Floating {
+                        x: CASCADE_X + CASCADE_STEP * n,
+                        y: CASCADE_Y + CASCADE_STEP * n,
+                        home,
+                    },
+                );
+            }
+            (Placement::Docked(s), false) => {
+                self.bars.insert(key, Placement::Hidden { home: Some(s) });
+                self.compact(s.edge);
+            }
+            (Placement::Floating { home, .. }, false) => {
+                self.bars.insert(key, Placement::Hidden { home });
+            }
+            _ => {}
+        }
+    }
+
     /// Double-click on a floating bar: back to where it was docked.
     pub fn redock(&mut self, id: ToolbarId) {
         if let Placement::Floating { home, .. } = self.placement(id) {
@@ -267,6 +306,9 @@ impl ToolbarLayout {
                 Placement::Floating { x, y, home } => Placement::Floating {
                     x: if x.is_finite() { x } else { 0.0 },
                     y: if y.is_finite() { y } else { 0.0 },
+                    home: home.filter(|s| id.allowed_on(s.edge)),
+                },
+                Placement::Hidden { home } => Placement::Hidden {
                     home: home.filter(|s| id.allowed_on(s.edge)),
                 },
                 other => other,
@@ -580,5 +622,99 @@ mod tests {
         assert_eq!(band_rect(slot(Edge::Left, 0, 0), win).0, 0.0);
         let (x, _, w, _) = band_rect(slot(Edge::Right, 0, 0), win);
         assert_eq!(x + w, 1600.0);
+    }
+
+    #[test]
+    fn hiding_a_docked_bar_removes_it_compacts_lanes_and_remembers_home() {
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        l.set_visible(Layers, false);
+        assert!(!l.is_visible(Layers));
+        assert_eq!(l.lanes(Edge::Top), vec![vec![Annotation, Block, Measure]]);
+        assert_eq!(
+            l.placement(Layers),
+            Placement::Hidden { home: Some(slot(Edge::Top, 1, 0)) }
+        );
+        assert!(l.floating().is_empty());
+    }
+
+    #[test]
+    fn showing_a_hidden_bar_opens_it_floating_in_a_cascade() {
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        l.set_visible(Draw, false);
+        l.set_visible(Modify, false);
+        l.set_visible(Draw, true);
+        l.set_visible(Modify, true);
+        assert_eq!(
+            l.placement(Draw),
+            Placement::Floating { x: CASCADE_X, y: CASCADE_Y, home: Some(slot(Edge::Left, 0, 0)) }
+        );
+        assert_eq!(
+            l.placement(Modify),
+            Placement::Floating {
+                x: CASCADE_X + CASCADE_STEP,
+                y: CASCADE_Y + CASCADE_STEP,
+                home: Some(slot(Edge::Right, 0, 0)),
+            }
+        );
+    }
+
+    #[test]
+    fn the_cascade_wraps_so_many_shown_bars_stay_in_reach() {
+        // Review focus 3.
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        let ids = [Draw, Modify, Annotation, Block, Measure, Layers];
+        for id in ids {
+            l.set_visible(id, false);
+        }
+        for id in ids {
+            l.set_visible(id, true);
+        }
+        assert_eq!(l.floating().len(), 6);
+        let last = ids.iter().map(|id| l.placement(*id)).last().unwrap();
+        match last {
+            Placement::Floating { x, y, .. } => {
+                assert!(x <= CASCADE_X + CASCADE_STEP * CASCADE_STEPS as f32);
+                assert!(y <= CASCADE_Y + CASCADE_STEP * CASCADE_STEPS as f32);
+            }
+            other => panic!("expected floating, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shown_bar_can_return_to_its_home_and_a_floating_one_can_be_hidden() {
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        l.set_visible(Draw, false);
+        l.set_visible(Draw, true);
+        l.redock(Draw);
+        assert_eq!(l.placement(Draw), Placement::Docked(slot(Edge::Left, 0, 0)));
+
+        l.move_to(Layers, Target::Float { x: 50.0, y: 60.0 });
+        l.set_visible(Layers, false);
+        assert_eq!(
+            l.placement(Layers),
+            Placement::Hidden { home: Some(slot(Edge::Top, 1, 0)) }
+        );
+        // Hiding twice or showing a visible bar changes nothing.
+        let before = l.clone();
+        l.set_visible(Layers, false);
+        l.set_visible(Draw, true);
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn hidden_survives_serde_and_sanitize() {
+        use ToolbarId::*;
+        let mut l = ToolbarLayout::default();
+        l.set_visible(Block, false);
+        let json = serde_json::to_string(&l).unwrap();
+        let back: ToolbarLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, l);
+        let back = back.sanitized();
+        assert!(!back.is_visible(Block));
+        assert_eq!(back.lanes(Edge::Top), vec![vec![Annotation, Measure], vec![Layers]]);
     }
 }
