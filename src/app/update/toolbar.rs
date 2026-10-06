@@ -1,7 +1,9 @@
 //! ArchLine: update handling for the dockable classic toolbars.
 
 use crate::app::{Message, OpenCADStudio};
-use crate::ui::toolbar_dock::{bar_length, bar_size, ToolbarDrag, ToolbarMsg, GRIP_ANCHOR};
+use crate::ui::toolbar_dock::{
+    bar_length, bar_size, ToolbarDrag, ToolbarMsg, DRAG_THRESHOLD, GRIP_ANCHOR,
+};
 use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx};
 
 impl OpenCADStudio {
@@ -10,12 +12,21 @@ impl OpenCADStudio {
             ToolbarMsg::Grab(id) => {
                 self.toolbar_drag = Some(ToolbarDrag {
                     id,
+                    origin: None,
                     cursor: None,
                     target: None,
                 });
             }
             ToolbarMsg::DragMove(p) => {
                 if let Some(drag) = &mut self.toolbar_drag {
+                    // The first move is the layer reporting the press position
+                    // itself: remember it, and only start once the pointer has
+                    // really travelled (a click on a grip must not move a bar).
+                    let origin = *drag.origin.get_or_insert(p);
+                    let travelled = (p.x - origin.x).hypot(p.y - origin.y);
+                    if travelled < DRAG_THRESHOLD && drag.target.is_none() {
+                        return iced::Task::none();
+                    }
                     let win = self.win_size;
                     let size = bar_size(drag.id, false);
                     let float_at =
@@ -43,6 +54,9 @@ impl OpenCADStudio {
                 }
             }
             ToolbarMsg::Redock(id) => {
+                // A double click is Grab then Redock in one event: end the drag
+                // the Grab started, or its layer would re-float the bar.
+                self.toolbar_drag = None;
                 self.toolbars.redock(id);
                 self.save_config();
             }
@@ -71,13 +85,23 @@ mod tests {
         app
     }
 
+    fn toolbar(app: &mut OpenCADStudio, m: ToolbarMsg) {
+        let _ = app.update(Message::Toolbar(m));
+    }
+
+    /// What the real widget delivers: the freshly mounted drag layer reports
+    /// a first move at the grip, then the pointer travels to `to`.
+    fn drag(app: &mut OpenCADStudio, id: ToolbarId, to: Point) {
+        toolbar(app, ToolbarMsg::Grab(id));
+        toolbar(app, ToolbarMsg::DragMove(Point::new(20.0, 100.0)));
+        toolbar(app, ToolbarMsg::DragMove(to));
+        toolbar(app, ToolbarMsg::DragRelease);
+    }
+
     #[test]
     fn dragging_a_bar_to_the_left_edge_docks_it_there() {
         let mut app = app();
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Block)));
-        assert!(app.toolbar_drag.is_some());
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragMove(Point::new(8.0, 400.0))));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
+        drag(&mut app, ToolbarId::Block, Point::new(8.0, 400.0));
         assert!(app.toolbar_drag.is_none());
         assert_eq!(
             app.toolbars.placement(ToolbarId::Block),
@@ -88,9 +112,7 @@ mod tests {
     #[test]
     fn dragging_into_the_middle_floats_the_bar_inside_the_window() {
         let mut app = app();
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Draw)));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragMove(Point::new(800.0, 450.0))));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
+        drag(&mut app, ToolbarId::Draw, Point::new(800.0, 450.0));
         match app.toolbars.placement(ToolbarId::Draw) {
             Placement::Floating { x, y, .. } => {
                 assert!(x >= 0.0 && y >= 0.0);
@@ -101,47 +123,74 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_grip_without_moving_changes_nothing() {
-        // Review focus 5.
+    fn a_click_on_the_grip_without_dragging_changes_nothing() {
+        // Review focus 5, as the real widget behaves: the drag layer reports
+        // a move at the grip itself before the release. For Layers that grip
+        // sits where `resolve_drop` would otherwise float the bar.
         let mut app = app();
         let before = app.toolbars.clone();
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Modify)));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
+        toolbar(&mut app, ToolbarMsg::Grab(ToolbarId::Layers));
+        toolbar(&mut app, ToolbarMsg::DragMove(Point::new(20.0, 131.0)));
+        toolbar(&mut app, ToolbarMsg::DragRelease);
         assert_eq!(app.toolbars, before);
         assert!(app.toolbar_drag.is_none());
+    }
+
+    #[test]
+    fn a_grab_released_with_no_move_at_all_changes_nothing() {
+        let mut app = app();
+        let before = app.toolbars.clone();
+        toolbar(&mut app, ToolbarMsg::Grab(ToolbarId::Modify));
+        toolbar(&mut app, ToolbarMsg::DragRelease);
+        assert_eq!(app.toolbars, before);
     }
 
     #[test]
     fn escape_cancels_a_drag_and_keeps_the_layout() {
         let mut app = app();
         let before = app.toolbars.clone();
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Draw)));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragMove(Point::new(800.0, 450.0))));
+        toolbar(&mut app, ToolbarMsg::Grab(ToolbarId::Draw));
+        toolbar(&mut app, ToolbarMsg::DragMove(Point::new(20.0, 100.0)));
+        toolbar(&mut app, ToolbarMsg::DragMove(Point::new(800.0, 450.0)));
         let _ = app.update(Message::CommandEscape);
         assert!(app.toolbar_drag.is_none());
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
+        toolbar(&mut app, ToolbarMsg::DragRelease);
         assert_eq!(app.toolbars, before);
+    }
+
+    #[test]
+    fn redock_stops_the_drag_so_a_double_click_does_not_refloat_the_bar() {
+        // A double click on a floating bar's title arrives as Grab then
+        // Redock in the same event; the drag layer then reports pointer moves.
+        let mut app = app();
+        drag(&mut app, ToolbarId::Layers, Point::new(800.0, 450.0));
+        assert!(matches!(
+            app.toolbars.placement(ToolbarId::Layers),
+            Placement::Floating { .. }
+        ));
+        toolbar(&mut app, ToolbarMsg::Grab(ToolbarId::Layers));
+        toolbar(&mut app, ToolbarMsg::Redock(ToolbarId::Layers));
+        assert!(app.toolbar_drag.is_none());
+        toolbar(&mut app, ToolbarMsg::DragMove(Point::new(300.0, 300.0)));
+        toolbar(&mut app, ToolbarMsg::DragMove(Point::new(800.0, 450.0)));
+        toolbar(&mut app, ToolbarMsg::DragRelease);
+        assert_eq!(
+            app.toolbars.placement(ToolbarId::Layers),
+            Placement::Docked(DockSlot { edge: Edge::Top, lane: 1, index: 0 })
+        );
     }
 
     #[test]
     fn redock_and_reset_restore_positions() {
         let mut app = app();
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Layers)));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragMove(Point::new(800.0, 450.0))));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
-        assert!(matches!(
-            app.toolbars.placement(ToolbarId::Layers),
-            Placement::Floating { .. }
-        ));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Redock(ToolbarId::Layers)));
+        drag(&mut app, ToolbarId::Layers, Point::new(800.0, 450.0));
+        toolbar(&mut app, ToolbarMsg::Redock(ToolbarId::Layers));
         assert_eq!(
             app.toolbars.placement(ToolbarId::Layers),
             Placement::Docked(DockSlot { edge: Edge::Top, lane: 1, index: 0 })
         );
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Draw)));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragMove(Point::new(800.0, 450.0))));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::DragRelease));
-        let _ = app.update(Message::Toolbar(ToolbarMsg::Reset));
+        drag(&mut app, ToolbarId::Draw, Point::new(800.0, 450.0));
+        toolbar(&mut app, ToolbarMsg::Reset);
         assert_eq!(app.toolbars, ToolbarLayout::default());
     }
 }

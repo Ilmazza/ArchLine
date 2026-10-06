@@ -98,6 +98,7 @@ mod tests {
         // While dragging, the layer still builds with a live target.
         let drag = ToolbarDrag {
             id: ToolbarId::Draw,
+            origin: Some(iced::Point::new(10.0, 10.0)),
             cursor: Some(iced::Point::new(300.0, 300.0)),
             target: Some(Target::Float { x: 290.0, y: 290.0 }),
         };
@@ -108,6 +109,90 @@ mod tests {
         let base: iced::Element<'_, Message> = iced::widget::Space::new().into();
         let el = decorate(base, &app.toolbars, &app.ribbon, None, win, false);
         assert_eq!(el.as_widget().size().width, iced::Length::Shrink);
+    }
+
+    /// Feed events to the REAL drag layer (headless iced) and apply what it
+    /// publishes to the app, like the runtime would.
+    fn run_drag_layer(
+        app: &mut OpenCADStudio,
+        pointer: iced::Point,
+        events: Vec<iced_core::Event>,
+    ) {
+        let layer = crate::ui::toolbar_dock::decorate(
+            iced::widget::Space::new().into(),
+            &app.toolbars,
+            &app.ribbon,
+            app.toolbar_drag.as_ref(),
+            app.win_size,
+            true,
+        );
+        let mut ui = iced_test::simulator(layer);
+        ui.point_at(pointer);
+        ui.simulate(events);
+        for message in ui.into_messages() {
+            let _ = app.update(message);
+        }
+    }
+
+    #[test]
+    fn clicking_a_grip_without_dragging_keeps_the_layout_with_the_real_widget() {
+        use crate::ui::toolbar_dock::ToolbarMsg;
+        use crate::ui::toolbar_layout::ToolbarId;
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.win_size = (1600.0, 900.0);
+        let before = app.toolbars.clone();
+        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Layers)));
+        // Press happened on the grip of Layers; the layer is mounted fresh and
+        // its first update reports the pointer as a move.
+        let grip = iced::Point::new(20.0, 131.0);
+        run_drag_layer(
+            &mut app,
+            grip,
+            vec![
+                iced_core::Event::Mouse(iced::mouse::Event::CursorMoved { position: grip }),
+                iced_core::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )),
+            ],
+        );
+        assert!(app.toolbar_drag.is_none(), "the release ended the drag");
+        assert_eq!(app.toolbars, before, "a click must not move the bar");
+    }
+
+    #[test]
+    fn leaving_the_window_during_a_drag_ends_it() {
+        use crate::ui::toolbar_dock::ToolbarMsg;
+        use crate::ui::toolbar_layout::ToolbarId;
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.win_size = (1600.0, 900.0);
+        let _ = app.update(Message::Toolbar(ToolbarMsg::Grab(ToolbarId::Draw)));
+        let inside = iced::Point::new(100.0, 100.0);
+        let layer = crate::ui::toolbar_dock::decorate(
+            iced::widget::Space::new().into(),
+            &app.toolbars,
+            &app.ribbon,
+            app.toolbar_drag.as_ref(),
+            app.win_size,
+            true,
+        );
+        let mut ui = iced_test::simulator(layer);
+        ui.point_at(inside);
+        ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: inside,
+        })]);
+        // The button is released while the pointer is outside the window: the
+        // layer never sees a ButtonReleased, only the pointer leaving.
+        let outside = iced::Point::new(-50.0, -50.0);
+        ui.point_at(outside);
+        ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: outside,
+        })]);
+        for message in ui.into_messages() {
+            let _ = app.update(message);
+        }
+        assert!(app.toolbar_drag.is_none(), "drag must not outlive the pointer");
     }
 
     #[test]

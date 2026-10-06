@@ -21,6 +21,8 @@ use crate::app::Message;
 /// grip, which sits in the bar's corner.
 pub const GRIP_ANCHOR: f32 = 10.0;
 const GRIP_W: f32 = 8.0;
+/// Distance (px) the pointer must travel from the grab before it is a drag.
+pub const DRAG_THRESHOLD: f32 = 4.0;
 /// Estimated length of the layer / properties bar (combo 220, 3×130 combos,
 /// 11 buttons, separators, spacing).
 const LAYERS_LENGTH: f32 = 1050.0;
@@ -42,7 +44,11 @@ pub enum ToolbarMsg {
 #[derive(Clone, Debug)]
 pub struct ToolbarDrag {
     pub id: ToolbarId,
-    /// Last pointer position, in the toolbar frame; `None` until it moves.
+    /// Where the pointer was first seen after the grab. The drag layer is
+    /// mounted fresh and reports a move at the press position, so a drag only
+    /// starts once the pointer travels `DRAG_THRESHOLD` from here.
+    pub origin: Option<Point>,
+    /// Last pointer position, in the toolbar frame; `None` until the drag starts.
     pub cursor: Option<Point>,
     /// Where releasing now would put the bar; `None` until it moves.
     pub target: Option<Target>,
@@ -387,6 +393,9 @@ pub fn decorate<'a>(
         mouse_area(stacked)
             .on_move(|p| Message::Toolbar(ToolbarMsg::DragMove(p)))
             .on_release(Message::Toolbar(ToolbarMsg::DragRelease))
+            // A release outside the window never reaches the layer: the pointer
+            // leaving ends the drag instead of leaving it stuck.
+            .on_exit(Message::Toolbar(ToolbarMsg::DragRelease))
             .interaction(iced::mouse::Interaction::Grabbing)
             .into()
     } else {

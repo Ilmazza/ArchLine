@@ -307,17 +307,8 @@ pub fn resolve_drop(
         (Edge::Left, x.max(0.0)),
         (Edge::Right, (ctx.win.0 - x).max(0.0)),
     ];
-    let best = candidates
-        .into_iter()
-        .filter(|(edge, d)| dragged.allowed_on(*edge) && *d < SNAP_BAND)
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    let Some((edge, dist)) = best else {
-        return Target::Float {
-            x: float_at.0,
-            y: float_at.1,
-        };
-    };
-
+    // `dragged` is parked outside every edge so it does not count as a lane
+    // occupant of the edge it is leaving.
     let mut probe = layout.clone();
     probe.bars.insert(
         dragged.key().to_string(),
@@ -327,6 +318,22 @@ pub fn resolve_drop(
             home: None,
         },
     );
+    // The snap band covers every existing lane plus one more, so a new lane
+    // can always be opened below the last one.
+    let best = candidates
+        .into_iter()
+        .filter(|(edge, d)| {
+            let band = SNAP_BAND.max((probe.lanes(*edge).len() + 1) as f32 * LANE_THICKNESS);
+            dragged.allowed_on(*edge) && *d < band
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    let Some((edge, dist)) = best else {
+        return Target::Float {
+            x: float_at.0,
+            y: float_at.1,
+        };
+    };
+
     let lanes = probe.lanes(edge);
     let lane = ((dist / LANE_THICKNESS) as usize).min(lanes.len());
     let index = if lane < lanes.len() {
@@ -497,6 +504,23 @@ mod tests {
         assert_eq!(
             resolve_drop(&l, Draw, (800.0, 450.0), (790.0, 440.0), &ctx()),
             Target::Float { x: 790.0, y: 440.0 }
+        );
+    }
+
+    #[test]
+    fn resolve_drop_reaches_a_new_lane_below_the_existing_ones() {
+        // Top already holds two lanes; a bar released under them must open a
+        // third instead of floating (the snap band grows with the lanes).
+        use ToolbarId::*;
+        let l = ToolbarLayout::default();
+        assert_eq!(
+            resolve_drop(&l, Draw, (800.0, TOP_CHROME + 100.0), (0.0, 0.0), &ctx()),
+            Target::Dock(slot(Edge::Top, 2, 0))
+        );
+        // Still far from everything: floating.
+        assert_eq!(
+            resolve_drop(&l, Draw, (800.0, TOP_CHROME + 300.0), (7.0, 9.0), &ctx()),
+            Target::Float { x: 7.0, y: 9.0 }
         );
     }
 
