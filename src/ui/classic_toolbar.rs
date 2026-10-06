@@ -295,7 +295,12 @@ pub(super) fn panel_style(theme: &Theme) -> container::Style {
 
 fn tool_button(bar: ToolbarId, b: &ClassicButton) -> Element<'static, Message> {
     let inner: Element<'static, Message> = if b.variants.is_empty() {
-        button(main_icon(b, ICON_SIZE))
+        // No padding: a button pads its content by default (5 / 10 px), which in
+        // a 24 px button squeezed the 16 px icon to a 4 px dot. The icon sits in
+        // a centring container because a button stretches its direct content
+        // to the full 24 px.
+        button(container(main_icon(b, ICON_SIZE)).center(Length::Fill))
+            .padding(0)
             .on_press(click(&b.main))
             .width(Length::Fixed(BTN_SIZE))
             .height(Length::Fixed(BTN_SIZE))
@@ -470,5 +475,55 @@ mod tests {
         assert_eq!(flyout_top(100.0, 64.0, 200.0, 900.0), 100.0, "fits below");
         assert_eq!(flyout_top(890.0, 860.0, 200.0, 900.0), 660.0, "opens above");
         assert_eq!(flyout_top(100.0, 50.0, 500.0, 400.0), 0.0, "fits nowhere: pinned to the top");
+    }
+
+    /// Selects the first icon drawn inside a widget tree.
+    struct AnyIcon;
+    impl iced_test::selector::Selector for AnyIcon {
+        type Output = iced_test::selector::Target;
+        fn select(
+            &mut self,
+            candidate: iced_test::selector::Candidate<'_>,
+        ) -> Option<Self::Output> {
+            match candidate {
+                iced_test::selector::Candidate::Custom { state, .. }
+                    if state.is::<crate::ui::icons::SemanticIconProbe>() =>
+                {
+                    Some(iced_test::selector::Target::from(candidate))
+                }
+                _ => None,
+            }
+        }
+        fn description(&self) -> String {
+            "a toolbar icon".to_string()
+        }
+    }
+
+    #[test]
+    fn icons_are_drawn_at_full_size_inside_their_button() {
+        // A `button` pads its content (5 px by default): in a 24 px button that
+        // left 4 px for the icon and every icon showed as a dot.
+        use crate::ui::toolbar_layout::ToolbarId;
+        let bar = ToolbarId::Draw;
+        let plain = items_for(bar)
+            .iter()
+            .find(|i| matches!(i, ClassicItem::Button(b) if b.variants.is_empty()
+                && matches!(b.main.icon, IconKind::Svg(_))))
+            .expect("a plain Draw button with an svg icon");
+        let with_variants = items_for(bar)
+            .iter()
+            .find(|i| matches!(i, ClassicItem::Button(b) if !b.variants.is_empty()))
+            .expect("a Draw button with variants");
+        for (name, item) in [("plain", plain), ("variants", with_variants)] {
+            let mut ui = iced_test::simulator(item_el(item, false, bar));
+            let icon = match ui.find(AnyIcon) {
+                Ok(i) => i,
+                Err(_) if name == "variants" => continue, // glyph icon: no svg to measure
+                Err(e) => panic!("{name}: {e:?}"),
+            };
+            let b = iced_test::selector::Bounded::visible_bounds(&icon).expect("icon visible");
+            assert_eq!(b.width, ICON_SIZE, "{name}: icon width");
+            assert_eq!(b.height, ICON_SIZE, "{name}: icon height");
+        }
     }
 }

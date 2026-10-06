@@ -255,7 +255,21 @@ struct SemanticIcon {
     opacity: f32,
 }
 
+/// State a [`SemanticIcon`] reports to widget operations, so tests (and any
+/// selector) can find an icon and read its laid-out bounds.
+pub struct SemanticIconProbe;
+
 impl<M> Widget<M, Theme, Renderer> for SemanticIcon {
+    fn operate(
+        &mut self,
+        _tree: &mut Tree,
+        layout: Layout<'_>,
+        _renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        operation.custom(None, layout.bounds(), &mut SemanticIconProbe);
+    }
+
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
     }
