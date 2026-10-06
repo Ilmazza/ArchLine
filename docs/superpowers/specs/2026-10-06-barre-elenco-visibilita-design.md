@@ -30,8 +30,9 @@ barre di plugin aggiunte a runtime dopo l'avvio (si leggono al lancio).
 
 ## 3. Identità e registro delle barre (`src/ui/toolbar_registry.rs`)
 
-`ToolbarId` smette di essere un enum e diventa un identificatore `Copy` a stringa fissa (`&'static str`),
-costruito una volta (`OnceLock`) dal registro dei moduli.
+`ToolbarId` resta un enum `Copy` con una variante in più, `Group(&'static str)`, per le barre generate dai gruppi
+del ribbon (anziché diventare un newtype: così non si toccano i ~100 usi esistenti). Il registro dei moduli si
+costruisce una volta (`OnceLock`); `ToolbarId::all()` e `ToolbarId::BUILTIN` prendono il posto di `ALL`.
 
 - **Chiavi.** Le 6 barre attuali mantengono la chiave già salvata in `settings.json`: `Draw`, `Modify`,
   `Annotation`, `Block`, `Measure`, `Layers`. Tutte le altre: `modulo:Titolo` (es. `annotate:Dimensions`,
@@ -51,14 +52,14 @@ costruito una volta (`OnceLock`) dal registro dei moduli.
 - Nuova variante `Placement::Hidden { home: Option<DockSlot> }`, serializzata come le altre.
 - **Default** per una chiave non presente nel file: le 6 barre attuali agganciate come oggi; tutte le altre
   `Hidden`. `lanes(edge)` e `floating()` ignorano le `Hidden`.
-- `ToolbarLayout::set_visible(id, bool, cascade_n)`:
+- `ToolbarLayout::set_visible(id, bool)` (calcola da solo l'indice di cascata, nessun parametro `cascade_n`):
   - mostrare una barra `Hidden` la rende `Floating { x, y, home }` a cascata: `x = 120 + 28·n`,
     `y = 130 + 28·n`, con `n` = numero di barre flottanti già presenti modulo 8 (il clamp al render la tiene in
     finestra); `home` è il vecchio `home` della barra;
   - nascondere una barra agganciata o flottante la rende `Hidden { home }` con l'ultima posizione agganciata;
     le lane che restano vuote si compattano.
-- `sanitized(known: &[&str])`: scarta le chiavi che il registro non conosce, riempie le mancanti col default,
-  corregge `Layers` su un lato.
+- `sanitized()`: scarta le chiavi che il registro non conosce, riempie le mancanti col default (senza scrivere le
+  ~30 barre di gruppo nascoste), corregge `Layers` su un lato.
 - Retrocompatibile: un `settings.json` con solo le 6 chiavi di oggi si legge senza errori; le chiavi `Hidden`
   non compaiono nei file vecchi.
 
@@ -85,12 +86,15 @@ flyout che oggi vive sul tasto destro delle icone con varianti.
   `Some` e non `fired`, la sottoscrizione aggiunge `iced::time::every(50 ms)` → `ToolbarMsg::HoldTick(Instant)`,
   che apre il flyout al superamento della soglia (stesso schema delle sottoscrizioni condizionali già presenti).
   Un rilascio fuori dal pulsante o l'uscita del cursore annulla senza eseguire.
+- Il pulsante con varianti usa `mouse_area` + `hover` (un `button` cattura la pressione e il `mouse_area` esterno non
+  la vedrebbe); il rilascio è gestito da `HoldEnd`, il tempo da `HoldTick`.
 - Flyout: contenuto di `flyout_row`/`flyout` di oggi (pubblica `RibbonToolClick`); aperto con l'overlay dei
   dropdown del ribbon: il pulsante è avvolto in `PosReport::owned("cflyout:<id>")`, e
-  `Ribbon::place_dropdown` lo ancora sotto. L'overlay si aggiunge dove `view_main` costruisce già
-  `dropdown_layer`, tramite una funzione separata `#[inline(never)]`.
-- Da verificare in implementazione: che il clic su una riga del flyout chiuda l'overlay (come reagisce
-  `RibbonToolClick` a un dropdown aperto) e che l'id `cflyout:` non collida con quelli del ribbon.
+  `Ribbon::place_dropdown` lo ancora sotto. L'overlay si aggiunge in `view_main` con un solo `.or_else(...)` dopo
+  `dropdown_overlay` (la logica sta in `classic_toolbar::flyout_overlay`).
+- Il clic su una riga chiude il flyout senza altro aggancio: `on_ribbon_tool_click` chiude già qualunque dropdown
+  aperto (`dialog.rs:119`). L'id `cflyout:` non collide con quelli del ribbon (il test lo verifica: l'overlay del
+  ribbon lo ignora).
 
 ## 7. Rischi e punti da verificare
 
