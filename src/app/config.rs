@@ -30,6 +30,8 @@ pub struct AppConfig {
     /// General edge-stack dock layout (which panels are docked, side, order,
     /// width and auto-collapse) for the Properties panel and block palette.
     pub dock: crate::ui::dock::DockState,
+    /// Where each classic toolbar is: docked on an edge, or floating.
+    pub toolbars: crate::ui::toolbar_layout::ToolbarLayout,
     /// Add a newly selected annotation scale to existing annotative objects.
     pub annotation_auto_scale: i8,
     /// Ribbon collapse density.
@@ -52,6 +54,7 @@ impl Default for AppConfig {
             start: StartConfig::default(),
             statusbar: StatusBarConfig::default(),
             dock: crate::ui::dock::DockState::default(),
+            toolbars: crate::ui::toolbar_layout::ToolbarLayout::default(),
             annotation_auto_scale: -4,
             ribbon: RibbonConfig::default(),
             plot: PlotDialogState::default(),
@@ -609,6 +612,22 @@ mod tests {
         assert_eq!(deserialized.model_space.grid_opacity, 45);
         assert_eq!(deserialized.model_space.selection_opacity, 35);
         assert_eq!(deserialized.model_space.selection_window_color, 5);
+    }
+
+    #[test]
+    fn toolbars_default_when_absent_and_round_trip() {
+        // A settings.json from before the dockable toolbars has no section.
+        let old: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.toolbars, crate::ui::toolbar_layout::ToolbarLayout::default());
+
+        let mut cfg = AppConfig::default();
+        cfg.toolbars.move_to(
+            crate::ui::toolbar_layout::ToolbarId::Draw,
+            crate::ui::toolbar_layout::Target::Float { x: 40.0, y: 90.0 },
+        );
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.toolbars, cfg.toolbars);
     }
 
     #[test]

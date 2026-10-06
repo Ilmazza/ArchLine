@@ -1179,6 +1179,7 @@ impl OpenCADStudio {
                 dock.ensure_settings();
                 dock
             },
+            toolbars: self.toolbars.clone(),
             annotation_auto_scale: self.annotation_auto_scale,
             ribbon: crate::app::config::RibbonConfig {
                 collapse: self.ribbon.collapse_mode(),
@@ -1237,6 +1238,7 @@ impl OpenCADStudio {
         let mut dock = cfg.dock;
         dock.ensure_settings();
         self.dock = dock;
+        self.toolbars = cfg.toolbars.sanitized();
         self.annotation_auto_scale = cfg.annotation_auto_scale.clamp(-4, 4);
         self.ribbon.set_collapse_mode(cfg.ribbon.collapse);
         self.plot_dialog = cfg.plot;

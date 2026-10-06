@@ -823,6 +823,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) bg_picker: Option<BgTarget>,
     /// General edge-stack dock layout for the side panels.
     pub(crate) dock: crate::ui::dock::DockState,
+    /// Classic toolbar placement (docked lane / floating position).
+    pub(crate) toolbars: crate::ui::toolbar_layout::ToolbarLayout,
     /// Which panel is currently floated at full height (hovered, or a pinned
     /// panel on top).
     pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
@@ -4229,6 +4231,7 @@ impl OpenCADStudio {
             block_palette: Default::default(),
             xref_manager: Default::default(),
             dock: Default::default(),
+            toolbars: Default::default(),
             dock_expanded: None,
             dock_dragging: None,
             dock_resizing: None,
