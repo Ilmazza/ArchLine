@@ -14,6 +14,7 @@ use super::classic_toolbar::{item_el, plain, separator};
 use crate::app::Message;
 use crate::modules::{registry, RibbonItem, ToolDef};
 use crate::ui::icons;
+use crate::ui::toolbar_layout::ToolbarId;
 use crate::ui::properties::{acad_color_display, linetype_display_name, LwItem};
 use crate::ui::ribbon::{
     combo_btn_style, Ribbon, LAYER_COMBO_ID, PROP_COLOR_ID, PROP_LINETYPE_ID, PROP_LW_ID,
@@ -153,12 +154,12 @@ pub fn layer_row(ribbon: &Ribbon) -> iced::widget::Row<'static, Message> {
     let tools = layer_tools();
     let mut r = row![].spacing(3).align_y(iced::Center);
     if let Some(m) = &tools.manager {
-        r = r.push(item_el(&plain(m), false));
+        r = r.push(item_el(&plain(m), false, ToolbarId::Layers));
     }
     r = r.push(layer_combo(ribbon));
     r = r.push(separator(false));
     for c in &tools.commands {
-        r = r.push(item_el(&plain(c), false));
+        r = r.push(item_el(&plain(c), false, ToolbarId::Layers));
     }
     r = r.push(separator(false));
     let (color_swatch, _) = acad_color_display(ribbon.active_color);

@@ -4,7 +4,7 @@ use crate::app::{Message, OpenCADStudio};
 use crate::ui::toolbar_dock::{
     bar_length, bar_size, ToolbarDrag, ToolbarMsg, DRAG_THRESHOLD, GRIP_ANCHOR, HOLD_MS,
 };
-use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx};
+use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx, ToolbarId};
 
 impl OpenCADStudio {
     pub(super) fn on_toolbar(&mut self, m: ToolbarMsg) -> iced::Task<Message> {
@@ -60,8 +60,9 @@ impl OpenCADStudio {
                 self.toolbars.redock(id);
                 self.save_config();
             }
-            ToolbarMsg::HoldStart(tool) => {
+            ToolbarMsg::HoldStart(bar, tool) => {
                 self.tool_hold = Some(crate::app::ToolHold {
+                    bar,
                     tool,
                     pressed_at: iced::time::Instant::now(),
                     fired: false,
@@ -75,11 +76,8 @@ impl OpenCADStudio {
                     let held = now.saturating_duration_since(h.pressed_at);
                     if !h.fired && held >= std::time::Duration::from_millis(HOLD_MS) {
                         h.fired = true;
-                        self.ribbon.open_dropdown = Some(format!(
-                            "{}{}",
-                            crate::ui::classic_toolbar::FLYOUT_PREFIX,
-                            h.tool
-                        ));
+                        self.ribbon.open_dropdown =
+                            Some(crate::ui::classic_toolbar::flyout_id(h.bar, h.tool));
                     }
                 }
             }
@@ -91,6 +89,19 @@ impl OpenCADStudio {
             }
             ToolbarMsg::Toggle(id) => {
                 let shown = self.toolbars.is_visible(id);
+                // Keep one bar: the list opens from a bar, so with none left
+                // there would be nothing to right-click.
+                let visible = ToolbarId::all()
+                    .iter()
+                    .filter(|b| self.toolbars.is_visible(**b))
+                    .count();
+                if shown && visible <= 1 {
+                    self.command_line.push_info(
+                        crate::t!("At least one toolbar must stay visible (TOOLBARRESET restores the defaults).")
+                            .as_ref(),
+                    );
+                    return iced::Task::none();
+                }
                 self.toolbars.set_visible(id, !shown);
                 self.save_config();
             }
@@ -276,15 +287,15 @@ mod tests {
     fn a_long_press_opens_the_variants_flyout() {
         let mut app = app();
         let tool = variant_tool();
-        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
         tick(&mut app, 100);
         assert!(app.ribbon.open_dropdown.is_none(), "too early");
         tick(&mut app, 600);
         assert_eq!(
             app.ribbon.open_dropdown.as_deref(),
-            Some(format!("{}{tool}", crate::ui::classic_toolbar::FLYOUT_PREFIX).as_str())
+            Some(crate::ui::classic_toolbar::flyout_id(ToolbarId::Draw, tool).as_str())
         );
-        assert!(crate::ui::classic_toolbar::flyout_overlay(&app.ribbon, 1600.0).is_some());
+        assert!(crate::ui::classic_toolbar::flyout_overlay(&app.ribbon, 1600.0, 900.0).is_some());
         // The ribbon's own overlay must leave the id alone, so `view_main` falls
         // through to the flyout.
         assert!(app
@@ -302,7 +313,7 @@ mod tests {
         let i = app.active_tab;
         let tool = variant_tool();
         let event = crate::modules::ModuleEvent::Command(tool.to_string());
-        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
         toolbar(
             &mut app,
             ToolbarMsg::HoldEnd { tool_id: tool.to_string(), event },
@@ -318,7 +329,7 @@ mod tests {
         app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
         let tool = variant_tool();
-        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
         tick(&mut app, 600);
         let event = crate::modules::ModuleEvent::Command(tool.to_string());
         toolbar(
@@ -333,10 +344,51 @@ mod tests {
     fn leaving_the_button_cancels_the_hold() {
         let mut app = app();
         let tool = variant_tool();
-        toolbar(&mut app, ToolbarMsg::HoldStart(tool));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, tool));
         toolbar(&mut app, ToolbarMsg::HoldCancel);
         tick(&mut app, 600);
         assert!(app.tool_hold.is_none());
         assert!(app.ribbon.open_dropdown.is_none());
+    }
+
+    #[test]
+    fn the_last_visible_bar_cannot_be_hidden() {
+        // Final review: with every bar hidden nothing is left to right-click.
+        let mut app = app();
+        for id in ToolbarId::BUILTIN {
+            toolbar(&mut app, ToolbarMsg::Toggle(id));
+        }
+        let shown = ToolbarId::all()
+            .iter()
+            .filter(|id| app.toolbars.is_visible(**id))
+            .count();
+        assert_eq!(shown, 1, "the last bar stays so the list stays reachable");
+    }
+
+    #[test]
+    fn the_flyout_belongs_to_the_bar_that_was_pressed() {
+        // Final review: DIMLINEAR is the default of a dropdown in two bars.
+        use crate::ui::classic_toolbar::{flyout_id, variants_of};
+        let mut app = app();
+        let dims = ToolbarId::all()
+            .iter()
+            .copied()
+            .find(|id| id.title() == "Dimensions")
+            .expect("a Dimensions bar");
+        let ids = |bar| -> Vec<&'static str> {
+            variants_of(bar, "DIMLINEAR")
+                .expect("DIMLINEAR has variants")
+                .iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        assert_ne!(ids(ToolbarId::Annotation), ids(dims), "each bar keeps its own variants");
+        assert_ne!(flyout_id(ToolbarId::Annotation, "DIMLINEAR"), flyout_id(dims, "DIMLINEAR"));
+        toolbar(&mut app, ToolbarMsg::HoldStart(dims, "DIMLINEAR"));
+        tick(&mut app, 600);
+        assert_eq!(
+            app.ribbon.open_dropdown.as_deref(),
+            Some(flyout_id(dims, "DIMLINEAR").as_str())
+        );
     }
 }

@@ -45,7 +45,7 @@ pub enum ToolbarMsg {
     /// Tick / untick a bar in the right-click list.
     Toggle(ToolbarId),
     /// A button with variants was pressed: start timing the hold.
-    HoldStart(&'static str),
+    HoldStart(ToolbarId, &'static str),
     /// The pointer left the button before the hold fired.
     HoldCancel,
     /// Time passed while a hold is pending.
@@ -211,9 +211,9 @@ fn bar_body(id: ToolbarId, vertical: bool, ribbon: &Ribbon) -> Element<'static, 
     }
     let items = items_for(id);
     if vertical {
-        column(items.iter().map(|i| item_el(i, true))).spacing(3).into()
+        column(items.iter().map(|i| item_el(i, true, id))).spacing(3).into()
     } else {
-        row(items.iter().map(|i| item_el(i, false)))
+        row(items.iter().map(|i| item_el(i, false, id)))
             .spacing(3)
             .align_y(iced::Center)
             .into()

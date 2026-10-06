@@ -766,6 +766,24 @@ impl Ribbon {
 
     // ── Dropdown overlay ──────────────────────────────────────────────────
 
+    /// Like [`Self::place_dropdown`] for a panel `w` x `h` that must stay inside
+    /// the window: below its anchor when it fits, else above it.
+    pub fn place_dropdown_fit<'a>(
+        &self,
+        id: &str,
+        panel: Element<'a, Message>,
+        w: f32,
+        h: f32,
+        win: (f32, f32),
+    ) -> Element<'a, Message> {
+        let (align_right, h_pad, top) = self.dd_anchor(id, w, win.0);
+        let top = match crate::ui::wrap_bar::dropdown_bounds(id) {
+            Some(b) => crate::ui::classic_toolbar::flyout_top(top, b.y, h, win.1),
+            None => top,
+        };
+        dropdown_backdrop(position_ribbon_dropdown(panel, align_right, h_pad, top))
+    }
+
     /// Place `panel` (`w` wide) under dropdown `id`, closing on a click
     /// outside it.
     pub fn place_dropdown<'a>(

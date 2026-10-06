@@ -272,6 +272,7 @@ impl From<&QSelectState> for QSelectSettings {
 /// A pending press on a toolbar button with variants.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolHold {
+    pub(crate) bar: crate::ui::toolbar_layout::ToolbarId,
     pub(crate) tool: &'static str,
     pub(crate) pressed_at: iced::time::Instant,
     pub(crate) fired: bool,

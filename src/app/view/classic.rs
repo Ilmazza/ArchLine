@@ -313,6 +313,7 @@ mod tests {
                 variants: tool.variants.clone(),
             }),
             true,
+            ToolbarId::Draw,
         );
         let mut ui = iced_test::simulator(el);
         let at = iced::Point::new(18.0, 18.0);
@@ -325,7 +326,7 @@ mod tests {
         assert!(
             messages
                 .iter()
-                .any(|m| matches!(m, Message::Toolbar(ToolbarMsg::HoldStart(id)) if *id == tool.main.id)),
+                .any(|m| matches!(m, Message::Toolbar(ToolbarMsg::HoldStart(bar, id)) if *bar == ToolbarId::Draw && *id == tool.main.id)),
             "press must publish HoldStart: {messages:?}"
         );
         assert!(

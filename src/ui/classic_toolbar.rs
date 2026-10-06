@@ -14,6 +14,7 @@ use iced::{Background, Border, Element, Length, Theme};
 use crate::app::Message;
 use crate::ui::ribbon::Ribbon;
 use crate::ui::toolbar_dock::ToolbarMsg;
+use crate::ui::toolbar_layout::ToolbarId;
 use crate::ui::wrap_bar::PosReport;
 use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
@@ -25,26 +26,52 @@ const FLYOUT_WIDTH: f32 = 230.0;
 /// Id prefix of the variants flyout in the ribbon's dropdown machinery.
 pub const FLYOUT_PREFIX: &str = "cflyout:";
 
-fn variants_of(tool_id: &str) -> Option<Vec<ToolDef>> {
-    use crate::ui::toolbar_layout::ToolbarId;
-    ToolbarId::all()
-        .iter()
-        .flat_map(|id| items_for(*id).iter())
-        .find_map(|i| match i {
-            ClassicItem::Button(b) if b.main.id == tool_id && !b.variants.is_empty() => {
-                Some(b.variants.clone())
-            }
-            _ => None,
-        })
+/// Tooltip line for a button that has variants.
+pub const VARIANTS_HINT: &str = "Hold: more options";
+
+/// Height of one flyout row (text 12 + padding 8, rounded up), in px.
+const FLYOUT_ROW_H: f32 = 26.0;
+
+/// Flyout id of one button of one bar: the same tool can be the default of a
+/// dropdown in two bars (DIMLINEAR), and each needs its own variants and its
+/// own anchor. Bar keys may contain `:`, tool ids never do.
+pub fn flyout_id(bar: ToolbarId, tool_id: &str) -> String {
+    format!("{FLYOUT_PREFIX}{}:{tool_id}", bar.key())
 }
 
-/// The open variants flyout, anchored under its button (which reports its
+pub fn variants_of(bar: ToolbarId, tool_id: &str) -> Option<Vec<ToolDef>> {
+    items_for(bar).iter().find_map(|i| match i {
+        ClassicItem::Button(b) if b.main.id == tool_id && !b.variants.is_empty() => {
+            Some(b.variants.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Top of a flyout: just below its button, unless it would leave the window,
+/// then just above; when neither fits, pinned to the top.
+pub fn flyout_top(below: f32, button_top: f32, panel_h: f32, win_h: f32) -> f32 {
+    if below + panel_h <= win_h {
+        below
+    } else if button_top - panel_h >= 0.0 {
+        button_top - panel_h
+    } else {
+        (win_h - panel_h).max(0.0)
+    }
+}
+
+/// The open variants flyout, anchored next to its button (which reports its
 /// bounds under the same id), if one is open.
-pub fn flyout_overlay<'a>(ribbon: &'a Ribbon, win_w: f32) -> Option<Element<'a, Message>> {
+pub fn flyout_overlay<'a>(
+    ribbon: &'a Ribbon,
+    win_w: f32,
+    win_h: f32,
+) -> Option<Element<'a, Message>> {
     let open = ribbon.open_dropdown.as_deref()?;
-    let tool_id = open.strip_prefix(FLYOUT_PREFIX)?;
-    let variants = variants_of(tool_id)?;
-    Some(ribbon.place_dropdown(open, flyout(&variants), FLYOUT_WIDTH, win_w))
+    let (bar_key, tool_id) = open.strip_prefix(FLYOUT_PREFIX)?.rsplit_once(':')?;
+    let variants = variants_of(ToolbarId::from_key(bar_key)?, tool_id)?;
+    let h = variants.len() as f32 * FLYOUT_ROW_H + 4.0;
+    Some(ribbon.place_dropdown_fit(open, flyout(&variants), FLYOUT_WIDTH, h, (win_w, win_h)))
 }
 
 /// One toolbar button: runs `main` on click; `variants` (if any) open on a long press.
@@ -190,7 +217,7 @@ fn tip(label: &'static str, has_variants: bool) -> Element<'static, Message> {
     let label = crate::t!(label).replace('\n', " ");
     let mut col = column![text(label).size(11)].spacing(2);
     if has_variants {
-        col = col.push(text(crate::t!("Right-click: more options").into_owned()).size(10));
+        col = col.push(text(crate::t!(VARIANTS_HINT).into_owned()).size(10));
     }
     container(col)
         .padding([2, 6])
@@ -252,7 +279,7 @@ pub(super) fn panel_style(theme: &Theme) -> container::Style {
     }
 }
 
-fn tool_button(b: &ClassicButton) -> Element<'static, Message> {
+fn tool_button(bar: ToolbarId, b: &ClassicButton) -> Element<'static, Message> {
     let inner: Element<'static, Message> = if b.variants.is_empty() {
         button(icon_el(&b.main.icon, ICON_SIZE))
             .on_press(click(&b.main))
@@ -296,10 +323,10 @@ fn tool_button(b: &ClassicButton) -> Element<'static, Message> {
                 ..Default::default()
             });
         mouse_area(PosReport::owned(
-            format!("{FLYOUT_PREFIX}{}", b.main.id),
+            flyout_id(bar, b.main.id),
             hover(plain, lit),
         ))
-        .on_press(Message::Toolbar(ToolbarMsg::HoldStart(b.main.id)))
+        .on_press(Message::Toolbar(ToolbarMsg::HoldStart(bar, b.main.id)))
         .on_release(Message::Toolbar(ToolbarMsg::HoldEnd {
             tool_id: b.main.id.to_string(),
             event: b.main.event.clone(),
@@ -326,9 +353,13 @@ pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
     }
 }
 
-pub(crate) fn item_el(item: &ClassicItem, vertical_bar: bool) -> Element<'static, Message> {
+pub(crate) fn item_el(
+    item: &ClassicItem,
+    vertical_bar: bool,
+    bar: ToolbarId,
+) -> Element<'static, Message> {
     match item {
-        ClassicItem::Button(b) => tool_button(b),
+        ClassicItem::Button(b) => tool_button(bar, b),
         ClassicItem::Separator => separator(vertical_bar),
     }
 }
@@ -402,5 +433,21 @@ mod tests {
             ids.dedup();
             assert_eq!(ids.len(), n, "duplicate main buttons");
         }
+    }
+
+    #[test]
+    fn the_variants_hint_teaches_the_long_press_not_the_right_click() {
+        // Final review: right click now opens the bar list.
+        assert!(!VARIANTS_HINT.to_lowercase().contains("right"), "{VARIANTS_HINT}");
+        assert!(VARIANTS_HINT.to_lowercase().contains("hold"), "{VARIANTS_HINT}");
+    }
+
+    #[test]
+    fn the_flyout_opens_below_unless_it_would_leave_the_window() {
+        // Final review: a bar docked at the bottom must not push it off-screen.
+        // flyout_top(below_button, button_top, panel_height, window_height)
+        assert_eq!(flyout_top(100.0, 64.0, 200.0, 900.0), 100.0, "fits below");
+        assert_eq!(flyout_top(890.0, 860.0, 200.0, 900.0), 660.0, "opens above");
+        assert_eq!(flyout_top(100.0, 50.0, 500.0, 400.0), 0.0, "fits nowhere: pinned to the top");
     }
 }

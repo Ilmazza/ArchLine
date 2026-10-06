@@ -2368,7 +2368,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 self.tabs[self.active_tab].is_start,
                 &self.recent_colors,
             )
-            .or_else(|| crate::ui::classic_toolbar::flyout_overlay(&self.ribbon, self.win_size.0))
+            .or_else(|| crate::ui::classic_toolbar::flyout_overlay(&self.ribbon, self.win_size.0, self.win_size.1))
             .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into())
         };
 
