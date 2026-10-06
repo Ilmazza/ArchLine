@@ -441,6 +441,16 @@ fn icon_for(command: &str) -> Option<MenuIcon> {
         .or_else(|| ui_icon(command).map(MenuIcon::Ui))
 }
 
+/// The icon bytes of a menu command for a toolbar button, and whether they are
+/// black strokes that need tinting (quick-access glyphs) rather than coloured
+/// ribbon art. `None` when the app has no icon for the command.
+pub(super) fn toolbar_icon(command: &str) -> Option<(&'static [u8], bool)> {
+    match icon_for(command)? {
+        MenuIcon::Ribbon(bytes) => Some((bytes, false)),
+        MenuIcon::Ui(bytes) => Some((bytes, true)),
+    }
+}
+
 fn lead(icon: Option<MenuIcon>) -> Element<'static, Message> {
     match icon {
         Some(MenuIcon::Ribbon(bytes)) => crate::ui::icons::semantic(bytes, ICON),

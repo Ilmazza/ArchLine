@@ -367,28 +367,23 @@ mod tests {
 
     #[test]
     fn the_flyout_belongs_to_the_bar_that_was_pressed() {
-        // Final review: DIMLINEAR is the default of a dropdown in two bars.
+        // Final review: the same tool can sit in two bars (DIMLINEAR is a
+        // dropdown on Annotation and a plain button on the Dimension menu bar).
         use crate::ui::classic_toolbar::{flyout_id, variants_of};
         let mut app = app();
-        let dims = ToolbarId::all()
+        let dim = ToolbarId::all()
             .iter()
             .copied()
-            .find(|id| id.title() == "Dimensions")
-            .expect("a Dimensions bar");
-        let ids = |bar| -> Vec<&'static str> {
-            variants_of(bar, "DIMLINEAR")
-                .expect("DIMLINEAR has variants")
-                .iter()
-                .map(|t| t.id)
-                .collect()
-        };
-        assert_ne!(ids(ToolbarId::Annotation), ids(dims), "each bar keeps its own variants");
-        assert_ne!(flyout_id(ToolbarId::Annotation, "DIMLINEAR"), flyout_id(dims, "DIMLINEAR"));
-        toolbar(&mut app, ToolbarMsg::HoldStart(dims, "DIMLINEAR"));
+            .find(|id| id.title() == "Dimension")
+            .expect("a Dimension bar");
+        assert!(variants_of(ToolbarId::Annotation, "DIMLINEAR").is_some());
+        assert!(variants_of(dim, "DIMLINEAR").is_none(), "the menu bar has no flyout there");
+        assert_ne!(flyout_id(ToolbarId::Annotation, "DIMLINEAR"), flyout_id(dim, "DIMLINEAR"));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Annotation, "DIMLINEAR"));
         tick(&mut app, 600);
         assert_eq!(
             app.ribbon.open_dropdown.as_deref(),
-            Some(flyout_id(dims, "DIMLINEAR").as_str())
+            Some(flyout_id(ToolbarId::Annotation, "DIMLINEAR").as_str())
         );
     }
 }

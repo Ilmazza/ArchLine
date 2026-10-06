@@ -271,8 +271,8 @@ mod tests {
         let dims = ToolbarId::all()
             .iter()
             .copied()
-            .find(|id| id.title() == "Dimensions")
-            .expect("a Dimensions bar");
+            .find(|id| id.title() == "Dimension")
+            .expect("a Dimension bar");
         assert!(!app.toolbars.is_visible(dims));
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
         let el = crate::ui::toolbar_dock::frame(
@@ -288,7 +288,7 @@ mod tests {
         ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(
             iced::mouse::Button::Right,
         ))]);
-        ui.click("Dimensions").expect("the list shows the hidden Dimensions bar");
+        ui.click("Dimension").expect("the list shows the hidden Dimension bar");
         for message in ui.into_messages() {
             let _ = app.update(message);
         }
@@ -311,6 +311,7 @@ mod tests {
             &ClassicItem::Button(crate::ui::classic_toolbar::ClassicButton {
                 main: tool.main.clone(),
                 variants: tool.variants.clone(),
+                tinted: tool.tinted,
             }),
             true,
             ToolbarId::Draw,

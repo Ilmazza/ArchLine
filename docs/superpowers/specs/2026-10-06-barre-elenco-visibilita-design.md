@@ -22,6 +22,24 @@ Decisioni prese con l'utente:
 - Approccio al clic prolungato: **timer a messaggi + overlay dei dropdown del ribbon** (non un widget
   personalizzato).
 
+## 1bis. Correzione: le barre rispecchiano i menu (dopo la prova dell'utente)
+
+La prima realizzazione generava una barra per ogni gruppo del ribbon (~34): barre "a spezzatino" che non
+corrispondevano ai menu a tendina (Dimensions, Visual Style…), con Draw e Modify incomplete rispetto ai menu.
+Decisione dell'utente: **una barra per menu, un pulsante per comando**.
+
+- Le barre Draw e Modify (chiavi storiche) hanno gli stessi comandi, nello stesso ordine e con gli stessi
+  separatori dei menu Draw e Modify (`classic_menu::menus()`).
+- Ogni altro menu con comandi propri è una barra `menu:Titolo` (File, Edit, View, Insert, Format, Tools, Dimension,
+  Help); ogni sottomenu con almeno 2 comandi è una barra a sé (Zoom, Visual Styles, Inquiry, Text, Geometric,
+  Dimensional, Manage). Parametric, fatto solo di sottomenu, non è una barra.
+- Una voce di menu = un pulsante; un sottomenu dentro una barra = un pulsante con le varianti sul clic prolungato.
+  Le righe che non sono comandi (cronologia, schede finestra) non compaiono.
+- Icona: quella del menu (ribbon o glifi del quick access); dove l'app non ne ha una, due lettere (iniziali). Il
+  tooltip porta il nome intero.
+- Annotation, Block, Measure e Layers restano barre storiche (stesse chiavi di `settings.json`); le chiavi dei vecchi
+  gruppi del ribbon (`modulo:Titolo`) non esistono più e vengono scartate al caricamento.
+
 ## 2. Fuori portata
 
 Pulsante di chiusura sulle barre flottanti (si chiudono dall'elenco); personalizzazione dei pulsanti; barre fatte

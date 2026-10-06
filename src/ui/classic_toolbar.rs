@@ -78,6 +78,8 @@ pub fn flyout_overlay<'a>(
 pub struct ClassicButton {
     pub main: ToolDef,
     pub variants: Vec<ToolDef>,
+    /// `main`'s icon is a black-stroke glyph that must follow the theme text colour.
+    pub tinted: bool,
 }
 
 /// A toolbar entry.
@@ -99,6 +101,7 @@ pub(super) fn plain(t: &ToolDef) -> ClassicItem {
     ClassicItem::Button(ClassicButton {
         main: t.clone(),
         variants: Vec::new(),
+        tinted: false,
     })
 }
 
@@ -117,7 +120,11 @@ fn dropdown(items: &[(&'static str, &'static str, IconKind)], default: &str) -> 
         .find(|t| t.id == default)
         .or_else(|| variants.first())?
         .clone();
-    Some(ClassicItem::Button(ClassicButton { main, variants }))
+    Some(ClassicItem::Button(ClassicButton {
+        main,
+        variants,
+        tinted: false,
+    }))
 }
 
 fn flatten(item: &RibbonItem, out: &mut Vec<ClassicItem>) {
@@ -137,15 +144,6 @@ fn flatten(item: &RibbonItem, out: &mut Vec<ClassicItem>) {
         }
         _ => {}
     }
-}
-
-/// Buttons of one ribbon group's items (dropdowns collapse to one button).
-pub(super) fn buttons_of(tools: &[RibbonItem]) -> Vec<ClassicItem> {
-    let mut out = Vec::new();
-    for item in tools {
-        flatten(item, &mut out);
-    }
-    out
 }
 
 /// Buttons of the draw-module groups named in `titles`, with a separator
@@ -175,8 +173,9 @@ fn group_items(titles: &[&str]) -> Vec<ClassicItem> {
 pub fn tools() -> &'static ClassicTools {
     static TOOLS: OnceLock<ClassicTools> = OnceLock::new();
     TOOLS.get_or_init(|| ClassicTools {
-        draw: group_items(&["Draw"]),
-        modify: group_items(&["Modify"]),
+        // Same commands, order and separators as the Draw / Modify menus.
+        draw: super::toolbar_registry::menu_items("Draw"),
+        modify: super::toolbar_registry::menu_items("Modify"),
         annotation: group_items(&["Annotation"]),
         block: group_items(&["Block"]),
         measure: group_items(&["Measure"]),
@@ -196,6 +195,14 @@ pub fn items_for(id: crate::ui::toolbar_layout::ToolbarId) -> &'static [ClassicI
         Measure => &t.measure,
         Layers => &[],
         Group(_) => super::toolbar_registry::group_items(id),
+    }
+}
+
+/// The icon of a button's main tool (tinted when it is a black-stroke glyph).
+fn main_icon(b: &ClassicButton, size: f32) -> Element<'static, Message> {
+    match (&b.main.icon, b.tinted) {
+        (IconKind::Svg(bytes), true) => crate::ui::icons::themed(bytes, size),
+        (icon, _) => icon_el(icon, size),
     }
 }
 
@@ -281,7 +288,7 @@ pub(super) fn panel_style(theme: &Theme) -> container::Style {
 
 fn tool_button(bar: ToolbarId, b: &ClassicButton) -> Element<'static, Message> {
     let inner: Element<'static, Message> = if b.variants.is_empty() {
-        button(icon_el(&b.main.icon, ICON_SIZE))
+        button(main_icon(b, ICON_SIZE))
             .on_press(click(&b.main))
             .width(Length::Fixed(BTN_SIZE))
             .height(Length::Fixed(BTN_SIZE))
@@ -304,12 +311,12 @@ fn tool_button(bar: ToolbarId, b: &ClassicButton) -> Element<'static, Message> {
         // short press runs it, a long press opens the flyout. An iced `button`
         // captures the press, so a `mouse_area` around it would never see it;
         // draw the hover highlight with `hover` instead.
-        let plain = container(icon_el(&b.main.icon, ICON_SIZE))
+        let plain = container(main_icon(b, ICON_SIZE))
             .width(Length::Fixed(BTN_SIZE))
             .height(Length::Fixed(BTN_SIZE))
             .center_x(Length::Fixed(BTN_SIZE))
             .center_y(Length::Fixed(BTN_SIZE));
-        let lit = container(icon_el(&b.main.icon, ICON_SIZE))
+        let lit = container(main_icon(b, ICON_SIZE))
             .width(Length::Fixed(BTN_SIZE))
             .height(Length::Fixed(BTN_SIZE))
             .center_x(Length::Fixed(BTN_SIZE))
@@ -395,20 +402,22 @@ mod tests {
         let draw = buttons(&tools().draw);
         let ids: Vec<_> = draw.iter().map(|b| b.main.id).collect();
         assert!(ids.contains(&"LINE"), "{ids:?}");
-        let circle = draw
+        let text = draw
             .iter()
-            .find(|b| b.variants.iter().any(|v| v.id == "CIRCLE_3P"))
-            .expect("circle dropdown keeps its variants");
-        assert_eq!(circle.main.id, "CIRCLE", "default entry is the main button");
-        assert!(circle.variants.len() > 1);
-        // The 3-point variant is no longer a toolbar button of its own.
-        assert!(!ids.contains(&"CIRCLE_3P"), "{ids:?}");
+            .find(|b| b.variants.iter().any(|v| v.id == "MTEXT"))
+            .expect("the Text submenu keeps its variants");
+        assert_eq!(text.main.id, "TEXT", "first entry is the main button");
+        assert_eq!(text.variants.len(), 2);
+        // Every other Draw-menu command is a button of its own.
+        for c in ["XLINE", "POLYGON", "RECTANG", "ARC", "CIRCLE", "DONUT", "SPLINE", "POINT", "REGION"] {
+            assert!(ids.contains(&c), "{c} missing from {ids:?}");
+        }
     }
 
     #[test]
-    fn draw_toolbar_is_compact_and_other_bars_are_populated() {
+    fn draw_toolbar_mirrors_the_menu_and_other_bars_are_populated() {
         let t = tools();
-        assert!(buttons(&t.draw).len() <= 12, "draw has {} buttons", buttons(&t.draw).len());
+        assert!(buttons(&t.draw).len() >= 14, "draw has {} buttons", buttons(&t.draw).len());
         assert!(!buttons(&t.modify).is_empty());
         assert!(!buttons(&t.annotation).is_empty());
     }
