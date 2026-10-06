@@ -576,6 +576,12 @@ impl OpenCADStudio {
             "CLEANSCREEN" => {
                 return Some(Task::done(Message::ToggleCleanScreen));
             }
+            // ── TOOLBARRESET — put the classic toolbars back where they started ──
+            "TOOLBARRESET" => {
+                return Some(Task::done(Message::Toolbar(
+                    crate::ui::toolbar_dock::ToolbarMsg::Reset,
+                )));
+            }
             // ── QUICKPROPERTIES — toggle the floating quick-properties readout ───
             "QUICKPROPERTIES" => {
                 return Some(Task::done(Message::ToggleQuickProperties));
@@ -2028,6 +2034,16 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
         app
+    }
+
+    #[test]
+    fn toolbarreset_is_registered_and_dispatched() {
+        assert!(crate::command::all_registered_command_names().contains(&"TOOLBARRESET"));
+        let mut app = OpenCADStudio::new_for_test();
+        assert!(
+            app.dispatch_display("TOOLBARRESET", 0).is_some(),
+            "the display family must claim TOOLBARRESET"
+        );
     }
 
     #[test]

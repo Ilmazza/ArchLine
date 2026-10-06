@@ -86,11 +86,11 @@ di `CLAUDE.md`); in `src/app/view/mod.rs` restano poche righe che sostituiscono 
 
 ## 6. Trascinamento
 
-Messaggi: `ToolbarGrab(id, offset)`, `ToolbarDragMove(Point)`, `ToolbarDragRelease`, `ToolbarDragCancel`
-(`Esc`). Stato transitorio in `OpenCADStudio` come per il dock (`dock_dragging` ecc.): barra, offset di
-presa, ultimo punto, target risolto.
+Messaggi: `ToolbarMsg::{Grab(id), DragMove(Point), DragRelease, Redock(id), Reset}`; `Esc` annulla il drag da
+`update_message`. Stato transitorio in `OpenCADStudio` come per il dock (`dock_dragging` ecc.): barra, ultimo punto, target risolto. Il punto di presa non è noto (`mouse_area::on_press` non dà la
+posizione): la barra flottante si posiziona con l'angolo a `GRIP_ANCHOR` px dal cursore.
 
-- Durante il drag la barra resta al suo posto, attenuata (nessun salto di layout). Seguono il cursore un
+- Durante il drag la barra resta al suo posto, evidenziata con sfondo semitrasparente e bordo di accento (nessun salto di layout). Seguono il cursore un
   contorno "fantasma" della barra e l'evidenziazione della zona di aggancio con la linea di inserimento.
 - Livello di drag: `mouse_area` a schermo intero con `on_move`/`on_release`, montato solo durante il drag
   (stesso schema del dock, `view/mod.rs` ~2092, e di `modal.rs`). Deve coprire tutta l'area sotto la barra
@@ -119,7 +119,7 @@ Fasi, ognuna consegnabile da sola:
 1. Modello, persistenza, barre separate e rendering ai bordi, layout di default identico a oggi.
 2. Trascinamento con aggancio a un bordo, anteprima, persistenza.
 3. Barre flottanti, ritorno a `home`, verifica dei dropdown.
-4. Comando di ripristino del layout e rifiniture.
+4. Comando `TOOLBARRESET` di ripristino del layout e rifiniture.
 
 ## 9. Compatibilità con la parte 2
 

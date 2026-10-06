@@ -456,6 +456,7 @@ inventory::submit!(crate::command::CommandRegistration {
         // dispatch families (no interactive command module of their own).
         "ALIASEDIT",
         "CLEANSCREEN",
+        "TOOLBARRESET",
         "CUI",
         "DSETTINGS",
         "PARAMETERS",
