@@ -146,10 +146,11 @@ mod tests {
     #[test]
     fn dragging_a_bar_to_the_left_edge_docks_it_there() {
         let mut app = app();
-        drag(&mut app, ToolbarId::Block, Point::new(8.0, 400.0));
+        let insert = ToolbarId::from_key("menu:Insert").unwrap();
+        drag(&mut app, insert, Point::new(8.0, 400.0));
         assert!(app.toolbar_drag.is_none());
         assert_eq!(
-            app.toolbars.placement(ToolbarId::Block),
+            app.toolbars.placement(insert),
             Placement::Docked(DockSlot { edge: Edge::Left, lane: 0, index: 1 })
         );
     }
@@ -355,8 +356,10 @@ mod tests {
     fn the_last_visible_bar_cannot_be_hidden() {
         // Final review: with every bar hidden nothing is left to right-click.
         let mut app = app();
-        for id in ToolbarId::BUILTIN {
-            toolbar(&mut app, ToolbarMsg::Toggle(id));
+        for id in ToolbarId::all().to_vec() {
+            if app.toolbars.is_visible(id) {
+                toolbar(&mut app, ToolbarMsg::Toggle(id));
+            }
         }
         let shown = ToolbarId::all()
             .iter()
@@ -367,23 +370,23 @@ mod tests {
 
     #[test]
     fn the_flyout_belongs_to_the_bar_that_was_pressed() {
-        // Final review: the same tool can sit in two bars (DIMLINEAR is a
-        // dropdown on Annotation and a plain button on the Dimension menu bar).
+        // Final review: the same tool can sit in two bars (TEXT is a submenu
+        // button on Draw and a plain button on the Text bar).
         use crate::ui::classic_toolbar::{flyout_id, variants_of};
         let mut app = app();
-        let dim = ToolbarId::all()
+        let text = ToolbarId::all()
             .iter()
             .copied()
-            .find(|id| id.title() == "Dimension")
-            .expect("a Dimension bar");
-        assert!(variants_of(ToolbarId::Annotation, "DIMLINEAR").is_some());
-        assert!(variants_of(dim, "DIMLINEAR").is_none(), "the menu bar has no flyout there");
-        assert_ne!(flyout_id(ToolbarId::Annotation, "DIMLINEAR"), flyout_id(dim, "DIMLINEAR"));
-        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Annotation, "DIMLINEAR"));
+            .find(|id| id.title() == "Text")
+            .expect("a Text bar");
+        assert!(variants_of(ToolbarId::Draw, "TEXT").is_some());
+        assert!(variants_of(text, "TEXT").is_none(), "the Text bar has no flyout there");
+        assert_ne!(flyout_id(ToolbarId::Draw, "TEXT"), flyout_id(text, "TEXT"));
+        toolbar(&mut app, ToolbarMsg::HoldStart(ToolbarId::Draw, "TEXT"));
         tick(&mut app, 600);
         assert_eq!(
             app.ribbon.open_dropdown.as_deref(),
-            Some(flyout_id(ToolbarId::Annotation, "DIMLINEAR").as_str())
+            Some(flyout_id(ToolbarId::Draw, "TEXT").as_str())
         );
     }
 }

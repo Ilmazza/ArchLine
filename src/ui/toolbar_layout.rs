@@ -28,18 +28,15 @@ pub const CASCADE_STEPS: usize = 8;
 pub enum ToolbarId {
     Draw,
     Modify,
-    Annotation,
-    Block,
-    Measure,
     Layers,
-    /// Any other ribbon group with buttons; the payload is its key
-    /// (`module:Title`), built once by `toolbar_registry`.
+    /// Any other bar made from a menu; the payload is its key (`menu:Title`),
+    /// built once by `toolbar_registry`.
     Group(&'static str),
 }
 
 impl ToolbarId {
-    /// Every bar the user can show: the six historic ones, then one per
-    /// ribbon group.
+    /// Every bar the user can show: the three built-ins, then one per menu
+    /// (and per command submenu).
     pub fn all() -> &'static [ToolbarId] {
         super::toolbar_registry::all_ids()
     }
@@ -48,23 +45,28 @@ impl ToolbarId {
         !matches!(self, ToolbarId::Group(_))
     }
 
-    pub const BUILTIN: [ToolbarId; 6] = [
-        ToolbarId::Draw,
-        ToolbarId::Modify,
-        ToolbarId::Annotation,
-        ToolbarId::Block,
-        ToolbarId::Measure,
-        ToolbarId::Layers,
-    ];
+    pub const BUILTIN: [ToolbarId; 3] = [ToolbarId::Draw, ToolbarId::Modify, ToolbarId::Layers];
+
+    /// Menu bars docked in the first top row by default, left to right. They
+    /// stand in for the old Annotation, Block and Measure bars.
+    const DEFAULT_TOP: [&'static str; 3] = ["menu:Dimension", "menu:Insert", "menu:Inquiry"];
+
+    /// The menu bars that are visible by default, in `DEFAULT_TOP` order.
+    pub fn default_visible_groups() -> &'static [ToolbarId] {
+        static IDS: std::sync::OnceLock<Vec<ToolbarId>> = std::sync::OnceLock::new();
+        IDS.get_or_init(|| {
+            Self::DEFAULT_TOP
+                .iter()
+                .filter_map(|k| Self::from_key(k))
+                .collect()
+        })
+    }
 
     /// Stable name used as the key in `settings.json`.
     pub fn key(self) -> &'static str {
         match self {
             ToolbarId::Draw => "Draw",
             ToolbarId::Modify => "Modify",
-            ToolbarId::Annotation => "Annotation",
-            ToolbarId::Block => "Block",
-            ToolbarId::Measure => "Measure",
             ToolbarId::Layers => "Layers",
             ToolbarId::Group(key) => key,
         }
@@ -132,19 +134,22 @@ fn default_slot(id: ToolbarId) -> DockSlot {
     let (edge, lane, index) = match id {
         Draw => (Left, 0, 0),
         Modify => (Right, 0, 0),
-        Annotation => (Top, 0, 0),
-        Block => (Top, 0, 1),
-        Measure => (Top, 0, 2),
         Layers => (Top, 1, 0),
-        // Only reached to re-dock a group bar that has no remembered home.
-        Group(_) => (Top, 0, u8::MAX),
+        // The default top bars have a fixed place; any other menu bar only
+        // reaches this to re-dock without a remembered home.
+        Group(key) => match ToolbarId::DEFAULT_TOP.iter().position(|k| *k == key) {
+            Some(i) => (Top, 0, i as u8),
+            None => (Top, 0, u8::MAX),
+        },
     };
     DockSlot { edge, lane, index }
 }
 
 fn default_placement(id: ToolbarId) -> Placement {
     match id {
-        ToolbarId::Group(_) => Placement::Hidden { home: None },
+        ToolbarId::Group(key) if !ToolbarId::DEFAULT_TOP.contains(&key) => {
+            Placement::Hidden { home: None }
+        }
         other => Placement::Docked(default_slot(other)),
     }
 }
@@ -161,8 +166,9 @@ impl Default for ToolbarLayout {
     fn default() -> Self {
         Self {
             bars: ToolbarId::BUILTIN
-                .into_iter()
-                .map(|id| (id.key().to_string(), default_placement(id)))
+                .iter()
+                .chain(ToolbarId::default_visible_groups())
+                .map(|id| (id.key().to_string(), default_placement(*id)))
                 .collect(),
         }
     }
@@ -462,6 +468,20 @@ pub fn band_rect(slot: DockSlot, win: (f32, f32)) -> (f32, f32, f32, f32) {
 mod tests {
     use super::*;
 
+    /// The three bars docked at the top by default (they replace the old
+    /// Annotation, Block and Measure bars).
+    fn dim() -> ToolbarId {
+        ToolbarId::from_key("menu:Dimension").expect("a Dimension bar")
+    }
+
+    fn ins() -> ToolbarId {
+        ToolbarId::from_key("menu:Insert").expect("an Insert bar")
+    }
+
+    fn inq() -> ToolbarId {
+        ToolbarId::from_key("menu:Inquiry").expect("an Inquiry bar")
+    }
+
     fn len(_: ToolbarId) -> f32 {
         100.0
     }
@@ -485,7 +505,7 @@ mod tests {
         assert_eq!(l.lanes(Edge::Right), vec![vec![Modify]]);
         assert_eq!(
             l.lanes(Edge::Top),
-            vec![vec![Annotation, Block, Measure], vec![Layers]]
+            vec![vec![dim(), ins(), inq()], vec![Layers]]
         );
         assert!(l.lanes(Edge::Bottom).is_empty());
         assert!(l.floating().is_empty());
@@ -495,10 +515,10 @@ mod tests {
     fn move_to_dock_inserts_and_compacts_the_old_edge() {
         use ToolbarId::*;
         let mut l = ToolbarLayout::default();
-        l.move_to(Block, Target::Dock(slot(Edge::Left, 0, 0)));
-        assert_eq!(l.lanes(Edge::Left), vec![vec![Block, Draw]]);
-        assert_eq!(l.lanes(Edge::Top), vec![vec![Annotation, Measure], vec![Layers]]);
-        assert_eq!(l.placement(Measure), Placement::Docked(slot(Edge::Top, 0, 1)));
+        l.move_to(ins(), Target::Dock(slot(Edge::Left, 0, 0)));
+        assert_eq!(l.lanes(Edge::Left), vec![vec![ins(), Draw]]);
+        assert_eq!(l.lanes(Edge::Top), vec![vec![dim(), inq()], vec![Layers]]);
+        assert_eq!(l.placement(inq()), Placement::Docked(slot(Edge::Top, 0, 1)));
     }
 
     #[test]
@@ -506,7 +526,7 @@ mod tests {
         use ToolbarId::*;
         let mut l = ToolbarLayout::default();
         l.move_to(Layers, Target::Float { x: 120.0, y: 200.0 });
-        assert_eq!(l.lanes(Edge::Top), vec![vec![Annotation, Block, Measure]]);
+        assert_eq!(l.lanes(Edge::Top), vec![vec![dim(), ins(), inq()]]);
         assert_eq!(
             l.placement(Layers),
             Placement::Floating {
@@ -634,11 +654,19 @@ mod tests {
     fn sanitized_drops_unknown_bars_and_repairs_bad_placements() {
         let json = r#"{"bars":{
             "Standard":{"Floating":{"x":1.0,"y":2.0,"home":null}},
+            "Annotation":{"Docked":{"edge":"Top","lane":0,"index":0}},
+            "Block":{"Docked":{"edge":"Top","lane":0,"index":1}},
+            "Measure":{"Floating":{"x":5.0,"y":6.0,"home":null}},
             "Layers":{"Docked":{"edge":"Left","lane":0,"index":0}}
         }}"#;
         let l: ToolbarLayout = serde_json::from_str(json).unwrap();
         let l = l.sanitized();
-        assert_eq!(l.bars.len(), 6, "unknown key gone, missing bars filled");
+        for retired in ["Standard", "Annotation", "Block", "Measure"] {
+            assert!(!l.bars.contains_key(retired), "{retired} should be gone");
+        }
+        assert_eq!(l.bars.len(), 6, "built-ins and the three default top bars");
+        // Layers was on a side it cannot use, so it joins the end of the first row.
+        assert_eq!(l.lanes(Edge::Top)[0], vec![dim(), ins(), inq(), ToolbarId::Layers]);
         match l.placement(ToolbarId::Layers) {
             Placement::Docked(s) => assert_eq!(s.edge, Edge::Top),
             other => panic!("expected docked, got {other:?}"),
@@ -665,7 +693,7 @@ mod tests {
         let mut l = ToolbarLayout::default();
         l.set_visible(Layers, false);
         assert!(!l.is_visible(Layers));
-        assert_eq!(l.lanes(Edge::Top), vec![vec![Annotation, Block, Measure]]);
+        assert_eq!(l.lanes(Edge::Top), vec![vec![dim(), ins(), inq()]]);
         assert_eq!(
             l.placement(Layers),
             Placement::Hidden { home: Some(slot(Edge::Top, 1, 0)) }
@@ -700,7 +728,7 @@ mod tests {
         // Review focus 3.
         use ToolbarId::*;
         let mut l = ToolbarLayout::default();
-        let ids = [Draw, Modify, Annotation, Block, Measure, Layers];
+        let ids = [Draw, Modify, dim(), ins(), inq(), Layers];
         for id in ids {
             l.set_visible(id, false);
         }
@@ -744,12 +772,12 @@ mod tests {
     fn hidden_survives_serde_and_sanitize() {
         use ToolbarId::*;
         let mut l = ToolbarLayout::default();
-        l.set_visible(Block, false);
+        l.set_visible(ins(), false);
         let json = serde_json::to_string(&l).unwrap();
         let back: ToolbarLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(back, l);
         let back = back.sanitized();
-        assert!(!back.is_visible(Block));
-        assert_eq!(back.lanes(Edge::Top), vec![vec![Annotation, Measure], vec![Layers]]);
+        assert!(!back.is_visible(ins()));
+        assert_eq!(back.lanes(Edge::Top), vec![vec![dim(), inq()], vec![Layers]]);
     }
 }

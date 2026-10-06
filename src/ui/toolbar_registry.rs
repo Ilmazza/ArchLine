@@ -237,12 +237,27 @@ mod tests {
 
     #[test]
     fn the_historic_keys_still_resolve() {
-        for key in ["Draw", "Modify", "Annotation", "Block", "Measure", "Layers"] {
+        for key in ["Draw", "Modify", "Layers"] {
             let id = ToolbarId::from_key(key).unwrap_or_else(|| panic!("{key} missing"));
             assert_eq!(id.key(), key);
             assert!(id.is_builtin());
         }
-        assert_eq!(ToolbarId::BUILTIN.len(), 6);
+        assert_eq!(ToolbarId::BUILTIN.len(), 3);
+    }
+
+    #[test]
+    fn annotation_block_and_measure_are_retired_in_favour_of_the_menu_bars() {
+        for key in ["Annotation", "Block", "Measure"] {
+            assert_eq!(ToolbarId::from_key(key), None, "{key} should no longer exist");
+        }
+        let default_top: Vec<_> = ToolbarId::default_visible_groups()
+            .iter()
+            .map(|id| id.title())
+            .collect();
+        assert_eq!(default_top, ["Dimension", "Insert", "Inquiry"]);
+        for id in ToolbarId::default_visible_groups() {
+            assert!(!items_for(*id).is_empty(), "{} has no buttons", id.key());
+        }
     }
 
     #[test]
@@ -291,9 +306,10 @@ mod tests {
     fn group_bars_are_hidden_by_default_and_not_written_to_the_file() {
         // Review focus 2.
         let l = ToolbarLayout::default();
-        assert_eq!(l.bars.len(), 6, "only the built-ins are materialised");
-        let g = groups();
-        assert!(!l.is_visible(g[0]));
+        assert_eq!(l.bars.len(), 6, "built-ins and the default top bars are materialised");
+        let shown = ToolbarId::default_visible_groups();
+        let hidden = groups().into_iter().find(|id| !shown.contains(id)).unwrap();
+        assert!(!l.is_visible(hidden));
         let l = l.sanitized();
         assert_eq!(l.bars.len(), 6, "sanitize must not materialise ~30 hidden bars");
     }
@@ -301,7 +317,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_known_group_keys_and_drops_unknown_ones() {
         // Review focus 1.
-        let g = groups()[0];
+        let g = groups().into_iter().find(|id| id.title() == "File").unwrap();
         let json = format!(
             r#"{{"bars":{{"{}":{{"Floating":{{"x":10.0,"y":20.0,"home":null}}}},"gone:Removed":{{"Hidden":{{"home":null}}}}}}}}"#,
             g.key()

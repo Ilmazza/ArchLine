@@ -381,9 +381,6 @@ pub fn floating_id(id: ToolbarId) -> iced::widget::Id {
     iced::widget::Id::new(match id {
         ToolbarId::Draw => "toolbar-float-Draw",
         ToolbarId::Modify => "toolbar-float-Modify",
-        ToolbarId::Annotation => "toolbar-float-Annotation",
-        ToolbarId::Block => "toolbar-float-Block",
-        ToolbarId::Measure => "toolbar-float-Measure",
         ToolbarId::Layers => "toolbar-float-Layers",
         ToolbarId::Group(key) => key,
     })

@@ -16,7 +16,7 @@ use crate::ui::ribbon::Ribbon;
 use crate::ui::toolbar_dock::ToolbarMsg;
 use crate::ui::toolbar_layout::ToolbarId;
 use crate::ui::wrap_bar::PosReport;
-use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
+use crate::modules::{IconKind, ToolDef};
 
 // AutoCAD-like slim bars. Every size is an even number of logical px so that,
 // at the usual 125 % / 150 % / 200 % display scales, buttons and icons land on
@@ -95,13 +95,10 @@ pub enum ClassicItem {
     Separator,
 }
 
-/// Item lists for the three classic toolbars.
+/// Item lists for the two toolbars that have a field of their own.
 pub struct ClassicTools {
     pub draw: Vec<ClassicItem>,
     pub modify: Vec<ClassicItem>,
-    pub annotation: Vec<ClassicItem>,
-    pub block: Vec<ClassicItem>,
-    pub measure: Vec<ClassicItem>,
 }
 
 pub(super) fn plain(t: &ToolDef) -> ClassicItem {
@@ -112,70 +109,6 @@ pub(super) fn plain(t: &ToolDef) -> ClassicItem {
     })
 }
 
-fn dropdown(items: &[(&'static str, &'static str, IconKind)], default: &str) -> Option<ClassicItem> {
-    let variants: Vec<ToolDef> = items
-        .iter()
-        .map(|(id, label, icon)| ToolDef {
-            id,
-            label,
-            icon: icon.clone(),
-            event: ModuleEvent::Command((*id).to_string()),
-        })
-        .collect();
-    let main = variants
-        .iter()
-        .find(|t| t.id == default)
-        .or_else(|| variants.first())?
-        .clone();
-    Some(ClassicItem::Button(ClassicButton {
-        main,
-        variants,
-        tinted: false,
-    }))
-}
-
-fn flatten(item: &RibbonItem, out: &mut Vec<ClassicItem>) {
-    match item {
-        RibbonItem::Tool(t) | RibbonItem::LabeledTool(t) | RibbonItem::LargeTool(t) => {
-            out.push(plain(t))
-        }
-        RibbonItem::Dropdown { items, default, .. }
-        | RibbonItem::LabeledDropdown { items, default, .. }
-        | RibbonItem::LargeDropdown { items, default, .. } => {
-            out.extend(dropdown(items, default));
-        }
-        RibbonItem::ToolGrid { columns } => {
-            for t in columns.iter().flatten() {
-                out.push(plain(t));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Buttons of the draw-module groups named in `titles`, with a separator
-/// between groups.
-fn group_items(titles: &[&str]) -> Vec<ClassicItem> {
-    let mut out: Vec<ClassicItem> = Vec::new();
-    for module in registry::all_modules() {
-        if module.id() != "draw" {
-            continue;
-        }
-        for group in module.ribbon_groups() {
-            if !titles.contains(&group.title) {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push(ClassicItem::Separator);
-            }
-            for item in &group.tools {
-                flatten(item, &mut out);
-            }
-        }
-    }
-    out
-}
-
 /// Item lists, computed once.
 pub fn tools() -> &'static ClassicTools {
     static TOOLS: OnceLock<ClassicTools> = OnceLock::new();
@@ -183,9 +116,6 @@ pub fn tools() -> &'static ClassicTools {
         // Same commands, order and separators as the Draw / Modify menus.
         draw: super::toolbar_registry::menu_items("Draw"),
         modify: super::toolbar_registry::menu_items("Modify"),
-        annotation: group_items(&["Annotation"]),
-        block: group_items(&["Block"]),
-        measure: group_items(&["Measure"]),
     })
 }
 
@@ -197,9 +127,6 @@ pub fn items_for(id: crate::ui::toolbar_layout::ToolbarId) -> &'static [ClassicI
     match id {
         Draw => &t.draw,
         Modify => &t.modify,
-        Annotation => &t.annotation,
-        Block => &t.block,
-        Measure => &t.measure,
         Layers => &[],
         Group(_) => super::toolbar_registry::group_items(id),
     }
@@ -436,23 +363,17 @@ mod tests {
         let t = tools();
         assert!(buttons(&t.draw).len() >= 14, "draw has {} buttons", buttons(&t.draw).len());
         assert!(!buttons(&t.modify).is_empty());
-        assert!(!buttons(&t.annotation).is_empty());
     }
 
     #[test]
-    fn annotation_block_and_measure_are_separate_bars_with_buttons() {
-        use crate::ui::toolbar_layout::ToolbarId::*;
-        for id in [Annotation, Block, Measure] {
-            assert!(!buttons(items_for(id)).is_empty(), "{id:?} has no buttons");
-        }
-        // Layers is built by classic_layers, not from an item list.
-        assert!(items_for(Layers).is_empty());
+    fn layers_is_built_by_classic_layers_not_from_an_item_list() {
+        assert!(items_for(crate::ui::toolbar_layout::ToolbarId::Layers).is_empty());
     }
 
     #[test]
     fn no_main_button_is_duplicated() {
         let t = tools();
-        for list in [&t.draw, &t.modify, &t.annotation, &t.block, &t.measure] {
+        for list in [&t.draw, &t.modify] {
             let mut ids: Vec<_> = buttons(list).iter().map(|b| b.main.id).collect();
             let n = ids.len();
             ids.sort_unstable();
