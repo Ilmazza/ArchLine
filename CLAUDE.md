@@ -23,7 +23,7 @@ cargo test --locked --lib classic_toolbar        # altri filtri: start, i18n
 ## Cosa è ArchLine (file propri, per ridurre i conflitti col merge da upstream)
 - `src/privacy.rs`: `APP_NAME`, `online()` (`ARCHLINE_ONLINE=1` riattiva aggiornamenti/Discussions/video/Patreon), `show_promo()` (`ARCHLINE_PROMO=1` riporta Donate, Sponsors, Reddit, Patreon, OCS Web, Send Feedback).
 - `src/workspace.rs`: `is_classic()` (`ARCHLINE_WORKSPACE=ribbon` ripristina il ribbon); la pagina iniziale tiene sempre il ribbon.
-- `src/ui/classic_toolbar.rs`: barre Draw (sinistra), Modify (destra), Annotation/Block/Measure (alto), generate dai `RibbonGroup` esistenti. Un pulsante per dropdown (voce `default`); clic destro = flyout con le varianti (`iced_aw::ContextMenu`).
+- `src/ui/classic_toolbar.rs`: barre Draw (sinistra), Modify (destra), Layers e le barre dai menu (Dimension, Insert, Inquiry in alto di default; le altre dall'elenco col tasto destro), registro in `src/ui/toolbar_registry.rs`. Un pulsante per comando; clic prolungato sui sottomenu = flyout con le varianti.
 - `src/ui/classic_layers.rs`: seconda riga sotto la barra alta: gestione layer, menu layer, i 10 comandi layer del ribbon, menu Colore/Tipo linea/Spessore. Riusa overlay e messaggi del ribbon (`ToggleRibbonDropdown` + `PosReport`); i comandi si leggono dal gruppo "Layers" del ribbon. Mostra layer/proprietà *correnti*, non quelli dell'oggetto selezionato (come il ribbon).
 - Punti di aggancio in codice upstream (tenerli minimi): `src/app/mod.rs` (task di rete all'avvio), `src/app/view/mod.rs` (`view_main`, `start_page_content`), `src/ui/ribbon` (ID dei menu e `combo_btn_style` resi `pub(crate)`).
 - Non toccati di proposito: chiavi di registro, `locale_catalog.rs`, nome del package Cargo.

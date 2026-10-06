@@ -37,8 +37,11 @@ Decisione dell'utente: **una barra per menu, un pulsante per comando**.
   Le righe che non sono comandi (cronologia, schede finestra) non compaiono.
 - Icona: quella del menu (ribbon o glifi del quick access); dove l'app non ne ha una, due lettere (iniziali). Il
   tooltip porta il nome intero.
-- Annotation, Block, Measure e Layers restano barre storiche (stesse chiavi di `settings.json`); le chiavi dei vecchi
-  gruppi del ribbon (`modulo:Titolo`) non esistono più e vengono scartate al caricamento.
+- Le barre storiche sono ora tre: Draw, Modify e Layers (stesse chiavi di `settings.json`). **Annotation, Block e
+  Measure sono ritirate** (decisione dell'utente): nel menu classico non esistono con quei nomi e i loro comandi
+  stanno già nelle barre dei menu. Nel layout di default, prima riga in alto: Dimension, Insert, Inquiry
+  (`ToolbarId::default_visible_groups`); Text resta una barra a scelta dall'elenco. Le chiavi ritirate e quelle dei
+  vecchi gruppi del ribbon (`modulo:Titolo`) non esistono più e vengono scartate al caricamento.
 
 ## 2. Fuori portata
 
