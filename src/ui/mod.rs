@@ -15,6 +15,7 @@ pub mod read_only;
 pub mod classic_layers;
 pub mod classic_menu;
 pub mod classic_toolbar;
+pub mod menu_icons;
 pub mod toolbar_layout;
 pub mod toolbar_dock;
 pub mod toolbar_registry;

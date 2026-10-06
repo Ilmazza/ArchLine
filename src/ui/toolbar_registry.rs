@@ -442,17 +442,27 @@ mod tests {
     #[test]
     fn a_command_with_no_icon_still_gets_a_visible_glyph() {
         use crate::modules::IconKind;
+        let (tool, tinted) = tool_for("Some New Command", "NOSUCHCOMMAND");
+        assert!(!tinted);
+        match tool.icon {
+            IconKind::Glyph(g) => assert_eq!(g, "SN"),
+            _ => panic!("a command the app has no icon for must fall back to its initials"),
+        }
+    }
+
+    #[test]
+    fn the_formerly_lettered_buttons_now_carry_real_icons() {
+        use crate::modules::IconKind;
         let edit = bar_named("Edit");
-        let undo = items_for(edit)
-            .iter()
-            .find_map(|i| match i {
-                ClassicItem::Button(b) if b.main.id == "UNDO" => Some(b),
-                _ => None,
-            })
-            .expect("Edit has UNDO");
-        match undo.main.icon {
-            IconKind::Glyph(g) => assert!(!g.trim().is_empty()),
-            _ => panic!("UNDO has no icon in the app: expected a text glyph"),
+        for command in ["UNDO", "REDO"] {
+            let b = items_for(edit)
+                .iter()
+                .find_map(|i| match i {
+                    ClassicItem::Button(b) if b.main.id == command => Some(b),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("Edit has {command}"));
+            assert!(matches!(b.main.icon, IconKind::Svg(_)), "{command} still shows letters");
         }
     }
 }

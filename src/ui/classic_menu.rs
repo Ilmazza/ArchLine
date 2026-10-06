@@ -439,6 +439,8 @@ fn icon_for(command: &str) -> Option<MenuIcon> {
             }
         })
         .or_else(|| ui_icon(command).map(MenuIcon::Ui))
+        .or_else(|| super::menu_icons::ribbon(command).map(MenuIcon::Ribbon))
+        .or_else(|| super::menu_icons::mono(command).map(MenuIcon::Ui))
 }
 
 /// The icon bytes of a menu command for a toolbar button, and whether they are
@@ -862,12 +864,7 @@ mod tests {
     /// Commands that have no icon anywhere in the app (no ribbon tool, no
     /// quick-access glyph). Adding a menu row without an icon fails the test
     /// below until the row gets one or is listed here on purpose.
-    const NO_ICON: &[&str] = &[
-        "CLEANSCREEN", "CLOSE", "COLOR", "COPYBASE", "DIMSTYLE", "DSETTINGS", "FIELD", "HELP",
-        "ID", "IMAGEATTACH", "LIMITS", "LINETYPE", "LIST", "PLUGINS", "POINT", "QUIT", "REDO",
-        "REGEN", "REGENALL", "SELECTALL", "SHORTCUTS", "STYLE", "UCS", "UNDO", "UNITS",
-        "ZOOM ALL", "ZOOM PREVIOUS",
-    ];
+    const NO_ICON: &[&str] = &[];
 
     #[test]
     fn command_rows_without_an_icon_are_the_known_ones() {
