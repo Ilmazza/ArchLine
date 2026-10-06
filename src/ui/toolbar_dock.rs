@@ -8,13 +8,13 @@
 //! Kept out of `view_main` on purpose: that function is so large that extra
 //! nesting there can overflow rustc's stack on Windows release builds.
 
-use iced::widget::{column, container, mouse_area, pin, row, scrollable, Space, Stack};
+use iced::widget::{column, container, mouse_area, opaque, pin, row, scrollable, text, Space, Stack};
 use iced::{Background, Border, Color, Element, Length, Point, Theme};
 
 use super::classic_layers::layer_row;
 use super::classic_toolbar::{item_el, items_for, strip_style, ClassicItem, BTN_SIZE};
 use super::ribbon::Ribbon;
-use super::toolbar_layout::{band_rect, Edge, Target, ToolbarId, ToolbarLayout};
+use super::toolbar_layout::{band_rect, clamp_floating, Edge, Target, ToolbarId, ToolbarLayout};
 use crate::app::Message;
 
 /// Offset from the pointer to a dragged bar's top-left: the user holds the
@@ -238,6 +238,89 @@ pub fn frame<'a>(
     .into()
 }
 
+/// Height of a floating bar's title strip plus its padding.
+const FLOAT_TITLE_H: f32 = 18.0;
+
+/// `(width, height)` of a floating bar: a title strip over a horizontal body.
+pub fn floating_size(id: ToolbarId) -> (f32, f32) {
+    let (w, h) = bar_size(id, false);
+    (w, h + FLOAT_TITLE_H)
+}
+
+/// Where each floating bar is drawn: its saved position, pulled back inside
+/// the window so a bar saved on a bigger screen never ends up unreachable.
+pub fn floating_positions(layout: &ToolbarLayout, win: (f32, f32)) -> Vec<(ToolbarId, Point)> {
+    layout
+        .floating()
+        .into_iter()
+        .map(|(id, x, y)| {
+            let (cx, cy) = clamp_floating((x, y), floating_size(id), win);
+            (id, Point::new(cx, cy))
+        })
+        .collect()
+}
+
+fn floating_el(id: ToolbarId, ribbon: &Ribbon, being_dragged: bool) -> Element<'static, Message> {
+    let title = mouse_area(
+        container(text(crate::t!(id.title()).into_owned()).size(11))
+            .padding([2, 6])
+            .width(Length::Fill)
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(theme.palette().background.strong.color)),
+                text_color: Some(theme.palette().background.strong.text),
+                ..Default::default()
+            }),
+    )
+    .on_press(Message::Toolbar(ToolbarMsg::Grab(id)))
+    .on_double_click(Message::Toolbar(ToolbarMsg::Redock(id)))
+    .interaction(iced::mouse::Interaction::Grab);
+    container(column![title, bar_body(id, false, ribbon)].spacing(2))
+        .padding(2)
+        .style(move |theme: &Theme| {
+            let p = theme.palette();
+            container::Style {
+                background: Some(Background::Color(p.background.weak.color)),
+                border: Border {
+                    color: if being_dragged {
+                        p.primary.base.color
+                    } else {
+                        p.background.neutral.color
+                    },
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn floating_layer(
+    layout: &ToolbarLayout,
+    ribbon: &Ribbon,
+    win: (f32, f32),
+    dragging: Option<ToolbarId>,
+) -> Option<Element<'static, Message>> {
+    let bars = floating_positions(layout, win);
+    if bars.is_empty() {
+        return None;
+    }
+    let layers: Vec<Element<'static, Message>> = bars
+        .into_iter()
+        .map(|(id, at)| {
+            pin(opaque(floating_el(id, ribbon, dragging == Some(id))))
+                .position(at)
+                .into()
+        })
+        .collect();
+    Some(
+        Stack::with_children(layers)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    )
+}
+
 fn block_el(x: f32, y: f32, w: f32, h: f32, fill_alpha: f32) -> Element<'static, Message> {
     pin(container(Space::new())
         .width(Length::Fixed(w))
@@ -280,8 +363,8 @@ fn drag_visuals(d: &ToolbarDrag, win: (f32, f32)) -> Vec<Element<'static, Messag
 #[inline(never)]
 pub fn decorate<'a>(
     base: Element<'a, Message>,
-    _layout: &ToolbarLayout,
-    _ribbon: &Ribbon,
+    layout: &ToolbarLayout,
+    ribbon: &Ribbon,
     drag: Option<&ToolbarDrag>,
     win: (f32, f32),
     classic: bool,
@@ -290,6 +373,9 @@ pub fn decorate<'a>(
         return base;
     }
     let mut layers: Vec<Element<'a, Message>> = vec![base];
+    if let Some(floating) = floating_layer(layout, ribbon, win, drag.map(|d| d.id)) {
+        layers.push(floating);
+    }
     if let Some(d) = drag {
         layers.extend(drag_visuals(d, win));
     }
@@ -305,5 +391,30 @@ pub fn decorate<'a>(
             .into()
     } else {
         stacked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::toolbar_layout::Target;
+
+    #[test]
+    fn floating_positions_are_clamped_into_the_window() {
+        // Review focus 4: a bar saved far away must stay reachable in a
+        // smaller window.
+        let mut layout = ToolbarLayout::default();
+        layout.move_to(ToolbarId::Layers, Target::Float { x: 5000.0, y: 4000.0 });
+        layout.move_to(ToolbarId::Draw, Target::Float { x: 30.0, y: 40.0 });
+        let win = (800.0, 600.0);
+        let got = floating_positions(&layout, win);
+        assert_eq!(got.len(), 2);
+        for (id, p) in &got {
+            let (w, h) = floating_size(*id);
+            assert!(p.x >= 0.0 && p.y >= 0.0, "{id:?} at {p:?}");
+            assert!(p.x + w <= win.0.max(w) && p.y + h <= win.1, "{id:?} at {p:?}");
+        }
+        let draw = got.iter().find(|(id, _)| *id == ToolbarId::Draw).unwrap().1;
+        assert_eq!((draw.x, draw.y), (30.0, 40.0), "in-window bars are untouched");
     }
 }

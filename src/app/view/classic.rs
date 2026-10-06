@@ -83,6 +83,34 @@ mod tests {
     }
 
     #[test]
+    fn decorate_draws_floating_bars_and_the_drag_layer() {
+        use crate::ui::toolbar_dock::{decorate, ToolbarDrag};
+        use crate::ui::toolbar_layout::{Target, ToolbarId};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.toolbars
+            .move_to(ToolbarId::Layers, Target::Float { x: 5000.0, y: 4000.0 });
+        let win = (800.0, 600.0);
+        let base: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = decorate(base, &app.toolbars, &app.ribbon, None, win, true);
+        assert_eq!(el.as_widget().size().width, iced::Length::Fill);
+
+        // While dragging, the layer still builds with a live target.
+        let drag = ToolbarDrag {
+            id: ToolbarId::Draw,
+            cursor: Some(iced::Point::new(300.0, 300.0)),
+            target: Some(Target::Float { x: 290.0, y: 290.0 }),
+        };
+        let base: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let _ = decorate(base, &app.toolbars, &app.ribbon, Some(&drag), win, true);
+
+        // Not classic: untouched.
+        let base: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = decorate(base, &app.toolbars, &app.ribbon, None, win, false);
+        assert_eq!(el.as_widget().size().width, iced::Length::Shrink);
+    }
+
+    #[test]
     fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));
