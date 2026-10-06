@@ -640,8 +640,16 @@ pub fn menu_bar(ctx: &MenuCtx<'_>) -> Element<'static, Message> {
         });
     container(bar)
         .width(Length::Fill)
-        .style(super::classic_toolbar::strip_style)
+        .style(menubar_style)
         .into()
+}
+
+/// The menu bar sits on the base surface like the tab strip under it
+/// (AutoCAD: same grey as title and tabs), not on the toolbar grey.
+fn menubar_style(theme: &Theme) -> container::Style {
+    let mut style = super::classic_toolbar::strip_style(theme);
+    style.background = Some(Background::Color(theme.palette().background.base.color));
+    style
 }
 
 #[cfg(test)]
