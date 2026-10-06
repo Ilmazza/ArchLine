@@ -43,6 +43,17 @@ Decisione dell'utente: **una barra per menu, un pulsante per comando**.
   (`ToolbarId::default_visible_groups`); Text resta una barra a scelta dall'elenco. Le chiavi ritirate e quelle dei
   vecchi gruppi del ribbon (`modulo:Titolo`) non esistono più e vengono scartate al caricamento.
 
+## 1quater. Barre AutoCAD senza menu (dal ribbon)
+
+Dopo la prova l'utente ha segnalato che mancavano molte barre (decisione: aggiungere le barre classiche di AutoCAD
+che nessun menu copre). Sono definite da `RIBBON_BARS` in `toolbar_registry.rs`, chiave `ribbon:Titolo`, sempre
+nascoste di default (si accendono dall'elenco): Modeling, Solid Editing (Boolean + Edges), Viewports (finestre del
+modello + MVIEW), Layouts, Preset Views (viste + proiezione), Navigate, Viewport Tools, Palettes, Reference,
+Block Definition, Content, Group, Centerlines, Markup (con Tables), Annotation Scaling, Cleanup, Customization.
+Un dropdown del ribbon è un pulsante con le varianti sul clic prolungato (come i sottomenu dei menu); i combo non
+entrano. **Non fatta: Object Snap**, perché i modi di snap non sono comandi ma interruttori con stato
+(`DraftingSettingsToggleSnapMode`): servirebbe un tipo di pulsante a due stati.
+
 ## 1ter. Righe multiple: inserire una riga tra due righe
 
 Trascinando una barra su un bordo, `resolve_drop` distingue tre zone (`LANE_THICKNESS` = 32 px, margine = un

@@ -1,15 +1,17 @@
 //! ArchLine: registry of every toolbar the user can show.
 //!
-//! The six historic bars keep their names (Draw and Modify now carry every
-//! command of their menu). Every other menu with commands of its own, and every
-//! submenu with at least two, becomes a bar keyed `menu:Title`.
+//! Draw, Modify and Layers are built in (Draw and Modify carry every command of
+//! their menu). Every other menu with commands of its own, and every submenu
+//! with at least two, becomes a bar keyed `menu:Title`. A few AutoCAD toolbars
+//! that no menu covers (Modeling, Viewports, Reference...) are gathered from
+//! ribbon groups and keyed `ribbon:Title`.
 
 use std::sync::OnceLock;
 
 use super::classic_menu::{menus, toolbar_icon, Action, Entry};
 use super::classic_toolbar::{ClassicButton, ClassicItem};
 use super::toolbar_layout::ToolbarId;
-use crate::modules::{IconKind, ModuleEvent, ToolDef};
+use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
 /// Submenus with at least this many commands also get a bar of their own
 /// (Zoom, Visual Styles, Inquiry, Text, the Parametric groups).
@@ -112,9 +114,13 @@ fn entry_items(entries: &'static [Entry]) -> Vec<ClassicItem> {
             _ => {}
         }
     }
-    // No separator first, last or twice in a row (rows dropped above can leave them).
+    tidy(out)
+}
+
+/// No separator first, last or twice in a row (rows dropped can leave them).
+fn tidy(items: Vec<ClassicItem>) -> Vec<ClassicItem> {
     let mut tidy: Vec<ClassicItem> = Vec::new();
-    for item in out {
+    for item in items {
         let sep = matches!(item, ClassicItem::Separator);
         if sep && matches!(tidy.last(), None | Some(ClassicItem::Separator)) {
             continue;
@@ -125,6 +131,92 @@ fn entry_items(entries: &'static [Entry]) -> Vec<ClassicItem> {
         tidy.pop();
     }
     tidy
+}
+
+/// AutoCAD toolbars no menu stands for, as (list name, ribbon groups they
+/// gather as (module id, group title)); a separator goes between groups.
+const RIBBON_BARS: &[(&str, &[(&str, &str)])] = &[
+    ("Modeling", &[("model", "Create")]),
+    ("Solid Editing", &[("model", "Boolean"), ("model", "Edges")]),
+    ("Viewports", &[("view", "Model Viewports"), ("layout", "Viewport")]),
+    ("Layouts", &[("layout", "Plot")]),
+    ("Preset Views", &[("view", "Preset"), ("view", "Projection")]),
+    ("Navigate", &[("view", "Navigate")]),
+    ("Viewport Tools", &[("view", "Viewport Tools")]),
+    ("Palettes", &[("view", "Palettes")]),
+    ("Reference", &[("insert", "Reference")]),
+    ("Block Definition", &[("insert", "Block Definition")]),
+    ("Content", &[("insert", "Content")]),
+    ("Group", &[("draw", "Groups")]),
+    ("Centerlines", &[("annotate", "Centerlines")]),
+    ("Markup", &[("annotate", "Markup"), ("annotate", "Tables")]),
+    ("Annotation Scaling", &[("annotate", "Annotation Scaling")]),
+    ("Cleanup", &[("manage", "Cleanup")]),
+    ("Customization", &[("manage", "Customization")]),
+];
+
+fn ribbon_tool(t: &ToolDef) -> ClassicItem {
+    ClassicItem::Button(ClassicButton {
+        main: t.clone(),
+        variants: Vec::new(),
+        tinted: false,
+    })
+}
+
+/// A ribbon dropdown as one button (its default variant) with the variants.
+fn ribbon_dropdown(
+    items: &[(&'static str, &'static str, IconKind)],
+    default: &str,
+) -> Option<ClassicItem> {
+    let variants: Vec<ToolDef> = items
+        .iter()
+        .map(|(id, label, icon)| ToolDef {
+            id,
+            label,
+            icon: icon.clone(),
+            event: ModuleEvent::Command((*id).to_string()),
+        })
+        .collect();
+    let main = variants
+        .iter()
+        .find(|t| t.id == default)
+        .or_else(|| variants.first())?
+        .clone();
+    Some(ClassicItem::Button(ClassicButton { main, variants, tinted: false }))
+}
+
+fn ribbon_item(item: &RibbonItem, out: &mut Vec<ClassicItem>) {
+    match item {
+        RibbonItem::Tool(t) | RibbonItem::LabeledTool(t) | RibbonItem::LargeTool(t) => {
+            out.push(ribbon_tool(t))
+        }
+        RibbonItem::Dropdown { items, default, .. }
+        | RibbonItem::LabeledDropdown { items, default, .. }
+        | RibbonItem::LargeDropdown { items, default, .. } => {
+            out.extend(ribbon_dropdown(items, default));
+        }
+        RibbonItem::ToolGrid { columns } => {
+            out.extend(columns.iter().flatten().map(ribbon_tool));
+        }
+        // Combo boxes and the like have no place on a button bar.
+        _ => {}
+    }
+}
+
+/// Buttons of the ribbon groups `groups` name, a separator between groups.
+fn ribbon_items(groups: &[(&str, &str)]) -> Vec<ClassicItem> {
+    let mut out: Vec<ClassicItem> = Vec::new();
+    for (module_id, title) in groups {
+        for module in registry::all_modules().iter().filter(|m| m.id() == *module_id) {
+            for group in module.ribbon_groups().iter().filter(|g| g.title == *title) {
+                out.push(ClassicItem::Separator);
+                for item in &group.tools {
+                    ribbon_item(item, &mut out);
+                }
+            }
+        }
+    }
+    tidy(out)
 }
 
 /// Items of the menu called `title` (Draw and Modify bars use this).
@@ -174,6 +266,14 @@ fn build() -> Registry {
                 }
             }
         }
+    }
+    for (title, groups) in RIBBON_BARS {
+        let items = ribbon_items(groups);
+        if !has_buttons(&items) || taken.contains(&title.to_lowercase()) {
+            continue;
+        }
+        taken.push(title.to_lowercase());
+        raw.push((ToolbarId::Group(leak(format!("ribbon:{title}"))), title, items));
     }
     let mut names: Vec<(ToolbarId, &'static str)> =
         ToolbarId::BUILTIN.iter().map(|&id| (id, id.key())).collect();
@@ -414,10 +514,72 @@ mod tests {
     }
 
     #[test]
-    fn no_bar_comes_from_a_ribbon_group_any_more() {
+    fn every_bar_comes_from_a_menu_or_from_a_named_ribbon_set() {
         for id in groups() {
-            assert!(id.key().starts_with("menu:"), "{} is not a menu bar", id.key());
+            let k = id.key();
+            assert!(k.starts_with("menu:") || k.starts_with("ribbon:"), "{k}");
         }
+    }
+
+    /// Commands of a bar in order, each dropdown contributing its main command.
+    fn mains(id: ToolbarId) -> Vec<&'static str> {
+        items_for(id)
+            .iter()
+            .filter_map(|i| match i {
+                ClassicItem::Button(b) => Some(b.main.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_autocad_toolbars_without_a_menu_are_offered_and_hidden() {
+        for name in [
+            "Modeling", "Solid Editing", "Viewports", "Layouts", "Preset Views", "Navigate",
+            "Viewport Tools", "Palettes", "Reference", "Block Definition", "Content", "Group",
+            "Centerlines", "Markup", "Annotation Scaling", "Cleanup", "Customization",
+        ] {
+            let id = bar_named(name);
+            assert!(id.key().starts_with("ribbon:"), "{name}: {}", id.key());
+            assert!(!ToolbarId::default_visible_groups().contains(&id), "{name} is on by default");
+            assert!(!items_for(id).is_empty(), "{name} is empty");
+        }
+    }
+
+    #[test]
+    fn modeling_and_solid_editing_carry_the_3d_commands() {
+        let modeling = mains(bar_named("Modeling"));
+        for c in ["EXTRUDE", "REVOLVE", "LOFT", "SWEEP", "PRESSPULL"] {
+            assert!(modeling.contains(&c), "Modeling lacks {c}: {modeling:?}");
+        }
+        // The solid primitives are one button with the variants behind it.
+        let boxes = items_for(bar_named("Modeling"))
+            .iter()
+            .find_map(|i| match i {
+                ClassicItem::Button(b) if b.variants.len() > 1 && b.variants.iter().any(|v| v.id == "TORUS") => Some(b),
+                _ => None,
+            })
+            .expect("a primitives button with variants");
+        assert!(boxes.variants.iter().any(|v| v.id == "BOX"));
+        let edit = items_for(bar_named("Solid Editing"));
+        let ids = mains(bar_named("Solid Editing"));
+        for c in ["UNION", "SUBTRACT", "INTERSECT", "FILLETEDGE", "CHAMFEREDGE", "SHELL"] {
+            assert!(ids.contains(&c), "Solid Editing lacks {c}");
+        }
+        assert!(
+            edit.iter().any(|i| matches!(i, ClassicItem::Separator)),
+            "Boolean and edge commands are separated"
+        );
+    }
+
+    #[test]
+    fn viewports_and_layouts_gather_their_ribbon_groups() {
+        let vp = mains(bar_named("Viewports"));
+        for c in ["VPORTS", "VPORTS_NAMED", "VPJOIN", "VPORTS_RESTORE", "MVIEW"] {
+            assert!(vp.contains(&c), "Viewports lacks {c}: {vp:?}");
+        }
+        let lay = mains(bar_named("Layouts"));
+        assert!(lay.contains(&"PAGESETUP") && lay.contains(&"PRINTALL"), "{lay:?}");
     }
 
     #[test]

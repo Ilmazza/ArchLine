@@ -268,12 +268,12 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.toolbars = Default::default();
         app.win_size = (1600.0, 900.0);
-        let zoom = ToolbarId::all()
+        let hidden = ToolbarId::all()
             .iter()
             .copied()
-            .find(|id| id.title() == "Zoom")
+            .find(|id| id.title() == "Centerlines")
             .expect("a Zoom bar");
-        assert!(!app.toolbars.is_visible(zoom));
+        assert!(!app.toolbars.is_visible(hidden));
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
         let el = crate::ui::toolbar_dock::frame(
             true,
@@ -288,11 +288,11 @@ mod tests {
         ui.simulate([iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(
             iced::mouse::Button::Right,
         ))]);
-        ui.click("Zoom").expect("the list shows the hidden Zoom bar");
+        ui.click("Centerlines").expect("the list shows the hidden Centerlines bar");
         for message in ui.into_messages() {
             let _ = app.update(message);
         }
-        assert!(matches!(app.toolbars.placement(zoom), Placement::Floating { .. }));
+        assert!(matches!(app.toolbars.placement(hidden), Placement::Floating { .. }));
     }
 
     #[test]
