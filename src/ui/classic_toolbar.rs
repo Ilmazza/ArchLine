@@ -354,7 +354,8 @@ pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
             ..Default::default()
         });
     if vertical {
-        line.width(Length::Fill).height(Length::Fixed(1.0)).into()
+        // Not `Fill`: in a side lane a Fill child stretches the whole lane.
+        line.width(Length::Fixed(BTN_SIZE)).height(Length::Fixed(1.0)).into()
     } else {
         line.width(Length::Fixed(1.0)).height(Length::Fixed(BTN_SIZE - 8.0)).into()
     }

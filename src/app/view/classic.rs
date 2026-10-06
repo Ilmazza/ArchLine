@@ -339,4 +339,27 @@ mod tests {
             "a variant button must not run on press"
         );
     }
+
+    #[test]
+    fn docked_side_bars_leave_the_drawing_area_its_width() {
+        // The Draw and Modify bars have separators between their buttons; a
+        // separator that is `Fill` wide made each side lane swallow a third of
+        // the window and squeezed the drawing area to a strip.
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        let probe: iced::Element<'_, Message> = iced::widget::container(iced::widget::Space::new())
+            .id("center-probe")
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .into();
+        let el = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, 768.0, probe);
+        let mut ui = iced_test::simulator(el);
+        let b = ui
+            .find(iced::widget::Id::new("center-probe"))
+            .expect("probe present")
+            .visible_bounds()
+            .expect("probe visible");
+
+        assert!(b.width > 800.0, "the drawing area is only {} px wide", b.width);
+    }
 }
