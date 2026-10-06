@@ -18,9 +18,16 @@ use crate::ui::toolbar_layout::ToolbarId;
 use crate::ui::wrap_bar::PosReport;
 use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
-pub(super) const BTN_SIZE: f32 = 36.0;
-const ICON_SIZE: f32 = 24.0;
-const FLYOUT_ICON_SIZE: f32 = 18.0;
+// AutoCAD-like slim bars. Every size is an even number of logical px so that,
+// at the usual 125 % / 150 % / 200 % display scales, buttons and icons land on
+// whole device pixels (a fractional offset blurs the SVG icons).
+pub(super) const BTN_SIZE: f32 = 24.0;
+/// Gap between two buttons of a bar.
+pub(super) const BTN_GAP: f32 = 0.0;
+/// Width (horizontal bar) or height (vertical bar) taken by a separator.
+pub(super) const SEP_SPAN: f32 = 6.0;
+const ICON_SIZE: f32 = 16.0;
+const FLYOUT_ICON_SIZE: f32 = 16.0;
 const FLYOUT_WIDTH: f32 = 230.0;
 
 /// Id prefix of the variants flyout in the ribbon's dropdown machinery.
@@ -355,9 +362,13 @@ pub(super) fn separator(vertical: bool) -> Element<'static, Message> {
         });
     if vertical {
         // Not `Fill`: in a side lane a Fill child stretches the whole lane.
-        line.width(Length::Fixed(BTN_SIZE)).height(Length::Fixed(1.0)).into()
+        container(line.width(Length::Fixed(BTN_SIZE)).height(Length::Fixed(1.0)))
+            .padding(iced::Padding { top: 3.0, bottom: SEP_SPAN - 4.0, left: 0.0, right: 0.0 })
+            .into()
     } else {
-        line.width(Length::Fixed(1.0)).height(Length::Fixed(BTN_SIZE - 8.0)).into()
+        container(line.width(Length::Fixed(1.0)).height(Length::Fixed(BTN_SIZE - 8.0)))
+            .padding(iced::Padding { top: 0.0, bottom: 0.0, left: 3.0, right: SEP_SPAN - 4.0 })
+            .into()
     }
 }
 

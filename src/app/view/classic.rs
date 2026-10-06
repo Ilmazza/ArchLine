@@ -362,4 +362,30 @@ mod tests {
 
         assert!(b.width > 800.0, "the drawing area is only {} px wide", b.width);
     }
+
+    #[test]
+    fn lanes_are_as_thick_as_the_model_assumes_and_compact() {
+        // The drop zones come from `LANE_THICKNESS`; the widgets must really be
+        // that thick, and the user wants AutoCAD-like slim bars (<= 32 px).
+        use crate::ui::toolbar_layout::{Edge, LANE_THICKNESS};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        let probe: iced::Element<'_, Message> = iced::widget::container(iced::widget::Space::new())
+            .id("center-probe")
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .into();
+        let el = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, 768.0, probe);
+        let mut ui = iced_test::simulator(el);
+        let b = ui
+            .find(iced::widget::Id::new("center-probe"))
+            .expect("probe present")
+            .visible_bounds()
+            .expect("probe visible");
+        let top = app.toolbars.lanes(Edge::Top).len() as f32;
+        let left = app.toolbars.lanes(Edge::Left).len() as f32;
+        assert_eq!(b.y, top * LANE_THICKNESS, "top lanes are not LANE_THICKNESS thick");
+        assert_eq!(b.x, left * LANE_THICKNESS, "left lane is not LANE_THICKNESS thick");
+        assert!(LANE_THICKNESS <= 32.0, "bars are {LANE_THICKNESS} px thick");
+    }
 }

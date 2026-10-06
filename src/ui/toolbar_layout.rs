@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 /// Distance from a window edge within which a dragged bar docks (px).
 pub const SNAP_BAND: f32 = 60.0;
-/// Thickness of one lane: 36 px button + 2×2 bar padding + 2×3 lane padding.
-pub const LANE_THICKNESS: f32 = 46.0;
+/// Thickness of one lane: 24 px button + 2×2 bar padding + 2×2 lane padding.
+pub const LANE_THICKNESS: f32 = 32.0;
 /// Height of menu bar + document tabs above the toolbar area (estimate).
 pub const TOP_CHROME: f32 = 62.0;
 /// Height of the status bar below the toolbar area (estimate).
@@ -585,7 +585,13 @@ mod tests {
         use ToolbarId::*;
         let l = ToolbarLayout::default();
         assert_eq!(
-            resolve_drop(&l, Draw, (800.0, TOP_CHROME + 100.0), (0.0, 0.0), &ctx()),
+            resolve_drop(
+                &l,
+                Draw,
+                (800.0, TOP_CHROME + 2.5 * LANE_THICKNESS),
+                (0.0, 0.0),
+                &ctx()
+            ),
             Target::Dock(slot(Edge::Top, 2, 0))
         );
         // Still far from everything: floating.

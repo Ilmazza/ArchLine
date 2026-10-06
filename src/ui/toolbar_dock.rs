@@ -14,7 +14,9 @@ use iced::widget::{column, container, mouse_area, opaque, pin, row, scrollable, 
 use iced::{Background, Border, Color, Element, Length, Point, Theme};
 
 use super::classic_layers::layer_row;
-use super::classic_toolbar::{item_el, items_for, panel_style, strip_style, ClassicItem, BTN_SIZE};
+use super::classic_toolbar::{
+    item_el, items_for, panel_style, strip_style, ClassicItem, BTN_GAP, BTN_SIZE, SEP_SPAN,
+};
 use super::ribbon::Ribbon;
 use super::toolbar_layout::{band_rect, clamp_floating, Edge, Target, ToolbarId, ToolbarLayout};
 use crate::app::Message;
@@ -163,8 +165,8 @@ pub fn bar_length(id: ToolbarId) -> f32 {
     let items: f32 = items_for(id)
         .iter()
         .map(|i| match i {
-            ClassicItem::Button(_) => BTN_SIZE + 3.0,
-            ClassicItem::Separator => 4.0,
+            ClassicItem::Button(_) => BTN_SIZE + BTN_GAP,
+            ClassicItem::Separator => SEP_SPAN,
         })
         .sum();
     items + GRIP_W + 12.0
@@ -211,10 +213,12 @@ fn bar_body(id: ToolbarId, vertical: bool, ribbon: &Ribbon) -> Element<'static, 
     }
     let items = items_for(id);
     if vertical {
-        column(items.iter().map(|i| item_el(i, true, id))).spacing(3).into()
+        column(items.iter().map(|i| item_el(i, true, id)))
+            .spacing(BTN_GAP)
+            .into()
     } else {
         row(items.iter().map(|i| item_el(i, false, id)))
-            .spacing(3)
+            .spacing(BTN_GAP)
             .align_y(iced::Center)
             .into()
     }
@@ -231,10 +235,10 @@ fn bar_el(
 ) -> Element<'static, Message> {
     let body = bar_body(id, vertical, ribbon);
     let inner: Element<'static, Message> = if vertical {
-        column![grip(id, true), body].spacing(3).into()
+        column![grip(id, true), body].spacing(2).into()
     } else {
         row![grip(id, false), body]
-            .spacing(3)
+            .spacing(2)
             .align_y(iced::Center)
             .into()
     };
@@ -272,20 +276,20 @@ fn lane_el(
         .map(|&id| bar_el(id, vertical, ribbon, dragging == Some(id), menu))
         .collect();
     if vertical {
-        container(scrollable(column(els).spacing(3)))
-            .padding(3)
+        container(scrollable(column(els).spacing(2)))
+            .padding(2)
             .height(Length::Fill)
             .style(strip_style)
             .into()
     } else {
         container(
-            scrollable(row(els).spacing(3).align_y(iced::Center)).direction(
+            scrollable(row(els).spacing(2).align_y(iced::Center)).direction(
                 scrollable::Direction::Horizontal(
                     scrollable::Scrollbar::new().width(4).scroller_width(4),
                 ),
             ),
         )
-        .padding(3)
+        .padding(2)
         .width(Length::Fill)
         .style(strip_style)
         .into()
