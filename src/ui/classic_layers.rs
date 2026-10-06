@@ -7,10 +7,10 @@
 
 use std::sync::OnceLock;
 
-use iced::widget::{button, container, row, scrollable, text};
+use iced::widget::{button, container, row, text};
 use iced::{Color, Element, Length, Theme};
 
-use super::classic_toolbar::{item_el, plain, separator, strip_style};
+use super::classic_toolbar::{item_el, plain, separator};
 use crate::app::Message;
 use crate::modules::{registry, RibbonItem, ToolDef};
 use crate::ui::icons;
@@ -144,11 +144,12 @@ fn prop_combo(
     )
 }
 
-/// The layer / properties strip, to sit under the top toolbar.
+/// The layer / properties controls as one row, without its strip container
+/// (the dock wraps it in a bar like any other).
 ///
-/// Kept out of `view_main` on purpose (see `classic_toolbar::top_bar`).
+/// Kept out of `view_main` on purpose (see `toolbar_dock::frame`).
 #[inline(never)]
-pub fn layer_bar(ribbon: &Ribbon) -> Element<'static, Message> {
+pub fn layer_row(ribbon: &Ribbon) -> iced::widget::Row<'static, Message> {
     let tools = layer_tools();
     let mut r = row![].spacing(3).align_y(iced::Center);
     if let Some(m) = &tools.manager {
@@ -173,19 +174,12 @@ pub fn layer_bar(ribbon: &Ribbon) -> Element<'static, Message> {
         None,
         &linetype_display_name(&ribbon.active_linetype),
     ));
-    r = r.push(prop_combo(
+    r.push(prop_combo(
         ribbon,
         PROP_LW_ID,
         None,
         &LwItem(ribbon.active_lineweight).to_string(),
-    ));
-    container(scrollable(r).direction(scrollable::Direction::Horizontal(
-        scrollable::Scrollbar::new().width(4).scroller_width(4),
-    )))
-    .padding(3)
-    .width(Length::Fill)
-    .style(strip_style)
-    .into()
+    ))
 }
 
 #[cfg(test)]

@@ -2189,11 +2189,13 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.hovered_doc_tab,
                 ));
             }
-            if classic {
-                col = col.push(crate::ui::classic_toolbar::top_bar());
-                col = col.push(crate::ui::classic_layers::layer_bar(&self.ribbon));
-            }
-            let center_stack = crate::ui::classic_toolbar::wrap_center(classic, center_stack);
+            let center_stack = crate::ui::toolbar_dock::frame(
+                classic,
+                &self.toolbars,
+                &self.ribbon,
+                None,
+                center_stack,
+            );
             col.push(center_stack)
                 .push({
                     let is_model = tab.scene.current_layout == "Model";

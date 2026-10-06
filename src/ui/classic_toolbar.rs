@@ -1,4 +1,4 @@
-//! AutoCAD-classic docked toolbars (Draw left, Modify right, extras on top).
+//! AutoCAD-classic toolbars (dockable on any edge or floating: see `toolbar_layout`).
 //!
 //! Built from the same `RibbonGroup` definitions the ribbon uses, so tool ids,
 //! icons and commands stay in sync with upstream. Each ribbon dropdown becomes
@@ -7,13 +7,13 @@
 
 use std::sync::OnceLock;
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, tooltip, Space};
+use iced::widget::{button, column, container, mouse_area, row, text, tooltip, Space};
 use iced::{Background, Border, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::modules::{registry, IconKind, ModuleEvent, RibbonItem, ToolDef};
 
-const BTN_SIZE: f32 = 36.0;
+pub(super) const BTN_SIZE: f32 = 36.0;
 const ICON_SIZE: f32 = 24.0;
 const FLYOUT_ICON_SIZE: f32 = 18.0;
 const FLYOUT_WIDTH: f32 = 230.0;
@@ -34,7 +34,9 @@ pub enum ClassicItem {
 pub struct ClassicTools {
     pub draw: Vec<ClassicItem>,
     pub modify: Vec<ClassicItem>,
-    pub extra: Vec<ClassicItem>,
+    pub annotation: Vec<ClassicItem>,
+    pub block: Vec<ClassicItem>,
+    pub measure: Vec<ClassicItem>,
 }
 
 pub(super) fn plain(t: &ToolDef) -> ClassicItem {
@@ -110,8 +112,25 @@ pub fn tools() -> &'static ClassicTools {
     TOOLS.get_or_init(|| ClassicTools {
         draw: group_items(&["Draw"]),
         modify: group_items(&["Modify"]),
-        extra: group_items(&["Annotation", "Block", "Measure"]),
+        annotation: group_items(&["Annotation"]),
+        block: group_items(&["Block"]),
+        measure: group_items(&["Measure"]),
     })
+}
+
+/// Item list of one toolbar. `Layers` is built by `classic_layers`, so its
+/// list is empty.
+pub fn items_for(id: crate::ui::toolbar_layout::ToolbarId) -> &'static [ClassicItem] {
+    use crate::ui::toolbar_layout::ToolbarId::*;
+    let t = tools();
+    match id {
+        Draw => &t.draw,
+        Modify => &t.modify,
+        Annotation => &t.annotation,
+        Block => &t.block,
+        Measure => &t.measure,
+        Layers => &[],
+    }
 }
 
 fn icon_el(icon: &IconKind, size: f32) -> Element<'static, Message> {
@@ -256,55 +275,6 @@ pub(super) fn strip_style(theme: &Theme) -> container::Style {
     }
 }
 
-/// Top toolbar row (Annotation / Block / Measure).
-///
-/// Kept out of `view_main` on purpose: that function is so large that extra
-/// nesting there can overflow rustc's stack on Windows release builds.
-#[inline(never)]
-pub fn top_bar() -> Element<'static, Message> {
-    horizontal(&tools().extra)
-}
-
-/// Surround the canvas with the Draw (left) and Modify (right) toolbars when
-/// `classic` is set; otherwise return it untouched.
-#[inline(never)]
-pub fn wrap_center<'a>(classic: bool, center: Element<'a, Message>) -> Element<'a, Message> {
-    if !classic {
-        return center;
-    }
-    row![
-        vertical(&tools().draw),
-        container(center).width(Length::Fill).height(Length::Fill),
-        vertical(&tools().modify),
-    ]
-    .height(Length::Fill)
-    .into()
-}
-
-/// Vertical docked toolbar, pinned to the full height of its side.
-pub fn vertical(items: &'static [ClassicItem]) -> Element<'static, Message> {
-    let col = column(items.iter().map(|i| item_el(i, true))).spacing(3);
-    container(scrollable(col))
-        .padding(3)
-        .height(Length::Fill)
-        .style(strip_style)
-        .into()
-}
-
-/// Horizontal toolbar for the top edge.
-pub fn horizontal(items: &'static [ClassicItem]) -> Element<'static, Message> {
-    let r = row(items.iter().map(|i| item_el(i, false)))
-        .spacing(3)
-        .align_y(iced::Center);
-    container(scrollable(r).direction(scrollable::Direction::Horizontal(
-        scrollable::Scrollbar::new().width(4).scroller_width(4),
-    )))
-    .padding(3)
-    .width(Length::Fill)
-    .style(strip_style)
-    .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,13 +308,23 @@ mod tests {
         let t = tools();
         assert!(buttons(&t.draw).len() <= 12, "draw has {} buttons", buttons(&t.draw).len());
         assert!(!buttons(&t.modify).is_empty());
-        assert!(!buttons(&t.extra).is_empty());
+        assert!(!buttons(&t.annotation).is_empty());
+    }
+
+    #[test]
+    fn annotation_block_and_measure_are_separate_bars_with_buttons() {
+        use crate::ui::toolbar_layout::ToolbarId::*;
+        for id in [Annotation, Block, Measure] {
+            assert!(!buttons(items_for(id)).is_empty(), "{id:?} has no buttons");
+        }
+        // Layers is built by classic_layers, not from an item list.
+        assert!(items_for(Layers).is_empty());
     }
 
     #[test]
     fn no_main_button_is_duplicated() {
         let t = tools();
-        for list in [&t.draw, &t.modify, &t.extra] {
+        for list in [&t.draw, &t.modify, &t.annotation, &t.block, &t.measure] {
             let mut ids: Vec<_> = buttons(list).iter().map(|b| b.main.id).collect();
             let n = ids.len();
             ids.sort_unstable();

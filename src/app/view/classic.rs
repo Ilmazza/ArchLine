@@ -61,6 +61,28 @@ mod tests {
     }
 
     #[test]
+    fn the_toolbar_frame_builds_for_default_and_all_floating_layouts() {
+        use crate::ui::toolbar_layout::{Target, ToolbarId};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, center);
+        assert_eq!(el.as_widget().size().height, iced::Length::Fill);
+
+        // Review focus: every bar floating leaves all four edges empty.
+        for (i, id) in ToolbarId::ALL.into_iter().enumerate() {
+            app.toolbars.move_to(id, Target::Float { x: 10.0 * i as f32, y: 10.0 });
+        }
+        let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let _ = crate::ui::toolbar_dock::frame(true, &app.toolbars, &app.ribbon, None, center);
+
+        // Not classic: the centre comes back untouched.
+        let center: iced::Element<'_, Message> = iced::widget::Space::new().into();
+        let el = crate::ui::toolbar_dock::frame(false, &app.toolbars, &app.ribbon, None, center);
+        assert_eq!(el.as_widget().size().width, iced::Length::Shrink);
+    }
+
+    #[test]
     fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));

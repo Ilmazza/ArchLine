@@ -3636,6 +3636,8 @@ pub enum Message {
     /// A dock chrome interaction (grab/resize/pin/hover/dock move) on a side
     /// panel.
     Dock(crate::ui::dock::DockMsg),
+    /// A drag / redock / reset on the classic toolbars.
+    Toolbar(crate::ui::toolbar_dock::ToolbarMsg),
     /// Open the paper-layout batch output dialog.
     PrintAllOpen,
     /// Toggle one paper layout in the batch.

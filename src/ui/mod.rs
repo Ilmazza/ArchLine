@@ -16,6 +16,7 @@ pub mod classic_layers;
 pub mod classic_menu;
 pub mod classic_toolbar;
 pub mod toolbar_layout;
+pub mod toolbar_dock;
 pub mod ribbon;
 pub mod side_toolbar;
 pub mod statusbar;
