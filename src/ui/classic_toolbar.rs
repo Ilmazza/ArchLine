@@ -83,6 +83,15 @@ fn flatten(item: &RibbonItem, out: &mut Vec<ClassicItem>) {
     }
 }
 
+/// Buttons of one ribbon group's items (dropdowns collapse to one button).
+pub(super) fn buttons_of(tools: &[RibbonItem]) -> Vec<ClassicItem> {
+    let mut out = Vec::new();
+    for item in tools {
+        flatten(item, &mut out);
+    }
+    out
+}
+
 /// Buttons of the draw-module groups named in `titles`, with a separator
 /// between groups.
 fn group_items(titles: &[&str]) -> Vec<ClassicItem> {
@@ -130,6 +139,7 @@ pub fn items_for(id: crate::ui::toolbar_layout::ToolbarId) -> &'static [ClassicI
         Block => &t.block,
         Measure => &t.measure,
         Layers => &[],
+        Group(_) => super::toolbar_registry::group_items(id),
     }
 }
 

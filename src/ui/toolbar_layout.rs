@@ -32,10 +32,23 @@ pub enum ToolbarId {
     Block,
     Measure,
     Layers,
+    /// Any other ribbon group with buttons; the payload is its key
+    /// (`module:Title`), built once by `toolbar_registry`.
+    Group(&'static str),
 }
 
 impl ToolbarId {
-    pub const ALL: [ToolbarId; 6] = [
+    /// Every bar the user can show: the six historic ones, then one per
+    /// ribbon group.
+    pub fn all() -> &'static [ToolbarId] {
+        super::toolbar_registry::all_ids()
+    }
+
+    pub fn is_builtin(self) -> bool {
+        !matches!(self, ToolbarId::Group(_))
+    }
+
+    pub const BUILTIN: [ToolbarId; 6] = [
         ToolbarId::Draw,
         ToolbarId::Modify,
         ToolbarId::Annotation,
@@ -53,16 +66,17 @@ impl ToolbarId {
             ToolbarId::Block => "Block",
             ToolbarId::Measure => "Measure",
             ToolbarId::Layers => "Layers",
+            ToolbarId::Group(key) => key,
         }
     }
 
     pub fn from_key(key: &str) -> Option<ToolbarId> {
-        Self::ALL.into_iter().find(|id| id.key() == key)
+        Self::all().iter().copied().find(|id| id.key() == key)
     }
 
-    /// Title shown on a floating bar.
+    /// Name shown in the bar list and on a floating bar.
     pub fn title(self) -> &'static str {
-        self.key()
+        super::toolbar_registry::display_name(self)
     }
 
     /// `Layers` holds combo boxes and is horizontal only.
@@ -122,8 +136,17 @@ fn default_slot(id: ToolbarId) -> DockSlot {
         Block => (Top, 0, 1),
         Measure => (Top, 0, 2),
         Layers => (Top, 1, 0),
+        // Only reached to re-dock a group bar that has no remembered home.
+        Group(_) => (Top, 0, u8::MAX),
     };
     DockSlot { edge, lane, index }
+}
+
+fn default_placement(id: ToolbarId) -> Placement {
+    match id {
+        ToolbarId::Group(_) => Placement::Hidden { home: None },
+        other => Placement::Docked(default_slot(other)),
+    }
 }
 
 /// Keyed by bar name (a `String`) rather than `ToolbarId` so that a key this
@@ -137,9 +160,9 @@ pub struct ToolbarLayout {
 impl Default for ToolbarLayout {
     fn default() -> Self {
         Self {
-            bars: ToolbarId::ALL
+            bars: ToolbarId::BUILTIN
                 .into_iter()
-                .map(|id| (id.key().to_string(), Placement::Docked(default_slot(id))))
+                .map(|id| (id.key().to_string(), default_placement(id)))
                 .collect(),
         }
     }
@@ -150,14 +173,15 @@ impl ToolbarLayout {
         self.bars
             .get(id.key())
             .copied()
-            .unwrap_or(Placement::Docked(default_slot(id)))
+            .unwrap_or(default_placement(id))
     }
 
     /// Docked bars of `edge`, grouped by lane (lane 0 first), each lane in
     /// index order. Gaps in the stored numbers are ignored.
     pub fn lanes(&self, edge: Edge) -> Vec<Vec<ToolbarId>> {
-        let mut docked: Vec<(DockSlot, ToolbarId)> = ToolbarId::ALL
-            .into_iter()
+        let mut docked: Vec<(DockSlot, ToolbarId)> = ToolbarId::all()
+            .iter()
+            .copied()
             .filter_map(|id| match self.placement(id) {
                 Placement::Docked(s) if s.edge == edge => Some((s, id)),
                 _ => None,
@@ -179,8 +203,9 @@ impl ToolbarLayout {
     }
 
     pub fn floating(&self) -> Vec<(ToolbarId, f32, f32)> {
-        ToolbarId::ALL
-            .into_iter()
+        ToolbarId::all()
+            .iter()
+            .copied()
             .filter_map(|id| match self.placement(id) {
                 Placement::Floating { x, y, .. } => Some((id, x, y)),
                 _ => None,
@@ -296,7 +321,11 @@ impl ToolbarLayout {
     /// replace non-finite coordinates, and renumber every lane.
     pub fn sanitized(mut self) -> Self {
         self.bars.retain(|k, _| ToolbarId::from_key(k).is_some());
-        for id in ToolbarId::ALL {
+        for &id in ToolbarId::all() {
+            // Hidden group bars are the default: do not write ~30 of them out.
+            if !id.is_builtin() && !self.bars.contains_key(id.key()) {
+                continue;
+            }
             let fixed = match self.placement(id) {
                 Placement::Docked(s) if !id.allowed_on(s.edge) => Placement::Docked(DockSlot {
                     edge: Edge::Top,

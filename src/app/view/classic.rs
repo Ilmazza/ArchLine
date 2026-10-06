@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(el.as_widget().size().height, iced::Length::Fill);
 
         // Review focus: every bar floating leaves all four edges empty.
-        for (i, id) in ToolbarId::ALL.into_iter().enumerate() {
+        for (i, id) in ToolbarId::all().iter().copied().enumerate() {
             app.toolbars.move_to(id, Target::Float { x: 10.0 * i as f32, y: 10.0 });
         }
         let center: iced::Element<'_, Message> = iced::widget::Space::new().into();

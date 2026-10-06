@@ -275,6 +275,7 @@ pub fn floating_id(id: ToolbarId) -> iced::widget::Id {
         ToolbarId::Block => "toolbar-float-Block",
         ToolbarId::Measure => "toolbar-float-Measure",
         ToolbarId::Layers => "toolbar-float-Layers",
+        ToolbarId::Group(key) => key,
     })
 }
 
