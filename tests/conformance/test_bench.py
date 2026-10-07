@@ -239,6 +239,26 @@ class CasesTests(unittest.TestCase):
 FAKE = str(Path(__file__).resolve().parent / "fake_converter.py")
 
 
+class ConverterCmdTests(unittest.TestCase):
+    def setUp(self):
+        import run
+        self.run = run
+
+    def test_relative_path_with_forward_slashes_becomes_absolute(self):
+        # su Windows subprocess non trova 'target/release/x.exe' (barre /) ma trova la forma assoluta
+        rel = os.path.relpath(FAKE).replace("\\", "/")
+        self.assertFalse(os.path.isabs(rel))
+        exe = self.run.converter_cmd(rel)[-1]
+        self.assertTrue(os.path.isabs(exe), exe)
+        self.assertTrue(os.path.exists(exe), exe)
+
+    def test_script_is_run_with_the_current_python(self):
+        self.assertEqual(self.run.converter_cmd(FAKE)[0], sys.executable)
+
+    def test_bare_name_is_left_for_the_path_lookup(self):
+        self.assertEqual(self.run.converter_cmd("OpenCADStudio"), ["OpenCADStudio"])
+
+
 class UpdatedExpectedTests(unittest.TestCase):
     def setUp(self):
         import run

@@ -29,6 +29,8 @@ class BenchError(Exception):
 
 def converter_cmd(exe):
     exe = str(exe)
+    if Path(exe).exists():
+        exe = str(Path(exe).resolve())  # su Windows subprocess non trova 'target/release/x.exe' (barre /)
     return [sys.executable, exe] if exe.endswith(".py") else [exe]
 
 
