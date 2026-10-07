@@ -821,6 +821,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "LAYER",
         "LAYERS",
         "LAYCUR",
+        "LAYERP",
         "LAYISO",
         "LAYON",
         "LAYOUTMANAGER",

@@ -471,6 +471,42 @@ impl OpenCADStudio {
                 }
             }
 
+            // LAYERP — restore the layer settings from before the last change (several times to go
+            // further back). Unlike UNDO it leaves drawing edits alone; new, deleted or renamed
+            // layers are not touched. The restore is one UNDO step but is not itself recorded for
+            // LAYERP, so a second LAYERP does not flip back.
+            "LAYERP" => match self.tabs[i].layer_prev.pop() {
+                None => self
+                    .command_line
+                    .push_error(crate::t!("LAYERP: no previous layer settings.").as_ref()),
+                Some(group) => {
+                    let names: Vec<String> = group
+                        .iter()
+                        .filter(|(name, _)| self.tabs[i].scene.document.layers.get(name).is_some())
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    let undo = self.begin_layer_undo(i, "LAYERP", &names);
+                    for (name, before) in group {
+                        if let Some(slot) = self.tabs[i].scene.document.layers.get_mut(&name) {
+                            *slot = before;
+                        }
+                    }
+                    self.tabs[i].scene.invalidate_layer_visibility(&names);
+                    self.tabs[i].dirty = true;
+                    let changed = self.commit_layer_undo_with(i, undo, false);
+                    self.refresh_layer_panel();
+                    if changed == 0 {
+                        self.command_line.push_info(
+                            crate::t!("LAYERP: the layer settings were already as they were.").as_ref(),
+                        );
+                    } else {
+                        self.command_line.push_info(
+                            crate::tf!("LAYERP  Layer settings restored ({changed} layer(s)).").as_ref(),
+                        );
+                    }
+                }
+            },
+
             "LAYON" => {
                 let names = self.tabs[i]
                     .scene
@@ -1157,6 +1193,115 @@ mod tests {
         assert_eq!(active.name(), "SELECT");
         assert!(active.is_selection_gathering());
         assert_eq!(layer_of(&app, line), "0", "nothing moves before the selection is confirmed");
+    }
+
+    // ── LAYERP ───────────────────────────────────────────────────────────────
+
+    /// "Walls" holds the line and has been made current at the start; the line is selected.
+    fn app_with_line_on_walls() -> (OpenCADStudio, Handle) {
+        let (mut app, line) = app_with_line();
+        make_current(&mut app, "Walls");
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYCUR");
+        assert_eq!(layer_of(&app, line), "Walls");
+        (app, line)
+    }
+
+    fn walls(app: &OpenCADStudio) -> codec::tables::Layer {
+        app.tabs[0].scene.document.layers.get("Walls").cloned().expect("layer Walls")
+    }
+
+    #[test]
+    fn layerp_restores_the_layer_frozen_by_layfrz() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        assert!(walls(&app).is_frozen());
+        let out = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_frozen(), "LAYERP must thaw the layer; got: {out:?}");
+        assert!(out.contains("restored"), "got: {out:?}");
+    }
+
+    #[test]
+    fn layerp_steps_back_through_several_changes() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYLCK");
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        assert!(walls(&app).is_locked() && walls(&app).is_frozen());
+
+        let _ = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_frozen() && walls(&app).is_locked(), "first step undoes the freeze only");
+        let _ = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_locked(), "second step undoes the lock");
+        let out = run(&mut app, "LAYERP");
+        assert!(out.contains("no previous layer settings"), "got: {out:?}");
+    }
+
+    #[test]
+    fn layerp_with_nothing_to_restore_is_an_error() {
+        let (mut app, _line) = app_with_line();
+        let out = run(&mut app, "LAYERP");
+        assert!(out.contains("no previous layer settings"), "got: {out:?}");
+    }
+
+    #[test]
+    fn layerp_does_not_ping_pong() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        let _ = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_frozen());
+        let out = run(&mut app, "LAYERP");
+        assert!(out.contains("no previous layer settings"), "a second LAYERP must not re-apply the freeze; got: {out:?}");
+        assert!(!walls(&app).is_frozen());
+    }
+
+    #[test]
+    fn layerp_is_undoable_in_one_step() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        let _ = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_frozen());
+        let _ = app.update(Message::Undo);
+        assert!(walls(&app).is_frozen(), "UNDO of LAYERP brings the freeze back");
+    }
+
+    #[test]
+    fn layerp_leaves_new_layers_and_drawing_edits_alone() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Doors"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,5 10,5"}"#);
+        let _ = app.update(Message::CommandEscape);
+        let lines = |app: &OpenCADStudio| {
+            app.tabs[0]
+                .scene
+                .document
+                .entities()
+                .filter(|e| matches!(e, codec::EntityType::Line(_)))
+                .count()
+        };
+        assert_eq!(lines(&app), 2);
+
+        let _ = run(&mut app, "LAYERP");
+        assert!(!walls(&app).is_frozen(), "Walls is thawed again");
+        assert!(app.tabs[0].scene.document.layers.get("Doors").is_some(), "a layer made later stays");
+        assert_eq!(lines(&app), 2, "a line drawn in between stays");
+    }
+
+    #[test]
+    fn layerp_ignores_a_layer_deleted_since() {
+        let (mut app, line) = app_with_line_on_walls();
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYFRZ");
+        app.tabs[0].scene.document.layers.remove("Walls");
+        let out = run(&mut app, "LAYERP");
+        assert!(app.tabs[0].scene.document.layers.get("Walls").is_none(), "a deleted layer is not brought back");
+        assert!(!out.contains("INVALID"), "got: {out:?}");
     }
 
     #[test]

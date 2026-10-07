@@ -76,6 +76,9 @@ pub(super) struct PendingDelta {
     structure_before: Option<codec::CadDocument>,
 }
 
+/// How many layer-settings changes LAYERP can step back through (the oldest are dropped).
+const LAYER_PREVIOUS_LIMIT: usize = 50;
+
 pub(super) struct PendingLayerDelta {
     label: String,
     current_layout: String,
@@ -419,6 +422,19 @@ impl OpenCADStudio {
     }
 
     pub(super) fn commit_layer_undo(&mut self, i: usize, pending: PendingLayerDelta) {
+        self.commit_layer_undo_with(i, pending, true);
+    }
+
+    /// Push the layer change onto the undo history. With `record_previous` the layers' settings
+    /// from before the change also go onto the LAYERP stack (LAYERP itself passes `false`, or two
+    /// LAYERP in a row would flip back and forth). Creating, deleting or renaming a layer is not
+    /// a settings change and is not recorded for LAYERP. Returns how many layers changed.
+    pub(super) fn commit_layer_undo_with(
+        &mut self,
+        i: usize,
+        pending: PendingLayerDelta,
+        record_previous: bool,
+    ) -> usize {
         let entries: Vec<_> = pending
             .before
             .into_iter()
@@ -432,7 +448,24 @@ impl OpenCADStudio {
             })
             .collect();
         if entries.is_empty() {
-            return;
+            return 0;
+        }
+        let changed = entries.len();
+        if record_previous {
+            let previous: Vec<(String, codec::tables::Layer)> = entries
+                .iter()
+                .filter_map(|e| match (&e.before, &e.after) {
+                    (Some(before), Some(_)) => Some((e.name.clone(), before.clone())),
+                    _ => None,
+                })
+                .collect();
+            if !previous.is_empty() {
+                let stack = &mut self.tabs[i].layer_prev;
+                stack.push(previous);
+                if stack.len() > LAYER_PREVIOUS_LIMIT {
+                    stack.remove(0);
+                }
+            }
         }
         let selected_after = self.tabs[i].scene.selected.iter().copied().collect();
         let delta = DeltaSnapshot {
@@ -450,6 +483,7 @@ impl OpenCADStudio {
             label: pending.label,
         };
         self.push_undo_entry(i, HistorySnapshot::Delta(Box::new(delta)));
+        changed
     }
 
     pub(super) fn begin_text_style_undo(
