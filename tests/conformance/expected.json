@@ -1,0 +1,50 @@
+{
+  "geometry|R2000|dwg|types": {
+    "detail": "tipi {'LWPOLYLINE': (2, 3), 'POLYLINE': (1, 0)}",
+    "note": "Benigno: il codec converte la POLYLINE 2D in LWPOLYLINE (come il lettore di Autocad_clone). Misurato il 2026-10-07 su ffd82560."
+  },
+  "geometry|R2000|dxf|types": {
+    "detail": "tipi {'LWPOLYLINE': (2, 3), 'POLYLINE': (1, 0)}",
+    "note": "Benigno: il codec converte la POLYLINE 2D in LWPOLYLINE (come il lettore di Autocad_clone). Misurato il 2026-10-07 su ffd82560."
+  },
+  "geometry|R2018|dwg|types": {
+    "detail": "tipi {'LWPOLYLINE': (2, 3), 'POLYLINE': (1, 0)}",
+    "note": "Benigno: il codec converte la POLYLINE 2D in LWPOLYLINE (come il lettore di Autocad_clone). Misurato il 2026-10-07 su ffd82560."
+  },
+  "geometry|R2018|dxf|types": {
+    "detail": "tipi {'LWPOLYLINE': (2, 3), 'POLYLINE': (1, 0)}",
+    "note": "Benigno: il codec converte la POLYLINE 2D in LWPOLYLINE (come il lettore di Autocad_clone). Misurato il 2026-10-07 su ffd82560."
+  },
+  "hatch_spline|R2000|dwg|extents": {
+    "detail": "estensioni (-0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
+    "note": "Da approfondire: il contorno a spline di un hatch R2000 perde i punti di fit (estensione 3 -> 0), come nella baseline del 2026-10-03. Riserva: la spline sintetica ha solo punti di fit, AutoCAD di norma scrive anche i punti di controllo, quindi la gravita sui file reali e incerta."
+  },
+  "hatch_spline|R2000|dxf|extents": {
+    "detail": "estensioni (-0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
+    "note": "Da approfondire: il contorno a spline di un hatch R2000 perde i punti di fit (estensione 3 -> 0), come nella baseline del 2026-10-03. Riserva: la spline sintetica ha solo punti di fit, AutoCAD di norma scrive anche i punti di controllo, quindi la gravita sui file reali e incerta."
+  },
+  "text_accents|R2000|dwg|strings": {
+    "detail": "stringhe [('Sottotetto è più basso: ù à ò ì é', 'Sottotetto Ã¨ piÃ¹ basso: Ã¹ Ã\\xa0 Ã² Ã¬ Ã©'), ('Cucina: perché già così\\ncittà è', 'Cucina: perchÃ© giÃ\\xa0 cosÃ¬\\ncittÃ\\xa0 Ã¨'), ('porta è blindata', 'porta Ã¨ blindata')]",
+    "note": "Difetto noto (punto aperto 4 di CLAUDE.md): in R2000 con $DWGCODEPAGE = ANSI_1252 i caratteri accentati escono come UTF-8 e si leggono come due caratteri (mojibake). Riguarda TEXT, MTEXT e ATTRIB."
+  },
+  "text_accents|R2000|dxf|strings": {
+    "detail": "stringhe [('Sottotetto è più basso: ù à ò ì é', 'Sottotetto Ã¨ piÃ¹ basso: Ã¹ Ã\\xa0 Ã² Ã¬ Ã©'), ('Cucina: perché già così\\ncittà è', 'Cucina: perchÃ© giÃ\\xa0 cosÃ¬\\ncittÃ\\xa0 Ã¨'), ('porta è blindata', 'porta Ã¨ blindata')]",
+    "note": "Difetto noto (punto aperto 4 di CLAUDE.md): in R2000 con $DWGCODEPAGE = ANSI_1252 i caratteri accentati escono come UTF-8 e si leggono come due caratteri (mojibake). Riguarda TEXT, MTEXT e ATTRIB."
+  },
+  "text|R2000|dwg|strings": {
+    "detail": "stringhe [('Sottotetto è più basso: 2,40 m ù à ò ì é', 'Sottotetto Ã¨ piÃ¹ basso: 2,40 m Ã¹ Ã\\xa0 Ã² Ã¬ Ã©'), ('Titolo\\nSecondo riga\\nrosso \\\\U+00E8 \\\\~ fine', 'Titolo\\nSecondo riga\\nrosso Ã¨ \\\\~ fine')]",
+    "note": "Difetto noto (punto aperto 4 di CLAUDE.md): stesso mojibake degli accenti in R2000 (TEXT e MTEXT, anche la sequenza \\U+00E8 dell'MTEXT)."
+  },
+  "text|R2000|dxf|strings": {
+    "detail": "stringhe [('Sottotetto è più basso: 2,40 m ù à ò ì é', 'Sottotetto Ã¨ piÃ¹ basso: 2,40 m Ã¹ Ã\\xa0 Ã² Ã¬ Ã©'), ('Titolo\\nSecondo riga\\nrosso \\\\U+00E8 \\\\~ fine', 'Titolo\\nSecondo riga\\nrosso Ã¨ \\\\~ fine')]",
+    "note": "Difetto noto (punto aperto 4 di CLAUDE.md): stesso mojibake degli accenti in R2000 (TEXT e MTEXT, anche la sequenza \\U+00E8 dell'MTEXT)."
+  },
+  "text|R2018|dwg|strings": {
+    "detail": "stringhe [('Titolo\\nSecondo riga\\nrosso \\\\U+00E8 \\\\~ fine', 'Titolo\\nSecondo riga\\nrosso è \\\\~ fine')]",
+    "note": "Benigno: in R2018 la sequenza \\U+00E8 dell'MTEXT esce come la lettera accentata (stesso testo visibile, cambia solo la codifica), come nella baseline del 2026-10-03."
+  },
+  "text|R2018|dxf|strings": {
+    "detail": "stringhe [('Titolo\\nSecondo riga\\nrosso \\\\U+00E8 \\\\~ fine', 'Titolo\\nSecondo riga\\nrosso è \\\\~ fine')]",
+    "note": "Benigno: in R2018 la sequenza \\U+00E8 dell'MTEXT esce come la lettera accentata (stesso testo visibile, cambia solo la codifica), come nella baseline del 2026-10-03."
+  }
+}
