@@ -36,8 +36,15 @@ Per ogni caso, versione (R2000, R2018), percorso (DXF>DXF, DXF>DWG>DXF) e contro
 - Il percorso DWG e' indiretto. ezdxf non legge DWG: il DWG scritto da ArchLine viene riletto da ArchLine
   stesso e confrontato dopo l'export in DXF.
 - Si misura il convertitore headless (`--export`), non l'apertura e il salvataggio interattivi.
-- Le **estensioni sono calcolate senza testi**: ezdxf stima l'estensione di un testo dalla lunghezza della
-  stringa, che non e' un dato geometrico. I testi si confrontano solo nel controllo `strings`.
+- Le **estensioni sono calcolate con ogni testo sostituito da un segnaposto di una lettera**: ezdxf stima
+  l'estensione di un testo dalla lunghezza della stringa, che non e' un dato geometrico. Inserimento, altezza,
+  rotazione e allineamento restano misurati; il contenuto dei testi si confronta solo nel controllo `strings`.
+- `readable` controlla anche che la **versione DXF** del file in uscita sia quella della sorgente: un export che
+  riscrivesse sempre in R2018 smetterebbe di esercitare gli scenari R2000.
+- **Il caso `colors` non e' misurato da nessun controllo**: i quattro controlli non leggono colore ne layer, e
+  `types` conta solo le entita' di primo livello del model space. Il caso genera BYBLOCK/BYLAYER/layer 0 in blocchi
+  annidati ma un codec che li perdesse darebbe comunque OK. Serve un controllo su colore e layer (da decidere).
+- Il confronto delle stringhe e' posizionale: un riordino delle entita' in uscita produce coppie disallineate.
 - Solo disegni sintetici generati da codice. Nessun disegno reale (il repo e' pubblico).
 
 ## expected.json

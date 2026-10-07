@@ -16,11 +16,11 @@
     "note": "Benigno: il codec converte la POLYLINE 2D in LWPOLYLINE (come il lettore di Autocad_clone). Misurato il 2026-10-07 su ffd82560."
   },
   "hatch_spline|R2000|dwg|extents": {
-    "detail": "estensioni (-0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
+    "detail": "estensioni (0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
     "note": "Da approfondire: il contorno a spline di un hatch R2000 perde i punti di fit (estensione 3 -> 0), come nella baseline del 2026-10-03. Riserva: la spline sintetica ha solo punti di fit, AutoCAD di norma scrive anche i punti di controllo, quindi la gravita sui file reali e incerta."
   },
   "hatch_spline|R2000|dxf|extents": {
-    "detail": "estensioni (-0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
+    "detail": "estensioni (0.00, 0.00, 10.00, 3.00) -> (0.00, 0.00, 10.00, 0.00)",
     "note": "Da approfondire: il contorno a spline di un hatch R2000 perde i punti di fit (estensione 3 -> 0), come nella baseline del 2026-10-03. Riserva: la spline sintetica ha solo punti di fit, AutoCAD di norma scrive anche i punti di controllo, quindi la gravita sui file reali e incerta."
   },
   "text_accents|R2000|dwg|strings": {

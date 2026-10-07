@@ -39,7 +39,7 @@ def convert(cmd, src, dst, timeout=120):
     e la decodifica cp1252 della console Windows puo' sollevare UnicodeDecodeError."""
     try:
         r = subprocess.run([*cmd, "--export", str(src), str(dst)], capture_output=True, timeout=timeout)
-    except (FileNotFoundError, PermissionError) as ex:
+    except OSError as ex:  # non trovato, non eseguibile, non un programma valido (WinError 193)...
         raise BenchError(f"convertitore non eseguibile: {cmd[0]} ({type(ex).__name__})") from ex
     except subprocess.TimeoutExpired:
         return False, f"conversione fallita (timeout {timeout} s)"

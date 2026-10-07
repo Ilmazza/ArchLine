@@ -41,31 +41,38 @@ def _strings(doc):
     return out
 
 
-def _strip_text(doc):
-    """Toglie dal documento in memoria ogni testo (TEXT, MTEXT, ATTDEF e gli ATTRIB degli INSERT).
+PLACEHOLDER = "X"
+
+
+def _neutralize_text(doc):
+    """Sostituisce in memoria ogni testo con un segnaposto di una lettera (TEXT, MTEXT, ATTDEF, ATTRIB).
 
     ezdxf stima l'estensione di un testo dalla lunghezza della stringa: non e' un dato geometrico, e un
-    difetto sugli accenti non deve comparire anche come difetto di estensione.
+    difetto sugli accenti non deve comparire anche come difetto di estensione. Il segnaposto toglie la
+    lunghezza ma lascia inserimento, altezza, rotazione e allineamento, che le estensioni continuano a misurare.
     """
-    layouts = [doc.modelspace()] + list(doc.blocks)
-    for layout in layouts:
-        for e in list(layout):
+    for layout in [doc.modelspace()] + list(doc.blocks):
+        for e in layout:
             kind = e.dxftype()
-            if kind in ("TEXT", "MTEXT", "ATTDEF"):
-                layout.delete_entity(e)
+            if kind in ("TEXT", "ATTDEF"):
+                e.dxf.text = PLACEHOLDER
+            elif kind == "MTEXT":
+                e.text = PLACEHOLDER
             elif kind == "INSERT":
-                e.attribs.clear()
+                for a in e.attribs:
+                    a.dxf.text = PLACEHOLDER
 
 
 def snapshot(doc):
-    """Tipi, stringhe ed estensioni. Modifica `doc`: dopo aver letto le stringhe ne toglie i testi."""
+    """Versione, tipi, stringhe ed estensioni. Modifica `doc`: dopo aver letto le stringhe ne neutralizza i testi."""
     types, strings = _types(doc), _strings(doc)
-    _strip_text(doc)
-    return {"types": types, "extents": _extents(doc), "strings": strings}
+    _neutralize_text(doc)
+    return {"version": doc.dxfversion, "types": types, "extents": _extents(doc), "strings": strings}
 
 
 def _fmt_box(box):
-    return "vuoto" if box is None else "(" + ", ".join(f"{v:.2f}" for v in box) + ")"
+    # +0.0 trasforma -0.0 in 0.0: il rumore numerico (-3e-16) non deve stamparsi '-0.00'
+    return "vuoto" if box is None else "(" + ", ".join(f"{round(v, 2) + 0.0:.2f}" for v in box) + ")"
 
 
 def _same_box(a, b):
@@ -86,7 +93,10 @@ def compare(src, out_path):
         res["readable"] = (False, f"non leggibile ({err})")
         return res
     got = snapshot(doc)
-    res = {"readable": (True, "")}
+    if got["version"] == src["version"]:
+        res = {"readable": (True, "")}
+    else:  # un export che cambia versione smette di esercitare lo scenario (es. R2000)
+        res = {"readable": (False, f"versione {src['version']} -> {got['version']}")}
 
     if got["types"] == src["types"]:
         res["types"] = (True, "")

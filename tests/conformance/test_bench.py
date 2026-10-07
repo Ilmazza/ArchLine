@@ -191,6 +191,44 @@ class OracleTests(unittest.TestCase):
         self.assertTrue(res["extents"][0], res["extents"])
         self.assertFalse(res["strings"][0])  # il testo e' comunque diverso
 
+    def test_text_position_still_moves_the_extents(self):
+        # senza testi le estensioni non vedrebbero piu' inserimento, altezza, rotazione, allineamento
+        def make(name, x):
+            doc = self.ezdxf.new("R2018")
+            doc.modelspace().add_line((0, 0), (10, 0))
+            doc.modelspace().add_text("ciao", height=2).set_placement((x, 0))
+            path = self.tmp / name
+            doc.saveas(path)
+            return path
+
+        here, moved = make("here.dxf", 20), make("moved.dxf", 50)
+        snap = self.oracle.snapshot(self.oracle.read_strict(here)[0])
+        self.assertTrue(self.oracle.compare(snap, here)["extents"][0])
+        self.assertFalse(self.oracle.compare(snap, moved)["extents"][0])
+
+    def test_negative_zero_is_not_printed_in_the_extents_detail(self):
+        # -2.9e-16 (rumore numerico della spline) stampato come '-0.00' oscillerebbe tra build di ezdxf
+        text = self.oracle._fmt_box((-2.9e-16, 0.0, 10.0, 3.0))
+        self.assertNotIn("-0.00", text)
+        self.assertEqual(text, "(0.00, 0.00, 10.00, 3.00)")
+
+    def test_dxf_version_change_fails_the_readable_check(self):
+        # se l'export riscrivesse sempre in R2018, lo scenario R2000 non verrebbe piu' esercitato
+        def make(name, version):
+            doc = self.ezdxf.new(version)
+            doc.modelspace().add_line((0, 0), (1, 1))
+            path = self.tmp / name
+            doc.saveas(path)
+            return path
+
+        r2000, r2018 = make("a.dxf", "R2000"), make("b.dxf", "R2018")
+        snap = self.oracle.snapshot(self.oracle.read_strict(r2000)[0])
+        self.assertEqual(snap["version"], "AC1015")
+        self.assertTrue(self.oracle.compare(snap, r2000)["readable"][0])
+        ok, detail = self.oracle.compare(snap, r2018)["readable"]
+        self.assertFalse(ok)
+        self.assertEqual(detail, "versione AC1015 -> AC1032")
+
     def test_type_difference_names_both_counts(self):
         a = self._save("a.dxf", lambda m: (m.add_line((0, 0), (1, 1)), m.add_circle((0, 0), 1)))
         b = self._save("b.dxf", lambda m: m.add_line((0, 0), (1, 1)))
@@ -429,6 +467,14 @@ class BenchEndToEndTests(unittest.TestCase):
         rc, _, err = self._main("faithful", exe=str(self.tmp / "non_esiste.exe"))
         self.assertEqual(rc, 2)
         self.assertIn("eseguibile non trovato", err)
+
+    def test_existing_file_that_is_not_an_executable_is_a_bench_error(self):
+        # un .exe troncato da una build interrotta, o un file passato per sbaglio: OSError, non un traceback
+        not_exe = self.tmp / "non_eseguibile.bin"
+        not_exe.write_bytes(b"questo non e' un programma")
+        rc, _, err = self._main("faithful", "--case", "paperspace", exe=str(not_exe))
+        self.assertEqual(rc, 2)
+        self.assertIn("convertitore non eseguibile", err)
 
     def test_unknown_case_is_a_bench_error(self):
         rc, _, err = self._main("faithful", "--case", "inesistente")

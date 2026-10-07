@@ -40,13 +40,20 @@ jobs:
           python-version: "3.12"
 
       # Misura, non blocca: il report entra nell'artefatto. Per promuoverlo a cancello, togliere continue-on-error.
-      - name: Conformance (ezdxf come oracolo)
+      # ezdxf e' bloccato alla versione con cui e' stato misurato expected.json (un'altra puo' dare regressioni spurie).
+      # Due passi separati: in pwsh un comando nativo che fallisce non ferma il successivo, e il passo prende
+      # solo l'exit code dell'ultimo, quindi i test rossi del banco verrebbero nascosti da run.py.
+      - name: Conformance, test del banco
         continue-on-error: true
         shell: pwsh
         run: |
-          python -m pip install ezdxf
+          python -m pip install "ezdxf==1.4.4"
           python -m unittest discover -s tests/conformance -p "test_*.py"
-          python tests/conformance/run.py target\release\OpenCADStudio.exe --out dist\conformance-report.md
+
+      - name: Conformance, misura (ezdxf come oracolo)
+        continue-on-error: true
+        shell: pwsh
+        run: python tests/conformance/run.py target\release\OpenCADStudio.exe --out dist\conformance-report.md
 
       - uses: actions/upload-artifact@v4
         with:

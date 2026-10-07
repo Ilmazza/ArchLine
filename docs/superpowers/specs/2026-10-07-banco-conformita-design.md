@@ -71,9 +71,12 @@ Per ogni (caso, versione, percorso) si eseguono quattro controlli, tutti con ezd
 `readable` (ezdxf legge il file in modalità strict), `types` (conteggio dei tipi di entità del model space),
 `extents` (estensioni, tolleranza 2e-3), `strings` (TEXT/MTEXT/ATTRIB, accenti inclusi).
 
-Le **estensioni sono calcolate senza testi** (TEXT, MTEXT, ATTDEF e gli ATTRIB degli INSERT): ezdxf stima l'estensione
-di un testo dalla lunghezza della stringa, che non è un dato geometrico, e senza questa scelta un difetto sugli accenti
-compariva anche come difetto di estensione. I testi si confrontano solo nel controllo `strings`. Il dettaglio di
+Le **estensioni sono calcolate con ogni testo (TEXT, MTEXT, ATTDEF e gli ATTRIB degli INSERT) sostituito da un
+segnaposto di una lettera**: ezdxf stima l'estensione di un testo dalla lunghezza della stringa, che non è un dato
+geometrico, e senza questa scelta un difetto sugli accenti compariva anche come difetto di estensione. Il
+segnaposto (e non la cancellazione dei testi, scelta iniziale corretta dopo la revisione) lascia misurati
+inserimento, altezza, rotazione e allineamento. Il contenuto si confronta solo nel controllo `strings`. `readable`
+verifica anche che la versione DXF in uscita sia quella della sorgente. Il dettaglio di
 `strings` riporta **tutte** le stringhe diverse: un dettaglio parziale mascherava le regressioni nelle altre.
 
 Ogni controllo ha uno di quattro stati, confrontando l'esito misurato con `expected.json`:
