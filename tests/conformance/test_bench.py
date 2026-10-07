@@ -1,6 +1,7 @@
 """Test del banco di conformita. Da lanciare dalla radice del repo:
 python -m unittest discover -s tests/conformance -p "test_*.py" -v
 """
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from pathlib import Path
 import classify
 import report
 from classify import EXPECTED, IMPROVED, OK, REGRESSION, Result
+
+HAVE_EZDXF = importlib.util.find_spec("ezdxf") is not None
 
 
 class ClassifyTests(unittest.TestCase):
@@ -106,6 +109,103 @@ class ReportTests(unittest.TestCase):
         text = report.render([], res, {})
         self.assertEqual(text.encode("utf-8").decode("utf-8"), text)
         self.assertIn("Ã¨", text)
+
+
+@unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+class OracleTests(unittest.TestCase):
+    def setUp(self):
+        import ezdxf
+        import oracle
+        self.ezdxf, self.oracle = ezdxf, oracle
+        self.tmp = Path(tempfile.mkdtemp(prefix="conf_test_"))
+
+    def _save(self, name, build):
+        doc = self.ezdxf.new("R2018")
+        build(doc.modelspace())
+        path = self.tmp / name
+        doc.saveas(path)
+        return path
+
+    def test_identical_files_pass_all_checks(self):
+        a = self._save("a.dxf", lambda m: (m.add_line((0, 0), (10, 5)), m.add_text("ciao").set_placement((1, 1))))
+        doc, err = self.oracle.read_strict(a)
+        self.assertIsNone(err)
+        res = self.oracle.compare(self.oracle.snapshot(doc), a)
+        self.assertEqual(set(res), set(classify.CHECKS))
+        self.assertTrue(all(ok for ok, _ in res.values()), res)
+
+    def test_extents_difference_is_detected_beyond_tolerance_only(self):
+        a = self._save("a.dxf", lambda m: m.add_line((0, 0), (10, 0)))
+        near = self._save("near.dxf", lambda m: m.add_line((0, 0), (10.001, 0)))
+        far = self._save("far.dxf", lambda m: m.add_line((0, 0), (10.1, 0)))
+        snap = self.oracle.snapshot(self.oracle.read_strict(a)[0])
+        self.assertTrue(self.oracle.compare(snap, near)["extents"][0])
+        ok, detail = self.oracle.compare(snap, far)["extents"]
+        self.assertFalse(ok)
+        self.assertIn("10.10", detail)
+
+    def test_type_difference_names_both_counts(self):
+        a = self._save("a.dxf", lambda m: (m.add_line((0, 0), (1, 1)), m.add_circle((0, 0), 1)))
+        b = self._save("b.dxf", lambda m: m.add_line((0, 0), (1, 1)))
+        snap = self.oracle.snapshot(self.oracle.read_strict(a)[0])
+        ok, detail = self.oracle.compare(snap, b)["types"]
+        self.assertFalse(ok)
+        self.assertIn("'CIRCLE': (1, 0)", detail)
+
+    def test_string_difference_is_reported(self):
+        a = self._save("a.dxf", lambda m: m.add_text("perché").set_placement((0, 0)))
+        b = self._save("b.dxf", lambda m: m.add_text("perchÃ©").set_placement((0, 0)))
+        snap = self.oracle.snapshot(self.oracle.read_strict(a)[0])
+        ok, detail = self.oracle.compare(snap, b)["strings"]
+        self.assertFalse(ok)
+        self.assertIn("perchÃ©", detail)
+
+    def test_unreadable_file_fails_every_check(self):
+        a = self._save("a.dxf", lambda m: m.add_line((0, 0), (1, 1)))
+        junk = self.tmp / "junk.dxf"
+        junk.write_bytes(b"questo non e' un DXF")
+        snap = self.oracle.snapshot(self.oracle.read_strict(a)[0])
+        res = self.oracle.compare(snap, junk)
+        self.assertEqual(set(res), set(classify.CHECKS))
+        self.assertFalse(any(ok for ok, _ in res.values()))
+        self.assertTrue(res["readable"][1].startswith("non leggibile ("))
+
+    def test_failed_covers_every_check(self):
+        res = self.oracle.failed("conversione fallita (exit 1)")
+        self.assertEqual(res, {c: (False, "conversione fallita (exit 1)") for c in classify.CHECKS})
+
+
+@unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+class CasesTests(unittest.TestCase):
+    def test_every_case_builds_a_strict_readable_file_in_both_versions(self):
+        import cases
+        import oracle
+        tmp = Path(tempfile.mkdtemp(prefix="conf_test_"))
+        names = [c.NAME for c in cases.ALL]
+        self.assertEqual(len(names), len(set(names)), "nomi di caso duplicati")
+        self.assertEqual(
+            sorted(names),
+            sorted(["geometry", "colors", "hatch", "hatch_spline", "text", "text_accents", "dims", "attribs", "paperspace"]),
+        )
+        for case in cases.ALL:
+            for version in ("R2000", "R2018"):
+                path = case.build(version, tmp)
+                self.assertEqual(path.name, f"{case.NAME}_{version}.dxf")
+                doc, err = oracle.read_strict(path)
+                self.assertIsNone(err, f"{case.NAME} {version}: {err}")
+                self.assertGreater(len(list(doc.modelspace())), 0, f"{case.NAME} {version}: model space vuoto")
+
+    def test_text_accents_contains_the_accented_strings_in_all_three_entity_kinds(self):
+        import cases
+        import oracle
+        tmp = Path(tempfile.mkdtemp(prefix="conf_test_"))
+        for version in ("R2000", "R2018"):
+            doc, _ = oracle.read_strict(cases.text_accents.build(version, tmp))
+            strings = oracle.snapshot(doc)["strings"]
+            joined = " ".join(strings)
+            self.assertEqual(len(strings), 3, strings)
+            for ch in "èàòùìé":
+                self.assertIn(ch, joined, f"{version}: manca {ch!r}")
 
 
 if __name__ == "__main__":
