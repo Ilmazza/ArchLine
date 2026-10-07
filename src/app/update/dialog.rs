@@ -935,10 +935,10 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     .as_ref()
                     .and_then(|p| p.parent().map(|p| p.to_path_buf()))
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
-                // Drawing references only: image/PDF rows keep their flags
-                // untouched and report per-entry (their names never match the
-                // DWG-only `XrefInfo` list, so matching after the flag clear
-                // would spuriously report no-match).
+                // Drawing references resolve through `XrefInfo`; image rows reload through
+                // `reload_image_refs` (their names never match that DWG-only list, so they
+                // are kept out of it to avoid a spurious no-match). Other kinds report
+                // per entry.
                 let dwg_picked: Vec<(u64, String)> = picked
                     .iter()
                     .filter(|(_, _, kind, is_nested)| {
@@ -946,6 +946,13 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                             return false;
                         }
                         *kind == crate::io::xref_model::RefKind::DwgXref
+                    })
+                    .map(|(key, name, _, _)| (*key, name.clone()))
+                    .collect();
+                let image_rows: Vec<(u64, String)> = picked
+                    .iter()
+                    .filter(|(_, _, kind, is_nested)| {
+                        !*is_nested && *kind == crate::io::xref_model::RefKind::Image
                     })
                     .map(|(key, name, _, _)| (*key, name.clone()))
                     .collect();
@@ -982,7 +989,9 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                             }
                         }
                         self.tabs[i].scene.bump_geometry();
-                    } else if *kind != crate::io::xref_model::RefKind::DwgXref {
+                    } else if *kind != crate::io::xref_model::RefKind::DwgXref
+                        && *kind != crate::io::xref_model::RefKind::Image
+                    {
                         self.command_line.push_error(crate::tf!(
                             "{}: reload applies to drawing references only.",
                             name
@@ -993,6 +1002,7 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                     self.tabs[i].xref_unloaded.remove(key);
                     self.tabs[i].xref_stat_cache.remove(key);
                 }
+                done += self.reload_image_refs(i, &image_rows);
                 let handles: rustc_hash::FxHashSet<codec::types::Handle> = self.tabs[i]
                     .scene
                     .document
@@ -1174,6 +1184,29 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
     /// Reload every direct drawing reference (toolbar Reload All). Same
     /// engine path as `XRELOAD`: undo snapshot, session flags cleared,
     /// full resolve, per-ref report, stat baselines refreshed.
+    /// Reload image rows of the reference list (`(definition key, display name)`): clear their
+    /// session-unloaded flag, re-read the files (and apply a path edited with XREF Path) and
+    /// report each one. Callers push the undo snapshot first. Returns how many were reloaded.
+    pub(crate) fn reload_image_refs(&mut self, i: usize, images: &[(u64, String)]) -> usize {
+        if images.is_empty() {
+            return 0;
+        }
+        let handles: Vec<codec::types::Handle> = images
+            .iter()
+            .map(|(key, _)| codec::types::Handle::new(*key))
+            .collect();
+        for (key, _) in images {
+            self.tabs[i].xref_unloaded.remove(key);
+            self.tabs[i].xref_stat_cache.remove(key);
+        }
+        self.tabs[i].scene.reload_image_definitions(&handles);
+        for (_, name) in images {
+            self.command_line
+                .push_output(crate::tf!("XREF  Reloaded \"{}\"", name).as_ref());
+        }
+        images.len()
+    }
+
     pub(crate) fn xref_manager_reload_all(&mut self) {
         if cfg!(target_arch = "wasm32") {
             self.command_line.push_error(crate::t!("Reference changes are not available on web — the reference list is read-only.").as_ref());
@@ -1190,21 +1223,28 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                 .push_error(crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").as_ref());
             return;
         };
-        let reload_keys: Vec<u64> = crate::io::xref::collect_entries_with_prev(
+        let entries = crate::io::xref::collect_entries_with_prev(
             &self.tabs[i].scene.document,
             &base_dir,
             self.tabs[i].xref_unloaded.as_set(),
             &self.tabs[i].xref_stat_cache.0,
-        )
-        .iter()
-        .filter(|e| e.kind == crate::io::xref_model::RefKind::DwgXref && e.parent_key.is_none())
-        .map(|e| e.key)
-        .collect();
+        );
+        let reload_keys: Vec<u64> = entries
+            .iter()
+            .filter(|e| e.kind == crate::io::xref_model::RefKind::DwgXref && e.parent_key.is_none())
+            .map(|e| e.key)
+            .collect();
+        let image_rows: Vec<(u64, String)> = entries
+            .iter()
+            .filter(|e| e.kind == crate::io::xref_model::RefKind::Image && e.parent_key.is_none())
+            .map(|e| (e.key, e.name.clone()))
+            .collect();
         self.push_undo_snapshot(i, "XREF-RELOAD");
         for key in &reload_keys {
             self.tabs[i].xref_unloaded.remove(key);
             self.tabs[i].xref_stat_cache.remove(key);
         }
+        self.reload_image_refs(i, &image_rows);
         let (infos, _dropped) =
             crate::io::xref::resolve_xrefs(&mut self.tabs[i].scene.document, &base_dir);
         let fresh = crate::io::xref::collect_entries_with_prev(
@@ -1992,41 +2032,99 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn palette_reload_skips_images_without_clearing_flags() {
-        // F7: palette Reload on an image/PDF row reports the drawing-only
-        // error and leaves its unloaded flag untouched (no spurious
-        // no-match after a flag clear).
+    /// A saved drawing with one raster image backed by a real PNG (`w` x `w` pixels), listed in the
+    /// palette. Returns (app, dir, png path, definition key, image handle).
+    fn app_with_png_image(
+        tag: &str,
+        w: u32,
+    ) -> (OpenCADStudio, std::path::PathBuf, std::path::PathBuf, u64, codec::types::Handle) {
         use codec::objects::{ImageDefinition, ObjectType};
-        use crate::io::xref_model::RefKind;
-        use crate::ui::window::xref_manager::XrefPaletteOp;
-        let dir = palette_tmpdir("imgreload");
+        let dir = palette_tmpdir(tag);
+        let png = dir.join("plan.png");
+        image::RgbaImage::new(w, w).save(&png).unwrap();
+        let path = png.to_string_lossy().to_string();
         let mut app = fresh();
         let i = app.active_tab;
         let h = app.tabs[i].scene.document.allocate_handle();
-        let mut def = ImageDefinition::with_dimensions("img.png", 8, 8);
+        let mut def = ImageDefinition::with_dimensions(&path, w, w);
         def.handle = h;
         app.tabs[i].scene.document.objects.insert(h, ObjectType::ImageDefinition(def));
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
+        let mut img = codec::entities::RasterImage::with_size(
+            &path,
             codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
+            w as f64,
+            w as f64,
+            1.0,
+            1.0,
         );
         img.definition_handle = Some(h);
-        app.tabs[i].scene.document.add_entity(codec::EntityType::RasterImage(img)).unwrap();
+        let image = app.tabs[i].scene.add_entity(codec::EntityType::RasterImage(img));
         app.tabs[i].current_path = Some(dir.join("host.dwg"));
         app.refresh_xref_manager();
-        let idx = app.xref_manager.entries.iter().position(|e| e.kind == RefKind::Image).expect("image listed");
-        let key = app.xref_manager.entries[idx].key;
+        (app, dir, png, h.value(), image)
+    }
+
+    #[test]
+    fn palette_reload_reloads_an_image_row() {
+        // Palette Reload on an image row re-reads the file and clears its unloaded flag (it used to
+        // report "reload applies to drawing references only" and leave the flag).
+        use crate::io::xref_model::RefKind;
+        use crate::ui::window::xref_manager::XrefPaletteOp;
+        let (mut app, dir, png, key, image) = app_with_png_image("imgreload", 4);
+        let i = app.active_tab;
+        assert_eq!(app.tabs[i].scene.images.get(&image).unwrap().width, 4);
+        let idx = app
+            .xref_manager
+            .entries
+            .iter()
+            .position(|e| e.kind == RefKind::Image)
+            .expect("image listed");
         app.xref_manager.selected.insert(idx);
         app.tabs[i].xref_unloaded.add(key);
+        image::RgbaImage::new(8, 8).save(&png).unwrap();
+
         let start = app.command_line.history.len();
         app.xref_manager_op(XrefPaletteOp::Reload);
         let out = palette_output(&app, start);
-        assert!(out.contains("img.png"), "got: {out:?}");
-        assert_eq!(app.command_line.history.len(), start + 1);
-        assert!(app.tabs[i].xref_unloaded.is_unloaded(key), "image flag must stay untouched");
+        assert!(!out.contains("reload applies to drawing references only"), "got: {out:?}");
+        assert!(out.contains("Reloaded") && out.contains("plan.png"), "got: {out:?}");
+        assert!(!app.tabs[i].xref_unloaded.is_unloaded(key), "Reload must clear the flag");
+        assert_eq!(app.tabs[i].scene.images.get(&image).unwrap().width, 8);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reload_all_reloads_images_too() {
+        let (mut app, dir, png, key, image) = app_with_png_image("imgreloadall", 4);
+        let i = app.active_tab;
+        app.tabs[i].xref_unloaded.add(key);
+        image::RgbaImage::new(8, 8).save(&png).unwrap();
+
+        app.xref_manager_reload_all();
+        assert!(!app.tabs[i].xref_unloaded.is_unloaded(key), "Reload All must clear the flag");
+        assert_eq!(app.tabs[i].scene.images.get(&image).unwrap().width, 8);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn xref_path_then_reload_shows_the_new_image() {
+        // `XREF Path` edits the definition and says "Reload to apply": the Reload now applies it.
+        let (mut app, dir, _png, _key, image) = app_with_png_image("imgpath", 4);
+        let i = app.active_tab;
+        let other = dir.join("other.png");
+        image::RgbaImage::new(6, 6).save(&other).unwrap();
+        assert_eq!(app.tabs[i].scene.images.get(&image).unwrap().width, 4);
+
+        let start = app.command_line.history.len();
+        let _ = app.run_command_line(&format!("XREF Path plan.png {}", other.display()));
+        let _ = app.run_command_line("XREF Reload *");
+        let out = palette_output(&app, start);
+        assert!(!out.contains("reload applies to drawing references only"), "got: {out:?}");
+        assert_eq!(
+            app.tabs[i].scene.images.get(&image).expect("resolves").width,
+            6,
+            "got: {out:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

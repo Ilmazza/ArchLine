@@ -110,7 +110,9 @@ collegamenti dati in **CSV e testo**; Excel non verificato) e l'API dei plugin P
 
 ## 6. Lacune trovate lavorando
 
-### 6.1 Le immagini non si possono ricaricare (segnalato da te)
+### 6.1 Le immagini non si possono ricaricare (segnalato da te) — RISOLTO il 2026-10-07
+
+**Stato attuale.** `XREF Reload`, il Reload della palette e «Reload All References» ricaricano ora anche le immagini: rileggono il file, applicano un percorso cambiato con `XREF Path` e tolgono lo stato «Unloaded». Implementato con `invalidate_image` (`image_model.rs`) e `Scene::reload_image_definitions` (`scene/entity.rs`); verificato da test, **non ancora visto a schermo**. Restano aperti il Reload dei PDF/DWF da riga di comando (rifiutato, mentre la palette li ricarica) e `IMAGEADJUST`/`IMAGEQUALITY`. Il testo sotto descrive il difetto com'era prima della correzione.
 
 **Sintomo.** Se il file di un'immagine collegata cambia, o compare dopo essere mancato, il disegno non la aggiorna.
 
@@ -150,7 +152,7 @@ stimato ore). Niente numeri inventati.
 
 | # | Cosa | Impatto | Costo | Perché |
 |---|---|---|---|---|
-| 1 | Ricarica delle immagini (§6.1) | alto: piante scansionate e catastali cambiano spesso | basso | difetto già segnalato, causa chiara |
+| 1 | ~~Ricarica delle immagini (§6.1)~~ fatto | alto: piante scansionate e catastali cambiano spesso | basso | difetto già segnalato, causa chiara |
 | 2 | `LAYERP`, `LAYCUR`, `LAYWALK` | medio: lavoro quotidiano sui layer | basso | la barra Layers c'è, mancano i comandi |
 | 3 | `PUBLISH` e `PREVIEW` | alto: consegna di più tavole | medio | la stampa singola c'è |
 | 4 | `TXTEXP`, `COPYTOLAYER`, `CHSPACE`, `BCOUNT` | medio | basso | comandi di editing isolati |

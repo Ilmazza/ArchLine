@@ -1027,6 +1027,7 @@ impl OpenCADStudio {
                             // Reloaded keys leave the session-unloaded set
                             // (so the listing agrees) with fresh stat
                             // baselines on the next palette refresh.
+                            let mut image_rows: Vec<(u64, String)> = Vec::new();
                             let reload_keys: Vec<u64> = {
                                 let entries = crate::io::xref::collect_entries_with_prev(
                                     &self.tabs[i].scene.document,
@@ -1034,11 +1035,11 @@ impl OpenCADStudio {
                                     self.tabs[i].xref_unloaded.as_set(),
                                     &self.tabs[i].xref_stat_cache.0,
                                 );
-                                // Drawing references only (mirrors the palette
-                                // Reload): image/PDF rows keep their flags
-                                // untouched and nested rows report per-entry
-                                // instead of clearing state that resolve
-                                // cannot rebuild.
+                                // Drawing references resolve through `XrefInfo`;
+                                // image rows reload through `reload_image_refs`
+                                // (kept out of the DWG-only list). Nested rows
+                                // and other kinds report per-entry instead of
+                                // clearing state that resolve cannot rebuild.
                                 let mut keys = Vec::new();
                                 for e in &entries {
                                     let hit = pattern.is_empty()
@@ -1052,6 +1053,8 @@ impl OpenCADStudio {
                                             "XREF: cannot reload nested reference '{}'. Reload it in its host drawing.",
                                             e.name
                                         ).as_ref());
+                                    } else if e.kind == crate::io::xref_model::RefKind::Image {
+                                        image_rows.push((e.key, e.name.clone()));
                                     } else if e.kind != crate::io::xref_model::RefKind::DwgXref {
                                         self.command_line.push_error(
                                             crate::tf!(
@@ -1071,7 +1074,11 @@ impl OpenCADStudio {
                             // return before snapshot + resolve so no empty
                             // undo entry is pushed and no spurious
                             // no-match error follows the per-entry reports.
-                            if reload_keys.is_empty() && !pattern.is_empty() && pattern != "*" {
+                            if reload_keys.is_empty()
+                                && image_rows.is_empty()
+                                && !pattern.is_empty()
+                                && pattern != "*"
+                            {
                                 return Some(self.finish_dispatch(cmd));
                             }
                             self.push_undo_snapshot(i, "XREF-RELOAD");
@@ -1079,6 +1086,7 @@ impl OpenCADStudio {
                                 self.tabs[i].xref_unloaded.remove(key);
                                 self.tabs[i].xref_stat_cache.remove(key);
                             }
+                            let images_reloaded = self.reload_image_refs(i, &image_rows);
                             let handles: rustc_hash::FxHashSet<codec::types::Handle> = self.tabs
                                 [i]
                                 .scene
@@ -1122,7 +1130,7 @@ impl OpenCADStudio {
                                     })
                                     .collect()
                             };
-                            if matched.is_empty() {
+                            if matched.is_empty() && images_reloaded == 0 {
                                 self.command_line.push_error(
                                     crate::tf!("XREF: no references match '{}'.", pattern).as_ref(),
                                 );
@@ -1948,48 +1956,58 @@ mod tests {
     }
 
     #[test]
-    fn xref_reload_image_keeps_flag_no_spurious_match() {
-        // CLI mirror of the palette F7 guard: reloading an image row reports
-        // the drawing-only error, leaves its unloaded flag untouched, and
-        // does not follow with a spurious no-match error.
+    fn xref_reload_image_reloads_pixels_and_clears_flag() {
+        // XREF Reload on an image row re-reads the file (it used to refuse images), clears the
+        // session-unloaded flag and reports it, with no spurious "no references match".
         use codec::objects::{ImageDefinition, ObjectType};
         let mut app = fresh_app();
         let i = app.active_tab;
+        let png = std::env::temp_dir().join(format!("archline_cli_reload_{}.png", std::process::id()));
+        image::RgbaImage::new(4, 4).save(&png).unwrap();
+        let path = png.to_string_lossy().to_string();
         let h = app.tabs[i].scene.document.allocate_handle();
-        let mut def = ImageDefinition::with_dimensions("img.png", 8, 8);
+        let mut def = ImageDefinition::with_dimensions(&path, 4, 4);
         def.handle = h;
         app.tabs[i]
             .scene
             .document
             .objects
             .insert(h, ObjectType::ImageDefinition(def));
-        let mut img = codec::entities::RasterImage::new(
-            "img.png",
+        let mut img = codec::entities::RasterImage::with_size(
+            &path,
             codec::types::Vector3::ZERO,
-            8.0,
-            8.0,
+            4.0,
+            4.0,
+            1.0,
+            1.0,
         );
         img.definition_handle = Some(h);
-        app.tabs[i]
+        let image = app.tabs[i]
             .scene
-            .document
-            .add_entity(codec::EntityType::RasterImage(img))
-            .unwrap();
+            .add_entity(codec::EntityType::RasterImage(img));
+        assert_eq!(app.tabs[i].scene.images.get(&image).unwrap().width, 4);
         app.tabs[i].current_path = Some(std::path::PathBuf::from("C:/Drawings/host.dwg"));
         app.tabs[i].xref_unloaded.add(h.value());
-        let out = run_capture(&mut app, "XREF Reload img.png");
+        image::RgbaImage::new(8, 8).save(&png).unwrap();
+
+        let name = png.file_name().unwrap().to_string_lossy().to_string();
+        let out = run_capture(&mut app, &format!("XREF Reload {name}"));
         assert!(
-            out.contains("reload applies to drawing references only"),
+            !out.contains("reload applies to drawing references only"),
             "got: {out:?}"
         );
+        assert!(!out.contains("no references match"), "got: {out:?}");
+        assert!(out.contains("Reloaded"), "got: {out:?}");
         assert!(
-            !out.contains("no references match"),
-            "spurious no-match, got: {out:?}"
+            !app.tabs[i].xref_unloaded.is_unloaded(h.value()),
+            "Reload must clear the unloaded flag of an image"
         );
-        assert!(
-            app.tabs[i].xref_unloaded.is_unloaded(h.value()),
-            "image flag must stay untouched"
+        assert_eq!(
+            app.tabs[i].scene.images.get(&image).unwrap().width,
+            8,
+            "the new pixels must show"
         );
+        let _ = std::fs::remove_file(&png);
     }
 
     #[test]
