@@ -13203,6 +13203,124 @@ mod journal_tests {
     /// A raster pointing at a path that cannot exist. `resolve_image` memoises
     /// per path for the life of the process, so each test uses its own path and
     /// cannot inherit another's cached answer.
+    // ── Reload of image definitions (XREF Reload on an image row) ─────────────
+
+    fn reload_png(tag: &str, w: u32, h: u32) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "archline_reload_{}_{}_{}.png",
+            std::process::id(),
+            tag,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        image::RgbaImage::new(w, h).save(&path).unwrap();
+        path
+    }
+
+    /// Add an image definition and a raster image linked to it; returns (definition, image).
+    fn add_linked_image(s: &mut Scene, path: &str) -> (Handle, Handle) {
+        use codec::objects::{ImageDefinition, ObjectType};
+        let def_handle = s.document.allocate_handle();
+        let mut def = ImageDefinition::with_dimensions(path, 8, 8);
+        def.handle = def_handle;
+        s.document.objects.insert(def_handle, ObjectType::ImageDefinition(def));
+        let mut img = codec::entities::RasterImage::with_size(
+            path,
+            codec::types::Vector3::new(0.0, 0.0, 0.0),
+            8.0,
+            8.0,
+            1.0,
+            1.0,
+        );
+        img.definition_handle = Some(def_handle);
+        (def_handle, s.add_entity(EntityType::RasterImage(img)))
+    }
+
+    /// A scene with one image definition and one raster image linked to it.
+    fn scene_with_linked_image(path: &str) -> (Scene, Handle, Handle) {
+        let mut s = Scene::new();
+        let (def, image) = add_linked_image(&mut s, path);
+        (s, def, image)
+    }
+
+    #[test]
+    fn reload_image_definitions_shows_a_file_changed_on_disk() {
+        let path = reload_png("changed", 4, 4);
+        let key = path.to_string_lossy().to_string();
+        let (mut s, def, image) = scene_with_linked_image(&key);
+        assert_eq!(s.images.get(&image).expect("resolves").width, 4);
+
+        image::RgbaImage::new(8, 8).save(&path).unwrap();
+        assert_eq!(s.images.get(&image).unwrap().width, 4, "stale until reloaded");
+
+        let epoch = s.geometry_epoch;
+        s.reload_image_definitions(&[def]);
+        assert_eq!(s.images.get(&image).expect("still there").width, 8);
+        assert!(s.geometry_epoch > epoch, "the redraw needs a geometry bump");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_image_definitions_shows_a_file_that_appears_after_being_missing() {
+        let missing = std::env::temp_dir().join(format!("archline_reload_late_{}.png", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let key = missing.to_string_lossy().to_string();
+        let (mut s, def, image) = scene_with_linked_image(&key);
+        assert!(s.images.get(&image).is_none(), "a missing file draws no picture");
+
+        image::RgbaImage::new(5, 3).save(&missing).unwrap();
+        s.reload_image_definitions(&[def]);
+        let model = s.images.get(&image).expect("the file exists now");
+        assert_eq!((model.width, model.height), (5, 3));
+        let _ = std::fs::remove_file(&missing);
+    }
+
+    #[test]
+    fn reload_image_definitions_applies_a_path_set_on_the_definition() {
+        use codec::objects::ObjectType;
+        let old = reload_png("old", 4, 4);
+        let new = reload_png("new", 6, 6);
+        let (old_key, new_key) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
+        let (mut s, def, image) = scene_with_linked_image(&old_key);
+        assert_eq!(s.images.get(&image).unwrap().width, 4);
+
+        // What XREF Path does: it edits the definition only.
+        crate::io::xref::set_ref_path(&mut s.document, def.value(), &new_key).unwrap();
+        s.reload_image_definitions(&[def]);
+
+        assert_eq!(s.images.get(&image).expect("resolves").width, 6);
+        match s.document.get_entity(image) {
+            Some(EntityType::RasterImage(img)) => assert_eq!(img.file_path, new_key),
+            other => panic!("expected the raster image, got {other:?}"),
+        }
+        match s.document.objects.get(&def) {
+            Some(ObjectType::ImageDefinition(d)) => assert_eq!(d.file_name, new_key),
+            _ => panic!("definition kept"),
+        }
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn reload_image_definitions_leaves_other_definitions_alone() {
+        let path_a = reload_png("a", 4, 4);
+        let path_b = reload_png("b", 4, 4);
+        let (mut s, def_a, image_a) = scene_with_linked_image(&path_a.to_string_lossy());
+        let (_def_b, image_b) = add_linked_image(&mut s, &path_b.to_string_lossy());
+        image::RgbaImage::new(9, 9).save(&path_a).unwrap();
+        image::RgbaImage::new(9, 9).save(&path_b).unwrap();
+
+        s.reload_image_definitions(&[def_a]);
+        assert_eq!(s.images.get(&image_a).unwrap().width, 9, "the reloaded definition updates");
+        assert_eq!(
+            s.images.get(&image_b).unwrap().width,
+            4,
+            "an image linked to another definition keeps its cached pixels"
+        );
+        let _ = (std::fs::remove_file(&path_a), std::fs::remove_file(&path_b));
+    }
+
     fn broken_raster(tag: &str) -> codec::entities::RasterImage {
         use codec::entities::RasterImage;
         use codec::types::Vector3;

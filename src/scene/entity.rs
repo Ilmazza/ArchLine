@@ -2448,6 +2448,49 @@ impl Scene {
         }
     }
 
+    /// Re-read the pixels of the raster images linked to the image definitions `keys`
+    /// (XREF Reload on an image row). The definition is the authority for the file name: it is
+    /// what XREF Path edits and what files store, while rendering reads the entity's own
+    /// `file_path`, so that is brought in line first. Then the old and the new path leave the
+    /// image cache (a changed file, or one that appears after being missing, must show up) and
+    /// the image models are rebuilt with a geometry bump. Images of other definitions keep
+    /// their cached pixels.
+    pub fn reload_image_definitions(&mut self, keys: &[Handle]) {
+        use crate::scene::model::image_model::invalidate_image;
+        let mut def_paths: Vec<(Handle, String)> = Vec::new();
+        for key in keys {
+            if let Some(codec::objects::ObjectType::ImageDefinition(def)) =
+                self.document.objects.get(key)
+            {
+                invalidate_image(&def.file_name);
+                def_paths.push((*key, def.file_name.clone()));
+            }
+        }
+        let linked: Vec<(Handle, String)> = self
+            .document
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::RasterImage(img) => {
+                    let def = img.definition_handle?;
+                    def_paths
+                        .iter()
+                        .find(|(key, _)| *key == def)
+                        .map(|(_, path)| (e.common().handle, path.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (entity, new_path) in linked {
+            if let Some(EntityType::RasterImage(img)) = self.document.get_entity_mut(entity) {
+                invalidate_image(&img.file_path);
+                if !new_path.trim().is_empty() {
+                    img.file_path = new_path;
+                }
+            }
+        }
+        self.populate_images_from_document();
+    }
+
     /// Rebuild the cached fill model (hatch / DXF SOLID) for `handle` after
     /// its document entity was edited in place. The fill models are prebuilt
     /// at load, so a pattern-scale / background / boundary edit stays
