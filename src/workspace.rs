@@ -34,6 +34,16 @@ pub fn menu_bar_shown(clean_screen: bool) -> bool {
     menu_bar_shown_in(is_classic(), clean_screen)
 }
 
+/// `true` when the command line and the status bar are drawn on this tab. The
+/// classic Start page has neither, as in AutoCAD; every other tab keeps both.
+pub fn bottom_chrome_shown(is_start_tab: bool) -> bool {
+    bottom_chrome_shown_in(is_classic(), is_start_tab)
+}
+
+fn bottom_chrome_shown_in(classic: bool, is_start_tab: bool) -> bool {
+    !(classic && is_start_tab)
+}
+
 fn ribbon_shown_in(classic: bool, _is_start_tab: bool, clean_screen: bool) -> bool {
     !classic && !clean_screen
 }
@@ -57,6 +67,13 @@ mod tests {
         assert!(ribbon_shown_in(false, true, false), "Start page keeps the ribbon");
         assert!(ribbon_shown_in(false, false, false));
         assert!(!ribbon_shown_in(false, false, true));
+    }
+
+    #[test]
+    fn the_classic_start_page_has_no_command_line_or_status_bar() {
+        assert!(!bottom_chrome_shown_in(true, true));
+        assert!(bottom_chrome_shown_in(true, false), "drawing tabs keep them");
+        assert!(bottom_chrome_shown_in(false, true), "the ribbon workspace is unchanged");
     }
 
     #[test]

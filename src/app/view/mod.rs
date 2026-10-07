@@ -2115,6 +2115,9 @@ bg={bg_ms:.1}ms n={view_count}"
         );
         let center_stack: Element<'_, Message> = if thumbnail_capture_clean {
             workspace
+        } else if tab.is_start && !crate::workspace::bottom_chrome_shown(true) {
+            // ArchLine: the classic Start page has no command line.
+            workspace
         } else if tab.is_start {
             column![
                 workspace,
@@ -2202,7 +2205,10 @@ bg={bg_ms:.1}ms n={view_count}"
                 center_stack,
             );
             col.push(center_stack)
-                .push({
+                .push(if !crate::workspace::bottom_chrome_shown(tab.is_start) {
+                    // ArchLine: no status bar on the classic Start page.
+                    Element::<Message>::from(iced::widget::Space::new().width(0).height(0))
+                } else {
                     let is_model = tab.scene.current_layout == "Model";
                     let scale_pill_enabled = is_model
                         || tab.scene.active_viewport.is_some()
