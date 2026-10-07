@@ -1127,6 +1127,9 @@ const MENU_CURSOR_INSET_X: f32 = 24.0;
 /// not the row carries a glyph (object snaps, command icons).
 const MENU_GUTTER_W: f32 = 18.0;
 const MENU_ICON_SIZE: f32 = 14.0;
+/// Height `sep()` really renders (the model's `MENU_SEP_H` also counts padding
+/// the view does not draw), used to line a submenu up with its header.
+const MENU_SEP_RENDERED_H: f32 = 1.0;
 
 /// The gutter cell: the row's glyph, faded with a disabled row, or empty
 /// space of the same width.
@@ -1183,6 +1186,11 @@ pub(super) fn viewport_context_menu_overlay(
     // keyboard highlight lands on the same row the model counts.
     let mut sel_idx = 0usize;
     let mut items: Vec<Element<'static, Message>> = Vec::new();
+    // The open submenu's rows go in a panel beside the menu, level with
+    // their header; `y` tracks the header's distance from the panel top.
+    let mut flyout_items: Vec<Element<'static, Message>> = Vec::new();
+    let mut flyout_top = 0.0f32;
+    let mut y = 0.0f32;
 
     for row in &menu.rows {
         match row {
@@ -1190,8 +1198,12 @@ pub(super) fn viewport_context_menu_overlay(
                 let is_hl = highlighted == Some(sel_idx);
                 items.push(context_menu_row(item, 0.0, is_hl));
                 sel_idx += 1;
+                y += MENU_ROW_H;
             }
-            MenuRow::Separator => items.push(sep()),
+            MenuRow::Separator => {
+                items.push(sep());
+                y += MENU_SEP_RENDERED_H;
+            }
             MenuRow::Submenu {
                 id,
                 label,
@@ -1201,12 +1213,10 @@ pub(super) fn viewport_context_menu_overlay(
             } => {
                 let is_hl = highlighted == Some(sel_idx);
                 let enabled = !children.is_empty();
-                let caret = if !enabled {
-                    crate::ui::icons::themed_disabled_arrow_right(9.0)
-                } else if *open {
-                    crate::ui::icons::themed_arrow_down(9.0)
-                } else {
+                let caret = if enabled {
                     crate::ui::icons::themed_arrow_right(9.0)
+                } else {
+                    crate::ui::icons::themed_disabled_arrow_right(9.0)
                 };
                 let content = row![
                     context_menu_gutter(*icon, enabled),
@@ -1232,36 +1242,52 @@ pub(super) fn viewport_context_menu_overlay(
                 items.push(btn.into());
                 sel_idx += 1;
                 if *open {
+                    flyout_top = y;
                     for child in children {
                         let is_hl = highlighted == Some(sel_idx);
-                        items.push(context_menu_row(child, 14.0, is_hl));
+                        flyout_items.push(context_menu_row(child, 0.0, is_hl));
                         sel_idx += 1;
                     }
                 }
+                y += MENU_ROW_H;
             }
         }
     }
 
-    let menu_col = column(items).spacing(0).width(Length::Fixed(menu.width));
-    let menu_col = scrollable(menu_col)
-        .height(Length::Shrink)
-        .direction(scrollable::Direction::Vertical(
-            scrollable::Scrollbar::new()
-                .width(8)
-                .scroller_width(6),
-        ));
-
-    let panel = container(menu_col)
-        .style(container::bordered_box)
-        .padding([MENU_PAD_TOP as u16, 0])
-        .width(Length::Fixed(menu.width));
+    let panel = context_menu_panel(items, menu.width);
+    let panel: Element<'static, Message> = if flyout_items.is_empty() {
+        panel
+    } else {
+        let flyout = column![
+            iced::widget::Space::new().height(flyout_top),
+            context_menu_panel(flyout_items, menu.width),
+        ];
+        row![panel, flyout].into()
+    };
 
     // Shift the panel so the default row's centre line is under the pointer.
     let offset = Vector::new(
         -MENU_CURSOR_INSET_X,
         -(menu.default_row_y() + MENU_ROW_H * 0.5),
     );
-    position_canvas_overlay_clamped(pos, bottom_inset, offset, panel.into())
+    position_canvas_overlay_clamped(pos, bottom_inset, offset, panel)
+}
+
+/// A menu panel: the rows in a scrollable column inside a bordered box.
+fn context_menu_panel(items: Vec<Element<'static, Message>>, width: f32) -> Element<'static, Message> {
+    let col = column(items).spacing(0).width(Length::Fixed(width));
+    let col = scrollable(col)
+        .height(Length::Shrink)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new()
+                .width(8)
+                .scroller_width(6),
+        ));
+    container(col)
+        .style(container::bordered_box)
+        .padding([MENU_PAD_TOP as u16, 0])
+        .width(Length::Fixed(width))
+        .into()
 }
 
 /// One menu row: label (bold for the default row, "✓ "-prefixed when
@@ -1789,4 +1815,52 @@ fn qselect_content<'a>(
         });
 
     panel.into()
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+    use crate::ui::popup::context_menu::{build_context_menu, MenuContext, SubmenuId, MENU_ROW_H};
+
+    fn line_menu(open: Option<SubmenuId>) -> ContextMenu {
+        build_context_menu(
+            &MenuContext::Command {
+                options: Vec::new(),
+                has_point_step: true,
+                recent_inputs: Vec::new(),
+            },
+            open,
+        )
+    }
+
+    fn bounds_of(menu: &ContextMenu, text: &str) -> Rectangle {
+        let el = viewport_context_menu_overlay(iced::Point::new(300.0, 300.0), 0.0, menu, None);
+        let mut ui = iced_test::simulator(el);
+        let target = ui.find(text).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+        iced_test::selector::Bounded::bounds(&target)
+    }
+
+    #[test]
+    fn an_open_submenu_sits_beside_the_menu_and_leaves_the_rows_below_where_they_are() {
+        let closed = line_menu(None);
+        let open = line_menu(Some(SubmenuId::SnapOverrides));
+        let pan_closed = bounds_of(&closed, "Pan");
+        let pan_open = bounds_of(&open, "Pan");
+        assert_eq!(pan_open.y, pan_closed.y, "Pan must not slide down when the submenu opens");
+
+        let header = bounds_of(&open, "Snap Overrides");
+        let first = bounds_of(&open, "Mid Between 2 Points");
+        assert!(
+            (first.y - header.y).abs() <= 4.0,
+            "the first variant is level with its header ({} vs {})",
+            first.y,
+            header.y
+        );
+        let gap = first.x - header.x;
+        assert!(
+            gap >= open.width - 1.0 && gap <= open.width + 24.0,
+            "the variants start one menu width to the right of the header, got {gap}"
+        );
+        assert!(first.height <= MENU_ROW_H, "rows keep their height");
+    }
 }
