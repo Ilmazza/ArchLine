@@ -1188,8 +1188,7 @@ pub(super) fn viewport_context_menu_overlay(
     let mut items: Vec<Element<'static, Message>> = Vec::new();
     // The open submenu's rows go in a panel beside the menu, level with
     // their header; `y` tracks the header's distance from the panel top.
-    let mut flyout_items: Vec<Element<'static, Message>> = Vec::new();
-    let mut flyout_top = 0.0f32;
+    let mut flyout = Flyout::default();
     let mut y = 0.0f32;
 
     for row in &menu.rows {
@@ -1242,11 +1241,21 @@ pub(super) fn viewport_context_menu_overlay(
                 items.push(btn.into());
                 sel_idx += 1;
                 if *open {
-                    flyout_top = y;
+                    flyout.header_y = y;
+                    let mut row_y = 0.0f32;
                     for child in children {
                         let is_hl = highlighted == Some(sel_idx);
-                        flyout_items.push(context_menu_row(child, 0.0, is_hl));
+                        flyout.items.push(context_menu_row(child, 0.0, is_hl));
                         sel_idx += 1;
+                        if let Some(nested) = child.nested.as_ref().filter(|n| n.open) {
+                            flyout.nested_header_y = row_y;
+                            for grandchild in &nested.items {
+                                let is_hl = highlighted == Some(sel_idx);
+                                flyout.nested_items.push(context_menu_row(grandchild, 0.0, is_hl));
+                                sel_idx += 1;
+                            }
+                        }
+                        row_y += MENU_ROW_H;
                     }
                 }
                 y += MENU_ROW_H;
@@ -1254,16 +1263,9 @@ pub(super) fn viewport_context_menu_overlay(
         }
     }
 
+    let main_h = 2.0 * MENU_PAD_TOP + y;
     let panel = context_menu_panel(items, menu.width);
-    let panel: Element<'static, Message> = if flyout_items.is_empty() {
-        panel
-    } else {
-        let flyout = column![
-            iced::widget::Space::new().height(flyout_top),
-            context_menu_panel(flyout_items, menu.width),
-        ];
-        row![panel, flyout].into()
-    };
+    let panel = flyout.beside(panel, main_h, menu.width);
 
     // Shift the panel so the default row's centre line is under the pointer.
     let offset = Vector::new(
@@ -1271,6 +1273,68 @@ pub(super) fn viewport_context_menu_overlay(
         -(menu.default_row_y() + MENU_ROW_H * 0.5),
     );
     position_canvas_overlay_clamped(pos, bottom_inset, offset, panel)
+}
+
+/// The panels opened beside the menu: a submenu, and one nested inside it.
+#[derive(Default)]
+struct Flyout {
+    /// Distance from the menu's top to the row that opens the submenu.
+    header_y: f32,
+    items: Vec<Element<'static, Message>>,
+    /// Distance from the submenu's top to the row that opens the nested one.
+    nested_header_y: f32,
+    nested_items: Vec<Element<'static, Message>>,
+}
+
+/// Where a panel of height `h` goes inside a container of `container_h`: level
+/// with `wanted`, or higher up when that would hang it below the container.
+fn fit_top(wanted: f32, h: f32, container_h: f32) -> f32 {
+    if wanted + h <= container_h {
+        wanted
+    } else {
+        (container_h - h).max(0.0)
+    }
+}
+
+fn panel_height(rows: usize) -> f32 {
+    2.0 * MENU_PAD_TOP + rows as f32 * MENU_ROW_H
+}
+
+impl Flyout {
+    /// `menu` with the open submenus laid out to its right.
+    fn beside(
+        self,
+        menu: Element<'static, Message>,
+        menu_h: f32,
+        width: f32,
+    ) -> Element<'static, Message> {
+        if self.items.is_empty() {
+            return menu;
+        }
+        let top = fit_top(self.header_y, panel_height(self.items.len()), menu_h);
+        let nested = (!self.nested_items.is_empty()).then(|| {
+            let nested_top = fit_top(
+                self.nested_header_y,
+                panel_height(self.nested_items.len()),
+                panel_height(self.items.len()),
+            );
+            (top + nested_top, self.nested_items)
+        });
+        let mut layout = row![
+            menu,
+            column![
+                iced::widget::Space::new().height(top),
+                context_menu_panel(self.items, width),
+            ],
+        ];
+        if let Some((nested_top, items)) = nested {
+            layout = layout.push(column![
+                iced::widget::Space::new().height(nested_top),
+                context_menu_panel(items, width),
+            ]);
+        }
+        layout.into()
+    }
 }
 
 /// A menu panel: the rows in a scrollable column inside a bordered box.
@@ -1328,6 +1392,11 @@ fn context_menu_row(item: &MenuItem, indent: f32, highlighted: bool) -> Element<
                         }
                     }),
             );
+    }
+    if item.nested.is_some() {
+        content = content
+            .push(iced::widget::Space::new().width(Fill))
+            .push(crate::ui::icons::themed_arrow_right(9.0));
     }
     let mut btn = button(content)
         .padding(iced::Padding {
@@ -1827,7 +1896,7 @@ mod context_menu_tests {
             &MenuContext::Command {
                 options: Vec::new(),
                 has_point_step: true,
-                recent_inputs: Vec::new(),
+                recent_inputs: vec!["10,10".into(), "C".into()],
             },
             open,
         )
@@ -1841,7 +1910,7 @@ mod context_menu_tests {
     }
 
     #[test]
-    fn an_open_submenu_sits_beside_the_menu_and_leaves_the_rows_below_where_they_are() {
+    fn an_open_submenu_sits_one_menu_width_to_the_right_and_the_rows_below_stay_put() {
         let closed = line_menu(None);
         let open = line_menu(Some(SubmenuId::SnapOverrides));
         let pan_closed = bounds_of(&closed, "Pan");
@@ -1850,17 +1919,59 @@ mod context_menu_tests {
 
         let header = bounds_of(&open, "Snap Overrides");
         let first = bounds_of(&open, "Temporary track point");
-        assert!(
-            (first.y - header.y).abs() <= 4.0,
-            "the first variant is level with its header ({} vs {})",
-            first.y,
-            header.y
-        );
         let gap = first.x - header.x;
         assert!(
             gap >= open.width - 1.0 && gap <= open.width + 24.0,
             "the variants start one menu width to the right of the header, got {gap}"
         );
         assert!(first.height <= MENU_ROW_H, "rows keep their height");
+    }
+
+    #[test]
+    fn a_short_submenu_is_level_with_its_header() {
+        let open = line_menu(Some(SubmenuId::RecentInput));
+        let header = bounds_of(&open, "Recent Input");
+        let first = bounds_of(&open, "10,10");
+        assert!(
+            (first.y - header.y).abs() <= 4.0,
+            "first variant {} vs header {}",
+            first.y,
+            header.y
+        );
+    }
+
+    #[test]
+    fn a_submenu_taller_than_the_menu_starts_at_the_top_of_the_menu() {
+        let open = line_menu(Some(SubmenuId::SnapOverrides));
+        let enter = bounds_of(&open, "Enter");
+        let first = bounds_of(&open, "Temporary track point");
+        assert!(
+            (first.y - enter.y).abs() <= 4.0,
+            "first variant {} vs the menu's first row {}",
+            first.y,
+            enter.y
+        );
+    }
+
+    #[test]
+    fn a_nested_submenu_opens_beside_its_parent_level_with_its_header() {
+        let open = line_menu(Some(SubmenuId::PointFilters));
+        let header = bounds_of(&open, "Point Filters");
+        let first = bounds_of(&open, ".X");
+        let gap = first.x - header.x;
+        assert!(
+            gap >= open.width - 1.0 && gap <= open.width + 24.0,
+            "the filters start one panel width to the right of their header, got {gap}"
+        );
+        assert!(
+            (first.y - header.y).abs() <= 4.0,
+            "first filter {} vs header {}",
+            first.y,
+            header.y
+        );
+        // The parent submenu is still there, one width right of the menu.
+        let temp = bounds_of(&open, "Temporary track point");
+        let enter = bounds_of(&open, "Enter");
+        assert!(temp.x - enter.x >= open.width - 1.0);
     }
 }

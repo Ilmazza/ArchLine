@@ -925,6 +925,56 @@ pub enum PointModifier {
     From,
     /// Temporary tracking point (`TT`).
     TrackPoint,
+    /// Point filter (`.X`, `.XY`, …): some coordinates from one point, the
+    /// rest from another.
+    Filter(PointFilter),
+}
+
+/// The coordinates a point filter takes from its first point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointFilter {
+    X,
+    Y,
+    Z,
+    XY,
+    XZ,
+    YZ,
+}
+
+impl PointFilter {
+    pub const ALL: [Self; 6] = [Self::X, Self::Y, Self::Z, Self::XY, Self::XZ, Self::YZ];
+
+    /// The filtered axes, as typed after the dot.
+    pub fn axes(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::XY => "XY",
+            Self::XZ => "XZ",
+            Self::YZ => "YZ",
+        }
+    }
+
+    /// The axes the second point has to give.
+    fn needed(self) -> &'static str {
+        match self {
+            Self::X => "YZ",
+            Self::Y => "XZ",
+            Self::Z => "XY",
+            Self::XY => "Z",
+            Self::XZ => "Y",
+            Self::YZ => "X",
+        }
+    }
+
+    fn from_axes(axes: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.axes().eq_ignore_ascii_case(axes))
+    }
+
+    fn takes(self, axis: char) -> bool {
+        self.axes().contains(axis)
+    }
 }
 
 impl PointModifier {
@@ -938,7 +988,9 @@ impl PointModifier {
         } else if t.eq_ignore_ascii_case("TT") {
             Some(Self::TrackPoint)
         } else {
-            None
+            t.strip_prefix('.')
+                .and_then(PointFilter::from_axes)
+                .map(Self::Filter)
         }
     }
 
@@ -947,6 +999,7 @@ impl PointModifier {
             Self::Mtp => Box::new(Mid2PointCommand::new()),
             Self::From => Box::new(FromCommand::new()),
             Self::TrackPoint => Box::new(TrackPointCommand::new()),
+            Self::Filter(filter) => Box::new(PointFilterCommand::new(filter)),
         }
     }
 }
@@ -1009,6 +1062,89 @@ impl CadCommand for FromCommand {
         self.base
             .map(|base| base_rubber_band("from_rubber_band", base, pt))
             .unwrap_or_default()
+    }
+}
+
+/// `.X`, `.XY`, …: the filtered coordinates come from the first point, the
+/// others from the second. When a single coordinate is still needed a typed
+/// number gives it; a typed `x,y` pair is an ordinary point, so it supplies the
+/// needed coordinates under their own names.
+#[derive(Debug)]
+pub struct PointFilterCommand {
+    filter: PointFilter,
+    first: Option<DVec3>,
+}
+
+impl PointFilterCommand {
+    pub fn new(filter: PointFilter) -> Self {
+        Self { filter, first: None }
+    }
+
+    /// The first point's filtered coordinates, the others from `rest`.
+    fn combine(&self, first: DVec3, rest: DVec3) -> DVec3 {
+        DVec3::new(
+            if self.filter.takes('X') { first.x } else { rest.x },
+            if self.filter.takes('Y') { first.y } else { rest.y },
+            if self.filter.takes('Z') { first.z } else { rest.z },
+        )
+    }
+}
+
+impl CadCommand for PointFilterCommand {
+    fn name(&self) -> &'static str {
+        match self.filter {
+            PointFilter::X => ".X",
+            PointFilter::Y => ".Y",
+            PointFilter::Z => ".Z",
+            PointFilter::XY => ".XY",
+            PointFilter::XZ => ".XZ",
+            PointFilter::YZ => ".YZ",
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self.first {
+            None => format!("{} of Specify point:", self.name()),
+            Some(_) => format!("{} (need {}):", self.name(), self.filter.needed()),
+        }
+    }
+
+    fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        match self.first {
+            None => {
+                self.first = Some(pt);
+                CmdResult::NeedPoint
+            }
+            Some(first) => CmdResult::ReturnPoint(self.combine(first, pt)),
+        }
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let first = self.first?;
+        let needed = self.filter.needed();
+        if needed.len() != 1 {
+            return None;
+        }
+        // A consumed number that does not parse keeps prompting (`None` would
+        // offer the same text to the command a second time).
+        let Some(value) = crate::entities::common::parse_length(text.trim()) else {
+            return Some(CmdResult::NeedPoint);
+        };
+        let mut rest = first;
+        match needed {
+            "X" => rest.x = value,
+            "Y" => rest.y = value,
+            _ => rest.z = value,
+        }
+        Some(CmdResult::ReturnPoint(self.combine(first, rest)))
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
     }
 }
 
@@ -3363,5 +3499,70 @@ mod tests {
         assert_eq!(PointModifier::From.command().name(), "FROM");
         assert_eq!(PointModifier::TrackPoint.command().name(), "TT");
         assert_eq!(PointModifier::Mtp.command().name(), "MTP");
+    }
+
+    #[test]
+    fn a_point_filter_takes_its_axes_from_the_first_pick_and_the_rest_from_the_second() {
+        let first = DVec3::new(1.0, 2.0, 3.0);
+        let second = DVec3::new(7.0, 8.0, 9.0);
+        for (filter, expected) in [
+            (PointFilter::X, DVec3::new(1.0, 8.0, 9.0)),
+            (PointFilter::Y, DVec3::new(7.0, 2.0, 9.0)),
+            (PointFilter::Z, DVec3::new(7.0, 8.0, 3.0)),
+            (PointFilter::XY, DVec3::new(1.0, 2.0, 9.0)),
+            (PointFilter::XZ, DVec3::new(1.0, 8.0, 3.0)),
+            (PointFilter::YZ, DVec3::new(7.0, 2.0, 3.0)),
+        ] {
+            let mut cmd = PointFilterCommand::new(filter);
+            assert!(matches!(cmd.on_point(first), CmdResult::NeedPoint), "{filter:?}");
+            let res = cmd.on_point(second);
+            assert!(
+                matches!(res, CmdResult::ReturnPoint(p) if p == expected),
+                "{filter:?}: expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_point_filter_names_itself_and_the_axes_still_needed() {
+        let mut cmd = PointFilterCommand::new(PointFilter::XY);
+        assert_eq!(cmd.name(), ".XY");
+        assert!(cmd.prompt().contains(".XY"), "{}", cmd.prompt());
+        let _ = cmd.on_point(DVec3::ZERO);
+        assert!(cmd.prompt().contains("need Z"), "{}", cmd.prompt());
+        let mut cmd = PointFilterCommand::new(PointFilter::X);
+        let _ = cmd.on_point(DVec3::ZERO);
+        assert!(cmd.prompt().contains("need YZ"), "{}", cmd.prompt());
+    }
+
+    #[test]
+    fn a_typed_number_gives_the_single_axis_still_needed() {
+        let mut cmd = PointFilterCommand::new(PointFilter::XY);
+        let _ = cmd.on_point(DVec3::new(1.0, 2.0, 3.0));
+        let res = cmd.on_text_input("5");
+        assert!(matches!(res, Some(CmdResult::ReturnPoint(p)) if p == DVec3::new(1.0, 2.0, 5.0)));
+
+        // Two axes still needed: one number cannot say which, so it is not taken.
+        let mut cmd = PointFilterCommand::new(PointFilter::X);
+        let _ = cmd.on_point(DVec3::new(1.0, 2.0, 3.0));
+        assert!(cmd.on_text_input("5").is_none());
+    }
+
+    #[test]
+    fn a_point_filter_enter_cancels_and_tokens_are_recognised() {
+        let mut cmd = PointFilterCommand::new(PointFilter::Z);
+        assert!(matches!(cmd.on_enter(), CmdResult::Cancel));
+        assert!(matches!(cmd.on_escape(), CmdResult::Cancel));
+        for filter in PointFilter::ALL {
+            let token = format!(".{}", filter.axes());
+            assert_eq!(
+                PointModifier::from_token(&token.to_lowercase()),
+                Some(PointModifier::Filter(filter))
+            );
+            assert_eq!(PointModifier::Filter(filter).command().name(), token);
+        }
+        assert_eq!(PointModifier::from_token("."), None);
+        assert_eq!(PointModifier::from_token("XY"), None);
+        assert_eq!(PointModifier::from_token(".W"), None);
     }
 }

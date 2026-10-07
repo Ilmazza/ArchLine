@@ -112,6 +112,16 @@ pub const ALL_3D_SNAP_MODES: &[(SnapType, &str, &str)] = &[
     (SnapType::NearestFace, "✦", "Nearest to face"),
 ];
 
+/// Display name of any snap mode, 2D or 3D.
+pub fn snap_label(t: SnapType) -> &'static str {
+    ALL_SNAP_MODES
+        .iter()
+        .chain(ALL_3D_SNAP_MODES)
+        .find(|(m, _, _)| *m == t)
+        .map(|(_, _, label)| *label)
+        .unwrap_or("Snap")
+}
+
 // ── Snap result ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -257,12 +267,22 @@ pub struct Snapper {
     /// direction + point under the cursor, when it was first hovered, and
     /// whether this dwell has already fired (so it acquires/toggles once).
     parallel_dwell: Option<(DVec3, DVec3, Instant, bool)>,
-    /// One-shot snap override (Shift+RMB menu): the (enabled set, snap on)
-    /// pair saved when the override engaged, restored when it is consumed by
-    /// the next point pick or cancelled. While `Some`, `enabled` holds only
-    /// the override mode and `snap_enabled` is forced on — the override works
-    /// even with running osnap off (#337).
-    override_saved: Option<(HashSet<SnapType>, bool)>,
+    /// One-shot snap override (Shift+RMB menu): the snap configuration saved
+    /// when the override engaged, restored when it is consumed by the next
+    /// point pick or cancelled. While `Some`, the override mode is the only one
+    /// on and its master is forced on — the override works even with running
+    /// osnap off (#337).
+    override_saved: Option<SavedSnap>,
+}
+
+/// Snap configuration parked while a one-shot override runs: both the 2D and
+/// the 3D system, each with its master toggle.
+#[derive(Clone, Debug)]
+struct SavedSnap {
+    enabled: HashSet<SnapType>,
+    snap_enabled: bool,
+    enabled3d: HashSet<SnapType>,
+    snap3d_enabled: bool,
 }
 
 impl Default for Snapper {
@@ -416,29 +436,48 @@ impl Snapper {
     /// configuration. Re-picking while active replaces the mode but keeps the
     /// original saved state.
     pub fn set_override(&mut self, t: SnapType) {
-        if self.override_saved.is_none() {
-            self.override_saved = Some((self.enabled.clone(), self.snap_enabled));
+        self.save_for_override();
+        if t.is_3d() {
+            // The 3D system is separate: isolate the mode there and silence 2D.
+            self.enabled3d = std::iter::once(t).collect();
+            self.snap3d_enabled = true;
+            self.enabled.clear();
+            self.snap_enabled = false;
+        } else {
+            self.enabled = std::iter::once(t).collect();
+            self.snap_enabled = true;
         }
-        self.enabled = std::iter::once(t).collect();
-        self.snap_enabled = true;
+    }
+
+    /// Park the running configuration the first time an override engages;
+    /// re-picking while active keeps the original.
+    fn save_for_override(&mut self) {
+        if self.override_saved.is_none() {
+            self.override_saved = Some(SavedSnap {
+                enabled: self.enabled.clone(),
+                snap_enabled: self.snap_enabled,
+                enabled3d: self.enabled3d.clone(),
+                snap3d_enabled: self.snap3d_enabled,
+            });
+        }
     }
 
     /// One-shot "None" override (Snap Overrides ▸ None): the next pick takes
     /// the raw cursor point, ignoring every running object snap, after which
     /// `clear_override` restores the saved configuration.
     pub fn set_override_none(&mut self) {
-        if self.override_saved.is_none() {
-            self.override_saved = Some((self.enabled.clone(), self.snap_enabled));
-        }
+        self.save_for_override();
         self.enabled.clear();
         self.snap_enabled = false;
     }
 
     /// Restore the pre-override snap configuration. No-op when inactive.
     pub fn clear_override(&mut self) {
-        if let Some((enabled, on)) = self.override_saved.take() {
-            self.enabled = enabled;
-            self.snap_enabled = on;
+        if let Some(saved) = self.override_saved.take() {
+            self.enabled = saved.enabled;
+            self.snap_enabled = saved.snap_enabled;
+            self.enabled3d = saved.enabled3d;
+            self.snap3d_enabled = saved.snap3d_enabled;
         }
     }
 
@@ -3868,6 +3907,51 @@ mod ext_tests {
         // 3D modes never leak into the 2D set.
         assert!(!s.is_on(SnapType::Vertex));
         assert!(!s.is_on(SnapType::EdgeMidpoint));
+    }
+
+    #[test]
+    fn a_3d_snap_override_isolates_that_mode_and_clear_restores_everything() {
+        let mut s = Snapper::default();
+        let (enabled, enabled3d) = (s.enabled.clone(), s.enabled3d.clone());
+        s.set_override(SnapType::FaceCenter);
+        assert!(s.is_on_3d(SnapType::FaceCenter));
+        assert!(!s.is_on_3d(SnapType::Vertex), "only the override mode snaps");
+        assert!(!s.is_active(), "no 2D mode snaps during a 3D override");
+        s.clear_override();
+        assert_eq!(s.enabled, enabled);
+        assert_eq!(s.enabled3d, enabled3d);
+        assert!(s.snap_enabled && s.snap3d_enabled);
+    }
+
+    #[test]
+    fn a_3d_snap_override_works_with_the_3d_master_off_and_restores_it_off() {
+        let mut s = Snapper::default();
+        s.snap3d_enabled = false;
+        s.set_override(SnapType::Vertex);
+        assert!(s.is_on_3d(SnapType::Vertex));
+        s.clear_override();
+        assert!(!s.snap3d_enabled);
+        assert!(!s.is_on_3d(SnapType::Vertex));
+    }
+
+    #[test]
+    fn every_snap_mode_has_a_label_including_the_3d_ones() {
+        assert_eq!(snap_label(SnapType::Endpoint), "Endpoint");
+        assert_eq!(snap_label(SnapType::FaceCenter), "Center of face");
+        for &(t, _, label) in ALL_SNAP_MODES.iter().chain(ALL_3D_SNAP_MODES) {
+            assert_eq!(snap_label(t), label);
+        }
+    }
+
+    #[test]
+    fn a_2d_snap_override_leaves_the_3d_set_alone() {
+        let mut s = Snapper::default();
+        let enabled3d = s.enabled3d.clone();
+        s.set_override(SnapType::Endpoint);
+        assert_eq!(s.enabled3d, enabled3d);
+        assert!(s.snap3d_enabled);
+        s.clear_override();
+        assert!(s.is_on(SnapType::Midpoint));
     }
 
     #[test]

@@ -943,11 +943,7 @@ impl OpenCADStudio {
             Message::SnapOverridePick(t) => {
                 self.snap_override_popup = None;
                 self.snapper.set_override(t);
-                let label = crate::snap::ALL_SNAP_MODES
-                    .iter()
-                    .find(|(m, _, _)| *m == t)
-                    .map(|(_, _, l)| *l)
-                    .unwrap_or("Snap");
+                let label = crate::snap::snap_label(t);
                 self.command_line
                     .push_info(crate::tf!("Snap override: {label} (next pick only).").as_ref());
                 Task::none()

@@ -13,7 +13,7 @@
 //! Clipboard / Undo-Redo / Isolate / Pan-Zoom / selection tools; during a grip
 //! edit it offers the grip modes.
 
-use crate::command::CmdOption;
+use crate::command::{CmdOption, PointFilter, PointModifier};
 use crate::scene::parametric_constraints::ConstraintId;
 use crate::scene::pick::grip::GripEditMode;
 use crate::snap::SnapType;
@@ -42,6 +42,27 @@ pub enum SubmenuId {
     DrawOrder,
     Isolate,
     SnapOverrides,
+    /// 3D Osnap ▸, nested inside Snap Overrides.
+    Osnap3d,
+    /// Point Filters ▸, nested inside Snap Overrides.
+    PointFilters,
+}
+
+impl SubmenuId {
+    /// The submenu this one opens inside, if it is nested. A nested submenu
+    /// being open means its parent is open too.
+    pub fn parent(self) -> Option<SubmenuId> {
+        match self {
+            Self::Osnap3d | Self::PointFilters => Some(Self::SnapOverrides),
+            _ => None,
+        }
+    }
+
+    /// Whether this submenu is showing when `open` is the open id: it is the
+    /// open one, or the open one is nested inside it.
+    pub fn is_open_in(self, open: Option<SubmenuId>) -> bool {
+        open == Some(self) || open.and_then(Self::parent) == Some(self)
+    }
 }
 
 /// Glyph drawn in a row's icon gutter (commercial solutions show one for object snaps
@@ -129,6 +150,16 @@ pub struct MenuItem {
     pub checked: bool,
     /// Glyph in the icon gutter.
     pub icon: Option<MenuIcon>,
+    /// A row that opens a submenu of its own (only inside a submenu).
+    pub nested: Option<Nested>,
+}
+
+/// The submenu a row of a submenu opens (Snap Overrides ▸ Point Filters ▸).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Nested {
+    pub id: SubmenuId,
+    pub items: Vec<MenuItem>,
+    pub open: bool,
 }
 
 impl MenuItem {
@@ -142,7 +173,15 @@ impl MenuItem {
             enabled: true,
             checked: false,
             icon: None,
+            nested: None,
         }
+    }
+
+    /// A row that expands `items` as a submenu of its own.
+    fn submenu(label: impl Into<String>, id: SubmenuId, items: Vec<MenuItem>, open: bool) -> Self {
+        let mut item = Self::new(label, MenuAction::ToggleSubmenu(id));
+        item.nested = Some(Nested { id, items, open });
+        item
     }
 
     fn icon(mut self, icon: MenuIcon) -> Self {
@@ -199,6 +238,19 @@ fn command_icon(command: &str) -> Option<MenuIcon> {
     crate::modules::registry::command_icon(command).map(MenuIcon::Tool)
 }
 
+/// The rows of a submenu in display order: each item, followed by its own
+/// submenu's rows when that one is open.
+fn flat_items(items: &[MenuItem]) -> Vec<&MenuItem> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(item);
+        if let Some(nested) = item.nested.as_ref().filter(|n| n.open) {
+            out.extend(flat_items(&nested.items));
+        }
+    }
+    out
+}
+
 /// A keyboard-navigable row in display order: either an item or a submenu
 /// header. Separators and the children of collapsed submenus are skipped.
 #[derive(Clone, Debug, PartialEq)]
@@ -238,12 +290,12 @@ impl ContextMenu {
                         header: Some(*id),
                     });
                     if *open {
-                        for item in items {
+                        for item in flat_items(items) {
                             out.push(Selectable {
                                 action: item.action.clone(),
                                 mnemonic: item.mnemonic,
                                 enabled: item.enabled,
-                                header: None,
+                                header: item.nested.as_ref().map(|n| n.id),
                             });
                         }
                     }
@@ -268,7 +320,7 @@ impl ContextMenu {
                 MenuRow::Submenu { items, open, .. } => {
                     idx += 1;
                     if *open {
-                        for item in items {
+                        for item in flat_items(items) {
                             if item.default {
                                 return idx;
                             }
@@ -312,7 +364,7 @@ impl ContextMenu {
                 MenuRow::Submenu { items, open, .. } => {
                     y += MENU_ROW_H;
                     if *open {
-                        for item in items {
+                        for item in flat_items(items) {
                             if item.default {
                                 return y;
                             }
@@ -335,7 +387,7 @@ impl ContextMenu {
                 MenuRow::Submenu { items, open, .. } => {
                     h += MENU_ROW_H;
                     if *open {
-                        h += items.len() as f32 * MENU_ROW_H;
+                        h += flat_items(items).len() as f32 * MENU_ROW_H;
                     }
                 }
             }
@@ -347,7 +399,9 @@ impl ContextMenu {
         self.rows.iter().any(|row| match row {
             MenuRow::Item(item) => item.hint.is_some(),
             MenuRow::Separator => false,
-            MenuRow::Submenu { items, .. } => items.iter().any(|item| item.hint.is_some()),
+            MenuRow::Submenu { items, .. } => {
+                flat_items(items).iter().any(|item| item.hint.is_some())
+            }
         })
     }
 }
@@ -486,8 +540,8 @@ fn command_rows(
             id: SubmenuId::SnapOverrides,
             label: t!("Snap Overrides").into_owned(),
             icon: None,
-            items: snap_override_items(),
-            open: open_submenu == Some(SubmenuId::SnapOverrides),
+            items: snap_override_items(open_submenu),
+            open: SubmenuId::SnapOverrides.is_open_in(open_submenu),
         });
     }
 
@@ -511,11 +565,23 @@ fn recent_input_submenu(items: Vec<MenuItem>, open_submenu: Option<SubmenuId>) -
 /// Snap Overrides ▸: one-shot object snaps for the next pick, in the
 /// grouping (M2P, then the edge snaps, the curve snaps, the relation snaps,
 /// None) plus the settings dialog.
-fn snap_override_items() -> Vec<MenuItem> {
+fn snap_override_items(open_submenu: Option<SubmenuId>) -> Vec<MenuItem> {
     let snap = |label: &str, t: SnapType| {
         MenuItem::new(t!(label).into_owned(), MenuAction::SnapOverride(t)).icon(MenuIcon::Snap(t))
     };
-    use crate::command::PointModifier;
+    let filters = PointFilter::ALL
+        .into_iter()
+        .map(|f| {
+            MenuItem::new(
+                format!(".{}", f.axes()),
+                MenuAction::PointModifier(PointModifier::Filter(f)),
+            )
+        })
+        .collect();
+    let osnap_3d = crate::snap::ALL_3D_SNAP_MODES
+        .iter()
+        .map(|&(t, _, label)| snap(label, t))
+        .collect();
     vec![
         MenuItem::new(
             t!("Temporary track point").into_owned(),
@@ -523,6 +589,18 @@ fn snap_override_items() -> Vec<MenuItem> {
         ),
         MenuItem::new(t!("From").into_owned(), MenuAction::PointModifier(PointModifier::From)),
         MenuItem::new(t!("Mid Between 2 Points").into_owned(), MenuAction::Mtp).icon(MenuIcon::Mtp),
+        MenuItem::submenu(
+            t!("Point Filters").into_owned(),
+            SubmenuId::PointFilters,
+            filters,
+            open_submenu == Some(SubmenuId::PointFilters),
+        ),
+        MenuItem::submenu(
+            t!("3D Osnap").into_owned(),
+            SubmenuId::Osnap3d,
+            osnap_3d,
+            open_submenu == Some(SubmenuId::Osnap3d),
+        ),
         snap("Endpoint", SnapType::Endpoint),
         snap("Midpoint", SnapType::Midpoint),
         snap("Intersection", SnapType::Intersection),
@@ -963,6 +1041,68 @@ mod tests {
         };
         let menu = build_context_menu(&ctx, None);
         assert!(!actions(&menu).contains(&MenuAction::ToggleSubmenu(SubmenuId::SnapOverrides)));
+    }
+
+    fn point_ctx() -> MenuContext {
+        MenuContext::Command {
+            options: Vec::new(),
+            has_point_step: true,
+            recent_inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn snap_overrides_offers_3d_osnap_and_point_filters_as_closed_submenus() {
+        let menu = build_context_menu(&point_ctx(), Some(SubmenuId::SnapOverrides));
+        let acts = actions(&menu);
+        assert!(acts.contains(&MenuAction::ToggleSubmenu(SubmenuId::Osnap3d)));
+        assert!(acts.contains(&MenuAction::ToggleSubmenu(SubmenuId::PointFilters)));
+        for &(t, _, _) in crate::snap::ALL_3D_SNAP_MODES {
+            assert!(!acts.contains(&MenuAction::SnapOverride(t)), "{t:?} shows while closed");
+        }
+        assert!(!acts.contains(&MenuAction::PointModifier(PointModifier::Filter(PointFilter::X))));
+    }
+
+    #[test]
+    fn opening_3d_osnap_lists_every_3d_mode_and_keeps_the_parent_open() {
+        let menu = build_context_menu(&point_ctx(), Some(SubmenuId::Osnap3d));
+        let acts = actions(&menu);
+        for &(t, _, _) in crate::snap::ALL_3D_SNAP_MODES {
+            assert!(acts.contains(&MenuAction::SnapOverride(t)), "missing {t:?}");
+        }
+        assert!(acts.contains(&MenuAction::SnapOverride(SnapType::Endpoint)), "parent stays open");
+        assert!(!acts.contains(&MenuAction::PointModifier(PointModifier::Filter(PointFilter::X))));
+    }
+
+    #[test]
+    fn opening_point_filters_lists_the_six_filters_and_keeps_the_parent_open() {
+        let menu = build_context_menu(&point_ctx(), Some(SubmenuId::PointFilters));
+        let acts = actions(&menu);
+        for filter in PointFilter::ALL {
+            assert!(
+                acts.contains(&MenuAction::PointModifier(PointModifier::Filter(filter))),
+                "missing {filter:?}"
+            );
+        }
+        assert!(acts.contains(&MenuAction::SnapOverride(SnapType::Endpoint)), "parent stays open");
+    }
+
+    #[test]
+    fn a_submenu_counts_as_open_when_it_or_one_nested_in_it_is_the_open_id() {
+        let open = Some(SubmenuId::PointFilters);
+        assert!(SubmenuId::PointFilters.is_open_in(open));
+        assert!(SubmenuId::SnapOverrides.is_open_in(open));
+        assert!(!SubmenuId::Osnap3d.is_open_in(open));
+        assert!(!SubmenuId::RecentInput.is_open_in(open));
+        assert!(!SubmenuId::SnapOverrides.is_open_in(None));
+    }
+
+    #[test]
+    fn a_nested_submenu_belongs_to_snap_overrides() {
+        assert_eq!(SubmenuId::Osnap3d.parent(), Some(SubmenuId::SnapOverrides));
+        assert_eq!(SubmenuId::PointFilters.parent(), Some(SubmenuId::SnapOverrides));
+        assert_eq!(SubmenuId::SnapOverrides.parent(), None);
+        assert_eq!(SubmenuId::RecentInput.parent(), None);
     }
 
     fn idle_ctx(has_selection: bool) -> MenuContext {

@@ -3347,6 +3347,43 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_point_filter_combines_two_picks() {
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, ".X");
+        assert_eq!(active_and_parked(&app), (Some(".X"), Some("LINE")));
+        type_line(&mut app, "1,2");
+        assert_eq!(active_and_parked(&app), (Some(".X"), Some("LINE")), "still needs Y and Z");
+        type_line(&mut app, "7,8");
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+        assert_eq!(app.last_point, Some(glam::DVec3::new(1.0, 8.0, 0.0)));
+    }
+
+    #[test]
+    fn a_typed_number_finishes_an_xy_point_filter() {
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, ".xy");
+        type_line(&mut app, "1,2");
+        type_line(&mut app, "5");
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+        assert_eq!(app.last_point, Some(glam::DVec3::new(1.0, 2.0, 5.0)));
+    }
+
+    #[test]
+    fn the_context_menu_rows_start_a_point_filter() {
+        use crate::app::Message;
+        use crate::command::{PointFilter, PointModifier};
+        use crate::ui::popup::context_menu::MenuAction;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        let _ = app.update(Message::ContextMenuPick(MenuAction::PointModifier(
+            PointModifier::Filter(PointFilter::YZ),
+        )));
+        assert_eq!(active_and_parked(&app), (Some(".YZ"), Some("LINE")));
+    }
+
+    #[test]
     fn escape_during_from_restores_the_parent_command() {
         use crate::app::Message;
         let mut app = OpenCADStudio::new_for_test();

@@ -92,7 +92,10 @@ impl OpenCADStudio {
         let i = self.active_tab;
         let mut sel = self.tabs[i].scene.selection.borrow_mut();
         let ui = &mut sel.context_menu_ui;
-        ui.open_submenu = if ui.open_submenu == Some(id) { None } else { Some(id) };
+        let open = ui.open_submenu;
+        // A nested submenu closes back to its parent; the parent closes with
+        // whatever is open inside it.
+        ui.open_submenu = if id.is_open_in(open) { id.parent() } else { Some(id) };
         drop(sel);
         // Keep the keyboard highlight on the header that was toggled.
         let menu = self.current_context_menu();
@@ -251,7 +254,7 @@ impl OpenCADStudio {
                     let header = ui.highlighted.and_then(|c| rows.get(c)).and_then(|r| r.header);
                     let want_open = matches!(direction, ArrowKey::Right);
                     match header {
-                        Some(id) if (ui.open_submenu == Some(id)) != want_open => {
+                        Some(id) if id.is_open_in(ui.open_submenu) != want_open => {
                             Some(self.on_context_menu_submenu_toggle(id))
                         }
                         _ => Some(Task::none()),
@@ -927,6 +930,45 @@ mod transparent_tests {
             assert!(app.tabs[0].suspended_cmd.is_none());
             let _ = app.update(Message::CommandEscape);
             assert_eq!(active(&app), None, "no stale LINE comes back");
+        });
+    }
+
+    fn open_submenu(app: &OpenCADStudio) -> Option<SubmenuId> {
+        app.tabs[0].scene.selection.borrow().context_menu_ui.open_submenu
+    }
+
+    #[test]
+    fn nested_submenus_open_inside_snap_overrides_and_close_back_to_it() {
+        with_stack(|| {
+            let mut app = line_app();
+            let toggle = |app: &mut OpenCADStudio, id| {
+                let _ = app.update(Message::ContextMenuSubmenuToggle(id));
+            };
+            toggle(&mut app, SubmenuId::SnapOverrides);
+            assert_eq!(open_submenu(&app), Some(SubmenuId::SnapOverrides));
+            toggle(&mut app, SubmenuId::PointFilters);
+            assert_eq!(open_submenu(&app), Some(SubmenuId::PointFilters));
+            toggle(&mut app, SubmenuId::Osnap3d);
+            assert_eq!(open_submenu(&app), Some(SubmenuId::Osnap3d), "one nested menu at a time");
+            toggle(&mut app, SubmenuId::Osnap3d);
+            assert_eq!(open_submenu(&app), Some(SubmenuId::SnapOverrides), "closing it keeps the parent");
+            toggle(&mut app, SubmenuId::PointFilters);
+            toggle(&mut app, SubmenuId::SnapOverrides);
+            assert_eq!(open_submenu(&app), None, "closing the parent closes the nested one too");
+        });
+    }
+
+    #[test]
+    fn picking_a_3d_snap_row_engages_that_one_shot_override() {
+        with_stack(|| {
+            let mut app = line_app();
+            let _ = app.update(Message::ContextMenuPick(MenuAction::SnapOverride(
+                crate::snap::SnapType::FaceCenter,
+            )));
+            assert!(app.snapper.is_on_3d(crate::snap::SnapType::FaceCenter));
+            assert!(!app.snapper.is_on_3d(crate::snap::SnapType::Vertex));
+            app.snapper.clear_override();
+            assert!(app.snapper.is_on_3d(crate::snap::SnapType::Vertex));
         });
     }
 
