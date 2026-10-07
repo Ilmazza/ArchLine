@@ -3384,6 +3384,55 @@ mod tests {
     }
 
     #[test]
+    fn the_classic_layer_row_shows_the_selected_object_and_goes_back_when_deselected() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LAYER Walls"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let _ = app.update(Message::CommandEscape);
+        let handle = app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .find_map(|e| match e {
+                codec::EntityType::Line(l) => Some(l.common.handle),
+                _ => None,
+            })
+            .expect("a line");
+        // With the line selected, picking Walls in the row moves the line.
+        app.tabs[0].scene.select_entities(&[handle]);
+        app.refresh_properties();
+        let _ = app.update(Message::RibbonLayerChanged("Walls".into()));
+        let layer_of_line = || {
+            app.tabs[0]
+                .scene
+                .document
+                .get_entity(handle)
+                .map(|e| e.common().layer.clone())
+                .unwrap()
+        };
+        assert_eq!(layer_of_line(), "Walls");
+        let shown = |app: &OpenCADStudio, text: &str| {
+            let row: iced::Element<'_, Message> = crate::ui::classic_layers::layer_row(&app.ribbon)
+                .width(iced::Length::Fixed(1400.0))
+                .into();
+            let mut ui = iced_test::simulator(row);
+            ui.find(text).is_ok()
+        };
+        // Deselected: the row shows the current layer, not the line's.
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        assert_eq!(app.ribbon.active_layer, "0");
+        assert!(shown(&app, "0"));
+        // Selected again: the row shows the line's layer.
+        app.tabs[0].scene.select_entities(&[handle]);
+        app.refresh_properties();
+        assert_eq!(app.ribbon.active_layer, "Walls");
+        assert!(shown(&app, "Walls"), "the row shows the selected object's layer");
+    }
+
+    #[test]
     fn escape_during_from_restores_the_parent_command() {
         use crate::app::Message;
         let mut app = OpenCADStudio::new_for_test();
