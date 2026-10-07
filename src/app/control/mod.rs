@@ -330,6 +330,7 @@ fn command_selection_policy(name: &str) -> &'static str {
         "ERASE",
         "EXPLODE",
         "GROUP",
+        "LAYCUR",
         "LAYFRZ",
         "LAYLCK",
         "LAYMCUR",

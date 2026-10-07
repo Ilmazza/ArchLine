@@ -426,6 +426,51 @@ impl OpenCADStudio {
                 }
             }
 
+            // LAYCUR (Express) — move the selected objects to the current layer.
+            "LAYCUR" => {
+                let handles: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                if handles.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LAYCUR");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                } else {
+                    let layer = self.tabs[i].scene.document.header.current_layer_name.clone();
+                    let to_move: Vec<_> = handles
+                        .into_iter()
+                        .filter(|h| {
+                            self.tabs[i]
+                                .scene
+                                .document
+                                .get_entity(*h)
+                                .is_some_and(|e| e.common().layer != layer)
+                        })
+                        .collect();
+                    if to_move.is_empty() {
+                        self.command_line.push_info(
+                            crate::tf!("All selected objects are already on layer \"{layer}\".").as_ref(),
+                        );
+                    } else {
+                        let n = to_move.len();
+                        // Layer drives by-layer colour, linetype and lineweight, so the property
+                        // path re-tessellates and records one undo step.
+                        self.apply_property_op(i, "LAYCUR", &to_move, |app, handle| {
+                            if let Some(entity) = app.tabs[i].scene.document.get_entity_mut(handle) {
+                                crate::scene::view::dispatch::apply_common_prop(entity, "layer", &layer);
+                            }
+                        });
+                        self.command_line.push_info(
+                            crate::tf!("{n} object(s) moved to layer \"{layer}\".").as_ref(),
+                        );
+                    }
+                }
+            }
+
             "LAYON" => {
                 let names = self.tabs[i]
                     .scene
@@ -1020,5 +1065,106 @@ impl OpenCADStudio {
         );
         self.last_layer_translation = Some(report);
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{Message, OpenCADStudio};
+    use codec::types::Handle;
+
+    /// Run one command line and return only the command-line text it appended.
+    fn run(app: &mut OpenCADStudio, cmd: &str) -> String {
+        let start = app.command_line.history.len();
+        let _ = app.run_command_line(cmd);
+        app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("
+")
+    }
+
+    /// A drawing with a layer "Walls" (not current) and one line on layer "0".
+    fn app_with_line() -> (OpenCADStudio, Handle) {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Walls"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let _ = app.update(Message::CommandEscape);
+        let handle = app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .find_map(|e| match e {
+                codec::EntityType::Line(l) => Some(l.common.handle),
+                _ => None,
+            })
+            .expect("a line");
+        (app, handle)
+    }
+
+    fn layer_of(app: &OpenCADStudio, handle: Handle) -> String {
+        app.tabs[0]
+            .scene
+            .document
+            .get_entity(handle)
+            .map(|e| e.common().layer.clone())
+            .unwrap()
+    }
+
+    /// Make `layer` the current layer (no selection: the ribbon row sets the creation default).
+    fn make_current(app: &mut OpenCADStudio, layer: &str) {
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        let _ = app.update(Message::RibbonLayerChanged(layer.into()));
+    }
+
+    fn select(app: &mut OpenCADStudio, handle: Handle) {
+        app.tabs[0].scene.select_entities(&[handle]);
+        app.refresh_properties();
+    }
+
+    #[test]
+    fn laycur_moves_the_selection_to_the_current_layer() {
+        let (mut app, line) = app_with_line();
+        make_current(&mut app, "Walls");
+        select(&mut app, line);
+        let out = run(&mut app, "LAYCUR");
+        assert_eq!(layer_of(&app, line), "Walls");
+        assert!(out.contains("1 object(s) moved to layer \"Walls\""), "got: {out:?}");
+    }
+
+    #[test]
+    fn laycur_is_one_undo_step() {
+        let (mut app, line) = app_with_line();
+        make_current(&mut app, "Walls");
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYCUR");
+        assert_eq!(layer_of(&app, line), "Walls");
+        let _ = app.update(Message::Undo);
+        assert_eq!(layer_of(&app, line), "0");
+    }
+
+    #[test]
+    fn laycur_without_a_selection_asks_for_objects() {
+        let (mut app, line) = app_with_line();
+        make_current(&mut app, "Walls");
+        app.tabs[0].scene.deselect_all();
+        let _ = run(&mut app, "LAYCUR");
+        // The object selection runs as the generic SELECT command (its pending command is LAYCUR).
+        let active = app.tabs[0].active_cmd.as_ref().expect("LAYCUR must start the object selection");
+        assert_eq!(active.name(), "SELECT");
+        assert!(active.is_selection_gathering());
+        assert_eq!(layer_of(&app, line), "0", "nothing moves before the selection is confirmed");
+    }
+
+    #[test]
+    fn laycur_says_so_when_every_object_is_already_on_the_current_layer() {
+        let (mut app, line) = app_with_line();
+        select(&mut app, line); // the line is on "0", which is current
+        let out = run(&mut app, "LAYCUR");
+        assert!(out.contains("already on layer \"0\""), "got: {out:?}");
+        assert!(!out.contains("moved to layer"), "got: {out:?}");
     }
 }
