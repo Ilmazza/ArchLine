@@ -28,15 +28,19 @@ finestra (`src/main.rs`, `app::export_headless`), quindi gira senza GPU.
 
 ```
 tests/conformance/
-  run.py            orchestratore: genera → converte → confronta → classifica → report
+  run.py            orchestratore e CLI: genera → converte → confronta → classifica → report
+  classify.py       stati, Result, lettura e scrittura di expected.json (puro, senza ezdxf)
+  report.py         report Markdown (puro, senza ezdxf)
   oracle.py         funzioni ezdxf: leggibilità strict, estensioni, tipi di entità, stringhe
-  cases/            un modulo per scenario (vedi §4); ognuno espone build(version) -> Path
+  cases/            un modulo per scenario (vedi §4); ognuno espone NAME e build(version, work) -> Path
   expected.json     esito noto per (caso, versione, percorso, controllo)
+  fake_converter.py convertitore finto che imita --export, solo per i test
+  test_bench.py     test del banco
   README.md         uso, lettura del report, aggiornamento di expected.json
 ```
 
 Uso: `python tests/conformance/run.py target/release/OpenCADStudio.exe [--out report.md] [--strict]
-[--update-expected] [--case NOME] [--keep DIR]`. Dipendenze: Python 3 e `pip install ezdxf`. Senza ezdxf esce con
+[--update-expected --note "..."] [--case NOME] [--keep DIR]`. Dipendenze: Python 3 e `pip install ezdxf`. Senza ezdxf esce con
 codice 77 (saltato), come l'oracolo di partenza. I disegni sono generati in una cartella temporanea; il repo non viene
 scritto, salvo `report.md` e, solo con `--update-expected`, `expected.json`.
 
@@ -47,10 +51,11 @@ solido), hatch (solido con bulge, pattern ANSI31, isola, ellisse, cerchio), quot
 diametro, angolare), colori e layer in blocchi annidati (BYBLOCK/BYLAYER/layer 0), paper space e layout, attributi.
 Ogni caso è generato in **R2000** (AC1015) e **R2018** (AC1032).
 
-Casi nuovi, uno per difetto già noto:
-- `text_accents`: `è à ò ù ì é` in TEXT, MTEXT e ATTRIB (R2000 con `$DWGCODEPAGE = ANSI_1252`, R2018).
-- `hatch_spline`: hatch con contorno a spline (la baseline del 03/10 ha visto i punti di fit passare da 3 a 0 in R2000).
-  Riserva già annotata: la spline sintetica ha solo punti di fit, cosa che AutoCAD di norma non scrive.
+Anche gli scenari `text` (TEXT con codici `%%`, allineamenti, MTEXT con formattazione) e `hatch_spline` (hatch con
+contorno a spline: la baseline del 03/10 ha visto i punti di fit passare da 3 a 0 in R2000; riserva già annotata: la
+spline sintetica ha solo punti di fit, cosa che AutoCAD di norma non scrive) esistevano già nello script di partenza e
+sono stati portati. Il caso davvero nuovo è `text_accents`: `è à ò ù ì é` in TEXT, MTEXT e ATTRIB (R2000 con
+`$DWGCODEPAGE = ANSI_1252`, R2018).
 
 Percorsi per ogni caso (senza `--target-version`, l'export conserva la versione del documento letto:
 `export_headless` usa `doc.version`):
@@ -66,18 +71,25 @@ Per ogni (caso, versione, percorso) si eseguono quattro controlli, tutti con ezd
 `readable` (ezdxf legge il file in modalità strict), `types` (conteggio dei tipi di entità del model space),
 `extents` (estensioni, tolleranza 2e-3), `strings` (TEXT/MTEXT/ATTRIB, accenti inclusi).
 
+Le **estensioni sono calcolate senza testi** (TEXT, MTEXT, ATTDEF e gli ATTRIB degli INSERT): ezdxf stima l'estensione
+di un testo dalla lunghezza della stringa, che non è un dato geometrico, e senza questa scelta un difetto sugli accenti
+compariva anche come difetto di estensione. I testi si confrontano solo nel controllo `strings`. Il dettaglio di
+`strings` riporta **tutte** le stringhe diverse: un dettaglio parziale mascherava le regressioni nelle altre.
+
 Ogni controllo ha uno di quattro stati, confrontando l'esito misurato con `expected.json`:
 
 | Stato | Significato | Effetto |
 |---|---|---|
 | **OK** | coincide con la sorgente | nessuno |
 | **Atteso** | diverge, ed è in `expected.json` con una nota (es. POLYLINE→LWPOLYLINE, benigno; accenti R2000, difetto) | segnalato in tabella, non è errore |
-| **Regressione** | peggiore di quanto registrato (era OK o atteso, ora diverge di più o diversamente) | exit 1 con `--strict`; sempre evidenziato |
-| **Migliorato** | diverge meno del registrato | segnalato; si aggiorna `expected.json` con `--update-expected` (mai in automatico) |
+| **Regressione** | peggiore di quanto registrato: era OK e ora diverge, è una divergenza nuova, o il dettaglio è diverso da quello registrato (i dettagli non hanno un ordine, quindi non si può dire quale diverga di meno) | exit 1 con `--strict`; sempre evidenziato |
+| **Migliorato** | era una divergenza registrata e ora il controllo è OK | segnalato; si aggiorna `expected.json` con `--update-expected` (mai in automatico) |
 
 `expected.json` **nasce dalla prima esecuzione sull'eseguibile attuale**: i valori sono quelli misurati, non
 trascritti dalla baseline. La baseline del 2026-10-03 serve solo da controllo di coerenza (le stesse divergenze note
 devono ricomparire). Ogni voce «atteso» porta una nota di testo; una voce senza nota è rifiutata da `run.py`.
+`--update-expected` richiede `--note "motivo"` davanti a divergenze nuove o cambiate e, senza, non scrive nulla; le
+voci invariate tengono la loro nota, quelle ora OK vengono tolte, e le note si rifiniscono a mano.
 
 Exit code: 0 (nessuna regressione, o senza `--strict`), 1 (regressione con `--strict`), 77 (ezdxf mancante), 2
 (errore del banco: eseguibile assente, conversione andata in crash).
@@ -91,18 +103,22 @@ miglioramenti, e il conteggio per stato.
 
 ## 7. CI
 
-In `.github/workflows/archline-windows.yml`, dopo «Build (release)» e prima di «Package»: un passo `pip install ezdxf`
-e uno che lancia il banco con `--out dist/conformance-report.md`, con `continue-on-error: true`. Il report entra
+In `.github/workflows/archline-windows.yml`, dopo «Package» e prima del caricamento dell'artefatto: `setup-python`, poi un
+passo che installa ezdxf, lancia i test del banco e il banco con `--out dist\conformance-report.md`, con
+`continue-on-error: true`. Il report entra
 nell'artefatto già pubblicato (`ArchLine-windows-N`). Nessun nuovo workflow, nessun segreto.
 
 ## 8. Test del banco
 
-Il banco ha un test di sé stesso (`tests/conformance/test_oracle.py`, `python -m unittest`) con tre cose, senza
-bisogno dell'eseguibile di ArchLine:
+Il banco ha un test di sé stesso (`tests/conformance/test_bench.py`, `python -m unittest`), senza bisogno
+dell'eseguibile di ArchLine:
 - la classificazione dei quattro stati su coppie (misurato, atteso) costruite a mano;
-- il rifiuto di una voce «atteso» senza nota;
-- il rilevamento di una divergenza reale, con un convertitore finto (script Python che corrompe gli accenti o toglie
-  un'entità) al posto dell'eseguibile: prova che il banco *può* fallire, non solo passare.
+- il rifiuto di una voce «atteso» senza nota, e le regole di `--update-expected`;
+- il rilevamento di una divergenza reale, con `fake_converter.py` al posto dell'eseguibile: prova che il banco *può*
+  fallire, non solo passare. Il convertitore finto ha quattro modi (`FAKE_CONVERTER_MODE`): `faithful`,
+  `corrupt-accents`, `drop-entity`, `crash`;
+- i casi limite: eseguibile assente, caso inesistente, ezdxf mancante (exit 77), console Windows cp1252, conversione in
+  crash che non ferma gli altri casi.
 
 ## 9. Fuori da questo giro
 

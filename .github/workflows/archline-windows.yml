@@ -35,6 +35,19 @@ jobs:
           $info = "ArchLine build`ncommit: ${{ github.sha }}`nbranch: ${{ github.ref_name }}`n"
           Set-Content -Path dist\BUILD.txt -Value $info
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Misura, non blocca: il report entra nell'artefatto. Per promuoverlo a cancello, togliere continue-on-error.
+      - name: Conformance (ezdxf come oracolo)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python -m pip install ezdxf
+          python -m unittest discover -s tests/conformance -p "test_*.py"
+          python tests/conformance/run.py target\release\OpenCADStudio.exe --out dist\conformance-report.md
+
       - uses: actions/upload-artifact@v4
         with:
           name: ArchLine-windows-${{ github.run_number }}
