@@ -3294,6 +3294,93 @@ mod tests {
         );
     }
 
+    fn line_with_modifier(app: &mut OpenCADStudio, token: &str) {
+        use crate::app::Message;
+        app.automation_op(r#"{"op":"new"}"#);
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+        let _ = app.update(Message::CommandInput(token.to_string()));
+        let _ = app.update(Message::CommandSubmit);
+    }
+
+    fn type_line(app: &mut OpenCADStudio, text: &str) {
+        use crate::app::Message;
+        let _ = app.update(Message::CommandInput(text.to_string()));
+        let _ = app.update(Message::CommandSubmit);
+    }
+
+    fn active_and_parked(app: &OpenCADStudio) -> (Option<&'static str>, Option<&'static str>) {
+        (
+            app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+            app.tabs[0].suspended_cmd.as_ref().map(|c| c.name()),
+        )
+    }
+
+    #[test]
+    fn typed_from_offsets_the_next_point_from_the_base_point() {
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, "FROM");
+        assert_eq!(active_and_parked(&app), (Some("FROM"), Some("LINE")));
+        type_line(&mut app, "10,10");
+        assert_eq!(active_and_parked(&app), (Some("FROM"), Some("LINE")), "still waiting for the offset");
+        type_line(&mut app, "@5,5");
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+        assert_eq!(app.last_point, Some(glam::DVec3::new(15.0, 15.0, 0.0)));
+    }
+
+    #[test]
+    fn typed_tt_tracks_from_its_point_and_enter_keeps_that_point() {
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, "tt");
+        assert_eq!(active_and_parked(&app), (Some("TT"), Some("LINE")));
+        type_line(&mut app, "10,10");
+        type_line(&mut app, "@0,5");
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+        assert_eq!(app.last_point, Some(glam::DVec3::new(10.0, 15.0, 0.0)));
+
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, "TT");
+        type_line(&mut app, "10,10");
+        type_line(&mut app, "");
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+        assert_eq!(app.last_point, Some(glam::DVec3::new(10.0, 10.0, 0.0)));
+    }
+
+    #[test]
+    fn escape_during_from_restores_the_parent_command() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        line_with_modifier(&mut app, "FROM");
+        let _ = app.update(Message::CommandEscape);
+        assert_eq!(active_and_parked(&app), (Some("LINE"), None));
+    }
+
+    #[test]
+    fn the_context_menu_rows_start_from_and_tt() {
+        use crate::app::Message;
+        use crate::command::PointModifier;
+        use crate::ui::popup::context_menu::MenuAction;
+        for (modifier, name) in [(PointModifier::From, "FROM"), (PointModifier::TrackPoint, "TT")] {
+            let mut app = OpenCADStudio::new_for_test();
+            app.automation_op(r#"{"op":"new"}"#);
+            let _ = app.update(Message::CommandInput("LINE".to_string()));
+            let _ = app.update(Message::CommandSubmit);
+            let _ = app.update(Message::ContextMenuPick(MenuAction::PointModifier(modifier)));
+            assert_eq!(active_and_parked(&app), (Some(name), Some("LINE")));
+        }
+    }
+
+    #[test]
+    fn a_step_that_is_not_a_point_prompt_ignores_the_modifier_rows() {
+        use crate::app::Message;
+        use crate::command::PointModifier;
+        use crate::ui::popup::context_menu::MenuAction;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let _ = app.update(Message::ContextMenuPick(MenuAction::PointModifier(PointModifier::From)));
+        assert_eq!(active_and_parked(&app), (None, None), "no command, nothing to modify");
+    }
+
     #[test]
     fn test_mtp_escape_restores_parent() {
         use crate::app::Message;

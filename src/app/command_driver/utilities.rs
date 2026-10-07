@@ -1074,28 +1074,9 @@ impl OpenCADStudio {
         // Keywords, distances and points fed here (option buttons, the
         // context menu, scripts) join the Recent Input list like typed ones.
         self.command_line.record_recent_input(token);
-        let is_mtp = token.trim_start_matches('_').eq_ignore_ascii_case("MTP")
-            || token.trim_start_matches('_').eq_ignore_ascii_case("M2P");
-        if is_mtp {
-            let is_point_step = !self.tabs[i]
-                .active_cmd
-                .as_ref()
-                .map(|c| c.input_kind().wants_text())
-                .unwrap_or(true)
-                || self.tabs[i]
-                    .active_cmd
-                    .as_ref()
-                    .map(|c| c.point_step_accepts_keywords())
-                    .unwrap_or(false);
-            let not_entity_pick = !self.tabs[i]
-                .active_cmd
-                .as_ref()
-                .map(|c| c.needs_entity_pick())
-                .unwrap_or(false);
-            if is_point_step && not_entity_pick {
-                self.start_mtp_modifier(i);
-                return Task::none();
-            }
+        if let Some(modifier) = self.typed_point_modifier(i, token) {
+            self.start_point_modifier(i, modifier);
+            return Task::none();
         }
         if let Some((coord, kind)) = crate::app::helpers::parse_coord(token) {
             // Match the GUI command line: typed coordinates are in the active

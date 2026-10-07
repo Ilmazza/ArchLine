@@ -1849,7 +1849,7 @@ mod context_menu_tests {
         assert_eq!(pan_open.y, pan_closed.y, "Pan must not slide down when the submenu opens");
 
         let header = bounds_of(&open, "Snap Overrides");
-        let first = bounds_of(&open, "Mid Between 2 Points");
+        let first = bounds_of(&open, "Temporary track point");
         assert!(
             (first.y - header.y).abs() <= 4.0,
             "the first variant is level with its header ({} vs {})",

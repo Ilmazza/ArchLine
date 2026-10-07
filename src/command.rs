@@ -913,6 +913,159 @@ inventory::submit!(CommandRegistration {
     names: &["MTP", "M2P"],
 });
 
+// ── Point-entry modifiers (FROM, TT) ────────────────────────────────────────
+
+/// A modifier that answers a point prompt of the running command: the command
+/// is parked, the modifier collects its own points and hands one back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointModifier {
+    /// Mid between 2 points (`MTP` / `M2P`).
+    Mtp,
+    /// Base point plus an offset (`FROM`).
+    From,
+    /// Temporary tracking point (`TT`).
+    TrackPoint,
+}
+
+impl PointModifier {
+    /// The modifier a typed token names, if any (`_` prefix and case ignored).
+    pub fn from_token(token: &str) -> Option<Self> {
+        let t = token.trim().trim_start_matches('_');
+        if t.eq_ignore_ascii_case("MTP") || t.eq_ignore_ascii_case("M2P") {
+            Some(Self::Mtp)
+        } else if t.eq_ignore_ascii_case("FROM") {
+            Some(Self::From)
+        } else if t.eq_ignore_ascii_case("TT") {
+            Some(Self::TrackPoint)
+        } else {
+            None
+        }
+    }
+
+    pub fn command(self) -> Box<dyn CadCommand> {
+        match self {
+            Self::Mtp => Box::new(Mid2PointCommand::new()),
+            Self::From => Box::new(FromCommand::new()),
+            Self::TrackPoint => Box::new(TrackPointCommand::new()),
+        }
+    }
+}
+
+/// Rubber band from the modifier's base point to the cursor.
+fn base_rubber_band(name: &str, base: DVec3, pt: DVec3) -> Vec<WireModel> {
+    vec![WireModel::solid_f64(
+        name.to_string(),
+        vec![[base.x, base.y, base.z], [pt.x, pt.y, pt.z]],
+        WireModel::CYAN,
+        false,
+    )]
+}
+
+/// `FROM`: pick a base point, then give the offset from it. A typed
+/// `@dx,dy` is relative to the base because the pick of the base is also the
+/// last point; a point picked or typed absolute is taken as it is.
+#[derive(Debug, Default)]
+pub struct FromCommand {
+    base: Option<DVec3>,
+}
+
+impl FromCommand {
+    pub fn new() -> Self {
+        Self { base: None }
+    }
+}
+
+impl CadCommand for FromCommand {
+    fn name(&self) -> &'static str {
+        "FROM"
+    }
+
+    fn prompt(&self) -> String {
+        if self.base.is_none() {
+            crate::t!("_from Specify base point:").into_owned()
+        } else {
+            crate::t!("_from Specify offset from the base point (e.g. @10,5):").into_owned()
+        }
+    }
+
+    fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        if self.base.is_some() {
+            CmdResult::ReturnPoint(pt)
+        } else {
+            self.base = Some(pt);
+            CmdResult::NeedPoint
+        }
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_preview_wires(&mut self, pt: DVec3) -> Vec<WireModel> {
+        self.base
+            .map(|base| base_rubber_band("from_rubber_band", base, pt))
+            .unwrap_or_default()
+    }
+}
+
+/// `TT`: pick a temporary tracking point, then pick the point that is wanted;
+/// ortho, polar tracking and typed distances measure from the tracking point.
+/// Enter at the second step keeps the tracking point itself.
+#[derive(Debug, Default)]
+pub struct TrackPointCommand {
+    track: Option<DVec3>,
+}
+
+impl TrackPointCommand {
+    pub fn new() -> Self {
+        Self { track: None }
+    }
+}
+
+impl CadCommand for TrackPointCommand {
+    fn name(&self) -> &'static str {
+        "TT"
+    }
+
+    fn prompt(&self) -> String {
+        if self.track.is_none() {
+            crate::t!("_tt Specify temporary tracking point:").into_owned()
+        } else {
+            crate::t!("_tt Specify point (Enter keeps the tracking point):").into_owned()
+        }
+    }
+
+    fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        if self.track.is_some() {
+            CmdResult::ReturnPoint(pt)
+        } else {
+            self.track = Some(pt);
+            CmdResult::NeedPoint
+        }
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        match self.track {
+            Some(track) => CmdResult::ReturnPoint(track),
+            None => CmdResult::Cancel,
+        }
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+
+    fn on_preview_wires(&mut self, pt: DVec3) -> Vec<WireModel> {
+        self.track
+            .map(|track| base_rubber_band("tt_rubber_band", track, pt))
+            .unwrap_or_default()
+    }
+}
+
 /// Generic interactive front-end for a keyword command that operates on the
 /// current selection (CHPROP, ADJUST, XDATA, UNDERLAY, DRAWORDER…). If nothing
 /// is selected when it starts it first gathers a selection (Enter confirms),
@@ -3157,5 +3310,58 @@ mod tests {
         let names = all_registered_command_names();
         assert!(names.contains(&"MTP"));
         assert!(names.contains(&"M2P"));
+    }
+
+    #[test]
+    fn from_asks_for_a_base_point_then_returns_the_next_point() {
+        let mut cmd = FromCommand::new();
+        assert_eq!(cmd.name(), "FROM");
+        let base_prompt = cmd.prompt();
+        assert!(matches!(cmd.on_point(DVec3::new(10.0, 10.0, 0.0)), CmdResult::NeedPoint));
+        assert_ne!(cmd.prompt(), base_prompt, "the second step asks for the offset");
+        assert!(
+            !cmd.on_preview_wires(DVec3::new(15.0, 15.0, 0.0)).is_empty(),
+            "a rubber band joins the base to the cursor"
+        );
+        let res = cmd.on_point(DVec3::new(15.0, 15.0, 0.0));
+        assert!(matches!(res, CmdResult::ReturnPoint(p) if p == DVec3::new(15.0, 15.0, 0.0)));
+    }
+
+    #[test]
+    fn from_without_a_base_has_no_preview_and_enter_cancels() {
+        let mut cmd = FromCommand::new();
+        assert!(cmd.on_preview_wires(DVec3::ZERO).is_empty());
+        assert!(matches!(cmd.on_enter(), CmdResult::Cancel));
+        assert!(matches!(cmd.on_escape(), CmdResult::Cancel));
+    }
+
+    #[test]
+    fn temporary_track_point_returns_the_next_point_and_enter_keeps_the_track_point() {
+        let mut cmd = TrackPointCommand::new();
+        assert_eq!(cmd.name(), "TT");
+        assert!(matches!(cmd.on_enter(), CmdResult::Cancel), "nothing tracked yet");
+        let base_prompt = cmd.prompt();
+        assert!(matches!(cmd.on_point(DVec3::new(4.0, 6.0, 0.0)), CmdResult::NeedPoint));
+        assert_ne!(cmd.prompt(), base_prompt);
+        assert!(!cmd.on_preview_wires(DVec3::new(4.0, 20.0, 0.0)).is_empty());
+        let res = cmd.on_point(DVec3::new(4.0, 20.0, 0.0));
+        assert!(matches!(res, CmdResult::ReturnPoint(p) if p == DVec3::new(4.0, 20.0, 0.0)));
+
+        let mut cmd = TrackPointCommand::new();
+        let _ = cmd.on_point(DVec3::new(4.0, 6.0, 0.0));
+        let res = cmd.on_enter();
+        assert!(matches!(res, CmdResult::ReturnPoint(p) if p == DVec3::new(4.0, 6.0, 0.0)));
+    }
+
+    #[test]
+    fn modifier_tokens_are_recognised() {
+        assert_eq!(PointModifier::from_token("m2p"), Some(PointModifier::Mtp));
+        assert_eq!(PointModifier::from_token("_MTP"), Some(PointModifier::Mtp));
+        assert_eq!(PointModifier::from_token("from"), Some(PointModifier::From));
+        assert_eq!(PointModifier::from_token("tt"), Some(PointModifier::TrackPoint));
+        assert_eq!(PointModifier::from_token("LINE"), None);
+        assert_eq!(PointModifier::From.command().name(), "FROM");
+        assert_eq!(PointModifier::TrackPoint.command().name(), "TT");
+        assert_eq!(PointModifier::Mtp.command().name(), "MTP");
     }
 }

@@ -88,6 +88,8 @@ pub enum MenuAction {
     Command(String),
     /// One-shot "Mid Between 2 Points" snap override.
     Mtp,
+    /// FROM / Temporary track point, answering the current point prompt.
+    PointModifier(crate::command::PointModifier),
     /// One-shot object snap override for the next pick.
     SnapOverride(SnapType),
     /// Next pick ignores object snaps.
@@ -513,7 +515,13 @@ fn snap_override_items() -> Vec<MenuItem> {
     let snap = |label: &str, t: SnapType| {
         MenuItem::new(t!(label).into_owned(), MenuAction::SnapOverride(t)).icon(MenuIcon::Snap(t))
     };
+    use crate::command::PointModifier;
     vec![
+        MenuItem::new(
+            t!("Temporary track point").into_owned(),
+            MenuAction::PointModifier(PointModifier::TrackPoint),
+        ),
+        MenuItem::new(t!("From").into_owned(), MenuAction::PointModifier(PointModifier::From)),
         MenuItem::new(t!("Mid Between 2 Points").into_owned(), MenuAction::Mtp).icon(MenuIcon::Mtp),
         snap("Endpoint", SnapType::Endpoint),
         snap("Midpoint", SnapType::Midpoint),
@@ -940,6 +948,8 @@ mod tests {
         let menu = build_context_menu(&ctx, Some(SubmenuId::SnapOverrides));
         let acts = actions(&menu);
         assert!(acts.contains(&MenuAction::Mtp));
+        assert!(acts.contains(&MenuAction::PointModifier(crate::command::PointModifier::From)));
+        assert!(acts.contains(&MenuAction::PointModifier(crate::command::PointModifier::TrackPoint)));
         for &(t, _, _) in crate::snap::ALL_SNAP_MODES {
             assert!(acts.contains(&MenuAction::SnapOverride(t)), "missing {t:?}");
         }

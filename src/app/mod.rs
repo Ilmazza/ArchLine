@@ -2211,6 +2211,7 @@ pub enum Message {
     /// Mid Between 2 Points from the snap menu: modal 2-pick modifier over
     /// the active point prompt.
     SnapOverrideMtp,
+    SnapOverrideModifier(crate::command::PointModifier),
     /// Snap Overrides ▸ None: the next pick ignores object snaps.
     SnapOverrideNone,
     /// Close the one-shot snap override menu without picking.

@@ -140,6 +140,7 @@ impl OpenCADStudio {
             }
             MenuAction::Command(cmd) => self.update(Message::Command(cmd)),
             MenuAction::Mtp => self.update(Message::SnapOverrideMtp),
+            MenuAction::PointModifier(m) => self.update(Message::SnapOverrideModifier(m)),
             MenuAction::SnapOverride(t) => self.update(Message::SnapOverridePick(t)),
             MenuAction::SnapOverrideNone => self.update(Message::SnapOverrideNone),
             MenuAction::DeleteSelected => self.update(Message::DeleteSelected),

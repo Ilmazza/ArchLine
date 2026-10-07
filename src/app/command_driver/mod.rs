@@ -337,13 +337,51 @@ impl OpenCADStudio {
         self.refresh_active_cmd_preview(i);
     }
 
-    pub(in crate::app) fn start_mtp_modifier(&mut self, i: usize) {
+    /// The running command is at a step that takes a point (possibly next to
+    /// keywords) rather than an object pick: the step a point modifier (MTP,
+    /// FROM, TT) can answer.
+    pub(in crate::app) fn at_point_step(&self, i: usize) -> bool {
+        self.tabs[i].active_cmd.as_ref().is_some_and(|c| {
+            (!c.input_kind().wants_text() || c.point_step_accepts_keywords())
+                && !c.needs_entity_pick()
+        })
+    }
+
+    /// The point modifier a typed token starts at this step. FROM and TT yield
+    /// to a keyword of the step with the same name.
+    pub(in crate::app) fn typed_point_modifier(
+        &self,
+        i: usize,
+        token: &str,
+    ) -> Option<crate::command::PointModifier> {
+        let modifier = crate::command::PointModifier::from_token(token)?;
+        if !self.at_point_step(i) {
+            return None;
+        }
+        if modifier != crate::command::PointModifier::Mtp {
+            let named = self.tabs[i].active_cmd.as_ref().is_some_and(|c| {
+                c.options()
+                    .iter()
+                    .any(|o| o.keyword.eq_ignore_ascii_case(token.trim()))
+            });
+            if named {
+                return None;
+            }
+        }
+        Some(modifier)
+    }
+
+    pub(in crate::app) fn start_point_modifier(
+        &mut self,
+        i: usize,
+        modifier: crate::command::PointModifier,
+    ) {
         let parent = self.tabs[i].active_cmd.take();
         self.tabs[i].suspended_cmd = parent;
         self.tabs[i].scene.clear_preview_wire();
-        let cmd = crate::command::Mid2PointCommand::new();
-        let prompt = crate::command::CadCommand::prompt(&cmd);
-        self.tabs[i].active_cmd = Some(Box::new(cmd));
+        let cmd = modifier.command();
+        let prompt = cmd.prompt();
+        self.tabs[i].active_cmd = Some(cmd);
         self.command_line.push_info(&prompt);
         self.command_line.set_step_options(Vec::new());
         self.refresh_active_cmd_preview(i);
