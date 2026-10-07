@@ -49,6 +49,17 @@ pub(crate) fn tooltip_style(theme: &Theme) -> container::Style {
 
 // ── Ribbon state ───────────────────────────────────────────────────────────
 
+/// Which of the layer / colour / linetype / lineweight values the selected
+/// objects do not agree on. The classic bar leaves such a field blank, as the
+/// reference does; the values in `active_*` keep the last agreed one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MixedProps {
+    pub layer: bool,
+    pub color: bool,
+    pub linetype: bool,
+    pub lineweight: bool,
+}
+
 pub struct Ribbon {
     modules: Vec<Box<dyn CadModule>>,
     active: usize,
@@ -84,6 +95,8 @@ pub struct Ribbon {
     pub active_linetype: String,
     /// Active lineweight.
     pub active_lineweight: LineWeight,
+    /// Properties the selection is mixed on (see [`MixedProps`]).
+    pub mixed: MixedProps,
     /// Linetypes loaded from the current document (with ASCII art).
     pub available_linetypes: Vec<LinetypeItem>,
     /// Whether the full ACI palette is expanded inside the color picker overlay.
@@ -191,6 +204,7 @@ impl Ribbon {
             active_color: AcadColor::ByLayer,
             active_linetype: "ByLayer".to_string(),
             active_lineweight: LineWeight::ByLayer,
+            mixed: MixedProps::default(),
             available_linetypes: vec![LinetypeItem {
                 name: "Continuous".to_string(),
                 art: String::new(),

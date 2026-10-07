@@ -2697,6 +2697,7 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
     /// marker to do better).
     pub(super) fn sync_ribbon_from_selection(&mut self) {
         let i = self.active_tab;
+        self.ribbon.mixed = Default::default();
         // The Start (welcome) tab has no document — keep the ribbon's
         // current-layer chip empty rather than re-seeding it with a default.
         if self.tabs[i].is_start {
@@ -2780,6 +2781,12 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                 _ => {}
             }
         }
+        self.ribbon.mixed = crate::ui::ribbon::MixedProps {
+            layer: layer_mixed,
+            color: color_mixed,
+            linetype: linetype_mixed,
+            lineweight: lineweight_mixed,
+        };
         if !layer_mixed {
             if let Some(l) = layer {
                 self.ribbon.active_layer = l;

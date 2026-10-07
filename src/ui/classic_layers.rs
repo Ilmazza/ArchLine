@@ -106,6 +106,17 @@ fn combo(
 }
 
 fn layer_combo(ribbon: &Ribbon) -> Element<'static, Message> {
+    if ribbon.mixed.layer {
+        // The selection spans layers: no state icons, no swatch, no name.
+        return combo(
+            LAYER_COMBO_ID,
+            ribbon.open_dropdown.as_deref() == Some(LAYER_COMBO_ID),
+            LAYER_COMBO_W,
+            Vec::new(),
+            LAYER_COMBO_W - 8.0 * 2.0 - 9.0 - 4.0,
+            "",
+        );
+    }
     let info = ribbon.layer_infos.iter().find(|l| l.name == ribbon.active_layer);
     let color = info.map(|l| l.color).unwrap_or(Color::WHITE);
     let visible = info.map(|l| l.visible).unwrap_or(true);
@@ -163,24 +174,27 @@ pub fn layer_row(ribbon: &Ribbon) -> iced::widget::Row<'static, Message> {
     }
     r = r.push(separator(false));
     let (color_swatch, _) = acad_color_display(ribbon.active_color);
-    r = r.push(prop_combo(
-        ribbon,
-        PROP_COLOR_ID,
-        Some(color_swatch),
-        &crate::ui::color_select::color_display_name(ribbon.active_color),
-    ));
-    r = r.push(prop_combo(
-        ribbon,
-        PROP_LINETYPE_ID,
-        None,
-        &linetype_display_name(&ribbon.active_linetype),
-    ));
-    r.push(prop_combo(
-        ribbon,
-        PROP_LW_ID,
-        None,
-        &LwItem(ribbon.active_lineweight).to_string(),
-    ))
+    let (color_swatch, color_name) = if ribbon.mixed.color {
+        (None, String::new())
+    } else {
+        (
+            Some(color_swatch),
+            crate::ui::color_select::color_display_name(ribbon.active_color),
+        )
+    };
+    r = r.push(prop_combo(ribbon, PROP_COLOR_ID, color_swatch, &color_name));
+    let linetype = if ribbon.mixed.linetype {
+        String::new()
+    } else {
+        linetype_display_name(&ribbon.active_linetype)
+    };
+    r = r.push(prop_combo(ribbon, PROP_LINETYPE_ID, None, &linetype));
+    let lineweight = if ribbon.mixed.lineweight {
+        String::new()
+    } else {
+        LwItem(ribbon.active_lineweight).to_string()
+    };
+    r.push(prop_combo(ribbon, PROP_LW_ID, None, &lineweight))
 }
 
 #[cfg(test)]

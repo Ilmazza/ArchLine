@@ -3432,6 +3432,75 @@ mod tests {
         assert!(shown(&app, "Walls"), "the row shows the selected object's layer");
     }
 
+    fn two_lines(app: &mut OpenCADStudio) -> [codec::Handle; 2] {
+        use crate::app::Message;
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LAYER Walls"}"#);
+        for cmd in ["LINE 0,0 10,0", "LINE 0,5 10,5"] {
+            app.automation_op(&format!(r#"{{"op":"run","cmd":"{cmd}"}}"#));
+            let _ = app.update(Message::CommandEscape);
+        }
+        let handles: Vec<codec::Handle> = app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .filter_map(|e| match e {
+                codec::EntityType::Line(l) => Some(l.common.handle),
+                _ => None,
+            })
+            .collect();
+        [handles[0], handles[1]]
+    }
+
+    fn layer_row_shows(app: &OpenCADStudio, text: &str) -> bool {
+        use crate::app::Message;
+        let row: iced::Element<'_, Message> = crate::ui::classic_layers::layer_row(&app.ribbon)
+            .width(iced::Length::Fixed(1400.0))
+            .into();
+        iced_test::simulator(row).find(text).is_ok()
+    }
+
+    #[test]
+    fn a_mixed_layer_selection_leaves_the_layer_field_blank_until_one_is_picked() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        let [first, second] = two_lines(&mut app);
+        app.tabs[0].scene.select_entities(&[second]);
+        app.refresh_properties();
+        let _ = app.update(Message::RibbonLayerChanged("Walls".into()));
+
+        app.tabs[0].scene.select_entities(&[first, second]);
+        app.refresh_properties();
+        assert!(app.ribbon.mixed.layer, "one line on 0, one on Walls");
+        assert!(!app.ribbon.mixed.color && !app.ribbon.mixed.linetype && !app.ribbon.mixed.lineweight);
+        assert!(!layer_row_shows(&app, "0"), "blank, not the previous value");
+        assert!(!layer_row_shows(&app, "Walls"));
+
+        // Picking a layer applies it to both: the field has a value again.
+        let _ = app.update(Message::RibbonLayerChanged("Walls".into()));
+        assert!(!app.ribbon.mixed.layer);
+        assert!(layer_row_shows(&app, "Walls"));
+    }
+
+    #[test]
+    fn a_mixed_colour_selection_is_flagged_and_clears_with_the_selection() {
+        use crate::app::Message;
+        let mut app = OpenCADStudio::new_for_test();
+        let [first, second] = two_lines(&mut app);
+        app.tabs[0].scene.select_entities(&[second]);
+        app.refresh_properties();
+        let _ = app.update(Message::RibbonColorChanged(codec::types::Color::from_index(1)));
+
+        app.tabs[0].scene.select_entities(&[first, second]);
+        app.refresh_properties();
+        assert!(app.ribbon.mixed.color);
+        assert!(!app.ribbon.mixed.layer);
+
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        assert_eq!(app.ribbon.mixed, Default::default(), "nothing selected: nothing mixed");
+    }
+
     #[test]
     fn escape_during_from_restores_the_parent_command() {
         use crate::app::Message;
