@@ -2167,7 +2167,10 @@ bg={bg_ms:.1}ms n={view_count}"
                 self.tabs[self.active_tab].is_start,
                 self.clean_screen,
             );
-            if !self.clean_screen && !classic {
+            if crate::workspace::ribbon_shown(
+                self.tabs[self.active_tab].is_start,
+                self.clean_screen,
+            ) {
                 col = col.push(self.ribbon.view(
                     is_paper,
                     self.tabs[self.active_tab].is_start,
@@ -2176,7 +2179,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.show_block_palette,
                 ));
             }
-            if classic {
+            if crate::workspace::menu_bar_shown(self.clean_screen) {
                 col = col.push(self.classic_menu_bar());
             }
             // Split the `chrome` bucket so live `view-detail` traces show
