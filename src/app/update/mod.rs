@@ -97,6 +97,7 @@ mod dialog;
 mod dynamic;
 mod file;
 mod page_setup_import;
+mod start;
 mod style;
 mod toolbar;
 pub(in crate::app) mod util;
@@ -9611,6 +9612,7 @@ impl OpenCADStudio {
             Message::BlockPalette(m) => self.on_block_palette(m),
             Message::Dock(m) => self.on_dock(m),
             Message::Toolbar(m) => self.on_toolbar(m),
+            Message::Start(m) => self.on_start(m),
             Message::PrintAllOpen => self.on_print_all_open(),
             Message::PrintAllToggle(name) => {
                 if let Some((_, selected)) = self

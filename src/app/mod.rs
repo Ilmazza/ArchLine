@@ -839,6 +839,8 @@ pub(super) struct OpenCADStudio {
     /// A press on a toolbar button that has variants, waiting to become a long
     /// press (flyout) or a click.
     pub(crate) tool_hold: Option<ToolHold>,
+    /// Sort, search, view and section of the classic Start page.
+    pub(crate) start_ui: crate::ui::classic_start::StartUi,
     /// Which panel is currently floated at full height (hovered, or a pinned
     /// panel on top).
     pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
@@ -3652,6 +3654,8 @@ pub enum Message {
     Dock(crate::ui::dock::DockMsg),
     /// A drag / redock / reset on the classic toolbars.
     Toolbar(crate::ui::toolbar_dock::ToolbarMsg),
+    /// Sort / search / view / section on the classic Start page.
+    Start(crate::ui::classic_start::StartMsg),
     /// Open the paper-layout batch output dialog.
     PrintAllOpen,
     /// Toggle one paper layout in the batch.
@@ -4250,6 +4254,7 @@ impl OpenCADStudio {
             toolbars: Default::default(),
             toolbar_drag: None,
             tool_hold: None,
+            start_ui: Default::default(),
             dock_expanded: None,
             dock_dragging: None,
             dock_resizing: None,

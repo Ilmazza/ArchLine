@@ -323,6 +323,7 @@ impl OpenCADStudio {
                 &self.recent_limit_input,
                 self.start_action_w.clone(),
                 self.start_section,
+                &self.start_ui,
             )
         } else if is_paper {
             shader(ViewportPane::model(
@@ -3484,8 +3485,17 @@ pub(super) fn start_page_view<'a>(
     recent_limit_input: &'a str,
     action_width_out: std::sync::Arc<std::sync::atomic::AtomicU32>,
     active: super::StartSection,
+    start_ui: &'a crate::ui::classic_start::StartUi,
 ) -> Element<'a, Message> {
     responsive(move |size| {
+        // ArchLine: AutoCAD-style page in the classic workspace; the old tabbed
+        // page remains for a narrow window and for `ARCHLINE_WORKSPACE=ribbon`.
+        if crate::workspace::is_classic() && size.width >= crate::ui::classic_start::MIN_WIDTH {
+            return classic_start_page(
+                patrons, videos, videos_loading, video_thumbs, discussions, discussions_loading,
+                recents, thumbs, recent_limit, recent_limit_input, start_ui,
+            );
+        }
         start_page_content(
             patrons,
             videos,
@@ -3503,6 +3513,40 @@ pub(super) fn start_page_view<'a>(
         )
     })
     .into()
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn classic_start_page<'a>(
+    patrons: &'a [(String, i64)],
+    videos: &'a [crate::videos::VideoEntry],
+    videos_loading: bool,
+    video_thumbs: &'a std::collections::HashMap<String, iced::widget::image::Handle>,
+    discussions: &'a [crate::discussions::DiscussionEntry],
+    discussions_loading: bool,
+    recents: &'a [std::path::PathBuf],
+    thumbs: &'a std::collections::HashMap<std::path::PathBuf, Option<iced::widget::image::Handle>>,
+    recent_limit: usize,
+    recent_limit_input: &'a str,
+    ui: &'a crate::ui::classic_start::StartUi,
+) -> Element<'a, Message> {
+    crate::ui::classic_start::page(
+        crate::ui::classic_start::StartData {
+            recents,
+            thumbs,
+            recent_limit,
+            recent_limit_input,
+            recent_max: super::recent::RECENT_MAX,
+            videos,
+            videos_loading,
+            video_thumbs,
+            discussions,
+            discussions_loading,
+            patrons,
+            ui,
+        },
+        0.0,
+    )
 }
 
 fn start_page_content<'a>(
