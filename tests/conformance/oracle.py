@@ -108,6 +108,9 @@ def compare(src, out_path):
     if a == b:
         res["strings"] = (True, "")
     else:
-        bad = [(x, y) for x, y in zip(a, b) if x != y][:2]
-        res["strings"] = (False, f"stringhe {bad}" if bad else f"numero stringhe {len(a)} -> {len(b)}")
+        bad = [(x, y) for x, y in zip(a, b) if x != y]  # tutte: un dettaglio parziale maschera le regressioni
+        detail = f"stringhe {bad}" if bad else ""
+        if len(a) != len(b):
+            detail += f"{' ' if detail else ''}numero stringhe {len(a)} -> {len(b)}"
+        res["strings"] = (False, detail)
     return res

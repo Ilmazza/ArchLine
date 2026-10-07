@@ -149,6 +149,25 @@ class OracleTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("10.10", detail)
 
+    def test_every_differing_string_appears_in_the_detail(self):
+        # un dettaglio che ne mostra solo alcune maschera una regressione nelle altre
+        def make(name, texts):
+            doc = self.ezdxf.new("R2018")
+            for i, t in enumerate(texts):
+                doc.modelspace().add_text(t, height=2).set_placement((0, 10 * i))
+            path = self.tmp / name
+            doc.saveas(path)
+            return path
+
+        a = make("a.dxf", ["uno", "due", "tre", "quattro"])
+        b = make("b.dxf", ["UNO", "DUE", "TRE", "quattro"])
+        snap = self.oracle.snapshot(self.oracle.read_strict(a)[0])
+        ok, detail = self.oracle.compare(snap, b)["strings"]
+        self.assertFalse(ok)
+        for wrong in ("UNO", "DUE", "TRE"):
+            self.assertIn(wrong, detail)
+        self.assertNotIn("quattro", detail)
+
     def test_text_length_does_not_move_the_extents(self):
         # ezdxf stima l'estensione di TEXT, MTEXT e ATTRIB dalla lunghezza della stringa: non e' un dato
         # geometrico, e un difetto sugli accenti non deve comparire anche come difetto di estensione.
