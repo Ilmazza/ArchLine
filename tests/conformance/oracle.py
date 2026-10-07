@@ -41,8 +41,27 @@ def _strings(doc):
     return out
 
 
+def _strip_text(doc):
+    """Toglie dal documento in memoria ogni testo (TEXT, MTEXT, ATTDEF e gli ATTRIB degli INSERT).
+
+    ezdxf stima l'estensione di un testo dalla lunghezza della stringa: non e' un dato geometrico, e un
+    difetto sugli accenti non deve comparire anche come difetto di estensione.
+    """
+    layouts = [doc.modelspace()] + list(doc.blocks)
+    for layout in layouts:
+        for e in list(layout):
+            kind = e.dxftype()
+            if kind in ("TEXT", "MTEXT", "ATTDEF"):
+                layout.delete_entity(e)
+            elif kind == "INSERT":
+                e.attribs.clear()
+
+
 def snapshot(doc):
-    return {"types": _types(doc), "extents": _extents(doc), "strings": _strings(doc)}
+    """Tipi, stringhe ed estensioni. Modifica `doc`: dopo aver letto le stringhe ne toglie i testi."""
+    types, strings = _types(doc), _strings(doc)
+    _strip_text(doc)
+    return {"types": types, "extents": _extents(doc), "strings": strings}
 
 
 def _fmt_box(box):

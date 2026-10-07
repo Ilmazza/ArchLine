@@ -1,11 +1,16 @@
 """Test del banco di conformita. Da lanciare dalla radice del repo:
 python -m unittest discover -s tests/conformance -p "test_*.py" -v
 """
+import contextlib
 import importlib.util
+import io
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import classify
 import report
@@ -144,6 +149,29 @@ class OracleTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("10.10", detail)
 
+    def test_text_length_does_not_move_the_extents(self):
+        # ezdxf stima l'estensione di TEXT, MTEXT e ATTRIB dalla lunghezza della stringa: non e' un dato
+        # geometrico, e un difetto sugli accenti non deve comparire anche come difetto di estensione.
+        def make(name, text):
+            doc = self.ezdxf.new("R2018")
+            msp = doc.modelspace()
+            msp.add_line((0, 0), (10, 0))
+            msp.add_text(text, height=2).set_placement((20, 0))
+            msp.add_mtext(text, dxfattribs={"insert": (20, 10), "char_height": 2})
+            blk = doc.blocks.new("T")
+            blk.add_attdef("N", (0, 0), "-", dxfattribs={"height": 1})
+            msp.add_blockref("T", (40, 0)).add_auto_attribs({"N": text})
+            path = self.tmp / name
+            doc.saveas(path)
+            return path
+
+        short = make("short.dxf", "e")
+        long_ = make("long.dxf", "e" * 40)
+        snap = self.oracle.snapshot(self.oracle.read_strict(short)[0])
+        res = self.oracle.compare(snap, long_)
+        self.assertTrue(res["extents"][0], res["extents"])
+        self.assertFalse(res["strings"][0])  # il testo e' comunque diverso
+
     def test_type_difference_names_both_counts(self):
         a = self._save("a.dxf", lambda m: (m.add_line((0, 0), (1, 1)), m.add_circle((0, 0), 1)))
         b = self._save("b.dxf", lambda m: m.add_line((0, 0), (1, 1)))
@@ -206,6 +234,187 @@ class CasesTests(unittest.TestCase):
             self.assertEqual(len(strings), 3, strings)
             for ch in "èàòùìé":
                 self.assertIn(ch, joined, f"{version}: manca {ch!r}")
+
+
+FAKE = str(Path(__file__).resolve().parent / "fake_converter.py")
+
+
+class UpdatedExpectedTests(unittest.TestCase):
+    def setUp(self):
+        import run
+        self.run = run
+
+    def _res(self, check, ok, detail, state):
+        return Result("c", "R2000", "dxf", check, ok, detail, state)
+
+    def test_new_divergence_without_note_is_refused(self):
+        results = [self._res("types", False, "tipi x", REGRESSION)]
+        with self.assertRaises(self.run.BenchError) as ctx:
+            self.run.updated_expected({}, results, None)
+        self.assertIn("--note", str(ctx.exception))
+
+    def test_new_divergence_with_note_is_added(self):
+        results = [self._res("types", False, "tipi x", REGRESSION)]
+        new, added, changed, removed = self.run.updated_expected({}, results, "motivo")
+        self.assertEqual(new, {"c|R2000|dxf|types": {"detail": "tipi x", "note": "motivo"}})
+        self.assertEqual((added, changed, removed), (1, 0, 0))
+
+    def test_unchanged_expected_keeps_its_old_note_and_needs_no_note(self):
+        old = {"c|R2000|dxf|types": {"detail": "tipi x", "note": "nota vecchia"}}
+        results = [self._res("types", False, "tipi x", EXPECTED)]
+        new, added, changed, removed = self.run.updated_expected(old, results, None)
+        self.assertEqual(new, old)
+        self.assertEqual((added, changed, removed), (0, 0, 0))
+
+    def test_improved_entry_is_dropped(self):
+        old = {"c|R2000|dxf|types": {"detail": "tipi x", "note": "n"}}
+        results = [self._res("types", True, "", IMPROVED)]
+        new, added, changed, removed = self.run.updated_expected(old, results, None)
+        self.assertEqual(new, {})
+        self.assertEqual((added, changed, removed), (0, 0, 1))
+
+    def test_changed_detail_is_replaced_and_needs_a_note(self):
+        old = {"c|R2000|dxf|types": {"detail": "tipi x", "note": "n"}}
+        results = [self._res("types", False, "tipi y", REGRESSION)]
+        with self.assertRaises(self.run.BenchError):
+            self.run.updated_expected(old, results, None)
+        new, added, changed, removed = self.run.updated_expected(old, results, "nuovo motivo")
+        self.assertEqual(new["c|R2000|dxf|types"], {"detail": "tipi y", "note": "nuovo motivo"})
+        self.assertEqual((added, changed, removed), (0, 1, 0))
+
+    def test_entries_of_cases_not_run_are_preserved(self):
+        old = {"altro|R2000|dxf|types": {"detail": "d", "note": "n"}}
+        results = [self._res("types", True, "", OK)]
+        new, *_ = self.run.updated_expected(old, results, None)
+        self.assertEqual(new, old)
+
+
+@unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+class BenchEndToEndTests(unittest.TestCase):
+    def setUp(self):
+        import cases
+        import run
+        self.cases, self.run = cases, run
+        self.tmp = Path(tempfile.mkdtemp(prefix="conf_test_"))
+        self.expected_path = self.tmp / "expected.json"
+        self.cmd = [sys.executable, FAKE]
+
+    def _bench(self, mode, case_modules, expected=None):
+        work = self.tmp / f"work_{mode}"
+        work.mkdir(exist_ok=True)
+        with mock.patch.dict(os.environ, {"FAKE_CONVERTER_MODE": mode}):
+            return self.run.run_bench(self.cmd, case_modules, self.run.VERSIONS, expected or {}, work)
+
+    def _main(self, mode, *args, exe=FAKE, stream=None):
+        argv = [exe, "--expected", str(self.expected_path), *args]
+        out = stream or io.StringIO()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"FAKE_CONVERTER_MODE": mode}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.run.main(argv)
+        return rc, out, err.getvalue()
+
+    def test_faithful_converter_gives_all_ok(self):
+        results = self._bench("faithful", [self.cases.geometry, self.cases.text_accents])
+        self.assertEqual(len(results), 2 * 2 * 2 * 4)  # casi x versioni x percorsi x controlli
+        bad = [r for r in results if r.state != OK]
+        self.assertEqual(bad, [], bad)
+
+    def test_corrupted_accents_are_a_regression_only_in_strings(self):
+        results = self._bench("corrupt-accents", [self.cases.text_accents])
+        by_check = {}
+        for r in results:
+            by_check.setdefault(r.check, set()).add(r.state)
+        self.assertEqual(by_check["strings"], {REGRESSION})
+        self.assertEqual(by_check["types"], {OK})
+        self.assertEqual(by_check["extents"], {OK})
+        self.assertEqual(by_check["readable"], {OK})
+        detail = next(r.detail for r in results if r.check == "strings")
+        self.assertIn("Ã", detail)
+
+    def test_dropped_entity_is_detected_in_types(self):
+        results = self._bench("drop-entity", [self.cases.geometry])
+        states = {r.state for r in results if r.check == "types"}
+        self.assertEqual(states, {REGRESSION})
+
+    def test_crash_is_recorded_and_bench_continues(self):
+        results = self._bench("crash", [self.cases.geometry, self.cases.text_accents])
+        self.assertEqual(len(results), 2 * 2 * 2 * 4)
+        self.assertTrue(all(not r.ok for r in results))
+        self.assertTrue(all(r.detail == "conversione fallita (exit 1)" for r in results), {r.detail for r in results})
+
+    def test_recorded_divergence_becomes_expected_and_strict_passes(self):
+        rc, out, _ = self._main("corrupt-accents", "--case", "text_accents", "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("REGRESSIONE", out.getvalue())
+        rc, out, _ = self._main("corrupt-accents", "--case", "text_accents", "--update-expected",
+                                "--note", "accenti corrotti dal convertitore finto")
+        self.assertEqual(rc, 0)
+        saved = classify.load_expected(self.expected_path)
+        self.assertEqual(len(saved), 4)  # strings x 2 versioni x 2 percorsi
+        self.assertTrue(all(k.endswith("|strings") for k in saved))
+        rc, out, _ = self._main("corrupt-accents", "--case", "text_accents", "--strict")
+        self.assertEqual(rc, 0)
+        self.assertIn("ATTESO", out.getvalue())
+        self.assertNotIn("## Regressioni", out.getvalue())
+
+    def test_fixed_divergence_is_reported_as_improved(self):
+        self._main("corrupt-accents", "--case", "text_accents", "--update-expected", "--note", "n")
+        rc, out, _ = self._main("faithful", "--case", "text_accents", "--strict")
+        self.assertEqual(rc, 0)
+        self.assertIn("## Migliorati (4)", out.getvalue())
+
+    def test_report_survives_cp1252_console(self):
+        raw = io.BytesIO()
+        console = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+        rc, out, _ = self._main("corrupt-accents", "--case", "text_accents", stream=console)
+        out.flush()
+        self.assertEqual(rc, 0)
+        text = raw.getvalue().decode("utf-8")
+        self.assertIn("## Regressioni", text)
+        self.assertIn("Ã", text)
+
+    def test_out_file_is_written_as_utf8(self):
+        out_file = self.tmp / "report.md"
+        self._main("corrupt-accents", "--case", "text_accents", "--out", str(out_file))
+        text = out_file.read_bytes().decode("utf-8")
+        self.assertIn("# Banco di conformita ArchLine", text)
+
+    def test_keep_leaves_the_generated_files(self):
+        keep = self.tmp / "keep"
+        self._main("faithful", "--case", "geometry", "--keep", str(keep))
+        self.assertTrue((keep / "geometry_R2000.dxf").exists())
+        self.assertTrue((keep / "geometry_R2018.dxf").exists())
+
+    def test_missing_executable_is_a_bench_error(self):
+        rc, _, err = self._main("faithful", exe=str(self.tmp / "non_esiste.exe"))
+        self.assertEqual(rc, 2)
+        self.assertIn("eseguibile non trovato", err)
+
+    def test_unknown_case_is_a_bench_error(self):
+        rc, _, err = self._main("faithful", "--case", "inesistente")
+        self.assertEqual(rc, 2)
+        self.assertIn("caso sconosciuto: inesistente", err)
+        self.assertIn("geometry", err)
+
+    def test_expected_entry_without_note_is_a_bench_error(self):
+        self.expected_path.write_text(
+            json.dumps({"geometry|R2000|dxf|types": {"detail": "x", "note": ""}}), encoding="utf-8")
+        rc, _, err = self._main("faithful", "--case", "geometry")
+        self.assertEqual(rc, 2)
+        self.assertIn("geometry|R2000|dxf|types", err)
+
+    def test_update_expected_without_note_is_a_bench_error(self):
+        rc, _, err = self._main("corrupt-accents", "--case", "text_accents", "--update-expected")
+        self.assertEqual(rc, 2)
+        self.assertIn("--note", err)
+        self.assertFalse(self.expected_path.exists())
+
+    def test_missing_ezdxf_skips_with_77(self):
+        with mock.patch("importlib.util.find_spec", return_value=None):
+            rc, out, _ = self._main("faithful")
+        self.assertEqual(rc, 77)
+        self.assertIn("ezdxf", out.getvalue())
 
 
 if __name__ == "__main__":
