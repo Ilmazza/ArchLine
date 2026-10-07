@@ -46,8 +46,8 @@ Le 66 righe presenti per nome non sono elencate. Le altre:
 | `STATUS` | M | stato del disegno (entità, limiti, memoria): il letterale compare solo come tag di un attributo |
 | `RECOVER` | 1 | c'è `AUDIT`; `RECOVER` compare solo in un elenco del plugin host |
 | `TIME` | 2 | |
-| `LAYCUR` | 1 | (Express) porta gli oggetti sul layer corrente |
-| `LAYWALK` | 1 | |
+| ~~`LAYCUR`~~ | 1 | **fatto il 2026-10-07**: porta gli oggetti scelti sul layer corrente |
+| `LAYWALK` | 1 | rimandato: è una finestra con evidenziazione in tempo reale, **non** a basso costo come avevo scritto |
 | `NAMEDVIEW` | 1 | c'è `VIEW`; la finestra delle viste con nome non è registrata |
 | `EATTEDIT` | 1 | c'è `ATTEDIT` e `BATTMAN` |
 | `PREVIEW` | M | anteprima di stampa |
@@ -90,7 +90,7 @@ equivalenti, funzioni fuori scopo). **Elenco non verificato su documentazione Au
 | Annotazione | 19 / 25 | `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT`, `TEXTALIGN`, `TABLEEXPORT`, `SPELL` (controllo ortografico: non verificato a fondo) |
 | Blocchi | 9 / 14 | `BCOUNT` (conteggio blocchi per abaco), `ATTIPEDIT`, `BLOCKICON` |
 | Riferimenti | 11 / 18 | `IMAGEADJUST`, `IMAGEQUALITY`, `PDFSHXTEXT`, `OLELINKS`, `INSERTOBJ` |
-| Layer | 15 / 20 | `LAYERP` e `LAYERPMODE` (layer precedente), `LAYWALK`, `LAYCUR`, `LAYVPI` |
+| Layer | 17 / 20 | `LAYERPMODE` (interruttore del tracciamento), `LAYWALK`, `LAYVPI`; `LAYERP` e `LAYCUR` fatti il 2026-10-07 |
 | Vista | 11 / 14 | `NAMEDVIEW`, `UCSMAN`, `DVIEW` (prospettiva interattiva) |
 | Layout e stampa | 14 / 21 | `PUBLISH`, `PREVIEW`, `VPMAX`, `VPMIN`, `SHEETSETHIDE` |
 | Utilità | 24 / 34 | `STATUS`, `TIME`, `RECOVERALL`, `WORKSPACE` (cambio di workspace da comando: oggi solo con `ARCHLINE_WORKSPACE`) |
@@ -153,7 +153,7 @@ stimato ore). Niente numeri inventati.
 | # | Cosa | Impatto | Costo | Perché |
 |---|---|---|---|---|
 | 1 | ~~Ricarica delle immagini (§6.1)~~ fatto | alto: piante scansionate e catastali cambiano spesso | basso | difetto già segnalato, causa chiara |
-| 2 | `LAYERP`, `LAYCUR`, `LAYWALK` | medio: lavoro quotidiano sui layer | basso | la barra Layers c'è, mancano i comandi |
+| 2 | ~~`LAYERP`, `LAYCUR`~~ fatti; `LAYWALK` rimandato | medio: lavoro quotidiano sui layer | `LAYWALK`: medio-alto | `LAYERP` ricorda le modifiche fatte da barra, gestore e comandi `LAY…`; **non** quelle fatte con le sottoazioni `LAYER ON/OFF/…` a riga di comando (usano un'istantanea completa e non passano da `begin_layer_undo`) |
 | 3 | `PUBLISH` e `PREVIEW` | alto: consegna di più tavole | medio | la stampa singola c'è |
 | 4 | `TXTEXP`, `COPYTOLAYER`, `CHSPACE`, `BCOUNT` | medio | basso | comandi di editing isolati |
 | 5 | `IMAGEADJUST`, `IMAGEQUALITY` | medio per i raster | basso | si collega al punto 1 |
