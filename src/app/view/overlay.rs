@@ -1125,8 +1125,8 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
 const MENU_CURSOR_INSET_X: f32 = 24.0;
 /// Width of the icon gutter every row reserves so labels line up whether or
 /// not the row carries a glyph (object snaps, command icons).
-const MENU_GUTTER_W: f32 = 18.0;
-const MENU_ICON_SIZE: f32 = 14.0;
+const MENU_GUTTER_W: f32 = 20.0;
+const MENU_ICON_SIZE: f32 = 16.0;
 /// Height `sep()` really renders (the model's `MENU_SEP_H` also counts padding
 /// the view does not draw), used to line a submenu up with its header.
 const MENU_SEP_RENDERED_H: f32 = 1.0;
@@ -1925,6 +1925,14 @@ mod context_menu_tests {
             "the variants start one menu width to the right of the header, got {gap}"
         );
         assert!(first.height <= MENU_ROW_H, "rows keep their height");
+    }
+
+    #[test]
+    fn menu_icons_are_at_least_16_px_and_still_fit_inside_the_padded_row() {
+        // The row's button pads 3 px above and below its 22 px height.
+        assert!(MENU_ICON_SIZE >= 16.0, "icons are {MENU_ICON_SIZE} px");
+        assert!(MENU_ICON_SIZE <= MENU_ROW_H - 6.0, "icons are {MENU_ICON_SIZE} px");
+        assert!(MENU_GUTTER_W >= MENU_ICON_SIZE + 2.0);
     }
 
     #[test]
