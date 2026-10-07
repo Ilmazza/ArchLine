@@ -260,6 +260,20 @@ fn link_button<'a>(label: String, msg: Message) -> Element<'a, Message> {
         .into()
 }
 
+/// The bottom links of the sidebar share the look of Open / New.
+fn sidebar_link_style(theme: &Theme, status: button::Status) -> button::Style {
+    outline_style(theme, status)
+}
+
+fn sidebar_link<'a>(label: String, msg: Message) -> Element<'a, Message> {
+    button(text(label).size(14))
+        .on_press(msg)
+        .padding([8, 16])
+        .width(Length::Fill)
+        .style(sidebar_link_style)
+        .into()
+}
+
 #[inline(never)]
 fn sidebar<'a>(d: &StartData<'a>) -> Element<'a, Message> {
     let online = crate::privacy::online();
@@ -276,20 +290,20 @@ fn sidebar<'a>(d: &StartData<'a>) -> Element<'a, Message> {
         ));
     }
     let mut links = column![
-        link_button(crate::tr!("action", "options"), Message::OptionsOpen),
-        link_button(crate::tr!("action", "plugins"), Message::PluginManagerOpen),
+        sidebar_link(crate::tr!("action", "options"), Message::OptionsOpen),
+        sidebar_link(crate::tr!("action", "plugins"), Message::PluginManagerOpen),
     ]
     .spacing(6);
     if online {
         links = links
-            .push(link_button(
+            .push(sidebar_link(
                 crate::t!("Online help").into_owned(),
                 Message::RibbonToolClick {
                     tool_id: "HELP".to_string(),
                     event: crate::modules::ModuleEvent::Command("HELP".to_string()),
                 },
             ))
-            .push(link_button(
+            .push(sidebar_link(
                 crate::t!("Community forum").into_owned(),
                 Message::OpenUrl(crate::discussions::DISCUSSIONS_URL.to_string()),
             ));
@@ -308,7 +322,7 @@ fn sidebar<'a>(d: &StartData<'a>) -> Element<'a, Message> {
             Space::new().height(24),
             nav,
             Space::new().height(Length::Fill),
-            container(links).padding([0, 16]),
+            links,
         ]
         .height(Length::Fill),
     )
@@ -879,6 +893,36 @@ mod tests {
         // What is left of the old buttons still has a home in the sidebar.
         assert!(ui.find(crate::tr!("action", "options").as_str()).is_ok());
         assert!(ui.find(crate::tr!("action", "plugins").as_str()).is_ok());
+    }
+
+    #[test]
+    fn the_sidebar_links_look_like_the_open_and_new_buttons() {
+        for theme in [Theme::Dark, Theme::Light] {
+            for status in [
+                button::Status::Active,
+                button::Status::Hovered,
+                button::Status::Pressed,
+            ] {
+                let link = sidebar_link_style(&theme, status);
+                let wide = outline_style(&theme, status);
+                assert_eq!(link.background, wide.background, "{status:?}");
+                assert_eq!(link.text_color, wide.text_color, "{status:?}");
+                assert_eq!(link.border, wide.border, "{status:?}");
+                assert!(link.background.is_some() && link.border.width > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn options_and_plugins_open_their_windows() {
+        use crate::app::Message;
+        let f = Fixture::new(&["a.dwg"]);
+        let mut ui = iced_test::simulator(f.page());
+        ui.click(crate::tr!("action", "options").as_str()).expect("Options");
+        ui.click(crate::tr!("action", "plugins").as_str()).expect("Plugins");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::OptionsOpen)));
+        assert!(msgs.iter().any(|m| matches!(m, Message::PluginManagerOpen)));
     }
 
     #[test]
