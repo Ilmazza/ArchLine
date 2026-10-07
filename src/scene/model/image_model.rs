@@ -459,6 +459,17 @@ pub fn clear_image_cache() {
     }
 }
 
+/// Drop one memoised image so the next [`resolve_image`] of `path` re-reads it. Used by the
+/// XREF Reload of an image row: a changed file, or one that appears after being missing, must
+/// show up without reopening the drawing. Other paths keep their cached pixels.
+pub fn invalidate_image(path: &str) {
+    let path = path.trim();
+    image_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(path);
+}
+
 /// Resolve an image reference to decoded pixels, memoised per path. Handles a
 /// local file and — on native builds — an `http`/`https` URL. Returns `None`
 /// for anything that can't be shown (missing file, offline, decode error, or a
@@ -528,4 +539,81 @@ fn fetch_remote(url: &str) -> Option<Vec<u8>> {
 #[cfg(target_arch = "wasm32")]
 fn fetch_remote(_url: &str) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A unique temp path per call: the image cache is process-global, so tests must not share paths.
+    fn unique_png_path() -> std::path::PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "archline_image_cache_{}_{}.png",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32) {
+        image::RgbaImage::new(w, h).save(path).unwrap();
+    }
+
+    #[test]
+    fn invalidate_image_makes_a_changed_file_visible() {
+        let path = unique_png_path();
+        let key = path.to_string_lossy().to_string();
+        write_png(&path, 4, 4);
+        assert_eq!(resolve_image(&key).unwrap().width, 4);
+        write_png(&path, 8, 8);
+        // The cache keeps the old pixels until the path is invalidated: this is the bug being fixed.
+        assert_eq!(resolve_image(&key).unwrap().width, 4);
+        invalidate_image(&key);
+        assert_eq!(resolve_image(&key).unwrap().width, 8);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalidate_image_makes_a_file_that_appears_later_visible() {
+        let path = unique_png_path();
+        let key = path.to_string_lossy().to_string();
+        assert!(resolve_image(&key).is_none());
+        write_png(&path, 3, 5);
+        // A missing file is memoised too: it stays missing until invalidated.
+        assert!(resolve_image(&key).is_none());
+        invalidate_image(&key);
+        let decoded = resolve_image(&key).expect("the file exists now");
+        assert_eq!((decoded.width, decoded.height), (3, 5));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalidate_image_trims_the_path_like_resolve_does() {
+        let path = unique_png_path();
+        let key = path.to_string_lossy().to_string();
+        write_png(&path, 2, 2);
+        assert_eq!(resolve_image(&key).unwrap().width, 2);
+        write_png(&path, 6, 6);
+        invalidate_image(&format!("  {key}  "));
+        assert_eq!(resolve_image(&key).unwrap().width, 6);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalidate_image_leaves_other_paths_cached() {
+        let (a, b) = (unique_png_path(), unique_png_path());
+        let (ka, kb) = (a.to_string_lossy().to_string(), b.to_string_lossy().to_string());
+        write_png(&a, 2, 2);
+        write_png(&b, 2, 2);
+        resolve_image(&ka);
+        resolve_image(&kb);
+        write_png(&a, 7, 7);
+        write_png(&b, 7, 7);
+        invalidate_image(&ka);
+        assert_eq!(resolve_image(&ka).unwrap().width, 7);
+        assert_eq!(resolve_image(&kb).unwrap().width, 2, "an unrelated path must keep its cached pixels");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
 }
