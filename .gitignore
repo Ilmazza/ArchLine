@@ -44,3 +44,6 @@ __pycache__/
 
 # macOS Finder metadata
 .DS_Store
+
+# Python (banco di conformita)
+**/__pycache__/
