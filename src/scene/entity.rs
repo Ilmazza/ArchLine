@@ -1,4 +1,5 @@
 use super::*;
+use crate::entities::hatch_fill::gradient_tint_color;
 
 #[derive(Debug, Clone)]
 pub struct CreateBlockOptions {
@@ -99,36 +100,6 @@ fn family_from_stored_line(
         dy: dy as f32,
         dashes: ln.dash_lengths.iter().map(|&d| d as f32).collect(),
     }
-}
-
-/// Preserve the selected hue while moving its HSL lightness towards the
-/// persisted one-colour tint/shade target (0 = black, 1 = white).
-fn gradient_tint_color(base: [f32; 4], target: f32) -> [f32; 4] {
-    let max = base[0].max(base[1]).max(base[2]);
-    let min = base[0].min(base[1]).min(base[2]);
-    let lightness = (max + min) * 0.5;
-    let target = target.clamp(0.0, 1.0);
-    let mut result = base;
-    if target <= lightness {
-        let factor = if lightness > 1.0e-6 {
-            target / lightness
-        } else {
-            0.0
-        };
-        for channel in &mut result[..3] {
-            *channel *= factor;
-        }
-    } else {
-        let factor = if lightness < 1.0 - 1.0e-6 {
-            (target - lightness) / (1.0 - lightness)
-        } else {
-            1.0
-        };
-        for channel in &mut result[..3] {
-            *channel += (1.0 - *channel) * factor;
-        }
-    }
-    result
 }
 
 impl Scene {
