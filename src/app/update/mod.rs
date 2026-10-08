@@ -4844,9 +4844,9 @@ impl OpenCADStudio {
                 Task::none()
             }
             Message::HatchDialogOk => self.hatch_dialog_ok(),
-            Message::HatchDialogAdd(_)
-            | Message::HatchDialogPickOrigin
-            | Message::HatchDialogPreview => Task::none(), // Task 8
+            Message::HatchDialogAdd(kind) => self.hatch_dialog_add(kind),
+            Message::HatchDialogPickOrigin => self.hatch_dialog_pick_origin(),
+            Message::HatchDialogPreview => self.hatch_dialog_preview(),
             Message::DrawingUnitsApply => {
                 let Some(state) = self.drawing_units.take() else {
                     self.active_modal = None;

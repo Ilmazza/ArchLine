@@ -186,6 +186,232 @@ impl OpenCADStudio {
             self.refresh_properties();
         }
     }
+
+    /// Hide the dialog and start the collector for "Add: Pick points" or
+    /// "Add: Select objects".
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_add(
+        &mut self,
+        kind: crate::ui::window::hatch_dialog::AddKind,
+    ) -> Task<Message> {
+        use crate::ui::window::hatch_dialog::{AddKind, Flow};
+        let i = self.active_tab;
+        let Some(state) = self.hatch_dialog.as_ref() else {
+            return Task::none();
+        };
+        if state.owner_tab_id != self.tabs[i].id {
+            self.hatch_dialog_cancel();
+            return Task::none();
+        }
+        let Some(resolved) = state.settings.resolve() else {
+            return Task::none();
+        };
+        let settings = state.settings.clone();
+        let origin = self.hatch_origin_for(i);
+        // Rebuild the boundary data: the drawing may have changed since the
+        // dialog opened or since the last round.
+        let (plane, boundary_sources, outlines) = self.hatch_boundary_context(i);
+        let saved = (kind == AddKind::Objects).then(|| self.selected_handles(i));
+        if saved.is_some() {
+            self.tabs[i].scene.deselect_all();
+        }
+        let command = HatchCommand::collecting(
+            outlines.clone(),
+            boundary_sources.clone(),
+            plane,
+            kind == AddKind::Objects,
+        )
+        .with_origin(origin)
+        .with_settings(&resolved);
+        if let Some(state) = self.hatch_dialog.as_mut() {
+            state.plane = plane;
+            state.outlines = outlines;
+            state.boundary_sources = boundary_sources;
+            state.saved_selection = saved;
+            state.flow = match kind {
+                AddKind::Points => Flow::Pick,
+                AddKind::Objects => Flow::Select,
+            };
+        }
+        self.hatch_last = settings;
+        self.active_modal = None;
+        self.command_line.push_info(&command.prompt());
+        self.tabs[i].active_cmd = Some(Box::new(command));
+        Task::none()
+    }
+
+    /// The hatch origin the next command should use: the picked one when the
+    /// dialog is in "Specified origin" mode, the drawing's otherwise.
+    fn hatch_origin_for(&self, i: usize) -> [f64; 2] {
+        let document = self.tabs[i].scene.document.hatch_origin();
+        match self.hatch_dialog.as_ref() {
+            Some(state) if state.settings.origin_mode == OriginMode::Specified => {
+                state.specified_origin.unwrap_or(document)
+            }
+            _ => document,
+        }
+    }
+
+    /// "Click to set new origin": hide the dialog and take one point.
+    pub(in crate::app) fn hatch_dialog_pick_origin(&mut self) -> Task<Message> {
+        use crate::modules::draw::draw::hatch_flows::HatchOriginPickCommand;
+        use crate::ui::window::hatch_dialog::Flow;
+        let i = self.active_tab;
+        let Some(state) = self.hatch_dialog.as_mut() else {
+            return Task::none();
+        };
+        if state.owner_tab_id != self.tabs[i].id {
+            self.hatch_dialog_cancel();
+            return Task::none();
+        }
+        state.flow = Flow::Origin;
+        self.active_modal = None;
+        let command = HatchOriginPickCommand;
+        self.command_line.push_info(&command.prompt());
+        self.tabs[i].active_cmd = Some(Box::new(command));
+        Task::none()
+    }
+
+    /// Preview: hide the dialog and show what OK would create. Does not touch
+    /// the remembered settings.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_preview(&mut self) -> Task<Message> {
+        use crate::modules::draw::draw::hatch_flows::HatchPreviewCommand;
+        use crate::ui::window::hatch_dialog::Flow;
+        let i = self.active_tab;
+        let Some(state) = self.hatch_dialog.as_ref() else {
+            return Task::none();
+        };
+        if state.owner_tab_id != self.tabs[i].id {
+            self.hatch_dialog_cancel();
+            return Task::none();
+        }
+        if !state.can_ok() {
+            return Task::none();
+        }
+        let document_origin = self.tabs[i].scene.document.hatch_origin();
+        let Some(command) = hatch_command_from_state(state, document_origin) else {
+            return Task::none();
+        };
+        let models = command.preview_models();
+        if let Some(state) = self.hatch_dialog.as_mut() {
+            state.flow = Flow::Preview;
+        }
+        self.active_modal = None;
+        let preview = HatchPreviewCommand::new(models);
+        self.command_line.push_info(&preview.prompt());
+        self.tabs[i].active_cmd = Some(Box::new(preview));
+        self.refresh_area_preview(i);
+        Task::none()
+    }
+
+    /// The collector finished a round: take its regions into the dialog,
+    /// restore the selection and show the dialog again.
+    #[inline(never)]
+    pub(in crate::app) fn handle_hatch_boundaries_picked(
+        &mut self,
+        regions: Vec<(
+            crate::modules::draw::draw::hatch_settings::HatchRegion,
+            RegionOrigin,
+        )>,
+        objects: Vec<Handle>,
+    ) -> Task<Message> {
+        let i = self.active_tab;
+        self.tabs[i].active_cmd = None;
+        self.tabs[i].snap_result = None;
+        self.tabs[i].scene.clear_preview_wire();
+        self.restore_pre_cmd_tangent();
+        let owned = self
+            .hatch_dialog
+            .as_ref()
+            .is_some_and(|state| state.owner_tab_id == self.tabs[i].id);
+        if !owned {
+            // The flow belongs to another tab or is gone: never apply it here.
+            self.hatch_dialog_cancel();
+            return Task::none();
+        }
+        if let Some(state) = self.hatch_dialog.as_mut() {
+            for (region, origin) in regions {
+                add_region(&mut state.regions, region, origin);
+            }
+            for handle in objects {
+                if !state.taken_objects.contains(&handle) {
+                    state.taken_objects.push(handle);
+                }
+            }
+        }
+        self.hatch_dialog_resume(i, None);
+        Task::none()
+    }
+
+    /// Back to the visible dialog after a hidden step. `origin` is the point a
+    /// "Click to set new origin" round picked, in plane coordinates.
+    pub(in crate::app) fn hatch_dialog_resume(&mut self, i: usize, origin: Option<[f64; 2]>) {
+        use crate::ui::window::hatch_dialog::Flow;
+        let owned = self
+            .hatch_dialog
+            .as_ref()
+            .is_some_and(|state| state.owner_tab_id == self.tabs[i].id);
+        if !owned {
+            self.hatch_dialog_cancel();
+            return;
+        }
+        self.tabs[i].active_cmd = None;
+        self.tabs[i].scene.clear_preview_wire();
+        let saved = self
+            .hatch_dialog
+            .as_mut()
+            .and_then(|state| state.saved_selection.take());
+        if let Some(saved) = saved {
+            self.hatch_restore_selection(i, saved);
+        }
+        if let Some(state) = self.hatch_dialog.as_mut() {
+            state.flow = Flow::None;
+            if let Some(point) = origin {
+                state.specified_origin = Some(point);
+                state.settings.origin_mode = OriginMode::Specified;
+            }
+        }
+        self.active_modal = Some(ModalKind::Hatch);
+    }
+
+    /// The `Dispatch` strings the hidden-step commands end with. A successful
+    /// Pick/Select round does not come this way: it is
+    /// `CmdResult::HatchBoundariesPicked`.
+    pub(in crate::app) fn dispatch_hatch_dialog(
+        &mut self,
+        cmd: &str,
+        i: usize,
+    ) -> Option<Task<Message>> {
+        match cmd {
+            "HATCH_PICK_CANCELLED" | "HATCH_PREVIEW_DONE" => {
+                self.hatch_dialog_resume(i, None);
+                Some(Task::none())
+            }
+            _ => {
+                let rest = cmd.strip_prefix("HATCH_ORIGIN_PICKED ")?;
+                let numbers: Vec<f64> = rest
+                    .split_whitespace()
+                    .filter_map(|part| part.parse::<f64>().ok())
+                    .collect();
+                if numbers.len() != 3 {
+                    self.hatch_dialog_resume(i, None);
+                    return Some(Task::none());
+                }
+                let local = self
+                    .hatch_dialog
+                    .as_ref()
+                    .map(|state| {
+                        state
+                            .plane
+                            .to_local(glam::DVec3::new(numbers[0], numbers[1], numbers[2]))
+                    })
+                    .map(|point| [point.x, point.y]);
+                self.hatch_dialog_resume(i, local);
+                Some(Task::none())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,5 +607,237 @@ mod tests {
         app.tabs[i].scene.select_entity(handle, false);
         let _ = app.dispatch_command("HATCH");
         assert!(app.hatch_dialog.as_ref().unwrap().regions.is_empty());
+    }
+
+    use crate::command::StepInput;
+    use crate::ui::window::hatch_dialog::{AddKind, Flow};
+
+    fn open_dialog(app: &mut OpenCADStudio) {
+        let _ = app.dispatch_command("HATCH");
+        assert!(app.hatch_dialog.is_some());
+    }
+
+    fn click_inside(app: &mut OpenCADStudio) {
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .expect("a collector is running")
+            .on_point(glam::DVec3::new(10.0, 5.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+    }
+
+    #[test]
+    fn add_points_hides_the_dialog_and_starts_a_collector() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        let i = app.active_tab;
+        assert!(app.active_modal.is_none());
+        assert!(app.hatch_dialog.is_some(), "state survives while hidden");
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Pick);
+        assert!(app.tabs[i].active_cmd.is_some());
+    }
+
+    #[test]
+    fn pick_points_then_enter_returns_to_the_dialog_with_the_region() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(StepInput::Enter);
+        let i = app.active_tab;
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert!(app.tabs[i].active_cmd.is_none());
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(state.flow, Flow::None);
+        assert_eq!(state.regions.len(), 1);
+        assert_eq!(state.regions[0].1, RegionOrigin::Points);
+        assert_eq!(hatch_count(&app), 0, "nothing is created before OK");
+    }
+
+    #[test]
+    fn picking_the_same_area_twice_keeps_one_region() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        for _ in 0..2 {
+            let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+            click_inside(&mut app);
+            let _ = app.feed_command(StepInput::Enter);
+        }
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+    }
+
+    #[test]
+    fn escape_returns_to_the_dialog_without_adding() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(StepInput::Escape);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(state.flow, Flow::None);
+        assert!(state.regions.is_empty());
+    }
+
+    #[test]
+    fn ok_after_picking_creates_the_hatch() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(StepInput::Enter);
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 1);
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn add_updates_the_remembered_settings_and_cancel_keeps_them() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::Scale("4".into())));
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        assert_eq!(app.hatch_last.scale, "4");
+        let _ = app.feed_command(StepInput::Escape);
+        let _ = app.update(Message::CloseModal);
+        assert_eq!(app.hatch_last.scale, "4", "Cancel after an Add keeps the change");
+    }
+
+    #[test]
+    fn add_is_refused_while_a_field_is_invalid() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::Angle("x".into())));
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    }
+
+    #[test]
+    fn select_objects_clears_the_selection_and_escape_restores_it() {
+        let mut app = new_app();
+        let keep = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+        let i = app.active_tab;
+        app.tabs[i].scene.select_entity(keep, false);
+        let _ = app.dispatch_command("HATCH");
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        assert!(app.tabs[i].scene.selected.is_empty(), "starts with an empty selection");
+        let _ = app.feed_command(StepInput::Escape);
+        assert!(app.tabs[i].scene.selected.contains(&keep), "selection restored");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn select_objects_enter_restores_the_selection_too() {
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        let keep = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+        app.tabs[i].scene.select_entity(keep, false);
+        let _ = app.dispatch_command("HATCH");
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        let _ = app.feed_command(StepInput::Enter);
+        assert!(app.tabs[i].scene.selected.contains(&keep));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn two_areas_sharing_a_boundary_object_both_form() {
+        let mut app = new_app();
+        // Two squares side by side sharing the middle line.
+        add_line(&mut app, 0.0, 0.0, 10.0, 0.0);
+        add_line(&mut app, 10.0, 0.0, 20.0, 0.0);
+        add_line(&mut app, 20.0, 0.0, 20.0, 10.0);
+        add_line(&mut app, 20.0, 10.0, 10.0, 10.0);
+        add_line(&mut app, 10.0, 10.0, 0.0, 10.0);
+        add_line(&mut app, 0.0, 10.0, 0.0, 0.0);
+        add_line(&mut app, 10.0, 0.0, 10.0, 10.0);
+        let _ = app.dispatch_command("HATCH");
+        for x in [5.0, 15.0] {
+            let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+            let i = app.active_tab;
+            let result = app.tabs[i]
+                .active_cmd
+                .as_mut()
+                .unwrap()
+                .on_point(glam::DVec3::new(x, 5.0, 0.0));
+            let _ = app.apply_cmd_result(result);
+            let _ = app.feed_command(StepInput::Enter);
+        }
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 2);
+    }
+
+    #[test]
+    fn preview_shows_without_creating_and_returns() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        let _ = app.update(Message::HatchDialogPreview);
+        let i = app.active_tab;
+        assert!(app.active_modal.is_none());
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Preview);
+        assert!(app.tabs[i].active_cmd.is_some());
+        assert_eq!(hatch_count(&app), 0);
+        let _ = app.feed_command(StepInput::Enter);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::None);
+        assert_eq!(hatch_count(&app), 0);
+    }
+
+    #[test]
+    fn preview_does_not_touch_the_remembered_settings() {
+        let mut app = app_with_rectangle();
+        let before = app.hatch_last.clone();
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        let _ = app.update(Message::HatchDialogField(Field::Scale("7".into())));
+        let _ = app.update(Message::HatchDialogPreview);
+        let _ = app.feed_command(StepInput::Escape);
+        let _ = app.update(Message::CloseModal);
+        assert_eq!(app.hatch_last, before, "Preview then Cancel changes nothing");
+    }
+
+    #[test]
+    fn preview_needs_a_region() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogPreview);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn origin_pick_stores_the_point_in_plane_coordinates_and_returns() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::OriginMode(
+            crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
+        )));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Origin);
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_point(glam::DVec3::new(3.0, 4.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(state.flow, Flow::None);
+        assert_eq!(state.specified_origin, Some([3.0, 4.0]));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn origin_escape_returns_without_a_point() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::OriginMode(
+            crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
+        )));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        let _ = app.feed_command(StepInput::Escape);
+        assert!(app.hatch_dialog.as_ref().unwrap().specified_origin.is_none());
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
     }
 }

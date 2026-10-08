@@ -325,6 +325,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_field(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_hatch_dialog(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_draw(cmd, i) {
             return Some(t);
         }
