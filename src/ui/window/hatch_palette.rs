@@ -155,6 +155,7 @@ fn card<'a>(entry: &PatternEntry, selected: bool) -> Element<'a, Message> {
         }
     });
     mouse_area(body)
+        .interaction(iced::mouse::Interaction::Pointer)
         .on_press(Message::HatchDialogPalette(PaletteAction::Pick(entry.name.clone())))
         .on_double_click(Message::HatchDialogPalette(PaletteAction::Apply))
         .into()

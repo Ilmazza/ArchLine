@@ -741,14 +741,22 @@ mod tests {
 
     #[test]
     fn every_pattern_of_the_tab_has_a_card() {
-        // The grid is scrollable and the simulator lays out the whole of it:
-        // the first and the last of the tab are both present.
-        let state = with_palette("", Some("ANSI31"));
-        let entries = super::super::hatch_palette::in_category(PatternCategory::Ansi);
+        // Every pattern of the tab is a card in the grid, the ones far below
+        // the visible part of the scrollable included, and no other is.
+        let mut state = with_palette("", Some("ANSI31"));
+        state.palette.as_mut().unwrap().category = PatternCategory::Other;
+        let entries = super::super::hatch_palette::in_category(PatternCategory::Other);
+        assert!(entries.len() > 40, "more cards than one screen of the grid shows");
         let mut ui = iced_test::simulator(view_window(
             &state,
             crate::ui::modal::ModalSizing::FILL,
         ));
-        assert!(ui.find(entries[0].name.as_str()).is_ok());
+        for entry in &entries {
+            let shown = crate::ui::text_util::elide(&entry.name, 18);
+            assert!(ui.find(shown.as_str()).is_ok(), "{} has a card", entry.name);
+        }
+        let ansi = super::super::hatch_palette::in_category(PatternCategory::Ansi);
+        let foreign = crate::ui::text_util::elide(&ansi[0].name, 18);
+        assert!(ui.find(foreign.as_str()).is_err(), "{foreign} is on another tab");
     }
 }

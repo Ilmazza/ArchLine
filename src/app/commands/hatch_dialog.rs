@@ -194,7 +194,11 @@ impl OpenCADStudio {
         match action {
             PaletteAction::Open => {}
             PaletteAction::Close => state.palette = None,
-            PaletteAction::Tab(category) => palette.category = category,
+            // A tab click also ends a search, or the click would show nothing.
+            PaletteAction::Tab(category) => {
+                palette.category = category;
+                palette.search.clear();
+            }
             PaletteAction::Search(text) => palette.search = text,
             PaletteAction::Pick(name) => {
                 if let Some(entry) = crate::scene::model::hatch_patterns::find(&name) {
@@ -1919,6 +1923,19 @@ mod tests {
         assert_eq!(palette_of(&app).unwrap().search, "brick");
         assert_eq!(palette_of(&app).unwrap().selected, before);
         assert_eq!(pattern_of(&app), "ANSI31", "nothing is applied by browsing");
+    }
+
+    #[test]
+    fn a_tab_click_ends_the_search_and_keeps_the_selection() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Search("ansi".into()));
+        palette_do(&mut app, PaletteAction::Tab(PatternCategory::Iso));
+        let palette = palette_of(&app).unwrap();
+        assert!(palette.search.is_empty(), "the tab shows its own patterns");
+        assert_eq!(palette.category, PatternCategory::Iso);
+        assert_eq!(palette.selected.as_deref(), Some("BRICK"));
+        assert_eq!(pattern_of(&app), "ANSI31");
     }
 
     #[test]
