@@ -10,6 +10,9 @@ use kernel::geom2d::{
 };
 use glam::DVec3;
 use crate::t;
+use crate::modules::draw::draw::hatch_settings::{
+    add_region, HatchRegion, RegionOrigin, ResolvedSettings,
+};
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
@@ -147,6 +150,25 @@ fn resolve_hatch_rings(
     Some(rings)
 }
 
+/// The areas the chosen boundary objects enclose, one ring each. Open objects
+/// that together close an area count; handles that are not boundary sources
+/// are ignored.
+pub fn object_regions(
+    sources: &rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
+    handles: &[Handle],
+) -> Vec<HatchRegion> {
+    let mut segments = Vec::new();
+    for handle in handles {
+        if let Some(source) = sources.get(handle) {
+            segments.extend(source.segments.iter().copied());
+        }
+    }
+    bounded_faces(&segments, Tolerance::new(1.0e-6))
+        .into_iter()
+        .map(|ring| HatchRegion { rings: vec![ring] })
+        .collect()
+}
+
 /// Pack one or more rings (outer boundary + optional holes) into the Hatch
 /// model storage: the `boundary` f32 ring list (NaN-separated) plus the exact
 /// `boundary_wcs` (NaN-separated) used for persistence. The first vertex of the
@@ -206,6 +228,9 @@ pub struct HatchCommand {
         codec::types::Transparency,
     )>,
     plane: WorkingPlane,
+    /// The HATCH dialog's collector: Enter hands the regions back instead of
+    /// committing a hatch, and the settings keywords belong to the dialog.
+    collect_only: bool,
 }
 
 impl HatchCommand {
@@ -254,6 +279,7 @@ impl HatchCommand {
                 .unwrap_or(codec::entities::HatchStyleType::Normal),
             inherited,
             plane,
+            collect_only: false,
         };
         command.set_object_selection(selected_objects);
         command
@@ -261,16 +287,75 @@ impl HatchCommand {
 
     pub fn with_origin(mut self, origin: [f64; 2]) -> Self { self.default_origin = origin; self }
 
-    fn set_object_selection(&mut self, handles: Vec<Handle>) {
-        let mut segments = Vec::new();
-        for handle in &handles {
-            if let Some(source) = self.boundary_sources.get(handle) {
-                segments.extend(source.segments.iter().copied());
-            }
+    /// Apply the dialog's settings as the overrides the command line sets with
+    /// `P`, `A`, `L`, `N`, `D`, `B` and `Y`.
+    pub fn with_settings(mut self, settings: &ResolvedSettings) -> Self {
+        let entry = crate::scene::model::hatch_patterns::find(&settings.pattern);
+        self.pattern_override = entry.map(|entry| (entry.name.clone(), entry.gpu.clone()));
+        self.angle_override = Some(settings.angle_rad);
+        self.scale_override = Some(settings.scale);
+        self.associative = settings.associative;
+        self.retain_boundaries = settings.retain;
+        self.separate_hatches = settings.separate && !settings.retain;
+        self.island_style = settings.island_style;
+        self
+    }
+
+    /// Replace the collected areas with `regions` (every region keeps its rings
+    /// together, which is what separate hatches are made from).
+    pub fn with_regions(mut self, regions: Vec<HatchRegion>) -> Self {
+        self.point_regions = regions.into_iter().map(|region| region.rings).collect();
+        self.object_regions.clear();
+        self.selected_objects.clear();
+        self
+    }
+
+    /// The dialog's collector: picks areas like HATCH, but Enter returns them
+    /// (`CmdResult::HatchBoundariesPicked`) and Esc returns without any.
+    pub fn collecting(
+        outlines: Vec<Vec<[f64; 2]>>,
+        boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
+        plane: WorkingPlane,
+        select_objects: bool,
+    ) -> Self {
+        let mut command = Self::new(outlines, boundary_sources, Vec::new(), None, plane);
+        command.collect_only = true;
+        if select_objects {
+            command.mode = HatchMode::SelectObjects;
         }
-        self.object_regions = bounded_faces(&segments, Tolerance::new(1.0e-6))
+        command
+    }
+
+    fn collected(&self) -> CmdResult {
+        let mut regions = Vec::new();
+        for rings in &self.point_regions {
+            add_region(
+                &mut regions,
+                HatchRegion {
+                    rings: rings.clone(),
+                },
+                RegionOrigin::Points,
+            );
+        }
+        for rings in &self.object_regions {
+            add_region(
+                &mut regions,
+                HatchRegion {
+                    rings: rings.clone(),
+                },
+                RegionOrigin::Objects,
+            );
+        }
+        CmdResult::HatchBoundariesPicked {
+            regions,
+            objects: self.selected_objects.clone(),
+        }
+    }
+
+    fn set_object_selection(&mut self, handles: Vec<Handle>) {
+        self.object_regions = object_regions(&self.boundary_sources, &handles)
             .into_iter()
-            .map(|ring| vec![ring])
+            .map(|region| region.rings)
             .collect();
         self.missed = !handles.is_empty() && self.object_regions.is_empty();
         self.selected_objects = handles;
@@ -527,6 +612,28 @@ impl CadCommand for HatchCommand {
     }
 
     fn prompt(&self) -> String {
+        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
+            let miss = if self.missed {
+                t!("  ⚠ No closed boundary found.").into_owned()
+            } else {
+                String::new()
+            };
+            return match self.mode {
+                HatchMode::SelectObjects => t!(
+                    "HATCH  Select boundary objects (%{objects} objects, %{count} regions; Enter to return to the dialog):%{miss}",
+                    objects = self.selected_objects.len(),
+                    count = self.region_count(),
+                    miss = miss
+                )
+                .into_owned(),
+                _ => t!(
+                    "HATCH  Pick internal point (%{count} regions; Enter to return to the dialog):%{miss}",
+                    count = self.region_count(),
+                    miss = miss
+                )
+                .into_owned(),
+            };
+        }
         match &self.mode {
             HatchMode::PickInside => {
                 let miss = if self.missed {
@@ -568,6 +675,20 @@ impl CadCommand for HatchCommand {
 
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
+        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
+            let mut options = match self.mode {
+                HatchMode::SelectObjects => vec![
+                    CmdOption::new(t!("Pick internal points").as_ref(), "I"),
+                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
+                ],
+                _ => vec![
+                    CmdOption::new(t!("Select objects").as_ref(), "O"),
+                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
+                ],
+            };
+            options.push(CmdOption::enter(t!("Back to dialog").as_ref()));
+            return options;
+        }
         match &self.mode {
             HatchMode::PickInside => {
                 let mut options = vec![
@@ -690,6 +811,9 @@ impl CadCommand for HatchCommand {
             let ring = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
             self.add_point_region(vec![ring]);
         }
+        if self.collect_only {
+            return self.collected();
+        }
         let rings = self.combined_rings();
         if rings.is_empty() {
             CmdResult::Cancel
@@ -796,6 +920,9 @@ impl CadCommand for HatchCommand {
     }
 
     fn on_escape(&mut self) -> CmdResult {
+        if self.collect_only {
+            return CmdResult::Dispatch("HATCH_PICK_CANCELLED".to_string());
+        }
         CmdResult::Cancel
     }
 
@@ -806,6 +933,15 @@ impl CadCommand for HatchCommand {
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         let input = text.trim();
         let upper = input.to_ascii_uppercase();
+        if self.collect_only
+            && !matches!(self.mode, HatchMode::Manual)
+            && !matches!(
+                upper.as_str(),
+                "O" | "OBJECT" | "OBJECTS" | "I" | "INTERNAL" | "S"
+            )
+        {
+            return None;
+        }
         if matches!(self.mode, HatchMode::Manual) {
             return match upper.as_str() {
                 "A" | "ARC" => {
@@ -1672,5 +1808,310 @@ mod tests {
             panic!("expected one region");
         };
         assert_eq!(region.wires.len(), 2);
+    }
+
+    // ── HATCH dialog support ───────────────────────────────────────────────
+
+    use crate::modules::draw::draw::hatch_settings::{
+        HatchRegion, HatchSettings, RegionOrigin,
+    };
+
+    fn sources_for(
+        rings: &[Vec<[f64; 2]>],
+    ) -> rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource> {
+        let mut map = rustc_hash::FxHashMap::default();
+        for (n, ring) in rings.iter().enumerate() {
+            let segments: Vec<Line> = ring
+                .iter()
+                .copied()
+                .zip(ring.iter().copied().cycle().skip(1))
+                .take(ring.len())
+                .map(|(start, end)| Line { start, end })
+                .collect();
+            map.insert(
+                Handle::new(n as u64 + 1),
+                crate::scene::BoundarySource {
+                    curves: segments.iter().cloned().map(Curve::Line).collect(),
+                    segments,
+                },
+            );
+        }
+        map
+    }
+
+    fn committed(result: CmdResult) -> HatchModel {
+        match result {
+            CmdResult::CommitHatch(hatch) => hatch,
+            _ => panic!("expected CommitHatch"),
+        }
+    }
+
+    fn other_pattern_name() -> String {
+        crate::scene::model::hatch_patterns::catalog()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .find(|name| !name.eq_ignore_ascii_case("ANSI31"))
+            .expect("the catalog has more than one pattern")
+    }
+
+    #[test]
+    fn settings_and_regions_commit_like_the_interactive_command() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let sources = sources_for(&rings);
+        let pattern = other_pattern_name();
+
+        let mut interactive = HatchCommand::new(
+            rings.clone(),
+            sources.clone(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        let _ = interactive.on_text_input(&format!("P {pattern}"));
+        let _ = interactive.on_text_input("A 30");
+        let _ = interactive.on_text_input("L 2");
+        let _ = interactive.on_point(DVec3::new(0.0, 0.0, 0.0));
+        let expected = committed(interactive.on_enter());
+
+        let settings = HatchSettings {
+            pattern: pattern.clone(),
+            angle: "30".into(),
+            scale: "2".into(),
+            ..HatchSettings::default()
+        };
+        let resolved = settings.resolve().expect("valid settings");
+        let region = HatchRegion {
+            rings: resolve_hatch_rings(&rings, [0.0, 0.0]).unwrap(),
+        };
+        let mut dialog = HatchCommand::new(
+            rings,
+            sources,
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&resolved)
+        .with_regions(vec![region]);
+        let got = committed(dialog.on_enter());
+
+        assert_eq!(got.name, expected.name);
+        assert_eq!(got.scale, expected.scale);
+        assert_eq!(got.angle_offset, expected.angle_offset);
+        assert_eq!(got.style, expected.style);
+        assert_eq!(*got.boundary, *expected.boundary);
+        assert_eq!(
+            got.boundary_paths.as_ref().map(|paths| paths.len()),
+            expected.boundary_paths.as_ref().map(|paths| paths.len())
+        );
+    }
+
+    #[test]
+    fn separate_setting_commits_one_hatch_per_region() {
+        let rings = vec![
+            rect(0.0, 0.0, 10.0, 10.0),
+            rect(30.0, 0.0, 40.0, 10.0),
+        ];
+        let resolved = {
+            let mut settings = HatchSettings::default();
+            settings.set_separate(true);
+            settings.resolve().unwrap()
+        };
+        let regions = rings
+            .iter()
+            .map(|ring| HatchRegion {
+                rings: vec![ring.clone()],
+            })
+            .collect();
+        let mut command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&resolved)
+        .with_regions(regions);
+        match command.on_enter() {
+            CmdResult::CommitHatches { hatches, .. } => assert_eq!(hatches.len(), 2),
+            _ => panic!("expected CommitHatches"),
+        }
+    }
+
+    #[test]
+    fn retain_setting_commits_hatch_with_boundaries() {
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let resolved = {
+            let mut settings = HatchSettings::default();
+            settings.set_retain(true);
+            settings.resolve().unwrap()
+        };
+        let mut command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&resolved)
+        .with_regions(vec![HatchRegion {
+            rings: rings.clone(),
+        }]);
+        assert!(matches!(
+            command.on_enter(),
+            CmdResult::CommitHatchWithBoundaries { .. }
+        ));
+    }
+
+    #[test]
+    fn no_regions_cancels() {
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let mut command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_regions(Vec::new());
+        assert!(matches!(command.on_enter(), CmdResult::Cancel));
+    }
+
+    #[test]
+    fn collector_returns_picked_regions_instead_of_committing() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let mut command = HatchCommand::collecting(
+            rings.clone(),
+            sources_for(&rings),
+            WorkingPlane::default(),
+            false,
+        );
+        assert!(matches!(
+            command.on_point(DVec3::new(0.0, 0.0, 0.0)),
+            CmdResult::NeedPoint
+        ));
+        match command.on_enter() {
+            CmdResult::HatchBoundariesPicked { regions, objects } => {
+                assert_eq!(regions.len(), 1);
+                assert_eq!(regions[0].1, RegionOrigin::Points);
+                assert_eq!(regions[0].0.rings.len(), 1);
+                assert!(objects.is_empty());
+            }
+            _ => panic!("expected HatchBoundariesPicked"),
+        }
+    }
+
+    #[test]
+    fn collector_with_nothing_picked_still_returns_to_the_dialog() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let mut command = HatchCommand::collecting(
+            rings.clone(),
+            sources_for(&rings),
+            WorkingPlane::default(),
+            false,
+        );
+        match command.on_enter() {
+            CmdResult::HatchBoundariesPicked { regions, .. } => assert!(regions.is_empty()),
+            _ => panic!("expected HatchBoundariesPicked"),
+        }
+    }
+
+    #[test]
+    fn collector_escape_dispatches_the_cancel_string() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let mut command = HatchCommand::collecting(
+            rings.clone(),
+            sources_for(&rings),
+            WorkingPlane::default(),
+            false,
+        );
+        match command.on_escape() {
+            CmdResult::Dispatch(text) => assert_eq!(text, "HATCH_PICK_CANCELLED"),
+            _ => panic!("expected Dispatch"),
+        }
+    }
+
+    #[test]
+    fn plain_command_escape_still_cancels() {
+        let mut command = HatchCommand::new(
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        assert!(matches!(command.on_escape(), CmdResult::Cancel));
+    }
+
+    #[test]
+    fn collector_in_object_mode_reports_the_chosen_objects() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let sources = sources_for(&rings);
+        let handle = *sources.keys().next().unwrap();
+        let mut command =
+            HatchCommand::collecting(rings, sources, WorkingPlane::default(), true);
+        let _ = command.on_selection_complete(vec![handle]);
+        match command.on_enter() {
+            CmdResult::HatchBoundariesPicked { regions, objects } => {
+                assert_eq!(regions.len(), 1);
+                assert_eq!(regions[0].1, RegionOrigin::Objects);
+                assert_eq!(objects, vec![handle]);
+            }
+            _ => panic!("expected HatchBoundariesPicked"),
+        }
+    }
+
+    #[test]
+    fn collector_ignores_settings_keywords() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let mut command = HatchCommand::collecting(
+            rings.clone(),
+            sources_for(&rings),
+            WorkingPlane::default(),
+            false,
+        );
+        // The dialog owns these; typing them in the collector must not change anything.
+        for text in ["P ANSI31", "A 30", "L 2", "B", "N", "D", "Y"] {
+            assert!(command.on_text_input(text).is_none(), "{text}");
+        }
+        // Switching how areas are chosen is still allowed.
+        assert!(command.on_text_input("O").is_some());
+    }
+
+    #[test]
+    fn object_regions_close_an_area_from_several_open_segments() {
+        let corners = [
+            ([0.0, 0.0], [10.0, 0.0]),
+            ([10.0, 0.0], [10.0, 5.0]),
+            ([10.0, 5.0], [0.0, 5.0]),
+            ([0.0, 5.0], [0.0, 0.0]),
+        ];
+        let mut sources = rustc_hash::FxHashMap::default();
+        let mut handles = Vec::new();
+        for (n, (start, end)) in corners.iter().enumerate() {
+            let line = Line {
+                start: *start,
+                end: *end,
+            };
+            let handle = Handle::new(n as u64 + 1);
+            handles.push(handle);
+            sources.insert(
+                handle,
+                crate::scene::BoundarySource {
+                    curves: vec![Curve::Line(line)],
+                    segments: vec![line],
+                },
+            );
+        }
+        let regions = object_regions(&sources, &handles);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].rings.len(), 1);
+        // Three of the four sides do not enclose anything.
+        assert!(object_regions(&sources, &handles[..3]).is_empty());
+    }
+
+    #[test]
+    fn object_regions_ignore_unknown_handles() {
+        let sources = rustc_hash::FxHashMap::default();
+        assert!(object_regions(&sources, &[Handle::new(99)]).is_empty());
     }
 }

@@ -173,6 +173,7 @@ impl OpenCADStudio {
                 | CmdResult::SolidSubtract { .. }
                 | CmdResult::SliceEntities { .. }
                 | CmdResult::SliceSurfaceEntities { .. }
+                | CmdResult::HatchBoundariesPicked { .. }
         );
         let task = self.apply_cmd_result_inner(result);
         let i = self.active_tab;
@@ -624,6 +625,9 @@ impl OpenCADStudio {
                 entity_style,
             } => {
                 self.handle_commit_hatches(hatches, entity_style);
+            }
+            CmdResult::HatchBoundariesPicked { regions, objects } => {
+                return self.handle_hatch_boundaries_picked(regions, objects);
             }
             CmdResult::BatchCopy(handles, transforms) => {
                 if let Some(task) = self.handle_batch_copy(handles, transforms) {
@@ -1278,6 +1282,20 @@ impl OpenCADStudio {
         self.tabs[i].scene.clear_preview_wire();
         self.restore_pre_cmd_tangent();
         self.dispatch_command(&cmd)
+    }
+
+    /// Replaced by the real handler in `app/commands/hatch_dialog.rs` (plan Task 8).
+    fn handle_hatch_boundaries_picked(
+        &mut self,
+        _regions: Vec<(
+            crate::modules::draw::draw::hatch_settings::HatchRegion,
+            crate::modules::draw::draw::hatch_settings::RegionOrigin,
+        )>,
+        _objects: Vec<codec::Handle>,
+    ) -> Task<Message> {
+        let i = self.active_tab;
+        self.tabs[i].active_cmd = None;
+        Task::none()
     }
 
     fn handle_measurement(&mut self, msg: String) {
