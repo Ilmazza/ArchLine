@@ -174,23 +174,58 @@ pub fn gradient_profile(kind: GradientKind, invert: bool, t: f32) -> f32 {
     }
 }
 
+/// The two stops of a stored gradient, in the order of colour 1 / colour 2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientStops {
+    pub color1: Option<AcadColor>,
+    pub color2: Option<AcadColor>,
+    /// The stops were written swapped for an inverted Linear one-colour
+    /// gradient (see [`apply_gradient`]); `color1`/`color2` are already put
+    /// back in order and the gradient is inverted.
+    pub swapped: bool,
+}
+
+/// Read the stops of `hatch`. Only for a one-colour gradient named as a plain
+/// Linear one, it recognises the swap [`apply_gradient`] writes for an inverted
+/// Linear: stop 0 is the tint of stop 1. Anything else reads as stored (a
+/// file from another program recomputes colour 2 from stop 0 as before).
+pub fn read_stops(hatch: &Hatch) -> GradientStops {
+    let g = &hatch.gradient_color;
+    let stop = |index: usize| g.colors.get(index).map(|entry| entry.color);
+    let (first, second) = (stop(0), stop(1));
+    let plain_linear = GradientKind::from_name(&g.name) == (GradientKind::Linear, false);
+    if g.is_single_color && plain_linear {
+        if let (Some(a), Some(b)) = (first, second) {
+            let tint = g.color_tint.clamp(0.0, 1.0) as f32;
+            if a != b && rgba_of(b).is_some_and(|base| tinted_second_color(base, tint) == a) {
+                return GradientStops {
+                    color1: Some(b),
+                    color2: Some(a),
+                    swapped: true,
+                };
+            }
+        }
+    }
+    GradientStops {
+        color1: first,
+        color2: second,
+        swapped: false,
+    }
+}
+
 /// The gradient a stored hatch holds, with defaults for whatever a file from
 /// another program left out (stops, name, tint).
 pub fn read_gradient(hatch: &Hatch) -> GradientSpec {
     let g = &hatch.gradient_color;
-    let (kind, invert) = GradientKind::from_name(&g.name);
-    let stop = |index: usize, default: AcadColor| {
-        g.colors
-            .get(index)
-            .map(|entry| entry.color)
-            .unwrap_or(default)
-    };
+    let (kind, mut invert) = GradientKind::from_name(&g.name);
+    let stops = read_stops(hatch);
+    invert |= stops.swapped;
     GradientSpec {
         kind,
         invert,
         one_color: g.is_single_color,
-        color1: stop(0, DEFAULT_GRADIENT_COLOR1),
-        color2: stop(1, DEFAULT_GRADIENT_COLOR2),
+        color1: stops.color1.unwrap_or(DEFAULT_GRADIENT_COLOR1),
+        color2: stops.color2.unwrap_or(DEFAULT_GRADIENT_COLOR2),
         tint: g.color_tint.clamp(0.0, 1.0),
         angle_rad: g.angle,
         centered: g.shift < 0.5,
@@ -554,6 +589,44 @@ mod tests {
     fn a_written_gradient_reads_back_the_same() {
         let read = read_gradient(&gradient_hatch());
         assert_eq!(read, spec());
+    }
+
+    #[test]
+    fn an_inverted_linear_one_colour_gradient_reads_back_with_its_swapped_stops() {
+        let written = GradientSpec {
+            kind: GradientKind::Linear,
+            invert: true,
+            one_color: true,
+            color1: DEFAULT_GRADIENT_COLOR1,
+            ..spec()
+        };
+        let mut hatch = Hatch::solid();
+        apply_gradient(&mut hatch, &written);
+        // The stops are written swapped: (tint, colour 1).
+        assert_eq!(hatch.gradient_color.colors[1].color, written.color1);
+        let read = read_gradient(&hatch);
+        assert_eq!(read.color1, written.color1);
+        assert!(read.one_color && read.invert);
+        assert_eq!(read.kind, GradientKind::Linear);
+        assert_eq!(read.effective_color2(), written.effective_color2());
+    }
+
+    #[test]
+    fn a_one_colour_linear_gradient_from_another_program_is_still_recomputed() {
+        let mut hatch = Hatch::solid();
+        hatch.gradient_color.enabled = true;
+        hatch.gradient_color.name = "LINEAR".into();
+        hatch.gradient_color.is_single_color = true;
+        hatch.gradient_color.color_tint = 0.25;
+        let stops = [AcadColor::Rgb { r: 10, g: 20, b: 30 }, AcadColor::Rgb { r: 200, g: 0, b: 0 }];
+        hatch.gradient_color.colors = vec![stop_entry(0.0, stops[0]), stop_entry(1.0, stops[1])];
+        let read = read_gradient(&hatch);
+        assert_eq!(read.color1, stops[0], "stop 0 is colour 1, as before");
+        assert!(!read.invert);
+        assert_eq!(
+            read.effective_color2(),
+            tinted_second_color(rgba_of(stops[0]).unwrap(), 0.25)
+        );
     }
 
     // ── apply_gradient_patch: only the named fields, nothing else ──────────
