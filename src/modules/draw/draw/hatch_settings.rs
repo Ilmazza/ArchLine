@@ -1,0 +1,384 @@
+//! Pure data and rules behind the HATCH dialog: the settings it edits, the
+//! regions it collects, the canonical key that makes two regions "the same",
+//! and the parsing that decides whether a field is usable.
+//!
+//! Nothing here touches the app, the scene or the GPU, so every rule can be
+//! tested with plain values.
+
+use codec::entities::HatchStyleType;
+
+// ── Regions ────────────────────────────────────────────────────────────────
+
+/// One closed ring in the working plane's local coordinates.
+pub type HatchRing = Vec<[f64; 2]>;
+
+/// What one pick fills: an outer ring and any holes inside it. Keeping the
+/// rings of a region together is what lets "Create separate hatches" make one
+/// hatch per region instead of one per ring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HatchRegion {
+    /// `rings[0]` is the outer ring; the rest are holes.
+    pub rings: Vec<HatchRing>,
+}
+
+/// Which "Add" produced a region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionOrigin {
+    Points,
+    Objects,
+}
+
+/// How finely two coordinates must agree to count as the same point.
+const QUANTUM: f64 = 1.0e-6;
+
+type QuantizedRing = Vec<(i64, i64)>;
+
+/// Canonical, comparable form of a region: the outer ring plus the sorted set
+/// of its holes.
+pub type RegionKey = (QuantizedRing, Vec<QuantizedRing>);
+
+fn quantize(value: f64) -> i64 {
+    (value / QUANTUM).round() as i64
+}
+
+/// Same ring however it was traced: no repeated closing vertex, counter-
+/// clockwise, starting at its smallest vertex.
+fn canonical_ring(ring: &[[f64; 2]]) -> QuantizedRing {
+    let mut points: QuantizedRing = ring
+        .iter()
+        .map(|point| (quantize(point[0]), quantize(point[1])))
+        .collect();
+    points.dedup();
+    while points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
+    let twice_area: i128 = (0..points.len())
+        .map(|index| {
+            let (x0, y0) = points[index];
+            let (x1, y1) = points[(index + 1) % points.len()];
+            i128::from(x0) * i128::from(y1) - i128::from(x1) * i128::from(y0)
+        })
+        .sum();
+    if twice_area < 0 {
+        points.reverse();
+    }
+    if let Some(start) = (0..points.len()).min_by_key(|&index| points[index]) {
+        points.rotate_left(start);
+    }
+    points
+}
+
+pub fn region_key(region: &HatchRegion) -> RegionKey {
+    let mut rings = region.rings.iter();
+    let outer = rings
+        .next()
+        .map(|ring| canonical_ring(ring))
+        .unwrap_or_default();
+    let mut holes: Vec<QuantizedRing> = rings.map(|ring| canonical_ring(ring)).collect();
+    holes.sort();
+    (outer, holes)
+}
+
+/// Add `region` unless an equivalent one is already collected, whichever "Add"
+/// produced either. Returns whether it was added.
+pub fn add_region(
+    list: &mut Vec<(HatchRegion, RegionOrigin)>,
+    region: HatchRegion,
+    origin: RegionOrigin,
+) -> bool {
+    if region.rings.is_empty() {
+        return false;
+    }
+    let key = region_key(&region);
+    if list.iter().any(|(existing, _)| region_key(existing) == key) {
+        return false;
+    }
+    list.push((region, origin));
+    true
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginMode {
+    Current,
+    Specified,
+}
+
+/// What the dialog edits. Angle and scale stay as typed text so a half-typed
+/// number does not snap back while it is being typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HatchSettings {
+    /// Catalog name of the pattern.
+    pub pattern: String,
+    /// Degrees, as typed.
+    pub angle: String,
+    /// Scale factor, as typed.
+    pub scale: String,
+    pub associative: bool,
+    pub separate: bool,
+    pub retain: bool,
+    pub island_detection: bool,
+    /// The radio choice; only in force while `island_detection` is on.
+    pub island_style: HatchStyleType,
+    pub origin_mode: OriginMode,
+}
+
+impl Default for HatchSettings {
+    fn default() -> Self {
+        Self {
+            pattern: "ANSI31".into(),
+            angle: "0".into(),
+            scale: "1".into(),
+            associative: true,
+            separate: false,
+            retain: false,
+            island_detection: true,
+            island_style: HatchStyleType::Normal,
+            origin_mode: OriginMode::Current,
+        }
+    }
+}
+
+/// Settings once every field is known to be usable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedSettings {
+    pub pattern: String,
+    pub angle_rad: f32,
+    pub scale: f32,
+    pub associative: bool,
+    pub separate: bool,
+    pub retain: bool,
+    pub island_style: HatchStyleType,
+}
+
+/// A finite number of degrees; comma or dot as the decimal mark.
+pub fn parse_angle_deg(text: &str) -> Option<f32> {
+    let value: f32 = text.trim().replace(',', ".").parse().ok()?;
+    value.is_finite().then_some(value)
+}
+
+/// A finite scale above zero.
+pub fn parse_scale(text: &str) -> Option<f32> {
+    let value = parse_angle_deg(text)?;
+    (value > 0.0).then_some(value)
+}
+
+impl HatchSettings {
+    pub fn angle_error(&self) -> bool {
+        parse_angle_deg(&self.angle).is_none()
+    }
+
+    pub fn scale_error(&self) -> bool {
+        parse_scale(&self.scale).is_none()
+    }
+
+    /// `None` while any field is unusable or the pattern is not in the catalog.
+    pub fn resolve(&self) -> Option<ResolvedSettings> {
+        crate::scene::model::hatch_patterns::find(&self.pattern)?;
+        Some(ResolvedSettings {
+            pattern: self.pattern.clone(),
+            angle_rad: parse_angle_deg(&self.angle)?.to_radians(),
+            scale: parse_scale(&self.scale)?,
+            associative: self.associative,
+            separate: self.separate,
+            retain: self.retain,
+            island_style: self.effective_island_style(),
+        })
+    }
+
+    /// The engine keeps "retain boundaries" and "separate hatches" apart.
+    pub fn set_retain(&mut self, on: bool) {
+        self.retain = on;
+        if on {
+            self.separate = false;
+        }
+    }
+
+    pub fn set_separate(&mut self, on: bool) {
+        self.separate = on;
+        if on {
+            self.retain = false;
+        }
+    }
+
+    /// Island detection off draws through the islands, which is the Ignore style.
+    pub fn effective_island_style(&self) -> HatchStyleType {
+        if self.island_detection {
+            self.island_style
+        } else {
+            HatchStyleType::Ignore
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> HatchRing {
+        vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
+
+    fn region(rings: Vec<HatchRing>) -> HatchRegion {
+        HatchRegion { rings }
+    }
+
+    #[test]
+    fn same_ring_with_other_start_order_and_orientation_is_one_region() {
+        let a = region(vec![rect(0.0, 0.0, 10.0, 5.0)]);
+        // Same square, starting at another vertex.
+        let rotated = region(vec![vec![[10.0, 5.0], [0.0, 5.0], [0.0, 0.0], [10.0, 0.0]]]);
+        // Same square, reversed (clockwise) and closed with a repeated vertex.
+        let reversed = region(vec![vec![
+            [0.0, 0.0],
+            [0.0, 5.0],
+            [10.0, 5.0],
+            [10.0, 0.0],
+            [0.0, 0.0],
+        ]]);
+        assert_eq!(region_key(&a), region_key(&rotated));
+        assert_eq!(region_key(&a), region_key(&reversed));
+    }
+
+    #[test]
+    fn holes_are_compared_as_a_set() {
+        let hole_a = rect(2.0, 2.0, 3.0, 3.0);
+        let hole_b = rect(6.0, 2.0, 7.0, 3.0);
+        let outer = rect(0.0, 0.0, 10.0, 5.0);
+        let one = region(vec![outer.clone(), hole_a.clone(), hole_b.clone()]);
+        let swapped = region(vec![outer.clone(), hole_b, hole_a.clone()]);
+        let fewer = region(vec![outer, hole_a]);
+        assert_eq!(region_key(&one), region_key(&swapped));
+        assert_ne!(region_key(&one), region_key(&fewer));
+    }
+
+    #[test]
+    fn different_outer_rings_are_different_regions() {
+        let a = region(vec![rect(0.0, 0.0, 10.0, 5.0)]);
+        let b = region(vec![rect(0.0, 0.0, 10.0, 6.0)]);
+        assert_ne!(region_key(&a), region_key(&b));
+    }
+
+    #[test]
+    fn add_region_skips_equivalents_even_across_origins() {
+        let mut list = Vec::new();
+        assert!(add_region(
+            &mut list,
+            region(vec![rect(0.0, 0.0, 10.0, 5.0)]),
+            RegionOrigin::Points
+        ));
+        // The same contour arrives from "Select objects", starting elsewhere.
+        assert!(!add_region(
+            &mut list,
+            region(vec![vec![[10.0, 5.0], [0.0, 5.0], [0.0, 0.0], [10.0, 0.0]]]),
+            RegionOrigin::Objects
+        ));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, RegionOrigin::Points);
+    }
+
+    #[test]
+    fn add_region_ignores_empty_regions() {
+        let mut list = Vec::new();
+        assert!(!add_region(&mut list, region(Vec::new()), RegionOrigin::Points));
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn utm_scale_coordinates_keep_equal_regions_equal() {
+        let (x, y) = (5_000_000.123_456, 4_640_000.654_321);
+        let a = region(vec![rect(x, y, x + 10.0, y + 5.0)]);
+        let b = region(vec![vec![
+            [x + 10.0, y + 5.0],
+            [x, y + 5.0],
+            [x, y],
+            [x + 10.0, y],
+        ]]);
+        assert_eq!(region_key(&a), region_key(&b));
+        let c = region(vec![rect(x + 0.001, y, x + 10.001, y + 5.0)]);
+        assert_ne!(region_key(&a), region_key(&c), "1 mm apart is a different region");
+    }
+
+    #[test]
+    fn angle_and_scale_accept_comma_and_dot() {
+        assert_eq!(parse_angle_deg("45"), Some(45.0));
+        assert_eq!(parse_angle_deg(" -12,5 "), Some(-12.5));
+        assert_eq!(parse_scale("0,5"), Some(0.5));
+        assert_eq!(parse_scale("2.25"), Some(2.25));
+    }
+
+    #[test]
+    fn angle_and_scale_reject_unusable_text() {
+        for bad in ["", " ", "abc", "1,2,3", "NaN", "inf", "1e40", "-"] {
+            assert_eq!(parse_angle_deg(bad), None, "angle {bad:?}");
+            assert_eq!(parse_scale(bad), None, "scale {bad:?}");
+        }
+        assert_eq!(parse_scale("0"), None);
+        assert_eq!(parse_scale("-1"), None);
+        // A negative angle is fine; a negative scale is not.
+        assert_eq!(parse_angle_deg("-90"), Some(-90.0));
+    }
+
+    #[test]
+    fn default_settings_resolve() {
+        let resolved = HatchSettings::default().resolve().expect("defaults are valid");
+        assert_eq!(resolved.pattern, "ANSI31");
+        assert_eq!(resolved.angle_rad, 0.0);
+        assert_eq!(resolved.scale, 1.0);
+        assert!(resolved.associative && !resolved.separate && !resolved.retain);
+        assert_eq!(resolved.island_style, HatchStyleType::Normal);
+    }
+
+    #[test]
+    fn unknown_pattern_does_not_resolve() {
+        let settings = HatchSettings {
+            pattern: "NO_SUCH_PATTERN".into(),
+            ..HatchSettings::default()
+        };
+        assert!(settings.resolve().is_none());
+    }
+
+    #[test]
+    fn invalid_fields_do_not_resolve_and_are_flagged() {
+        let bad_angle = HatchSettings {
+            angle: "x".into(),
+            ..HatchSettings::default()
+        };
+        assert!(bad_angle.angle_error() && !bad_angle.scale_error());
+        assert!(bad_angle.resolve().is_none());
+        let bad_scale = HatchSettings {
+            scale: "0".into(),
+            ..HatchSettings::default()
+        };
+        assert!(bad_scale.scale_error() && !bad_scale.angle_error());
+        assert!(bad_scale.resolve().is_none());
+    }
+
+    #[test]
+    fn retain_and_separate_exclude_each_other() {
+        let mut settings = HatchSettings::default();
+        settings.set_separate(true);
+        assert!(settings.separate && !settings.retain);
+        settings.set_retain(true);
+        assert!(settings.retain && !settings.separate);
+        settings.set_separate(true);
+        assert!(settings.separate && !settings.retain);
+        settings.set_separate(false);
+        assert!(!settings.separate && !settings.retain);
+    }
+
+    #[test]
+    fn island_detection_off_means_ignore() {
+        let mut settings = HatchSettings {
+            island_style: HatchStyleType::Outer,
+            ..HatchSettings::default()
+        };
+        assert_eq!(settings.effective_island_style(), HatchStyleType::Outer);
+        settings.island_detection = false;
+        assert_eq!(settings.effective_island_style(), HatchStyleType::Ignore);
+        // The radio choice survives the toggle.
+        settings.island_detection = true;
+        assert_eq!(settings.effective_island_style(), HatchStyleType::Outer);
+    }
+}

@@ -8,6 +8,7 @@ pub mod donut;
 pub mod ellipse;
 pub mod face3d;
 pub mod hatch;
+pub mod hatch_settings;
 pub mod hatchedit;
 pub mod helix;
 pub mod line;
