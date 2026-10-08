@@ -520,13 +520,30 @@ mod tests {
     }
 
     #[test]
-    fn the_dialog_opens_in_a_layout_too() {
+    fn the_dialog_opens_and_creates_a_hatch_in_a_layout_too() {
         // Paper space has no UCS plane: the default plane is used.
         let mut app = new_app();
         let i = app.active_tab;
-        let before = app.tabs[i].editing_model_space();
+        app.tabs[i].scene.current_layout = "Layout1".to_string();
+        assert!(!app.tabs[i].editing_model_space(), "really in paper space");
+        for (x0, y0, x1, y1) in [
+            (0.0, 0.0, 20.0, 0.0),
+            (20.0, 0.0, 20.0, 10.0),
+            (20.0, 10.0, 0.0, 10.0),
+            (0.0, 10.0, 0.0, 0.0),
+        ] {
+            add_line(&mut app, x0, y0, x1, y1);
+        }
         let _ = app.dispatch_command("HATCH");
-        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "model space was {before}");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(state.plane.z, glam::DVec3::Z, "the default plane");
+        let _ = app.update(Message::HatchDialogAdd(crate::ui::window::hatch_dialog::AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 1);
     }
 
     #[test]

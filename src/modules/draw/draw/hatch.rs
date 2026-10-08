@@ -423,7 +423,10 @@ impl HatchCommand {
                     .map(|point| [point.x, point.y])
                     .collect::<Vec<[f64; 2]>>()
             });
-        let groups: Vec<Vec<Vec<[f64; 2]>>> = if self.separate_hatches && !self.retain_boundaries
+        // Manual mode always commits one combined hatch, so it previews one.
+        let groups: Vec<Vec<Vec<[f64; 2]>>> = if self.separate_hatches
+            && !self.retain_boundaries
+            && !matches!(self.mode, HatchMode::Manual)
         {
             let mut regions: Vec<Vec<Vec<[f64; 2]>>> = self
                 .point_regions
@@ -783,16 +786,9 @@ impl CadCommand for HatchCommand {
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
         if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
-            let mut options = match self.mode {
-                HatchMode::SelectObjects => vec![
-                    CmdOption::new(t!("Pick internal points").as_ref(), "I"),
-                ],
-                _ => vec![
-                    CmdOption::new(t!("Select objects").as_ref(), "O"),
-                ],
-            };
-            options.push(CmdOption::enter(t!("Back to dialog").as_ref()));
-            return options;
+            // How areas are chosen is the dialog's Add button's business: a
+            // switch here would bypass the selection it saved and restores.
+            return vec![CmdOption::enter(t!("Back to dialog").as_ref())];
         }
         match &self.mode {
             HatchMode::PickInside => {
@@ -1028,15 +1024,11 @@ impl CadCommand for HatchCommand {
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         let input = text.trim();
         let upper = input.to_ascii_uppercase();
-        // The dialog owns the settings, and drawing a boundary by hand (arcs
-        // included) is outside what it can carry back, so S is not offered here.
-        if self.collect_only
-            && !matches!(self.mode, HatchMode::Manual)
-            && !matches!(
-                upper.as_str(),
-                "O" | "OBJECT" | "OBJECTS" | "I" | "INTERNAL"
-            )
-        {
+        // The dialog owns the settings and the way areas are chosen (O / I
+        // would bypass the selection it saves and restores), and drawing a
+        // boundary by hand (arcs included) is outside what it can carry back,
+        // so none of them is offered here.
+        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
             return None;
         }
         if matches!(self.mode, HatchMode::Manual) {
@@ -2170,8 +2162,6 @@ mod tests {
         for text in ["P ANSI31", "A 30", "L 2", "B", "N", "D", "Y"] {
             assert!(command.on_text_input(text).is_none(), "{text}");
         }
-        // Switching how areas are chosen is still allowed.
-        assert!(command.on_text_input("O").is_some());
     }
 
     #[test]
@@ -2646,5 +2636,81 @@ mod tests {
         let from_trait = command.hatch_preview_models().unwrap();
         assert_eq!(from_trait.len(), command.preview_models().len());
         assert_eq!(ring_count(&from_trait[0].boundary), 2);
+    }
+
+    #[test]
+    fn manual_preview_is_one_model_like_the_commit_even_with_separate_on() {
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0), rect(30.0, 0.0, 40.0, 10.0)];
+        let mut settings = HatchSettings::default();
+        settings.set_separate(true);
+        let regions = rings
+            .iter()
+            .map(|ring| HatchRegion {
+                rings: vec![ring.clone()],
+            })
+            .collect();
+        let mut command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&settings.resolve().unwrap())
+        .with_regions(regions);
+        assert_eq!(command.preview_models().len(), 2, "two regions, two hatches");
+        assert!(command.on_text_input("S").is_some());
+        for point in [[60.0, 0.0], [70.0, 0.0], [70.0, 10.0]] {
+            let _ = command.on_point(DVec3::new(point[0], point[1], 0.0));
+        }
+        assert_eq!(
+            command.preview_models().len(),
+            1,
+            "Manual mode commits one hatch, so the preview shows one"
+        );
+        assert!(matches!(command.on_enter(), CmdResult::CommitHatch(_)));
+    }
+
+    #[test]
+    fn collector_neither_offers_nor_takes_the_mode_switch() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let sources = sources_for(&rings);
+        for select_objects in [false, true] {
+            let mut command = HatchCommand::collecting(
+                rings.clone(),
+                sources.clone(),
+                WorkingPlane::default(),
+                select_objects,
+            );
+            let before = command.mode;
+            assert!(
+                command
+                    .options()
+                    .iter()
+                    .all(|option| option.keyword != "O" && option.keyword != "I"),
+                "a mode switch is offered (select_objects={select_objects})"
+            );
+            for text in ["O", "o", "OBJECTS", "I", "i", "INTERNAL"] {
+                assert!(command.on_text_input(text).is_none(), "{text}");
+            }
+            assert!(command.mode == before, "the mode changed");
+        }
+    }
+
+    #[test]
+    fn plain_command_still_switches_between_points_and_objects() {
+        let mut command = HatchCommand::new(
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        assert!(command.options().iter().any(|option| option.keyword == "O"));
+        assert!(command.on_text_input("O").is_some());
+        assert!(matches!(command.mode, HatchMode::SelectObjects));
+        assert!(command.options().iter().any(|option| option.keyword == "I"));
+        assert!(command.on_text_input("I").is_some());
+        assert!(matches!(command.mode, HatchMode::PickInside));
     }
 }

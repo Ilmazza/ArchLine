@@ -4841,7 +4841,6 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
-            Message::OpenHatchDialog => self.hatch_dialog_open(),
             Message::HatchDialogField(field) => {
                 self.hatch_dialog_field(field);
                 Task::none()
