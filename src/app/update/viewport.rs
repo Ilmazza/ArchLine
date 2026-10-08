@@ -3666,6 +3666,8 @@ impl OpenCADStudio {
                         self.grip_popup = None;
                         return Task::none();
                     }
+                    // The second click of a double-click on a pattern hatch opens Hatch Edit.
+                    if let Some(task) = self.hatch_double_click_on_grip(i, handle, p) { return task; }
                     let mut edit = self.grip_edit_for_hit(i, handle, grip_id, is_translate, world);
                     if edit.gizmo {
                         // Where the gizmo part was grabbed: the drag keeps

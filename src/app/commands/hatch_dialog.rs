@@ -203,6 +203,49 @@ impl OpenCADStudio {
         .then(|| self.hatch_dialog_open_edit(handle))
     }
 
+    /// A press on a grip of the selected pattern hatch `handle` that is the
+    /// second half of a double-click (the first click selected the hatch):
+    /// open Hatch Edit instead of starting a grip edit. Without this, a
+    /// double-click on the centre of a hatch lands on its pattern-origin grip.
+    /// Same thresholds as the double-click in `on_viewport_left_release`;
+    /// `cursor` is in the same tile coordinates as `last_vp_click_pos`.
+    /// `None` leaves the grip to work as before.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_double_click_on_grip(
+        &mut self,
+        i: usize,
+        handle: Handle,
+        cursor: iced::Point,
+    ) -> Option<Task<Message>> {
+        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
+        if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
+            return None;
+        }
+        let double = self
+            .last_vp_click_time
+            .is_some_and(|time| time.elapsed().as_millis() < 400)
+            && self
+                .last_vp_click_pos
+                .is_some_and(|last| (cursor.x - last.x).hypot(cursor.y - last.y) < 8.0);
+        let pattern_hatch = matches!(
+            self.tabs[i].scene.document.get_entity(handle),
+            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch)
+        );
+        if !double || !pattern_hatch {
+            return None;
+        }
+        // The double-click is used up: a third quick press is a new gesture.
+        self.last_vp_click_time = None;
+        self.grip_hover = None;
+        self.grip_popup = None;
+        self.tabs[i]
+            .scene
+            .selection
+            .borrow_mut()
+            .clear_left_selection_gesture();
+        Some(self.hatch_dialog_open_edit(handle))
+    }
+
     /// The hatch whose fill is under `cursor`, for a double-click that hit
     /// no wire. A hatch carries no wire (`scene::convert::tessellate`), so
     /// the wire pick never finds one; the fill test is the one single clicks
@@ -2556,6 +2599,56 @@ mod tests {
     }
 
     #[test]
+    fn an_angle_only_change_rotates_the_pattern_lines_by_that_angle() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        assert_eq!(before.pattern_angle, 0.0);
+        let origin = before.pattern_origin();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Angle("30".into()));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(after.pattern_scale, before.pattern_scale, "scale untouched");
+        let theta = 30f64.to_radians();
+        assert!((after.pattern_angle - theta).abs() < 1.0e-12);
+        let (sin, cos) = theta.sin_cos();
+        let rotate = |x: f64, y: f64| (x * cos - y * sin, x * sin + y * cos);
+        assert_eq!(after.pattern.lines.len(), before.pattern.lines.len());
+        for (old, new) in before.pattern.lines.iter().zip(&after.pattern.lines) {
+            assert!((new.angle - (old.angle + theta)).abs() < 1.0e-9, "line angle");
+            let (ox, oy) = rotate(old.offset.x, old.offset.y);
+            assert!((new.offset.x - ox).abs() < 1.0e-9 && (new.offset.y - oy).abs() < 1.0e-9);
+            let (bx, by) = rotate(old.base_point.x - origin.x, old.base_point.y - origin.y);
+            assert!((new.base_point.x - (origin.x + bx)).abs() < 1.0e-9);
+            assert!((new.base_point.y - (origin.y + by)).abs() < 1.0e-9);
+            assert_eq!(new.dash_lengths, old.dash_lengths, "dashes not scaled");
+        }
+    }
+
+    #[test]
+    fn dash_hatchedit_style_change_keeps_scale_and_angle_exactly() {
+        // The f32 guard of the HATCHEDIT update applies to the command line
+        // too: a style change no longer rewrites scale and angle rounded to
+        // f32, nor moves the pattern lines.
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| {
+            h.pattern_scale = 0.1;
+            h.pattern_angle = 0.1;
+            assert!(h.set_pattern_origin(codec::types::Vector2::new(1.234_567_8, 5.678_912_3)));
+        });
+        let before = stored(&app, hatch);
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("-HATCHEDIT");
+        let _ = app.feed_command(StepInput::Text("S".into()));
+        let _ = app.feed_command(StepInput::Text("O".into()));
+        let after = stored(&app, hatch);
+        assert_eq!(after.style, HatchStyleType::Outer);
+        assert_eq!(after.pattern_scale, 0.1);
+        assert_eq!(after.pattern_angle, 0.1);
+        assert_eq!(after.pattern, before.pattern, "pattern lines untouched");
+    }
+
+    #[test]
     fn cancel_and_escape_change_nothing() {
         for close in [Message::CloseModal, Message::CommandEscape] {
             let (mut app, hatch) = app_with_hatch();
@@ -2954,18 +3047,48 @@ mod tests {
     fn hatchedit_on_two_selected_hatches_runs_the_command_line() {
         let (mut app, hatch) = app_with_hatch();
         let i = app.active_tab;
+        let mut copy = stored(&app, hatch);
+        copy.common.handle = Handle::NULL;
+        let second = app.tabs[i].scene.add_entity(codec::EntityType::Hatch(copy));
+        assert!(app.tabs[i].scene.hatches.contains_key(&second), "a second hatch");
+        select_only(&mut app, hatch);
+        app.tabs[i].scene.select_entity(second, false);
+        assert_eq!(app.selected_handles(i).len(), 2);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert_eq!(command_name(&app, i), Some("HATCHEDIT"), "one hatch is asked for");
+    }
+
+    #[test]
+    fn hatchedit_on_a_hatch_and_a_line_runs_the_command_line() {
+        let (mut app, hatch) = app_with_hatch();
+        let i = app.active_tab;
         let line = add_line(&mut app, 100.0, 0.0, 110.0, 0.0);
         select_only(&mut app, hatch);
         app.tabs[i].scene.select_entity(line, false);
         let _ = app.dispatch_command("HATCHEDIT");
-        assert!(app.hatch_dialog.is_none());
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
     }
 
+    /// `src/modules/draw/draw/hatchedit.rs` registers the pair.
     #[test]
-    fn command_registration_lists_dash_hatchedit() {
-        let registered = inventory::iter::<crate::command::CommandRegistration>()
-            .any(|registration| registration.names.contains(&"-HATCHEDIT"));
+    fn the_hatchedit_command_registers_its_dash_form() {
+        let registered = inventory::iter::<crate::command::CommandRegistration>().any(|r| {
+            r.names.contains(&"HATCHEDIT") && r.names.contains(&"-HATCHEDIT")
+        });
         assert!(registered);
+    }
+
+    /// The one-shot list of `src/app/commands/mod.rs` names it next to
+    /// `-INSERT` and `-HATCH`.
+    #[test]
+    fn the_known_command_list_names_dash_hatchedit() {
+        let listed = inventory::iter::<crate::command::CommandRegistration>().any(|r| {
+            r.names.contains(&"-INSERT")
+                && r.names.contains(&"-HATCH")
+                && r.names.contains(&"-HATCHEDIT")
+        });
+        assert!(listed);
     }
 
     // ── Double-click in the viewport ───────────────────────────────────────
@@ -3061,6 +3184,112 @@ mod tests {
         double_click(&mut app, 4.0, 3.0);
         assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
         assert!(last_line(&app).contains("locked"), "{}", last_line(&app));
+    }
+
+    fn click(app: &mut OpenCADStudio, x: f64, y: f64) {
+        let p = screen_point(app, x, y);
+        let _ = app.update(Message::ViewportMove(p));
+        let _ = app.update(Message::ViewportLeftPress);
+        let _ = app.update(Message::ViewportLeftRelease);
+    }
+
+    /// HATCHEDIT is past its pick step, and its options edit `hatch`.
+    fn assert_hatchedit_picked(app: &mut OpenCADStudio, hatch: Handle) {
+        let i = app.active_tab;
+        let command = app.tabs[i].active_cmd.as_ref().expect("HATCHEDIT still runs");
+        assert_eq!(command.name(), "HATCHEDIT");
+        assert!(!command.needs_entity_pick(), "past the pick step: {}", last_line(app));
+        let _ = app.feed_command(StepInput::Text("S".into()));
+        let _ = app.feed_command(StepInput::Text("O".into()));
+        assert_eq!(stored(app, hatch).style, HatchStyleType::Outer, "the picked hatch");
+    }
+
+    #[test]
+    fn hatchedit_without_a_selection_picks_the_hatch_by_its_fill() {
+        let (mut app, hatch) = app_with_hatch();
+        frame(&mut app);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert!(app.tabs[app.active_tab].active_cmd.as_ref().unwrap().needs_entity_pick());
+        click(&mut app, 4.0, 3.0);
+        assert!(!last_line(&app).contains("Nothing found"), "{}", last_line(&app));
+        assert_hatchedit_picked(&mut app, hatch);
+    }
+
+    #[test]
+    fn hatchedit_picks_a_hatch_at_its_edge_when_no_object_bounds_it() {
+        let (mut app, hatch) = app_with_hatch();
+        let i = app.active_tab;
+        let lines: Vec<Handle> = app.tabs[i]
+            .scene
+            .document
+            .entities()
+            .filter(|entity| matches!(entity, codec::EntityType::Line(_)))
+            .map(|entity| entity.common().handle)
+            .collect();
+        app.tabs[i].scene.erase_entities(&lines);
+        frame(&mut app);
+        let _ = app.dispatch_command("HATCHEDIT");
+        click(&mut app, 0.2, 9.8);
+        assert!(!last_line(&app).contains("not a hatch"), "{}", last_line(&app));
+        assert_hatchedit_picked(&mut app, hatch);
+    }
+
+    // ── Double-click on the grip at the hatch centre ───────────────────────
+
+    /// Snaps off, so a grip drag lands where the cursor goes.
+    fn no_snaps(app: &mut OpenCADStudio) {
+        app.snapper.snap_enabled = false;
+        app.snapper.grid_snap_on = false;
+        app.snapper.otrack_enabled = false;
+        app.ortho_mode = false;
+        app.polar_mode = false;
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_a_hatch_opens_the_window_not_a_grip_edit() {
+        let (mut app, hatch) = app_with_hatch();
+        frame(&mut app);
+        // (10, 5) is the centroid: the pattern-origin grip of the selected hatch.
+        double_click(&mut app, 10.0, 5.0);
+        let i = app.active_tab;
+        assert!(app.tabs[i].active_grip.is_none(), "no grip edit started");
+        assert_eq!(edit_handle(&app), Some(hatch));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn a_single_press_on_the_centre_grip_still_drags_it() {
+        let (mut app, hatch) = app_with_hatch();
+        no_snaps(&mut app);
+        frame(&mut app);
+        click(&mut app, 10.0, 5.0);
+        let i = app.active_tab;
+        assert!(app.tabs[i].scene.selected.contains(&hatch), "the first click selects it");
+        // Time passes: the next press is not the second half of a double-click.
+        app.last_vp_click_time = None;
+        let before = stored(&app, hatch);
+        let grip = screen_point(&app, 10.0, 5.0);
+        let _ = app.update(Message::ViewportMove(grip));
+        let _ = app.update(Message::ViewportLeftPress);
+        assert!(app.tabs[i].active_grip.is_some(), "the grip is engaged");
+        let _ = app.update(Message::ViewportMove(screen_point(&app, 12.0, 6.0)));
+        let _ = app.update(Message::ViewportLeftRelease);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(app.tabs[i].active_grip.is_none(), "the drag was committed");
+        assert_ne!(stored(&app, hatch).pattern, before.pattern, "the pattern moved");
+    }
+
+    #[test]
+    fn double_clicking_a_grip_of_another_object_still_engages_it() {
+        let (mut app, _hatch) = app_with_hatch();
+        let line = add_line(&mut app, 30.0, 0.0, 40.0, 0.0);
+        frame(&mut app);
+        // (35, 0) is the line's midpoint grip once the first click selects it.
+        double_click(&mut app, 35.0, 0.0);
+        let i = app.active_tab;
+        assert!(app.tabs[i].scene.selected.contains(&line));
+        assert!(app.tabs[i].active_grip.is_some(), "the grip is engaged as before");
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
     }
 
     #[test]
