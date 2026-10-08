@@ -520,7 +520,9 @@ impl OpenCADStudio {
             }
             super::super::ModalKind::Hatch => {
                 let state = self.hatch_dialog.as_ref()?;
-                sized_flow(ex, 940, 560, |flow| {
+                // 560 tagliava la riga Preview/OK/Cancel: le tre colonne più
+                // schede e pulsanti superano quell'altezza.
+                sized_flow(ex, 940, 760, |flow| {
                     crate::ui::window::hatch_dialog::view_window(state, flow)
                 })
             }
