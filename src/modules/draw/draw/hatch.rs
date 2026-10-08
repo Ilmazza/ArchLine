@@ -200,6 +200,66 @@ fn rte_boundary(pts: impl Iterator<Item = (f64, f64)>) -> (Vec<[f32; 2]>, [f64; 
     (rel, [ox, oy])
 }
 
+/// Keep only the rings of a NaN-separated buffer whose entry in `keep` is true.
+fn retain_rings(buffer: &[[f32; 2]], keep: &[bool]) -> Vec<[f32; 2]> {
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(buffer.len());
+    let mut ring_index = 0;
+    let mut current: Vec<[f32; 2]> = Vec::new();
+    let flush = |ring: &mut Vec<[f32; 2]>, index: usize, out: &mut Vec<[f32; 2]>| {
+        if ring.is_empty() {
+            return;
+        }
+        if keep.get(index).copied().unwrap_or(true) {
+            if !out.is_empty() {
+                out.push([f32::NAN, f32::NAN]);
+            }
+            out.append(ring);
+        } else {
+            ring.clear();
+        }
+    };
+    for &point in buffer {
+        if point[0].is_nan() || point[1].is_nan() {
+            flush(&mut current, ring_index, &mut out);
+            ring_index += 1;
+        } else {
+            current.push(point);
+        }
+    }
+    flush(&mut current, ring_index, &mut out);
+    out
+}
+
+/// Drop from the *rendered* buffers the rings the island style hides. The three
+/// buffers a renderer reads — `boundary`, `fill_plane_boundary` and
+/// `boundary_exterior` — are filtered together so no consumer sees a ring
+/// another one does not. The persisted data (`boundary_wcs`, `boundary_paths`,
+/// `boundary_sources`) is left whole.
+fn filter_rendered_rings(model: &mut HatchModel, depths: &[usize]) {
+    let keep: Vec<bool> = depths
+        .iter()
+        .map(|&depth| {
+            crate::scene::model::hatch_model::island_ring_kept(model.style, depth)
+        })
+        .collect();
+    if keep.iter().all(|&kept| kept) {
+        return;
+    }
+    model.boundary = std::sync::Arc::new(retain_rings(&model.boundary, &keep));
+    if let Some(local) = &model.fill_plane_boundary {
+        model.fill_plane_boundary = Some(std::sync::Arc::new(retain_rings(local, &keep)));
+    }
+    if let Some(exterior) = &model.boundary_exterior {
+        let filtered: Vec<bool> = exterior
+            .iter()
+            .zip(&keep)
+            .filter(|(_, &kept)| kept)
+            .map(|(&outer, _)| outer)
+            .collect();
+        model.boundary_exterior = Some(std::sync::Arc::new(filtered));
+    }
+}
+
 // ── HATCH command ──────────────────────────────────────────────────────────
 
 pub struct HatchCommand {
@@ -350,6 +410,53 @@ impl HatchCommand {
             regions,
             objects: self.selected_objects.clone(),
         }
+    }
+
+    /// The models the preview draws: one per region when hatches are made
+    /// separately, otherwise one for everything, each with the rings the island
+    /// style hides taken out of what is rendered.
+    pub fn preview_models(&self) -> Vec<HatchModel> {
+        let manual_ring = (matches!(self.mode, HatchMode::Manual) && self.manual_pts.len() >= 3)
+            .then(|| {
+                self.manual_pts
+                    .iter()
+                    .map(|point| [point.x, point.y])
+                    .collect::<Vec<[f64; 2]>>()
+            });
+        let groups: Vec<Vec<Vec<[f64; 2]>>> = if self.separate_hatches && !self.retain_boundaries
+        {
+            let mut regions: Vec<Vec<Vec<[f64; 2]>>> = self
+                .point_regions
+                .iter()
+                .chain(self.object_regions.iter())
+                .cloned()
+                .collect();
+            if let Some(ring) = manual_ring {
+                regions.push(vec![ring]);
+            }
+            regions
+        } else {
+            let mut rings = self.combined_rings();
+            if let Some(ring) = manual_ring {
+                rings.push(ring);
+            }
+            if rings.is_empty() {
+                Vec::new()
+            } else {
+                vec![rings]
+            }
+        };
+        groups
+            .into_iter()
+            .filter(|rings| !rings.is_empty())
+            .map(|rings| {
+                let depths = kernel::geom2d::ring_nesting_depths(&rings);
+                let mut model = self.make_hatch(rings);
+                filter_rendered_rings(&mut model, &depths);
+                model.color = [0.15, 0.55, 1.0, 0.75];
+                model
+            })
+            .collect()
     }
 
     fn set_object_selection(&mut self, handles: Vec<Handle>) {
@@ -904,17 +1011,7 @@ impl CadCommand for HatchCommand {
     }
 
     fn hatch_preview_models(&self) -> Option<Vec<HatchModel>> {
-        let mut rings = self.combined_rings();
-        if matches!(self.mode, HatchMode::Manual) && self.manual_pts.len() >= 3 {
-            rings.push(self.manual_pts.iter().map(|point| [point.x, point.y]).collect());
-        }
-        Some(if rings.is_empty() {
-            Vec::new()
-        } else {
-            let mut preview = self.make_hatch(rings);
-            preview.color = [0.15, 0.55, 1.0, 0.75];
-            vec![preview]
-        })
+        Some(self.preview_models())
     }
 
     fn on_escape(&mut self) -> CmdResult {
@@ -2150,5 +2247,163 @@ mod tests {
         assert!(command.options().iter().any(|option| option.keyword == "S"));
         assert!(command.on_text_input("S").is_some());
         assert!(matches!(command.mode, HatchMode::Manual));
+    }
+
+    // ── Faithful preview ───────────────────────────────────────────────────
+
+    use codec::entities::HatchStyleType;
+
+    /// Rings in a NaN-separated buffer.
+    fn ring_count(buffer: &[[f32; 2]]) -> usize {
+        if buffer.is_empty() {
+            0
+        } else {
+            1 + buffer.iter().filter(|point| point[0].is_nan()).count()
+        }
+    }
+
+    fn ring_count_f64(buffer: &[[f64; 2]]) -> usize {
+        if buffer.is_empty() {
+            0
+        } else {
+            1 + buffer.iter().filter(|point| point[0].is_nan()).count()
+        }
+    }
+
+    fn nested_rings() -> Vec<Vec<[f64; 2]>> {
+        vec![
+            rect(-30.0, -30.0, 30.0, 30.0),
+            rect(-15.0, -15.0, 15.0, 15.0),
+            rect(-5.0, -5.0, 5.0, 5.0),
+        ]
+    }
+
+    fn nested_command(style: HatchStyleType, plane: WorkingPlane) -> HatchCommand {
+        let rings = nested_rings();
+        let mut settings = HatchSettings::default();
+        settings.island_style = style;
+        HatchCommand::new(rings.clone(), sources_for(&rings), Vec::new(), None, plane)
+            .with_settings(&settings.resolve().unwrap())
+            .with_regions(vec![HatchRegion { rings }])
+    }
+
+    #[test]
+    fn preview_rings_follow_the_island_style() {
+        for (style, expected) in [
+            (HatchStyleType::Normal, 3),
+            (HatchStyleType::Outer, 2),
+            (HatchStyleType::Ignore, 1),
+        ] {
+            let models = nested_command(style, WorkingPlane::default()).preview_models();
+            assert_eq!(models.len(), 1, "{style:?}");
+            let model = &models[0];
+            assert_eq!(ring_count(&model.boundary), expected, "boundary {style:?}");
+            assert_eq!(
+                ring_count(model.fill_plane_boundary.as_ref().unwrap()),
+                expected,
+                "fill_plane_boundary {style:?}"
+            );
+            assert_eq!(
+                model.boundary_exterior.as_ref().unwrap().len(),
+                expected,
+                "boundary_exterior {style:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_keeps_the_persisted_paths_complete() {
+        let models =
+            nested_command(HatchStyleType::Ignore, WorkingPlane::default()).preview_models();
+        let model = &models[0];
+        assert_eq!(model.boundary_paths.as_ref().unwrap().len(), 3);
+        assert_eq!(model.boundary_sources.as_ref().unwrap().len(), 3);
+        assert_eq!(ring_count_f64(model.boundary_wcs.as_ref().unwrap()), 3);
+    }
+
+    #[test]
+    fn preview_buffers_stay_in_step_on_a_rotated_plane() {
+        // Local x runs along world +Y, local y along world -X.
+        let plane = WorkingPlane::new(DVec3::ZERO, DVec3::Y, DVec3::NEG_X);
+        let models = nested_command(HatchStyleType::Ignore, plane).preview_models();
+        let model = &models[0];
+        let world = &model.boundary;
+        let local = model.fill_plane_boundary.as_ref().unwrap();
+        assert_eq!(ring_count(world), 1);
+        assert_eq!(ring_count(local), 1);
+        // On a rotated plane the two buffers really are different coordinates.
+        assert_ne!(world[1], local[1]);
+        assert!(model.boundary_exterior.as_ref().unwrap().iter().all(|&outer| outer));
+    }
+
+    #[test]
+    fn separate_preview_makes_one_model_per_region() {
+        let rings = vec![
+            rect(0.0, 0.0, 10.0, 10.0),
+            rect(30.0, 0.0, 40.0, 10.0),
+            rect(60.0, 0.0, 70.0, 10.0),
+        ];
+        let mut settings = HatchSettings::default();
+        settings.set_separate(true);
+        let regions = rings
+            .iter()
+            .map(|ring| HatchRegion {
+                rings: vec![ring.clone()],
+            })
+            .collect();
+        let command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&settings.resolve().unwrap())
+        .with_regions(regions);
+        assert_eq!(command.preview_models().len(), 3);
+    }
+
+    #[test]
+    fn retain_preview_is_a_single_model_even_for_several_regions() {
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0), rect(30.0, 0.0, 40.0, 10.0)];
+        let mut settings = HatchSettings::default();
+        settings.set_retain(true);
+        let regions = rings
+            .iter()
+            .map(|ring| HatchRegion {
+                rings: vec![ring.clone()],
+            })
+            .collect();
+        let command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_settings(&settings.resolve().unwrap())
+        .with_regions(regions);
+        assert_eq!(command.preview_models().len(), 1);
+    }
+
+    #[test]
+    fn preview_with_nothing_picked_is_empty() {
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let command = HatchCommand::new(
+            rings.clone(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        assert!(command.preview_models().is_empty());
+    }
+
+    #[test]
+    fn command_line_preview_uses_the_same_models() {
+        let command = nested_command(HatchStyleType::Outer, WorkingPlane::default());
+        let from_trait = command.hatch_preview_models().unwrap();
+        assert_eq!(from_trait.len(), command.preview_models().len());
+        assert_eq!(ring_count(&from_trait[0].boundary), 2);
     }
 }
