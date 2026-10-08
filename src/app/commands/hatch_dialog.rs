@@ -609,6 +609,74 @@ mod tests {
         assert!(app.hatch_dialog.as_ref().unwrap().regions.is_empty());
     }
 
+    fn assert_runs_dialog_free(app: &mut OpenCADStudio, channel: &str) {
+        let i = app.active_tab;
+        assert!(app.active_modal.is_none(), "{channel}: no dialog");
+        assert!(app.hatch_dialog.is_none(), "{channel}: no dialog state");
+        let name = app.tabs[i].active_cmd.as_ref().map(|command| command.name());
+        assert_eq!(name, Some("HATCH"), "{channel}: the command-line HATCH runs");
+    }
+
+    #[test]
+    fn dash_hatch_starts_the_command_without_a_dialog() {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("-HATCH");
+        assert_runs_dialog_free(&mut app, "-HATCH");
+    }
+
+    #[test]
+    fn scripted_dispatch_makes_hatch_dialog_free() {
+        let mut app = app_with_rectangle();
+        app.scripted_dispatch = true;
+        let _ = app.dispatch_command("HATCH");
+        app.scripted_dispatch = false;
+        assert_runs_dialog_free(&mut app, "scripted_dispatch");
+    }
+
+    #[test]
+    fn script_lines_run_hatch_without_a_dialog() {
+        let mut app = app_with_rectangle();
+        let _ = app.update(Message::ScriptLine("HATCH".into()));
+        assert_runs_dialog_free(&mut app, "ScriptLine");
+        assert!(!app.scripted_dispatch, "the flag is restored afterwards");
+    }
+
+    #[test]
+    fn interactive_hatch_still_opens_the_dialog_after_a_script() {
+        let mut app = app_with_rectangle();
+        let _ = app.update(Message::ScriptLine("HATCH".into()));
+        let _ = app.update(Message::CommandEscape);
+        let _ = app.dispatch_command("HATCH");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn the_flag_is_restored_when_a_channel_nests() {
+        let mut app = app_with_rectangle();
+        app.scripted_dispatch = true;
+        let _ = app.update(Message::ScriptLine("HATCH".into()));
+        assert!(app.scripted_dispatch, "an outer scripted run stays scripted");
+        app.scripted_dispatch = false;
+    }
+
+    #[test]
+    fn command_registration_lists_dash_hatch() {
+        let registered = inventory::iter::<crate::command::CommandRegistration>()
+            .any(|registration| registration.names.contains(&"-HATCH"));
+        assert!(registered);
+    }
+
+    /// The headless `--serve` op `run` without `"protocol"` (stdin and TCP) is a
+    /// scripted channel too: nobody is there to answer a dialog.
+    #[test]
+    fn headless_serve_run_hatch_has_no_dialog() {
+        let mut app = app_with_rectangle();
+        let reply = app.automation_op(r#"{"op":"run","cmd":"HATCH"}"#);
+        assert_ne!(reply["ok"], serde_json::json!(false), "{reply}");
+        assert_runs_dialog_free(&mut app, "automation legacy run");
+        assert!(!app.scripted_dispatch, "the flag is restored afterwards");
+    }
+
     use crate::command::StepInput;
     use crate::ui::window::hatch_dialog::{AddKind, Flow};
 

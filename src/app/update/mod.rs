@@ -2543,7 +2543,7 @@ impl OpenCADStudio {
                 self.dispatch_command(&cmd)
             }
 
-            Message::ScriptLine(line) => self.feed_script_line(&line),
+            Message::ScriptLine(line) => self.feed_scripted_line(&line),
 
             Message::ToggleLayers => {
                 if self.active_modal == Some(super::ModalKind::Layers) {
