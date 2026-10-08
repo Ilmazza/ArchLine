@@ -679,11 +679,9 @@ impl CadCommand for HatchCommand {
             let mut options = match self.mode {
                 HatchMode::SelectObjects => vec![
                     CmdOption::new(t!("Pick internal points").as_ref(), "I"),
-                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
                 ],
                 _ => vec![
                     CmdOption::new(t!("Select objects").as_ref(), "O"),
-                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
                 ],
             };
             options.push(CmdOption::enter(t!("Back to dialog").as_ref()));
@@ -933,11 +931,13 @@ impl CadCommand for HatchCommand {
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         let input = text.trim();
         let upper = input.to_ascii_uppercase();
+        // The dialog owns the settings, and drawing a boundary by hand (arcs
+        // included) is outside what it can carry back, so S is not offered here.
         if self.collect_only
             && !matches!(self.mode, HatchMode::Manual)
             && !matches!(
                 upper.as_str(),
-                "O" | "OBJECT" | "OBJECTS" | "I" | "INTERNAL" | "S"
+                "O" | "OBJECT" | "OBJECTS" | "I" | "INTERNAL"
             )
         {
             return None;
@@ -2113,5 +2113,42 @@ mod tests {
     fn object_regions_ignore_unknown_handles() {
         let sources = rustc_hash::FxHashMap::default();
         assert!(object_regions(&sources, &[Handle::new(99)]).is_empty());
+    }
+
+    #[test]
+    fn collector_does_not_offer_manual_drawing() {
+        let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
+        let sources = sources_for(&rings);
+        for select_objects in [false, true] {
+            let mut command = HatchCommand::collecting(
+                rings.clone(),
+                sources.clone(),
+                WorkingPlane::default(),
+                select_objects,
+            );
+            let before = command.mode;
+            assert!(
+                command.options().iter().all(|option| option.keyword != "S"),
+                "S offered (select_objects={select_objects})"
+            );
+            assert!(command.on_text_input("S").is_none());
+            assert!(command.on_text_input("s").is_none());
+            assert!(command.mode == before, "S changed the mode");
+            assert!(!matches!(command.mode, HatchMode::Manual));
+        }
+    }
+
+    #[test]
+    fn plain_command_still_offers_and_enters_manual_drawing() {
+        let mut command = HatchCommand::new(
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        assert!(command.options().iter().any(|option| option.keyword == "S"));
+        assert!(command.on_text_input("S").is_some());
+        assert!(matches!(command.mode, HatchMode::Manual));
     }
 }
