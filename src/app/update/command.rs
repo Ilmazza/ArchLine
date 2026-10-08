@@ -167,6 +167,15 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 // editor holds a document-local handle into one tab, so drop it
                 // now rather than risk it applying to a different tab's document.
                 self.cancel_attr_editor();
+                // A HATCH dialog flow owned by the closing tab can never finish.
+                if self
+                    .hatch_dialog
+                    .as_ref()
+                    .zip(self.tabs.get(idx))
+                    .is_some_and(|(state, tab)| state.owner_tab_id == tab.id)
+                {
+                    self.hatch_dialog_cancel();
+                }
                 if self.tabs.get(idx).map_or(false, |t| t.dirty) {
                     self.pending_close =
                         Some(crate::app::PendingClose::Tab(self.tabs[idx].id));

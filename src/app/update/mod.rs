@@ -1896,6 +1896,9 @@ impl OpenCADStudio {
                         // The attribute editor is tab-scoped; leaving its tab
                         // drops it (its handle is that document's, not this one's).
                         self.cancel_attr_editor();
+                        // The HATCH dialog belongs to the tab that opened it;
+                        // leaving that tab abandons the flow.
+                        self.hatch_dialog_cancel();
                         // Persist the outgoing drawing's Ortho / running OSNAP
                         // before leaving it, so switching back restores them.
                         let prev = self.active_tab;

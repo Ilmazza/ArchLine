@@ -1028,4 +1028,124 @@ mod tests {
         assert_eq!(state.boundary_sources.len(), before + 4);
         assert_eq!(state.regions.len(), 1, "the new rectangle was seen");
     }
+
+    /// A second drawing tab next to the first (the first stays active);
+    /// returns (first_index, second_index).
+    fn open_second_tab(app: &mut OpenCADStudio) -> (usize, usize) {
+        let first = app.active_tab;
+        let _ = app.push_test_document();
+        let second = app.tabs.len() - 1;
+        assert_ne!(first, second);
+        (first, second)
+    }
+
+    fn start_flow(app: &mut OpenCADStudio, flow: &str) {
+        match flow {
+            "pick" => {
+                let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+            }
+            "select" => {
+                let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+            }
+            "preview" => {
+                app.hatch_dialog.as_mut().unwrap().regions.push(region());
+                let _ = app.update(Message::HatchDialogPreview);
+            }
+            "origin" => {
+                let _ = app.update(Message::HatchDialogField(Field::OriginMode(
+                    crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
+                )));
+                let _ = app.update(Message::HatchDialogPickOrigin);
+            }
+            other => panic!("unknown flow {other}"),
+        }
+    }
+
+    const FLOWS: [&str; 4] = ["pick", "select", "preview", "origin"];
+
+    #[test]
+    fn switching_tab_in_any_hidden_flow_abandons_it() {
+        for flow in FLOWS {
+            let mut app = app_with_rectangle();
+            let (first, second) = open_second_tab(&mut app);
+            let _ = app.update(Message::TabSwitch(first));
+            open_dialog(&mut app);
+            start_flow(&mut app, flow);
+            assert!(app.tabs[first].active_cmd.is_some(), "{flow}: flow started");
+            let _ = app.update(Message::TabSwitch(second));
+            assert!(app.hatch_dialog.is_none(), "{flow}: state dropped");
+            assert!(app.active_modal.is_none(), "{flow}: no dialog");
+            assert!(app.tabs[first].active_cmd.is_none(), "{flow}: owner's command stopped");
+            assert_eq!(hatch_count(&app), 0, "{flow}");
+        }
+    }
+
+    #[test]
+    fn closing_the_owner_tab_in_any_hidden_flow_abandons_it() {
+        for flow in FLOWS {
+            let mut app = app_with_rectangle();
+            let (first, _second) = open_second_tab(&mut app);
+            let _ = app.update(Message::TabSwitch(first));
+            open_dialog(&mut app);
+            start_flow(&mut app, flow);
+            let id = app.tabs[first].id;
+            let _ = app.update(Message::TabClose(id));
+            assert!(app.hatch_dialog.is_none(), "{flow}");
+            assert!(app.active_modal.is_none(), "{flow}");
+        }
+    }
+
+    #[test]
+    fn switching_tab_with_the_dialog_visible_closes_it() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        let _ = app.update(Message::TabSwitch(second));
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn selection_is_restored_when_a_select_round_is_abandoned() {
+        let mut app = new_app();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        let keep = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+        app.tabs[first].scene.select_entity(keep, false);
+        let _ = app.dispatch_command("HATCH");
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        let _ = app.update(Message::TabSwitch(second));
+        assert!(app.tabs[first].scene.selected.contains(&keep));
+    }
+
+    #[test]
+    fn a_stale_collector_result_is_never_applied_to_another_tab() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        // The user somehow lands on the other tab with the result still in flight.
+        app.active_tab = second;
+        let _ = app.apply_cmd_result(crate::command::CmdResult::HatchBoundariesPicked {
+            regions: vec![region()],
+            objects: Vec::new(),
+        });
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(hatch_count(&app), 0);
+    }
+
+    #[test]
+    fn ok_on_another_tab_is_refused() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        app.active_tab = second;
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 0);
+        assert!(app.hatch_dialog.is_none());
+    }
 }
