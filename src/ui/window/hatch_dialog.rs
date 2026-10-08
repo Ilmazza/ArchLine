@@ -66,6 +66,8 @@ pub struct State {
     /// "Click to set new origin".
     pub specified_origin: Option<[f64; 2]>,
     pub flow: Flow,
+    /// The pattern browser opened by "..."; `None` while closed.
+    pub palette: Option<super::hatch_palette::Palette>,
 }
 
 impl State {
@@ -87,6 +89,7 @@ impl State {
             settings,
             specified_origin: None,
             flow: Flow::None,
+            palette: None,
         }
     }
 
@@ -268,8 +271,12 @@ fn type_and_pattern<'a>(state: &State) -> Element<'a, Message> {
                 t!("Pattern").into_owned(),
                 row![
                     picker,
-                    // Pattern palette: not available yet, shown inert.
-                    button(text("...").size(12)).padding([3, 8]).style(button::secondary),
+                    button(text("...").size(12))
+                        .padding([3, 8])
+                        .style(button::secondary)
+                        .on_press(Message::HatchDialogPalette(
+                            super::hatch_palette::PaletteAction::Open
+                        )),
                 ]
                 .spacing(6)
                 .into()
@@ -462,6 +469,10 @@ pub fn view_window<'a>(
     ]
     .spacing(16);
 
+    if let Some(palette) = &state.palette {
+        return super::hatch_palette::page(tabs.into(), palette, sizing);
+    }
+
     let left = column![type_and_pattern(state), angle_and_scale(state), origin_group(state)]
         .spacing(8)
         .width(Fill);
@@ -618,5 +629,126 @@ mod tests {
         assert!(state.settings.separate && !state.settings.retain);
         state.apply(Field::Retain(true));
         assert!(state.settings.retain && !state.settings.separate);
+    }
+
+    // ── The real widgets, through the iced simulator ───────────────────────
+
+    use super::super::hatch_palette::{Palette, PaletteAction, PatternCategory};
+
+    /// Messages the real window publishes for the given interactions.
+    fn click_all(state: &State, labels: &[&str]) -> Vec<Message> {
+        let element = view_window(state, crate::ui::modal::ModalSizing::FILL);
+        let mut ui = iced_test::simulator(element);
+        for label in labels {
+            ui.click(*label).unwrap_or_else(|_| panic!("{label} is on screen"));
+        }
+        ui.into_messages().collect()
+    }
+
+    fn with_palette(search: &str, selected: Option<&str>) -> State {
+        let mut state = state();
+        let mut palette = Palette::open("ANSI31");
+        palette.search = search.into();
+        palette.selected = selected.map(str::to_string);
+        state.palette = Some(palette);
+        state
+    }
+
+    fn palette_actions(messages: &[Message]) -> Vec<PaletteAction> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::HatchDialogPalette(action) => Some(action.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_dots_button_opens_the_palette() {
+        let messages = click_all(&state(), &["..."]);
+        assert_eq!(palette_actions(&messages), vec![PaletteAction::Open]);
+    }
+
+    #[test]
+    fn a_card_click_picks_and_a_double_click_applies() {
+        let state = with_palette("brick", None);
+        let messages = click_all(&state, &["BRICK"]);
+        assert_eq!(
+            palette_actions(&messages),
+            vec![PaletteAction::Pick("BRICK".into())]
+        );
+        let messages = click_all(&state, &["BRICK", "BRICK"]);
+        let actions = palette_actions(&messages);
+        assert!(
+            actions.contains(&PaletteAction::Apply),
+            "the second quick click is a double click: {actions:?}"
+        );
+        assert_eq!(actions[0], PaletteAction::Pick("BRICK".into()));
+    }
+
+    #[test]
+    fn the_tabs_and_cancel_publish_palette_actions_and_the_window_controls_are_gone() {
+        let state = with_palette("", Some("ANSI31"));
+        let messages = click_all(&state, &["ISO"]);
+        assert_eq!(
+            palette_actions(&messages),
+            vec![PaletteAction::Tab(PatternCategory::Iso)]
+        );
+        let messages = click_all(&state, &["Cancel"]);
+        assert_eq!(palette_actions(&messages), vec![PaletteAction::Close]);
+        assert!(
+            !messages.iter().any(|m| matches!(m, Message::CloseModal)),
+            "Cancel in the palette is not the window's Cancel"
+        );
+        let mut ui = iced_test::simulator(view_window(
+            &state,
+            crate::ui::modal::ModalSizing::FILL,
+        ));
+        for hidden in ["Preview", "Add: Pick points", "Click to set new origin", "Islands"] {
+            assert!(ui.find(hidden).is_err(), "{hidden} is not on the palette page");
+        }
+        assert!(ui.find("Other Predefined").is_ok());
+    }
+
+    #[test]
+    fn ok_in_the_palette_needs_a_selection() {
+        let none = with_palette("brick", None);
+        assert!(palette_actions(&click_all(&none, &["OK"])).is_empty(), "OK is off");
+        let some = with_palette("brick", Some("BRICK"));
+        assert_eq!(
+            palette_actions(&click_all(&some, &["OK"])),
+            vec![PaletteAction::Apply]
+        );
+    }
+
+    #[test]
+    fn a_search_without_results_says_so() {
+        let state = with_palette("zzzz-no-such-pattern", None);
+        let mut ui = iced_test::simulator(view_window(
+            &state,
+            crate::ui::modal::ModalSizing::FILL,
+        ));
+        assert!(ui.find("No patterns found").is_ok());
+        let state = with_palette("brick", None);
+        let mut ui = iced_test::simulator(view_window(
+            &state,
+            crate::ui::modal::ModalSizing::FILL,
+        ));
+        assert!(ui.find("No patterns found").is_err());
+        assert!(ui.find("BRICK").is_ok());
+    }
+
+    #[test]
+    fn every_pattern_of_the_tab_has_a_card() {
+        // The grid is scrollable and the simulator lays out the whole of it:
+        // the first and the last of the tab are both present.
+        let state = with_palette("", Some("ANSI31"));
+        let entries = super::super::hatch_palette::in_category(PatternCategory::Ansi);
+        let mut ui = iced_test::simulator(view_window(
+            &state,
+            crate::ui::modal::ModalSizing::FILL,
+        ));
+        assert!(ui.find(entries[0].name.as_str()).is_ok());
     }
 }

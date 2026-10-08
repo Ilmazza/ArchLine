@@ -4849,6 +4849,7 @@ impl OpenCADStudio {
             Message::HatchDialogAdd(kind) => self.hatch_dialog_add(kind),
             Message::HatchDialogPickOrigin => self.hatch_dialog_pick_origin(),
             Message::HatchDialogPreview => self.hatch_dialog_preview(),
+            Message::HatchDialogPalette(action) => self.hatch_dialog_palette(action),
             Message::DrawingUnitsApply => {
                 let Some(state) = self.drawing_units.take() else {
                     self.active_modal = None;
@@ -8543,7 +8544,10 @@ impl OpenCADStudio {
 
             Message::CloseModal => {
                 if self.active_modal == Some(super::ModalKind::Hatch) {
-                    self.hatch_dialog_cancel();
+                    // Esc / Cancel close the palette first, the window next.
+                    if !self.hatch_dialog_close_palette() {
+                        self.hatch_dialog_cancel();
+                    }
                     return Task::none();
                 }
                 if self.active_modal == Some(super::ModalKind::Field) {

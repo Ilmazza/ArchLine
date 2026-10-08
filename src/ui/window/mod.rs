@@ -8,6 +8,7 @@ pub mod layout_manager;
 pub mod layer_state_manager;
 pub mod drawing_units;
 pub mod hatch_dialog;
+pub mod hatch_palette;
 pub mod geometric_tolerance;
 pub mod drafting_settings;
 pub mod auto_constrain_settings;

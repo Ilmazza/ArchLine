@@ -26,7 +26,7 @@ use crate::t;
 const FONT_SZ: f32 = ROW_H * 0.42; // ≈11 px
 const COMBO_PAD_V: f32 = (ROW_H - FONT_SZ * 1.3 - 2.0) / 2.0; // fills combo to ROW_H
 const PATTERN_CARD_W: f32 = 158.0;
-const PATTERN_PREVIEW_H: f32 = 58.0;
+pub(crate) const PATTERN_PREVIEW_H: f32 = 58.0;
 const PATTERN_PICKER_W: f32 = 348.0;
 const PATTERN_PICKER_H: f32 = 720.0;
 const LINETYPE_MENU_W: f32 = 220.0;
@@ -305,6 +305,39 @@ fn hatch_pattern_matches(
     query.is_empty()
         || entry.name.to_lowercase().contains(&query.to_lowercase())
         || entry.description.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Look of one card in a hatch-pattern browser: filled and primary-bordered
+/// when selected, bordered when focused, lighter when hovered. Shared by the
+/// Properties picker and the Hatch dialog's palette.
+pub(crate) fn pattern_card_style(
+    theme: &Theme,
+    selected: bool,
+    focused: bool,
+    hovered: bool,
+) -> button::Style {
+    let palette = theme.palette();
+    let pair = if selected {
+        palette.primary.weak
+    } else if hovered || focused {
+        palette.background.strong
+    } else {
+        palette.background.weak
+    };
+    button::Style {
+        background: Some(Background::Color(pair.color)),
+        text_color: pair.text,
+        border: Border {
+            color: if selected || focused {
+                palette.primary.base.color
+            } else {
+                palette.background.neutral.color
+            },
+            width: if selected || focused { 2.0 } else { 1.0 },
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 pub(crate) fn filtered_hatch_patterns(
@@ -1608,30 +1641,9 @@ impl PropertiesPanel {
                 )
                 .on_press(Message::PropHatchPatternChanged(name))
                 .style(move |theme: &Theme, status| {
-                    let palette = theme.palette();
                     let hovered =
                         matches!(status, button::Status::Hovered | button::Status::Pressed);
-                    let pair = if selected {
-                        palette.primary.weak
-                    } else if hovered || focused {
-                        palette.background.strong
-                    } else {
-                        palette.background.weak
-                    };
-                    button::Style {
-                        background: Some(Background::Color(pair.color)),
-                        text_color: pair.text,
-                        border: Border {
-                            color: if selected || focused {
-                                palette.primary.base.color
-                            } else {
-                                palette.background.neutral.color
-                            },
-                            width: if selected || focused { 2.0 } else { 1.0 },
-                            radius: 4.0.into(),
-                        },
-                        ..Default::default()
-                    }
+                    pattern_card_style(theme, selected, focused, hovered)
                 })
                 .padding(5)
                 .width(PATTERN_CARD_W);

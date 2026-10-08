@@ -8,6 +8,7 @@ use crate::command::{CadCommand, WorkingPlane};
 use crate::modules::draw::draw::hatch::{object_regions, HatchCommand};
 use crate::modules::draw::draw::hatch_settings::{add_region, OriginMode, RegionOrigin};
 use crate::ui::window::hatch_dialog::{Field, State};
+use crate::ui::window::hatch_palette::{Palette, PaletteAction, PALETTE_SEARCH_ID};
 use codec::Handle;
 
 /// A `HatchCommand` that would create what the dialog describes, or `None`
@@ -132,6 +133,10 @@ impl OpenCADStudio {
     /// the command line uses.
     #[inline(never)]
     pub(in crate::app) fn hatch_dialog_ok(&mut self) -> Task<Message> {
+        // Enter / OK with the palette open means "use the chosen pattern".
+        if self.hatch_palette_open() {
+            return self.hatch_dialog_palette(PaletteAction::Apply);
+        }
         let i = self.active_tab;
         let Some(state) = self.hatch_dialog.as_ref() else {
             return Task::none();
@@ -163,6 +168,64 @@ impl OpenCADStudio {
             .insert(Box::new(command))
             .on_enter();
         self.apply_cmd_result(result)
+    }
+
+    /// The pattern palette behind "...": every action of it lands here.
+    /// Browsing (tab, search, pick) never changes the pattern; only `Apply`
+    /// does, through the same `Field::Pattern` the drop-down uses.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_palette(
+        &mut self,
+        action: PaletteAction,
+    ) -> Task<Message> {
+        let Some(state) = self.hatch_dialog.as_mut() else {
+            return Task::none();
+        };
+        if matches!(action, PaletteAction::Open) {
+            if state.palette.is_some() {
+                return Task::none();
+            }
+            state.palette = Some(Palette::open(&state.settings.pattern));
+            return iced::widget::operation::focus(iced::widget::Id::new(PALETTE_SEARCH_ID));
+        }
+        let Some(palette) = state.palette.as_mut() else {
+            return Task::none();
+        };
+        match action {
+            PaletteAction::Open => {}
+            PaletteAction::Close => state.palette = None,
+            PaletteAction::Tab(category) => palette.category = category,
+            PaletteAction::Search(text) => palette.search = text,
+            PaletteAction::Pick(name) => {
+                if let Some(entry) = crate::scene::model::hatch_patterns::find(&name) {
+                    palette.selected = Some(entry.name.clone());
+                }
+            }
+            PaletteAction::Apply => {
+                if let Some(name) = palette.selected.clone() {
+                    state.apply(Field::Pattern(name));
+                    state.palette = None;
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Esc / Cancel: close the palette if it is open. `true` when it was, so
+    /// the caller leaves the window alone.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_close_palette(&mut self) -> bool {
+        self.hatch_dialog
+            .as_mut()
+            .is_some_and(|state| state.palette.take().is_some())
+    }
+
+    /// The palette hides the window's own controls: while it is open, what
+    /// would act on the window (OK, Add, Preview, origin) must not run.
+    pub(in crate::app) fn hatch_palette_open(&self) -> bool {
+        self.hatch_dialog
+            .as_ref()
+            .is_some_and(|state| state.palette.is_some())
     }
 
     /// Cancel / X / Esc, and every abandonment (tab left or closed, another
@@ -238,6 +301,9 @@ impl OpenCADStudio {
         kind: crate::ui::window::hatch_dialog::AddKind,
     ) -> Task<Message> {
         use crate::ui::window::hatch_dialog::{AddKind, Flow};
+        if self.hatch_palette_open() {
+            return Task::none();
+        }
         let i = self.active_tab;
         let Some(state) = self.hatch_dialog.as_ref() else {
             return Task::none();
@@ -299,6 +365,9 @@ impl OpenCADStudio {
     pub(in crate::app) fn hatch_dialog_pick_origin(&mut self) -> Task<Message> {
         use crate::modules::draw::draw::hatch_flows::HatchOriginPickCommand;
         use crate::ui::window::hatch_dialog::Flow;
+        if self.hatch_palette_open() {
+            return Task::none();
+        }
         let i = self.active_tab;
         let Some(state) = self.hatch_dialog.as_mut() else {
             return Task::none();
@@ -321,6 +390,9 @@ impl OpenCADStudio {
     pub(in crate::app) fn hatch_dialog_preview(&mut self) -> Task<Message> {
         use crate::modules::draw::draw::hatch_flows::HatchPreviewCommand;
         use crate::ui::window::hatch_dialog::Flow;
+        if self.hatch_palette_open() {
+            return Task::none();
+        }
         let i = self.active_tab;
         let Some(state) = self.hatch_dialog.as_ref() else {
             return Task::none();
@@ -1769,5 +1841,315 @@ mod tests {
         assert_eq!(app.active_modal, Some(ModalKind::Hatch));
         assert!(app.hatch_dialog.is_some());
         assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    }
+
+    // ── Pattern palette ("...") ────────────────────────────────────────────
+
+    use crate::ui::window::hatch_palette::{category_of, Palette, PaletteAction, PatternCategory};
+
+    fn palette_of(app: &OpenCADStudio) -> Option<&Palette> {
+        app.hatch_dialog.as_ref().and_then(|state| state.palette.as_ref())
+    }
+
+    fn palette_do(app: &mut OpenCADStudio, action: PaletteAction) {
+        let _ = app.update(Message::HatchDialogPalette(action));
+    }
+
+    fn pattern_of(app: &OpenCADStudio) -> String {
+        app.hatch_dialog.as_ref().unwrap().settings.pattern.clone()
+    }
+
+    /// The dialog open with one area collected and the palette open on it.
+    fn app_with_palette() -> OpenCADStudio {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("HATCH");
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        palette_do(&mut app, PaletteAction::Open);
+        app
+    }
+
+    #[test]
+    fn the_palette_is_closed_when_the_dialog_opens() {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("HATCH");
+        assert!(palette_of(&app).is_none());
+    }
+
+    #[test]
+    fn open_shows_the_tab_and_card_of_the_current_pattern() {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("HATCH");
+        let _ = app.update(Message::HatchDialogField(Field::Pattern("brick".into())));
+        palette_do(&mut app, PaletteAction::Open);
+        let palette = palette_of(&app).expect("the palette is open");
+        assert_eq!(palette.category, PatternCategory::Other);
+        assert_eq!(palette.selected.as_deref(), Some("BRICK"));
+        assert!(palette.search.is_empty());
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "same window");
+    }
+
+    #[test]
+    fn open_on_a_pattern_missing_from_the_catalog_starts_on_ansi_with_no_card() {
+        let mut app = app_with_rectangle();
+        app.hatch_last.pattern = "NO_SUCH_PATTERN".into();
+        let _ = app.dispatch_command("HATCH");
+        palette_do(&mut app, PaletteAction::Open);
+        let palette = palette_of(&app).expect("the button works with a bad pattern too");
+        assert_eq!(palette.category, PatternCategory::Ansi);
+        assert!(palette.selected.is_none());
+    }
+
+    #[test]
+    fn open_again_keeps_what_was_already_chosen() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Open);
+        assert_eq!(palette_of(&app).unwrap().selected.as_deref(), Some("BRICK"));
+    }
+
+    #[test]
+    fn tab_and_search_change_the_view_but_not_the_selection() {
+        let mut app = app_with_palette();
+        let before = palette_of(&app).unwrap().selected.clone();
+        assert_eq!(before.as_deref(), Some("ANSI31"));
+        palette_do(&mut app, PaletteAction::Tab(PatternCategory::Iso));
+        assert_eq!(palette_of(&app).unwrap().category, PatternCategory::Iso);
+        assert_eq!(palette_of(&app).unwrap().selected, before);
+        palette_do(&mut app, PaletteAction::Search("brick".into()));
+        assert_eq!(palette_of(&app).unwrap().search, "brick");
+        assert_eq!(palette_of(&app).unwrap().selected, before);
+        assert_eq!(pattern_of(&app), "ANSI31", "nothing is applied by browsing");
+    }
+
+    #[test]
+    fn pick_selects_without_applying() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("ISO02W100".into()));
+        assert_eq!(
+            palette_of(&app).unwrap().selected.as_deref(),
+            Some("ISO02W100")
+        );
+        assert_eq!(pattern_of(&app), "ANSI31");
+    }
+
+    #[test]
+    fn pick_of_a_name_that_is_not_in_the_catalog_is_ignored() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("NO_SUCH_PATTERN".into()));
+        assert_eq!(palette_of(&app).unwrap().selected.as_deref(), Some("ANSI31"));
+    }
+
+    #[test]
+    fn apply_sets_the_pattern_and_closes_the_palette() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Apply);
+        assert_eq!(pattern_of(&app), "BRICK");
+        assert!(palette_of(&app).is_none());
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "the window stays");
+        assert_eq!(hatch_count(&app), 0, "nothing is created");
+    }
+
+    #[test]
+    fn apply_with_nothing_selected_does_nothing() {
+        let mut app = app_with_rectangle();
+        app.hatch_last.pattern = "NO_SUCH_PATTERN".into();
+        let _ = app.dispatch_command("HATCH");
+        palette_do(&mut app, PaletteAction::Open);
+        palette_do(&mut app, PaletteAction::Apply);
+        assert!(palette_of(&app).is_some(), "still open");
+        assert_eq!(pattern_of(&app), "NO_SUCH_PATTERN");
+    }
+
+    #[test]
+    fn close_leaves_the_pattern_alone() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Close);
+        assert!(palette_of(&app).is_none());
+        assert_eq!(pattern_of(&app), "ANSI31");
+        assert!(app.hatch_dialog.is_some());
+    }
+
+    #[test]
+    fn actions_without_an_open_palette_do_nothing() {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("HATCH");
+        for action in [
+            PaletteAction::Close,
+            PaletteAction::Tab(PatternCategory::Iso),
+            PaletteAction::Search("x".into()),
+            PaletteAction::Pick("BRICK".into()),
+            PaletteAction::Apply,
+        ] {
+            palette_do(&mut app, action);
+            assert!(palette_of(&app).is_none());
+            assert_eq!(pattern_of(&app), "ANSI31");
+        }
+        // and with no dialog at all
+        let mut app = new_app();
+        palette_do(&mut app, PaletteAction::Open);
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn escape_with_the_palette_open_closes_only_the_palette() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        let _ = app.update(Message::CloseModal);
+        assert!(palette_of(&app).is_none());
+        assert!(app.hatch_dialog.is_some(), "the Hatch window is still there");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(pattern_of(&app), "ANSI31", "Esc applies nothing");
+        // the second Esc closes the window as before
+        let _ = app.update(Message::CloseModal);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn the_keyboard_escape_takes_the_same_path() {
+        let mut app = app_with_palette();
+        let _ = app.update(Message::CommandEscape);
+        assert!(palette_of(&app).is_none());
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn escape_without_the_palette_still_closes_the_window() {
+        let mut app = app_with_rectangle();
+        let _ = app.dispatch_command("HATCH");
+        let _ = app.update(Message::CloseModal);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn enter_with_the_palette_open_applies_it_and_creates_nothing() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(pattern_of(&app), "BRICK");
+        assert!(palette_of(&app).is_none());
+        assert!(app.hatch_dialog.is_some(), "the window stays open");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(hatch_count(&app), 0, "Enter was not the window's OK");
+        // the next Enter is the window's OK
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(hatch_count(&app), 1);
+    }
+
+    #[test]
+    fn enter_with_the_palette_open_and_nothing_selected_does_nothing() {
+        let mut app = app_with_rectangle();
+        app.hatch_last.pattern = "NO_SUCH_PATTERN".into();
+        let _ = app.dispatch_command("HATCH");
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        palette_do(&mut app, PaletteAction::Open);
+        let _ = app.update(Message::CommandFinalize);
+        assert!(palette_of(&app).is_some());
+        assert_eq!(hatch_count(&app), 0);
+        assert!(app.hatch_dialog.is_some());
+    }
+
+    #[test]
+    fn applying_a_pattern_over_a_missing_one_makes_the_window_usable_again() {
+        let mut app = app_with_rectangle();
+        app.hatch_last.pattern = "NO_SUCH_PATTERN".into();
+        let _ = app.dispatch_command("HATCH");
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        {
+            let state = app.hatch_dialog.as_ref().unwrap();
+            assert!(state.pattern_message().is_some());
+            assert!(!state.can_ok());
+            assert!(!state.fields_valid());
+        }
+        palette_do(&mut app, PaletteAction::Open);
+        palette_do(&mut app, PaletteAction::Pick("ANSI31".into()));
+        palette_do(&mut app, PaletteAction::Apply);
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert!(state.pattern_message().is_none());
+        assert!(state.fields_valid(), "Add and Preview are back");
+        assert!(state.can_ok(), "OK is back");
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 1);
+    }
+
+    #[test]
+    fn the_palette_does_not_touch_the_remembered_settings() {
+        let mut app = app_with_palette();
+        let before = app.hatch_last.clone();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Apply);
+        assert_eq!(app.hatch_last, before, "only Add / OK remember");
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(app.hatch_last.pattern, "BRICK");
+    }
+
+    #[test]
+    fn cancelling_the_window_discards_the_palette_with_it() {
+        let mut app = app_with_palette();
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        app.hatch_dialog_cancel();
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+        let _ = app.dispatch_command("HATCH");
+        assert!(palette_of(&app).is_none(), "a new window starts closed");
+        assert_eq!(pattern_of(&app), "ANSI31");
+    }
+
+    #[test]
+    fn switching_tab_with_the_palette_open_discards_everything() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        palette_do(&mut app, PaletteAction::Open);
+        assert!(palette_of(&app).is_some());
+        let _ = app.update(Message::TabSwitch(second));
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn the_windows_other_buttons_cannot_fire_behind_the_palette() {
+        use crate::ui::window::hatch_dialog::{AddKind, Flow};
+        for message in [
+            Message::HatchDialogAdd(AddKind::Points),
+            Message::HatchDialogAdd(AddKind::Objects),
+            Message::HatchDialogPreview,
+            Message::HatchDialogPickOrigin,
+        ] {
+            let mut app = app_with_palette();
+            let _ = app.update(message);
+            let i = app.active_tab;
+            assert!(app.tabs[i].active_cmd.is_none(), "no hidden step started");
+            assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+            assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::None);
+            assert!(palette_of(&app).is_some(), "the palette is untouched");
+            assert_eq!(hatch_count(&app), 0);
+        }
+        // OK: the palette answers it, no hatch is made
+        let mut app = app_with_palette();
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 0);
+        assert!(app.hatch_dialog.is_some());
+        assert!(palette_of(&app).is_none());
+    }
+
+    #[test]
+    fn every_catalog_pattern_can_be_picked_and_applied() {
+        // Whatever card is chosen, the window ends up exactly as if the
+        // drop-down had chosen it.
+        for entry in crate::scene::model::hatch_patterns::catalog() {
+            let mut app = app_with_palette();
+            palette_do(&mut app, PaletteAction::Tab(category_of(&entry.name)));
+            palette_do(&mut app, PaletteAction::Pick(entry.name.clone()));
+            palette_do(&mut app, PaletteAction::Apply);
+            assert_eq!(pattern_of(&app), entry.name);
+            assert!(app.hatch_dialog.as_ref().unwrap().can_ok(), "{}", entry.name);
+        }
     }
 }

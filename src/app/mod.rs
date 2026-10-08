@@ -2978,6 +2978,8 @@ pub enum Message {
     HatchDialogPreview,
     /// HATCH dialog OK — create the hatch from the collected areas.
     HatchDialogOk,
+    /// HATCH dialog: the pattern palette behind "...".
+    HatchDialogPalette(crate::ui::window::hatch_palette::PaletteAction),
     /// Block Definition dialog field updates
     BlockDefName(String),
     BlockDefNameSelect(String),
