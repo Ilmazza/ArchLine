@@ -144,6 +144,7 @@ Dettagli nella [guida all'automazione](docs/automation/README.md). I plugin nati
 
 ## Sviluppo e contributi
 
+- Attribuzione, licenze e politica di fork: [FORK.md](FORK.md).
 - Il lavoro quotidiano avviene sul branch `lavoro`; il lavoro assistito va su branch `claude/…` e si unisce con pull request.
 - `main` è riservato al riallineamento con upstream (`HakanSeven12/OpenCADStudio`) e non ospita il lavoro del fork; non si tocca senza conferma.
 - Segnalazioni e proposte: [Issues](https://github.com/Ilmazza/ArchLine/issues). Vulnerabilità: [SECURITY.md](SECURITY.md).

@@ -18,10 +18,10 @@ python tests/conformance/run.py target\release\OpenCADStudio.exe  # misura DXF/D
 - Il container cloud non ha GPU: la verifica visiva si fa solo su Windows, con screenshot dell'utente.
 
 ## Branch e flusso
-- L'utente lavora in locale su `lavoro` (da `claude/archline-integration`); GitHub è il backup (`git add -A`, `git commit`, `git push`).
+- L'utente lavora in locale su `lavoro` (nata da `claude/archline-integration`, poi cancellato); GitHub è il backup (`git add -A`, `git commit`, `git push`).
 - Il lavoro assistito va su branch `claude/…`; si unisce con PR. Non pushare su `lavoro` mentre l'utente lavora.
 - `main` del fork = upstream: **non toccarlo senza conferma esplicita**. Upstream: `HakanSeven12/OpenCADStudio` (`git remote add upstream …`, merge periodico a lavoro salvato).
-- Cronologia delle PR: #2 rebrand+offline, #3 workspace classico, #4 pagina iniziale ripulita, #5 CI Windows, #6 salta Web build check, #7 nasconde OCS Web/Send Feedback, #8 barre compatte. `claude/archline-integration` le contiene tutte.
+- Cronologia delle PR: #2 rebrand+offline, #3 workspace classico, #4 pagina iniziale ripulita, #5 CI Windows, #6 salta Web build check, #7 nasconde OCS Web/Send Feedback, #8 barre compatte. Tutte sono ora in `lavoro`; i branch `claude/archline-*` di quelle PR sono stati cancellati (ottobre 2026).
 
 ## Cosa è ArchLine (file propri, per ridurre i conflitti col merge da upstream)
 - `src/privacy.rs`: `APP_NAME`, `online()` (`ARCHLINE_ONLINE=1` riattiva aggiornamenti/Discussions/video/Patreon), `show_promo()` (`ARCHLINE_PROMO=1` riporta Donate, Sponsors, Reddit, Patreon, OCS Web, Send Feedback).
