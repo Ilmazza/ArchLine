@@ -92,9 +92,59 @@ impl fmt::Display for SelectionGroup {
     }
 }
 
+/// On-screen spacing limits for a pattern swatch, in pixels.
+pub(crate) const SWATCH_MIN_SPACING_PX: f32 = 2.0;
+pub(crate) const SWATCH_MAX_SPACING_PX: f32 = 64.0;
+/// A swatch never strokes more segments than this.
+pub(crate) const SWATCH_MAX_SEGMENTS: usize = 400;
+/// `hatch_preview_scale` draws a pattern at roughly this spacing for scale 1.
+const SWATCH_BASE_SPACING_PX: f32 = 8.0;
+
 #[derive(Clone)]
-struct HatchPatternPreview {
+pub(crate) struct HatchPatternPreview {
     pattern: crate::scene::model::hatch_model::HatchPattern,
+    user_angle: f32,
+    user_scale: f32,
+}
+
+impl HatchPatternPreview {
+    pub(crate) fn new(pattern: crate::scene::model::hatch_model::HatchPattern) -> Self {
+        Self {
+            pattern,
+            user_angle: 0.0,
+            user_scale: 1.0,
+        }
+    }
+
+    /// Angle in radians and scale factor as the user typed them.
+    pub(crate) fn with_angle_scale(mut self, angle_rad: f32, scale: f32) -> Self {
+        self.user_angle = angle_rad;
+        self.user_scale = scale;
+        self
+    }
+}
+
+/// Scale the swatch draws at: the pattern's own normalisation times the user's
+/// scale, held so the spacing on screen stays between 2 and 64 px.
+pub(crate) fn swatch_scale(
+    pattern: &crate::scene::model::hatch_model::HatchPattern,
+    user_scale: f32,
+) -> f32 {
+    // Solid and gradient fills have no lines to space: the scale is meaningless.
+    if !matches!(
+        pattern,
+        crate::scene::model::hatch_model::HatchPattern::Pattern(_)
+    ) {
+        return 1.0;
+    }
+    let low = SWATCH_MIN_SPACING_PX / SWATCH_BASE_SPACING_PX;
+    let high = SWATCH_MAX_SPACING_PX / SWATCH_BASE_SPACING_PX;
+    hatch_preview_scale(pattern) * user_scale.clamp(low, high)
+}
+
+/// Too fine to draw line by line: the swatch shows a tinted fill instead.
+pub(crate) fn swatch_is_dense(user_scale: f32) -> bool {
+    user_scale < SWATCH_MIN_SPACING_PX / SWATCH_BASE_SPACING_PX
 }
 
 impl canvas::Program<Message> for HatchPatternPreview {
@@ -130,43 +180,51 @@ impl canvas::Program<Message> for HatchPatternPreview {
                 frame.fill(&sample, palette.primary.weak.color);
             }
             HatchPattern::Pattern(_) => {
-                let model = HatchModel {
-                    pattern_origin: None,
-                    render_instance: None,
-                    world_origin: [0.0, 0.0],
-                    boundary: Arc::new(vec![
-                        [pad, pad],
-                        [bounds.width - pad, pad],
-                        [bounds.width - pad, bounds.height - pad],
-                        [pad, bounds.height - pad],
-                    ]),
-                    boundary_wcs: None,
-                    fill_plane: None,
-                    fill_plane_boundary: None,
-                    boundary_exterior: None,
-                    boundary_sources: None,
-                    boundary_paths: None,
-                    style: codec::entities::HatchStyleType::Normal,
-                    pattern: self.pattern.clone(),
-                    name: String::new(),
-                    color: [1.0; 4],
-                    aci: 0,
-                    line_weight_px: 1.0,
-                    angle_offset: 0.0,
-                    scale: hatch_preview_scale(&self.pattern),
-                    draw_depth: 0.0,
-                };
-                let stroke = canvas::Stroke::default()
-                    .with_color(palette.background.base.text)
-                    .with_width(1.0);
-                for segment in model.pattern_segments() {
-                    frame.stroke(
-                        &canvas::Path::line(
-                            Point::new(segment[0][0] as f32, bounds.height - segment[0][1] as f32),
-                            Point::new(segment[1][0] as f32, bounds.height - segment[1][1] as f32),
-                        ),
-                        stroke.clone(),
-                    );
+                if swatch_is_dense(self.user_scale) {
+                    frame.fill(&sample, palette.background.base.text.scale_alpha(0.35));
+                } else {
+                    let model = HatchModel {
+                        pattern_origin: None,
+                        render_instance: None,
+                        world_origin: [0.0, 0.0],
+                        boundary: Arc::new(vec![
+                            [pad, pad],
+                            [bounds.width - pad, pad],
+                            [bounds.width - pad, bounds.height - pad],
+                            [pad, bounds.height - pad],
+                        ]),
+                        boundary_wcs: None,
+                        fill_plane: None,
+                        fill_plane_boundary: None,
+                        boundary_exterior: None,
+                        boundary_sources: None,
+                        boundary_paths: None,
+                        style: codec::entities::HatchStyleType::Normal,
+                        pattern: self.pattern.clone(),
+                        name: String::new(),
+                        color: [1.0; 4],
+                        aci: 0,
+                        line_weight_px: 1.0,
+                        angle_offset: self.user_angle,
+                        scale: swatch_scale(&self.pattern, self.user_scale),
+                        draw_depth: 0.0,
+                    };
+                    let stroke = canvas::Stroke::default()
+                        .with_color(palette.background.base.text)
+                        .with_width(1.0);
+                    for segment in model
+                        .pattern_segments()
+                        .into_iter()
+                        .take(SWATCH_MAX_SEGMENTS)
+                    {
+                        frame.stroke(
+                            &canvas::Path::line(
+                                Point::new(segment[0][0] as f32, bounds.height - segment[0][1] as f32),
+                                Point::new(segment[1][0] as f32, bounds.height - segment[1][1] as f32),
+                            ),
+                            stroke.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -1498,9 +1556,7 @@ impl PropertiesPanel {
                 let selected = current.eq_ignore_ascii_case(&entry.name);
                 let focused = self.hatch_pattern_focus == index;
                 let name = entry.name.clone();
-                let preview = canvas(HatchPatternPreview {
-                    pattern: entry.gpu.clone(),
-                })
+                let preview = canvas(HatchPatternPreview::new(entry.gpu.clone()))
                 .width(Length::Fill)
                 .height(PATTERN_PREVIEW_H);
                 let card = button(
@@ -2261,5 +2317,50 @@ mod tests {
 
         assert!(scale.is_finite());
         assert!((0.01..=100.0).contains(&scale));
+    }
+}
+
+#[cfg(test)]
+mod swatch_tests {
+    use super::*;
+    use crate::scene::model::hatch_model::{HatchPattern, PatFamily};
+
+    fn lines(spacing: f32) -> HatchPattern {
+        HatchPattern::Pattern(vec![PatFamily {
+            angle_deg: 45.0,
+            x0: 0.0,
+            y0: 0.0,
+            dx: 0.0,
+            dy: spacing,
+            dashes: vec![],
+        }])
+    }
+
+    #[test]
+    fn scale_one_is_the_old_behaviour() {
+        let pattern = lines(3.175);
+        assert_eq!(swatch_scale(&pattern, 1.0), hatch_preview_scale(&pattern));
+    }
+
+    #[test]
+    fn extreme_scales_are_clamped_to_two_and_sixty_four_pixels() {
+        let pattern = lines(3.175);
+        let base = hatch_preview_scale(&pattern); // ~8 px at user scale 1
+        assert_eq!(swatch_scale(&pattern, 1.0e-6), base * 0.25);
+        assert_eq!(swatch_scale(&pattern, 1.0e6), base * 8.0);
+    }
+
+    #[test]
+    fn only_a_scale_below_the_floor_is_dense() {
+        assert!(swatch_is_dense(0.01));
+        assert!(swatch_is_dense(0.249));
+        assert!(!swatch_is_dense(0.25));
+        assert!(!swatch_is_dense(1.0));
+        assert!(!swatch_is_dense(1.0e6));
+    }
+
+    #[test]
+    fn a_pattern_without_lines_keeps_scale_one() {
+        assert_eq!(swatch_scale(&HatchPattern::Solid, 5.0), 1.0);
     }
 }
