@@ -2131,11 +2131,7 @@ impl Scene {
             .zip(ring_sources)
             .zip(depths)
         {
-            let keep = match dxf.style {
-                codec::entities::HatchStyleType::Normal => true,
-                codec::entities::HatchStyleType::Outer => depth <= 1,
-                codec::entities::HatchStyleType::Ignore => depth == 0,
-            };
+            let keep = crate::scene::model::hatch_model::island_ring_kept(dxf.style, depth);
             if !keep {
                 continue;
             }
