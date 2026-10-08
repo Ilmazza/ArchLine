@@ -12,6 +12,7 @@ use iced::{Border, Element, Fill, Length, Theme};
 
 use crate::app::Message;
 use crate::command::WorkingPlane;
+use crate::modules::draw::draw::hatch_edit_settings::EditTarget;
 use crate::modules::draw::draw::hatch_settings::{
     HatchRegion, HatchSettings, OriginMode, RegionOrigin,
 };
@@ -68,6 +69,8 @@ pub struct State {
     pub flow: Flow,
     /// The pattern browser opened by "..."; `None` while closed.
     pub palette: Option<super::hatch_palette::Palette>,
+    /// "Hatch Edit": the hatch the window edits. `None` while HATCH creates one.
+    pub edit: Option<EditTarget>,
 }
 
 impl State {
@@ -90,10 +93,34 @@ impl State {
             specified_origin: None,
             flow: Flow::None,
             palette: None,
+            edit: None,
         }
     }
 
+    /// The window on an existing hatch, its fields filled from it. `plane` is
+    /// the hatch's own plane, where a new origin is measured.
+    pub fn for_edit(owner_tab_id: u64, plane: WorkingPlane, target: EditTarget) -> Self {
+        let mut state = Self::new(
+            owner_tab_id,
+            plane,
+            Vec::new(),
+            Default::default(),
+            target.initial.clone(),
+        );
+        state.edit = Some(target);
+        state
+    }
+
     pub fn apply(&mut self, field: Field) {
+        if let Some(edit) = &self.edit {
+            match field {
+                // One existing hatch: these only shape a hatch being created.
+                Field::Separate(_) | Field::Retain(_) => return,
+                // A hatch can be disassociated here, never associated.
+                Field::Associative(_) if !edit.initial.associative => return,
+                _ => {}
+            }
+        }
         match field {
             Field::Pattern(name) => self.settings.pattern = name,
             Field::Angle(text) => self.settings.angle = text,
@@ -107,13 +134,24 @@ impl State {
         }
     }
 
-    /// Add, Preview and OK need every field usable.
+    /// Add, Preview and OK need every field usable. Editing a hatch, its own
+    /// pattern counts as usable even when the catalog does not have it.
     pub fn fields_valid(&self) -> bool {
-        self.settings.resolve().is_some()
+        match &self.edit {
+            Some(edit) => edit.fields_valid(&self.settings),
+            None => self.settings.resolve().is_some(),
+        }
     }
 
+    /// Creating: usable fields and at least one area. Editing: usable fields
+    /// and at least one of them changed.
     pub fn can_ok(&self) -> bool {
-        self.fields_valid() && !self.regions.is_empty()
+        match &self.edit {
+            Some(edit) => edit
+                .changes(&self.settings, self.specified_origin)
+                .is_some_and(|changes| !changes.is_empty()),
+            None => self.fields_valid() && !self.regions.is_empty(),
+        }
     }
 
     /// Message shown under Angle while it is not a number.
@@ -350,7 +388,14 @@ fn origin_group<'a>(state: &State) -> Element<'a, Message> {
 }
 
 fn boundaries_group<'a>(state: &State) -> Element<'a, Message> {
-    let enabled = state.fields_valid();
+    // Editing keeps the hatch's own boundaries: no Add, and no area count.
+    let enabled = state.fields_valid() && state.edit.is_none();
+    let count: Element<'a, Message> = match state.edit {
+        Some(_) => Space::new().into(),
+        None => text(crate::tf!("{} region(s) selected", state.regions.len()))
+            .size(11)
+            .into(),
+    };
     group(
         t!("Boundaries").into_owned(),
         column![
@@ -359,7 +404,7 @@ fn boundaries_group<'a>(state: &State) -> Element<'a, Message> {
             grey(t!("Remove boundaries").into_owned()),
             grey(t!("Recreate boundary").into_owned()),
             grey(t!("View Selections").into_owned()),
-            text(crate::tf!("{} region(s) selected", state.regions.len())).size(11),
+            count,
         ]
         .spacing(6)
         .into(),
@@ -379,16 +424,27 @@ fn options_group<'a>(state: &State) -> Element<'a, Message> {
         .align_y(iced::Center)
         .into()
     };
+    // Editing: "Associative" can only switch an associative hatch off, and
+    // separate hatches are a creation choice.
+    let editing = state.edit.as_ref();
+    let associative = match editing {
+        Some(edit) if !edit.initial.associative => grey_check(t!("Associative").into_owned()),
+        _ => check(settings.associative, t!("Associative").into_owned(), Field::Associative),
+    };
+    let separate = match editing {
+        Some(_) => grey_check(t!("Create separate hatches").into_owned()),
+        None => check(
+            settings.separate,
+            t!("Create separate hatches").into_owned(),
+            Field::Separate,
+        ),
+    };
     group(
         t!("Options").into_owned(),
         column![
             grey_check(t!("Annotative").into_owned()),
-            check(settings.associative, t!("Associative").into_owned(), Field::Associative),
-            check(
-                settings.separate,
-                t!("Create separate hatches").into_owned(),
-                Field::Separate
-            ),
+            associative,
+            separate,
             labelled(t!("Draw order").into_owned(), grey(t!("Send Behind Boundary").into_owned())),
             labelled(t!("Layer").into_owned(), grey(t!("Use Current").into_owned())),
             labelled(t!("Transparency").into_owned(), grey(t!("Use Current").into_owned())),
@@ -441,17 +497,23 @@ fn islands_group<'a>(state: &State) -> Element<'a, Message> {
 }
 
 fn retention_group<'a>(state: &State) -> Element<'a, Message> {
+    // Editing keeps the hatch's boundaries as they are.
+    let retain: Element<'a, Message> = match state.edit {
+        Some(_) => grey_check(t!("Retain boundaries").into_owned()),
+        None => row![
+            checkbox(state.settings.retain)
+                .on_toggle(|on| Message::HatchDialogField(Field::Retain(on)))
+                .size(14),
+            text(t!("Retain boundaries")).size(11),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+        .into(),
+    };
     group(
         t!("Boundary retention").into_owned(),
         column![
-            row![
-                checkbox(state.settings.retain)
-                    .on_toggle(|on| Message::HatchDialogField(Field::Retain(on)))
-                    .size(14),
-                text(t!("Retain boundaries")).size(11),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
+            retain,
             labelled(t!("Object type").into_owned(), grey(t!("Polyline").into_owned())),
         ]
         .spacing(6)
@@ -499,12 +561,13 @@ pub fn view_window<'a>(
     .width(Fill);
 
     let ok = state.can_ok();
-    let fields = state.fields_valid();
+    // Editing has no Preview: the hatch on screen is the preview.
+    let preview = state.edit.is_none() && state.fields_valid() && !state.regions.is_empty();
     let actions = row![
         Space::new().width(Fill),
         dialog_button_styled_opt(
             t!("Preview").into_owned(),
-            (fields && !state.regions.is_empty()).then_some(Message::HatchDialogPreview),
+            preview.then_some(Message::HatchDialogPreview),
             button::secondary,
         ),
         dialog_button_styled_opt(
@@ -620,6 +683,123 @@ mod tests {
         assert!(state.angle_message().is_none());
         assert!(state.scale_message().is_none());
         assert!(state.pattern_message().is_none());
+    }
+
+    // ── Hatch Edit ─────────────────────────────────────────────────────────
+
+    fn edit_state(associative: bool, pattern: &str) -> State {
+        let mut hatch = codec::entities::Hatch::with_pattern(
+            codec::entities::hatch::HatchPattern::new(pattern),
+        );
+        hatch.is_associative = associative;
+        hatch.pattern_scale = 1.0;
+        State::for_edit(
+            7,
+            WorkingPlane::default(),
+            EditTarget::from_hatch(Handle::new(5), &hatch),
+        )
+    }
+
+    #[test]
+    fn a_creation_state_is_not_an_edit() {
+        assert!(state().edit.is_none());
+    }
+
+    #[test]
+    fn an_edit_starts_from_the_hatch_and_ok_waits_for_a_change() {
+        let mut state = edit_state(true, "ANSI31");
+        let target = state.edit.clone().expect("an edit");
+        assert_eq!(target.handle, Handle::new(5));
+        assert_eq!(state.settings, target.initial);
+        assert!(state.regions.is_empty());
+        assert!(state.fields_valid());
+        assert!(!state.can_ok(), "nothing changed yet");
+        state.apply(Field::Scale("2".into()));
+        assert!(state.can_ok(), "a change and no region needed");
+        state.apply(Field::Scale("1,0".into()));
+        assert!(!state.can_ok(), "back to the hatch's own value");
+        state.apply(Field::Scale("0".into()));
+        assert!(!state.fields_valid());
+        assert!(!state.can_ok(), "an unusable field");
+    }
+
+    #[test]
+    fn an_edit_ignores_the_options_that_only_shape_a_new_hatch() {
+        let mut state = edit_state(true, "ANSI31");
+        state.apply(Field::Separate(true));
+        state.apply(Field::Retain(true));
+        assert!(!state.settings.separate && !state.settings.retain);
+        assert!(!state.can_ok());
+    }
+
+    #[test]
+    fn associative_can_only_be_switched_off_on_an_associative_hatch() {
+        let mut state = edit_state(true, "ANSI31");
+        state.apply(Field::Associative(false));
+        assert!(!state.settings.associative);
+        assert!(state.can_ok(), "switching it off disassociates");
+        let mut loose = edit_state(false, "ANSI31");
+        loose.apply(Field::Associative(true));
+        assert!(!loose.settings.associative, "a hatch is not re-associated here");
+        assert!(!loose.can_ok());
+    }
+
+    #[test]
+    fn the_hatch_own_unknown_pattern_warns_but_does_not_block_ok() {
+        let mut state = edit_state(true, "MY_OWN");
+        assert!(state.pattern_message().is_some(), "the warning is shown");
+        assert!(state.fields_valid());
+        assert!(!state.can_ok(), "nothing changed");
+        state.apply(Field::Scale("3".into()));
+        assert!(state.can_ok());
+        state.apply(Field::Pattern("ALSO_UNKNOWN".into()));
+        assert!(!state.can_ok(), "another unknown pattern is not usable");
+    }
+
+    #[test]
+    fn a_creation_state_still_needs_a_region() {
+        let mut state = state();
+        state.apply(Field::Scale("2".into()));
+        assert!(!state.can_ok());
+    }
+
+    fn has_message(messages: &[Message], wanted: fn(&Message) -> bool) -> bool {
+        messages.iter().any(wanted)
+    }
+
+    #[test]
+    fn the_edit_window_offers_no_add_no_preview_and_no_region_count() {
+        let mut state = edit_state(true, "ANSI31");
+        state.apply(Field::Scale("2".into()));
+        let messages = click_all(&state, &["Add: Pick points", "Add: Select objects", "Preview"]);
+        assert!(
+            !has_message(&messages, |m| matches!(
+                m,
+                Message::HatchDialogAdd(_) | Message::HatchDialogPreview
+            )),
+            "Add and Preview are grey"
+        );
+        let mut ui = iced_test::simulator(view_window(&state, crate::ui::modal::ModalSizing::FILL));
+        assert!(ui.find("0 region(s) selected").is_err());
+        assert!(ui.find("Create separate hatches").is_ok(), "shown, greyed");
+        assert!(ui.find("Retain boundaries").is_ok(), "shown, greyed");
+        let messages = click_all(&state, &["OK"]);
+        assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
+    }
+
+    #[test]
+    fn the_edit_window_ok_is_off_until_something_changes() {
+        let state = edit_state(true, "ANSI31");
+        let messages = click_all(&state, &["OK"]);
+        assert!(!has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
+        // The creation window keeps its buttons.
+        let mut create = self::state();
+        create.regions.push(one_region());
+        let messages = click_all(&create, &["Preview", "OK"]);
+        assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogPreview)));
+        assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
+        let mut ui = iced_test::simulator(view_window(&create, crate::ui::modal::ModalSizing::FILL));
+        assert!(ui.find("1 region(s) selected").is_ok());
     }
 
     #[test]
