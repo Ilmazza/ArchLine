@@ -7265,25 +7265,22 @@ impl OpenCADStudio {
                     return Task::none();
                 }
                 if !handles.is_empty() {
-                    let idx = if field == "gradient_color_2" { 1 } else { 0 };
+                    let patch = if field == "gradient_color_2" {
+                        crate::entities::hatch_fill::GradientPatch {
+                            color2: Some(color.clone()),
+                            ..Default::default()
+                        }
+                    } else {
+                        crate::entities::hatch_fill::GradientPatch {
+                            color1: Some(color.clone()),
+                            ..Default::default()
+                        }
+                    };
                     self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
                         if let Some(codec::EntityType::Hatch(h)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
-                            while h.gradient_color.colors.len() <= idx {
-                                let value = if h.gradient_color.colors.is_empty() {
-                                    0.0
-                                } else {
-                                    1.0
-                                };
-                                h.gradient_color.colors.push(
-                                    codec::entities::hatch::GradientColorEntry {
-                                        value,
-                                        color: codec::types::Color::Index(7),
-                                    },
-                                );
-                            }
-                            h.gradient_color.colors[idx].color = color.clone();
+                            crate::entities::hatch_fill::apply_gradient_patch(h, &patch);
                         }
                     });
                     // Rebuild hatch seeds so the gradient fill picks up the new

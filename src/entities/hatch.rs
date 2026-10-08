@@ -640,17 +640,25 @@ fn apply_geom_prop(h: &mut Hatch, field: &str, value: &str) {
             return;
         }
         "fill_type" => {
-            let one_color = value == "One color";
-            if one_color && !h.gradient_color.is_single_color {
-                h.gradient_color.color_tint = 1.0;
-            }
-            h.gradient_color.is_single_color = one_color;
+            crate::entities::hatch_fill::apply_gradient_patch(
+                h,
+                &crate::entities::hatch_fill::GradientPatch {
+                    one_color: Some(value == "One color"),
+                    ..Default::default()
+                },
+            );
             return;
         }
         "gradient_type" => {
             use crate::scene::model::hatch_model::GradientKind;
-            if let Some((kind, invert)) = GradientKind::from_choice_label(value) {
-                h.gradient_color.name = kind.dxf_name(invert).to_string();
+            if let Some(kind) = GradientKind::from_choice_label(value) {
+                crate::entities::hatch_fill::apply_gradient_patch(
+                    h,
+                    &crate::entities::hatch_fill::GradientPatch {
+                        kind: Some(kind),
+                        ..Default::default()
+                    },
+                );
             }
             return;
         }
@@ -660,7 +668,13 @@ fn apply_geom_prop(h: &mut Hatch, field: &str, value: &str) {
             } else {
                 value == "true"
             };
-            h.gradient_color.shift = if centered { 0.0 } else { 1.0 };
+            crate::entities::hatch_fill::apply_gradient_patch(
+                h,
+                &crate::entities::hatch_fill::GradientPatch {
+                    centered: Some(centered),
+                    ..Default::default()
+                },
+            );
             return;
         }
         _ => {}
@@ -670,11 +684,22 @@ fn apply_geom_prop(h: &mut Hatch, field: &str, value: &str) {
     };
     match field {
         "pattern_angle" if h.gradient_color.enabled => {
-            h.gradient_color.angle = v.to_radians();
-            h.pattern_angle = v.to_radians();
+            crate::entities::hatch_fill::apply_gradient_patch(
+                h,
+                &crate::entities::hatch_fill::GradientPatch {
+                    angle_rad: Some(v.to_radians()),
+                    ..Default::default()
+                },
+            );
         }
         "gradient_tint" if h.gradient_color.enabled => {
-            h.gradient_color.color_tint = v.clamp(0.0, 1.0);
+            crate::entities::hatch_fill::apply_gradient_patch(
+                h,
+                &crate::entities::hatch_fill::GradientPatch {
+                    tint: Some(v),
+                    ..Default::default()
+                },
+            );
         }
         "pattern_angle" => {
             let angle = v.to_radians();
@@ -1092,5 +1117,87 @@ impl FallbackTess for Hatch {
             pts = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
         }
         (pts, snap_pts, vec![], key_verts)
+    }
+}
+
+#[cfg(test)]
+mod gradient_property_tests {
+    use super::*;
+    use crate::entities::hatch_fill::{apply_gradient, GradientSpec};
+    use crate::entities::traits::PropertyEditable;
+    use crate::scene::model::hatch_model::GradientKind;
+
+    fn gradient() -> Hatch {
+        let mut hatch = Hatch::solid();
+        apply_gradient(
+            &mut hatch,
+            &GradientSpec {
+                kind: GradientKind::Linear,
+                invert: false,
+                one_color: false,
+                color1: codec::types::Color::Index(1),
+                color2: codec::types::Color::Index(5),
+                tint: 0.25,
+                angle_rad: 0.5,
+                centered: true,
+            },
+        );
+        hatch
+    }
+
+    fn after(field: &str, value: &str) -> Hatch {
+        let mut hatch = gradient();
+        PropertyEditable::apply_geom_prop(&mut hatch, field, value);
+        hatch
+    }
+
+    #[test]
+    fn the_gradient_type_changes_only_the_name() {
+        let mut expected = gradient();
+        expected.gradient_color.name = "CYLINDER".into();
+        assert_eq!(after("gradient_type", "Cylindrical"), expected);
+        expected.gradient_color.name = "INVCURVED".into();
+        assert_eq!(after("gradient_type", "Inverted curved"), expected);
+    }
+
+    #[test]
+    fn one_color_sets_the_tint_to_one_and_two_color_keeps_it() {
+        let mut expected = gradient();
+        expected.gradient_color.is_single_color = true;
+        expected.gradient_color.color_tint = 1.0;
+        assert_eq!(after("fill_type", "One color"), expected);
+        let mut already = after("fill_type", "One color");
+        PropertyEditable::apply_geom_prop(&mut already, "gradient_tint", "0.3");
+        PropertyEditable::apply_geom_prop(&mut already, "fill_type", "One color");
+        assert_eq!(already.gradient_color.color_tint, 0.3, "no reset when already one colour");
+        PropertyEditable::apply_geom_prop(&mut already, "fill_type", "Two color");
+        assert!(!already.gradient_color.is_single_color);
+        assert_eq!(already.gradient_color.color_tint, 0.3);
+    }
+
+    #[test]
+    fn the_tint_is_clamped() {
+        assert_eq!(after("gradient_tint", "5").gradient_color.color_tint, 1.0);
+        assert_eq!(after("gradient_tint", "-2").gradient_color.color_tint, 0.0);
+        assert_eq!(after("gradient_tint", "0.3").gradient_color.color_tint, 0.3);
+    }
+
+    #[test]
+    fn centered_toggles_and_sets() {
+        assert_eq!(after("gradient_centered", "toggle").gradient_color.shift, 1.0);
+        assert_eq!(after("gradient_centered", "false").gradient_color.shift, 1.0);
+        assert_eq!(after("gradient_centered", "true").gradient_color.shift, 0.0);
+    }
+
+    #[test]
+    fn the_angle_of_a_gradient_moves_both_angles() {
+        let got = after("pattern_angle", "30");
+        assert!((got.gradient_color.angle - 30f64.to_radians()).abs() < 1e-12);
+        assert_eq!(got.pattern_angle, got.gradient_color.angle);
+        // Everything else untouched.
+        let mut expected = gradient();
+        expected.gradient_color.angle = got.gradient_color.angle;
+        expected.pattern_angle = got.gradient_color.angle;
+        assert_eq!(got, expected);
     }
 }

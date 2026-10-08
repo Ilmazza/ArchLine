@@ -7,6 +7,7 @@ use std::path::PathBuf;
 mod attdef;
 mod field;
 mod hatch_dialog;
+mod hatch_gradient;
 mod blocks;
 mod xref_attach;
 mod dim;
