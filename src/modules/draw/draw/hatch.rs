@@ -2713,4 +2713,191 @@ mod tests {
         assert!(command.on_text_input("I").is_some());
         assert!(matches!(command.mode, HatchMode::PickInside));
     }
+
+    // ── Spec §10: every combination commits like the command line ──────────
+
+    /// Everything a commit result carries, as text, so two results can be
+    /// compared field by field (patterns and their phase included).
+    fn describe(result: CmdResult) -> Vec<String> {
+        match result {
+            CmdResult::CommitHatch(hatch) => vec!["CommitHatch".into(), format!("{hatch:?}")],
+            CmdResult::CommitStyledHatch {
+                hatch,
+                color,
+                transparency,
+            } => vec![
+                "CommitStyledHatch".into(),
+                format!("{hatch:?}"),
+                format!("{color:?} {transparency:?}"),
+            ],
+            CmdResult::CommitHatches {
+                hatches,
+                entity_style,
+            } => {
+                let mut lines = vec!["CommitHatches".into(), format!("{entity_style:?}")];
+                lines.extend(hatches.iter().map(|hatch| format!("{hatch:?}")));
+                lines
+            }
+            CmdResult::CommitHatchWithBoundaries {
+                hatch,
+                boundaries,
+                entity_style,
+            } => vec![
+                "CommitHatchWithBoundaries".into(),
+                format!("{hatch:?}"),
+                format!("{boundaries:?}"),
+                format!("{entity_style:?}"),
+            ],
+            _ => panic!("expected a commit"),
+        }
+    }
+
+    #[test]
+    fn every_combination_of_settings_commits_like_the_interactive_command() {
+        // Two plain squares and a ring with a hole: the third click lands
+        // between the big square and the small one inside it.
+        let rings = vec![
+            rect(0.0, 0.0, 10.0, 10.0),
+            rect(30.0, 0.0, 40.0, 10.0),
+            rect(60.0, -10.0, 100.0, 30.0),
+            rect(70.0, 0.0, 90.0, 20.0),
+        ];
+        let sources = sources_for(&rings);
+        let clicks = [[5.0, 5.0], [35.0, 5.0], [65.0, 5.0]];
+        let pattern = other_pattern_name();
+        // The identity plane, a plane away from the origin turned about Z, and
+        // one standing on the XZ plane.
+        let planes = [
+            WorkingPlane::default(),
+            WorkingPlane::new(DVec3::new(100.0, -40.0, 7.0), DVec3::Y, DVec3::NEG_X),
+            WorkingPlane::new(DVec3::new(0.0, 5.0, 0.0), DVec3::X, DVec3::Z),
+        ];
+        let origin = [3.0, 4.0];
+        let mut compared = 0;
+        for plane in planes {
+            for associative in [true, false] {
+                for shape in ["plain", "separate", "retain"] {
+                    for (island, detection) in [
+                        (HatchStyleType::Normal, true),
+                        (HatchStyleType::Outer, true),
+                        (HatchStyleType::Ignore, true),
+                        (HatchStyleType::Outer, false),
+                    ] {
+                        let label = format!(
+                            "assoc={associative} {shape} {island:?} detection={detection} plane={plane:?}"
+                        );
+                        let effective = if detection { island } else { HatchStyleType::Ignore };
+
+                        // The command line, with the keywords a user types.
+                        let mut interactive = HatchCommand::new(
+                            rings.clone(),
+                            sources.clone(),
+                            Vec::new(),
+                            None,
+                            plane,
+                        )
+                        .with_origin(origin);
+                        let _ = interactive.on_text_input(&format!("P {pattern}"));
+                        let _ = interactive.on_text_input("A 30");
+                        let _ = interactive.on_text_input("L 2");
+                        if !associative {
+                            let _ = interactive.on_text_input("N");
+                        }
+                        match shape {
+                            "separate" => {
+                                let _ = interactive.on_text_input("D");
+                            }
+                            "retain" => {
+                                let _ = interactive.on_text_input("B");
+                            }
+                            _ => {}
+                        }
+                        let turns = match effective {
+                            HatchStyleType::Normal => 0,
+                            HatchStyleType::Outer => 1,
+                            HatchStyleType::Ignore => 2,
+                        };
+                        for _ in 0..turns {
+                            let _ = interactive.on_text_input("Y");
+                        }
+                        for click in clicks {
+                            let _ = interactive
+                                .on_point(plane.to_world(DVec3::new(click[0], click[1], 0.0)));
+                        }
+                        let expected = describe(interactive.on_enter());
+
+                        // The dialog: settings plus the regions it collected.
+                        let mut settings = HatchSettings {
+                            pattern: pattern.clone(),
+                            angle: "30".into(),
+                            scale: "2".into(),
+                            associative,
+                            island_detection: detection,
+                            island_style: island,
+                            ..HatchSettings::default()
+                        };
+                        match shape {
+                            "separate" => settings.set_separate(true),
+                            "retain" => settings.set_retain(true),
+                            _ => {}
+                        }
+                        let regions = clicks
+                            .iter()
+                            .map(|click| HatchRegion {
+                                rings: resolve_hatch_rings(&rings, *click).unwrap(),
+                            })
+                            .collect();
+                        let mut dialog = HatchCommand::new(
+                            rings.clone(),
+                            sources.clone(),
+                            Vec::new(),
+                            None,
+                            plane,
+                        )
+                        .with_origin(origin)
+                        .with_settings(&settings.resolve().unwrap())
+                        .with_regions(regions);
+                        let got = describe(dialog.on_enter());
+
+                        let kind = match shape {
+                            "separate" => "CommitHatches",
+                            "retain" => "CommitHatchWithBoundaries",
+                            _ => "CommitHatch",
+                        };
+                        assert_eq!(expected[0], kind, "{label}: the command line");
+                        assert_eq!(got, expected, "{label}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 72);
+    }
+
+    #[test]
+    fn the_equivalence_check_can_tell_settings_apart() {
+        // Guards the test above: two different settings must not describe the same.
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0)];
+        let make = |angle: &str| {
+            let settings = HatchSettings {
+                angle: angle.into(),
+                ..HatchSettings::default()
+            };
+            describe(
+                HatchCommand::new(
+                    rings.clone(),
+                    sources_for(&rings),
+                    Vec::new(),
+                    None,
+                    WorkingPlane::default(),
+                )
+                .with_settings(&settings.resolve().unwrap())
+                .with_regions(vec![HatchRegion {
+                    rings: rings.clone(),
+                }])
+                .on_enter(),
+            )
+        };
+        assert_ne!(make("0"), make("30"));
+    }
 }

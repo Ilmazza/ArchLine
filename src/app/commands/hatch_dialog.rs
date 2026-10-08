@@ -1552,4 +1552,222 @@ mod tests {
         app.hatch_dialog_cancel();
         assert!(app.tabs[i].snap_result.is_none());
     }
+
+    // ── Spec §10: undo, origin, entry points ───────────────────────────────
+
+    fn entity_count(app: &OpenCADStudio) -> usize {
+        app.tabs[app.active_tab].scene.document.entities().count()
+    }
+
+    #[test]
+    fn one_undo_removes_everything_ok_created() {
+        for (case, hatches, extra_boundaries) in [
+            ("associative", 1, false),
+            ("separate", 2, false),
+            ("retain", 1, true),
+        ] {
+            let mut app = new_app();
+            add_rect(&mut app, 0.0, 0.0, 10.0, 10.0);
+            add_rect(&mut app, 20.0, 0.0, 30.0, 10.0);
+            let before = entity_count(&app);
+            open_dialog(&mut app);
+            match case {
+                "separate" => {
+                    let _ = app.update(Message::HatchDialogField(Field::Separate(true)));
+                }
+                "retain" => {
+                    let _ = app.update(Message::HatchDialogField(Field::Retain(true)));
+                }
+                _ => {}
+            }
+            for x in [5.0, 25.0] {
+                let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+                click_at(&mut app, x, 5.0);
+                let _ = app.feed_command(StepInput::Enter);
+            }
+            let _ = app.update(Message::HatchDialogOk);
+            assert_eq!(hatch_count(&app), hatches, "{case}: hatches created");
+            if extra_boundaries {
+                assert!(entity_count(&app) > before + 1, "{case}: the outlines were kept");
+            }
+            let _ = app.update(Message::Undo);
+            assert_eq!(hatch_count(&app), 0, "{case}: one undo removes the hatches");
+            assert_eq!(entity_count(&app), before, "{case}: and everything else OK made");
+        }
+    }
+
+    fn tilted_ucs(y: f64) -> codec::tables::Ucs {
+        // The XZ plane at height y: local x along world X, local y along world Z.
+        let mut ucs = codec::tables::Ucs::new("*ACTIVE*");
+        ucs.origin = codec::types::Vector3::new(0.0, y, 0.0);
+        ucs.x_axis = codec::types::Vector3::new(1.0, 0.0, 0.0);
+        ucs.y_axis = codec::types::Vector3::new(0.0, 0.0, 1.0);
+        ucs
+    }
+
+    fn add_line_3d(app: &mut OpenCADStudio, from: [f64; 3], to: [f64; 3]) {
+        let i = app.active_tab;
+        app.tabs[i]
+            .scene
+            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+                codec::types::Vector3::new(from[0], from[1], from[2]),
+                codec::types::Vector3::new(to[0], to[1], to[2]),
+            )));
+    }
+
+    /// A drawing with a 20 x 10 rectangle in the XZ plane at y = 5 and a
+    /// working plane (UCS) sitting on it.
+    fn app_on_a_tilted_plane() -> OpenCADStudio {
+        let mut app = new_app();
+        let i = app.active_tab;
+        app.tabs[i].active_ucs = Some(tilted_ucs(5.0));
+        add_line_3d(&mut app, [0.0, 5.0, 0.0], [20.0, 5.0, 0.0]);
+        add_line_3d(&mut app, [20.0, 5.0, 0.0], [20.0, 5.0, 10.0]);
+        add_line_3d(&mut app, [20.0, 5.0, 10.0], [0.0, 5.0, 10.0]);
+        add_line_3d(&mut app, [0.0, 5.0, 10.0], [0.0, 5.0, 0.0]);
+        app
+    }
+
+    /// Add the rectangle by a click inside it (a world point on the tilted plane).
+    fn pick_the_tilted_rectangle(app: &mut OpenCADStudio) {
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .expect("a collector is running")
+            .on_point(glam::DVec3::new(10.0, 5.0, 5.0));
+        let _ = app.apply_cmd_result(result);
+        let _ = app.feed_command(StepInput::Enter);
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().regions.len(),
+            1,
+            "the rectangle was found"
+        );
+    }
+
+    /// Where the pattern is anchored in the hatch that was saved in the
+    /// drawing, in working-plane coordinates: what the file keeps of the origin.
+    fn saved_pattern_base(app: &OpenCADStudio) -> [f64; 2] {
+        let hatches: Vec<_> = app.tabs[app.active_tab]
+            .scene
+            .document
+            .entities()
+            .filter_map(|entity| match entity {
+                codec::EntityType::Hatch(hatch) => Some(hatch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hatches.len(), 1, "one hatch in the drawing");
+        let base = hatches[0].pattern.lines[0].base_point;
+        [base.x, base.y]
+    }
+
+    /// What the command-line HATCH saves on the same drawing when the drawing
+    /// origin is `origin`.
+    fn command_line_pattern_base(origin: [f64; 2]) -> [f64; 2] {
+        let mut app = app_on_a_tilted_plane();
+        let i = app.active_tab;
+        assert!(app.tabs[i].scene.document.set_hatch_origin(origin));
+        let _ = app.dispatch_command("-HATCH");
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .expect("-HATCH runs")
+            .on_point(glam::DVec3::new(10.0, 5.0, 5.0));
+        let _ = app.apply_cmd_result(result);
+        let _ = app.feed_command(StepInput::Enter);
+        saved_pattern_base(&app)
+    }
+
+    fn assert_close(got: [f64; 2], expected: [f64; 2], label: &str) {
+        assert!(
+            (got[0] - expected[0]).abs() < 1.0e-4 && (got[1] - expected[1]).abs() < 1.0e-4,
+            "{label}: {got:?} is not {expected:?}"
+        );
+    }
+
+    #[test]
+    fn a_specified_origin_reaches_the_hatch_on_a_rotated_plane() {
+        let mut app = app_on_a_tilted_plane();
+        open_dialog(&mut app);
+        let plane = app.hatch_dialog.as_ref().unwrap().plane;
+        assert!(plane.z.dot(glam::DVec3::Z).abs() < 1.0e-9, "the plane is not the identity");
+        let _ = app.update(Message::HatchDialogField(Field::OriginMode(
+            crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
+        )));
+        app.hatch_dialog.as_mut().unwrap().specified_origin = Some([3.0, 4.0]);
+        pick_the_tilted_rectangle(&mut app);
+        let _ = app.update(Message::HatchDialogOk);
+        let got = saved_pattern_base(&app);
+        assert_close(got, [3.0, 4.0], "the specified origin");
+        assert_close(got, command_line_pattern_base([3.0, 4.0]), "as the command line");
+        assert_ne!(
+            got,
+            command_line_pattern_base([0.0, 0.0]),
+            "the default origin gives another phase, or the test proves nothing"
+        );
+    }
+
+    #[test]
+    fn use_current_origin_is_read_again_from_the_drawing_at_ok() {
+        let mut app = app_on_a_tilted_plane();
+        let i = app.active_tab;
+        open_dialog(&mut app);
+        pick_the_tilted_rectangle(&mut app);
+        // The drawing origin changes after the dialog opened and after the Add.
+        assert!(app.tabs[i].scene.document.set_hatch_origin([7.0, 8.0]));
+        let _ = app.update(Message::HatchDialogOk);
+        let got = saved_pattern_base(&app);
+        assert_close(got, [7.0, 8.0], "the current origin");
+        assert_close(got, command_line_pattern_base([7.0, 8.0]), "as the command line");
+    }
+
+    #[test]
+    fn specified_mode_without_a_picked_point_falls_back_to_the_current_origin() {
+        let mut app = app_on_a_tilted_plane();
+        let i = app.active_tab;
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::OriginMode(
+            crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
+        )));
+        pick_the_tilted_rectangle(&mut app);
+        assert!(app.tabs[i].scene.document.set_hatch_origin([7.0, 8.0]));
+        let _ = app.update(Message::HatchDialogOk);
+        assert_close(saved_pattern_base(&app), [7.0, 8.0], "falls back to the current origin");
+    }
+
+    #[test]
+    fn enter_with_an_invalid_field_does_nothing() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        let _ = app.update(Message::HatchDialogField(Field::Angle("x".into())));
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(hatch_count(&app), 0);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "still open");
+        assert!(app.hatch_dialog.is_some());
+    }
+
+    #[test]
+    fn enter_with_no_area_does_nothing() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(hatch_count(&app), 0);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn the_ribbon_hatch_button_opens_the_dialog() {
+        use crate::modules::ModuleEvent;
+        let mut app = app_with_rectangle();
+        let _ = app.update(Message::RibbonToolClick {
+            tool_id: "HATCH".to_string(),
+            event: ModuleEvent::Command("HATCH".to_string()),
+        });
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert!(app.hatch_dialog.is_some());
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    }
 }
