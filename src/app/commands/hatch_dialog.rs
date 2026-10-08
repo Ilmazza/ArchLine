@@ -1063,20 +1063,51 @@ mod tests {
 
     const FLOWS: [&str; 4] = ["pick", "select", "preview", "origin"];
 
+    /// A short line in tab `tab` (not the active one necessarily), selected.
+    fn add_selected_line(app: &mut OpenCADStudio, tab: usize, y: f64) -> Handle {
+        let handle = app.tabs[tab]
+            .scene
+            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
+                codec::types::Vector3::new(100.0, y, 0.0),
+                codec::types::Vector3::new(110.0, y, 0.0),
+            )));
+        app.tabs[tab].scene.select_entity(handle, false);
+        handle
+    }
+
+    fn hatches_in(app: &OpenCADStudio, tab: usize) -> usize {
+        app.tabs[tab].scene.hatches.len()
+    }
+
     #[test]
     fn switching_tab_in_any_hidden_flow_abandons_it() {
         for flow in FLOWS {
             let mut app = app_with_rectangle();
             let (first, second) = open_second_tab(&mut app);
             let _ = app.update(Message::TabSwitch(first));
+            // A selection that encloses nothing: no region is seeded from it.
+            let keep = add_selected_line(&mut app, first, 100.0);
+            let other = add_selected_line(&mut app, second, 200.0);
             open_dialog(&mut app);
             start_flow(&mut app, flow);
             assert!(app.tabs[first].active_cmd.is_some(), "{flow}: flow started");
+            if flow == "select" {
+                assert!(
+                    app.selected_handles(first).is_empty(),
+                    "{flow}: a Select round starts from an empty selection"
+                );
+            } else {
+                assert_eq!(app.selected_handles(first), vec![keep], "{flow}: untouched mid-flow");
+            }
             let _ = app.update(Message::TabSwitch(second));
             assert!(app.hatch_dialog.is_none(), "{flow}: state dropped");
             assert!(app.active_modal.is_none(), "{flow}: no dialog");
             assert!(app.tabs[first].active_cmd.is_none(), "{flow}: owner's command stopped");
-            assert_eq!(hatch_count(&app), 0, "{flow}");
+            assert_eq!(hatches_in(&app, first), 0, "{flow}: owner");
+            assert_eq!(hatches_in(&app, second), 0, "{flow}: other tab");
+            assert_eq!(hatch_count(&app), 0, "{flow}: active tab");
+            assert_eq!(app.selected_handles(first), vec![keep], "{flow}: owner selection");
+            assert_eq!(app.selected_handles(second), vec![other], "{flow}: other selection");
         }
     }
 
@@ -1084,14 +1115,34 @@ mod tests {
     fn closing_the_owner_tab_in_any_hidden_flow_abandons_it() {
         for flow in FLOWS {
             let mut app = app_with_rectangle();
-            let (first, _second) = open_second_tab(&mut app);
+            let (first, second) = open_second_tab(&mut app);
+            let survivor_id = app.tabs[second].id;
+            let survivor_line = add_selected_line(&mut app, second, 200.0);
             let _ = app.update(Message::TabSwitch(first));
+            add_selected_line(&mut app, first, 100.0);
             open_dialog(&mut app);
             start_flow(&mut app, flow);
+            assert!(app.tabs[first].active_cmd.is_some(), "{flow}: flow started");
             let id = app.tabs[first].id;
+            assert!(!app.tabs[first].dirty, "{flow}: a dirty tab would only ask to save");
+            let tabs_before = app.tabs.len();
             let _ = app.update(Message::TabClose(id));
+            assert_eq!(app.tabs.len(), tabs_before - 1, "{flow}: tab closed");
+            assert!(app.tabs.iter().all(|tab| tab.id != id), "{flow}: owner gone");
             assert!(app.hatch_dialog.is_none(), "{flow}");
             assert!(app.active_modal.is_none(), "{flow}");
+            let survivor = app
+                .tabs
+                .iter()
+                .position(|tab| tab.id == survivor_id)
+                .expect("the other tab survives");
+            assert!(app.tabs[survivor].active_cmd.is_none(), "{flow}: survivor has no command");
+            assert_eq!(hatches_in(&app, survivor), 0, "{flow}: survivor hatches");
+            assert_eq!(
+                app.selected_handles(survivor),
+                vec![survivor_line],
+                "{flow}: survivor selection"
+            );
         }
     }
 
@@ -1134,6 +1185,40 @@ mod tests {
         });
         assert!(app.hatch_dialog.is_none());
         assert_eq!(hatch_count(&app), 0);
+        assert_eq!(hatches_in(&app, first), 0);
+        assert!(app.tabs[first].active_cmd.is_none(), "the owner's collector is stopped");
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn a_stale_dispatch_return_is_discarded_without_touching_the_active_tab() {
+        let cases = [
+            "HATCH_PICK_CANCELLED",
+            "HATCH_PREVIEW_DONE",
+            "HATCH_ORIGIN_PICKED 5 5 0",
+        ];
+        for text in cases {
+            let mut app = app_with_rectangle();
+            let (first, second) = open_second_tab(&mut app);
+            let _ = app.update(Message::TabSwitch(first));
+            open_dialog(&mut app);
+            start_flow(&mut app, "pick");
+            assert!(app.tabs[first].active_cmd.is_some(), "{text}: flow started");
+            let hatch_origin = app.tabs[second].scene.document.hatch_origin();
+            app.active_tab = second;
+            let _ = app.dispatch_command(text);
+            assert!(app.hatch_dialog.is_none(), "{text}: state discarded");
+            assert!(app.active_modal.is_none(), "{text}: dialog not reopened");
+            assert!(app.tabs[first].active_cmd.is_none(), "{text}: owner's command stopped");
+            assert!(app.tabs[second].active_cmd.is_none(), "{text}");
+            assert_eq!(hatches_in(&app, first), 0, "{text}");
+            assert_eq!(hatches_in(&app, second), 0, "{text}");
+            assert_eq!(
+                app.tabs[second].scene.document.hatch_origin(),
+                hatch_origin,
+                "{text}: active document untouched"
+            );
+        }
     }
 
     #[test]
