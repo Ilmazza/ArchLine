@@ -294,6 +294,11 @@ pub struct HatchCommand {
     /// The dialog's Gradient tab; `None` for a pattern or solid hatch. Set by
     /// `with_settings`.
     gradient: Option<crate::entities::hatch_fill::GradientSpec>,
+    /// The colour and transparency the hatch is created with (resolved by the
+    /// app, "Use Current" included); `None` keeps the defaults.
+    creation_style: Option<(codec::types::Color, codec::types::Transparency)>,
+    /// The RGBA the preview of a pattern or solid is drawn with.
+    preview_color: Option<[f32; 4]>,
 }
 
 impl HatchCommand {
@@ -344,12 +349,51 @@ impl HatchCommand {
             plane,
             collect_only: false,
             gradient: None,
+            creation_style: None,
+            preview_color: None,
         };
         command.set_object_selection(selected_objects);
         command
     }
 
     pub fn with_origin(mut self, origin: [f64; 2]) -> Self { self.default_origin = origin; self }
+
+    /// The colour and transparency the hatch is made with (the app resolves
+    /// "Use Current"). `None`: as always, the entity takes the defaults.
+    pub fn with_creation_style(
+        mut self,
+        style: Option<(codec::types::Color, codec::types::Transparency)>,
+    ) -> Self {
+        self.creation_style = style;
+        self
+    }
+
+    /// The RGBA the preview of a pattern or solid is drawn with.
+    pub fn with_preview_color(mut self, color: Option<[f32; 4]>) -> Self {
+        self.preview_color = color;
+        self
+    }
+
+    /// The style the commit carries: the one chosen at creation, else the one
+    /// inherited from the source hatch (`-HATCH` Inherit).
+    fn entity_style(&self) -> Option<(codec::types::Color, codec::types::Transparency)> {
+        self.creation_style.clone().or_else(|| {
+            self.inherited
+                .as_ref()
+                .map(|(_, color, transparency)| (color.clone(), *transparency))
+        })
+    }
+
+    fn commit_one(&self, hatch: HatchModel) -> CmdResult {
+        match self.entity_style() {
+            Some((color, transparency)) => CmdResult::CommitStyledHatch {
+                hatch,
+                color,
+                transparency,
+            },
+            None => CmdResult::CommitHatch(hatch),
+        }
+    }
 
     /// Apply the dialog's settings as the overrides the command line sets with
     /// `P`, `A`, `L`, `N`, `D`, `B` and `Y`.
@@ -471,7 +515,13 @@ impl HatchCommand {
                 let depths = kernel::geom2d::ring_nesting_depths(&rings);
                 let mut model = self.make_hatch(rings);
                 filter_rendered_rings(&mut model, &depths);
-                model.color = [0.15, 0.55, 1.0, 0.75];
+                if let HatchPattern::Gradient { color2, .. } = &mut model.pattern {
+                    // The real colours, translucent like every preview.
+                    color2[3] = 0.75;
+                    model.color[3] = 0.75;
+                } else {
+                    model.color = self.preview_color.unwrap_or([0.15, 0.55, 1.0, 0.75]);
+                }
                 model
             })
             .collect()
@@ -571,6 +621,30 @@ impl HatchCommand {
                 path.boundary_handles.clear();
                 path.flags.set_external(false);
             }
+        }
+        if let Some(spec) = &self.gradient {
+            let (pattern, color) = spec.model_pattern();
+            return HatchModel {
+                pattern_origin: None,
+                render_instance: None,
+                boundary: std::sync::Arc::new(rel),
+                pattern,
+                name: spec.kind.dxf_name(spec.invert).to_string(),
+                color,
+                aci: 0,
+                line_weight_px: 1.0,
+                angle_offset: spec.angle_rad as f32,
+                scale: 1.0,
+                world_origin: origin,
+                boundary_wcs: Some(std::sync::Arc::new(wcs)),
+                fill_plane: Some(fill_plane),
+                fill_plane_boundary: Some(std::sync::Arc::new(local_boundary)),
+                boundary_exterior: Some(std::sync::Arc::new(exterior)),
+                boundary_sources: Some(std::sync::Arc::new(boundary_sources)),
+                boundary_paths: Some(std::sync::Arc::new(boundary_paths)),
+                style: self.island_style,
+                draw_depth: 0.0,
+            };
         }
         if let Some((source, _, _)) = &self.inherited {
             let (name, mut pattern) = self
@@ -938,15 +1012,7 @@ impl CadCommand for HatchCommand {
             if let Some(path) = self.manual_boundary_path() {
                 hatch.boundary_paths = Some(std::sync::Arc::new(vec![path]));
             }
-            if let Some((_, color, transparency)) = &self.inherited {
-                CmdResult::CommitStyledHatch {
-                    hatch,
-                    color: color.clone(),
-                    transparency: *transparency,
-                }
-            } else {
-                CmdResult::CommitHatch(hatch)
-            }
+            self.commit_one(hatch)
         } else if self.separate_hatches && !self.retain_boundaries {
             let hatches = self
                 .point_regions
@@ -957,10 +1023,7 @@ impl CadCommand for HatchCommand {
                 .collect();
             CmdResult::CommitHatches {
                 hatches,
-                entity_style: self
-                    .inherited
-                    .as_ref()
-                    .map(|(_, color, transparency)| (color.clone(), *transparency)),
+                entity_style: self.entity_style(),
             }
         } else if self.retain_boundaries {
             CmdResult::CommitHatchWithBoundaries {
@@ -971,19 +1034,10 @@ impl CadCommand for HatchCommand {
                     &self.boundary_sources,
                     1.0e-6,
                 ),
-                entity_style: self
-                    .inherited
-                    .as_ref()
-                    .map(|(_, color, transparency)| (color.clone(), *transparency)),
-            }
-        } else if let Some((_, color, transparency)) = &self.inherited {
-            CmdResult::CommitStyledHatch {
-                hatch: self.make_hatch(rings),
-                color: color.clone(),
-                transparency: *transparency,
+                entity_style: self.entity_style(),
             }
         } else {
-            CmdResult::CommitHatch(self.make_hatch(rings))
+            self.commit_one(self.make_hatch(rings))
         }
     }
 
@@ -2950,5 +3004,245 @@ mod tests {
             )
         };
         assert_ne!(make("0"), make("30"));
+    }
+
+    use crate::entities::hatch_fill::{rgba_of, tinted_second_color};
+    use crate::modules::draw::draw::hatch_settings::GradientSettings;
+
+    fn square_command() -> HatchCommand {
+        let ring = rect(0.0, 0.0, 10.0, 10.0);
+        HatchCommand::new(
+            vec![ring.clone()],
+            sources_for(std::slice::from_ref(&ring)),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_regions(vec![HatchRegion { rings: vec![ring] }])
+    }
+
+    fn gradient_settings(edit: impl FnOnce(&mut GradientSettings)) -> HatchSettings {
+        let mut settings = HatchSettings::default();
+        settings.tab = FillTab::Gradient;
+        edit(&mut settings.gradient);
+        settings
+    }
+
+    fn gradient_command(settings: &HatchSettings) -> HatchCommand {
+        square_command().with_settings(&settings.resolve().expect("valid"))
+    }
+
+    #[test]
+    fn a_gradient_command_commits_a_gradient_model() {
+        let settings = gradient_settings(|g| {
+            g.shape = 5; // CHOICES[5] = curved
+            g.angle = "30".into();
+            g.centered = false;
+        });
+        let model = committed(gradient_command(&settings).on_enter());
+        let HatchPattern::Gradient { angle_deg, kind, invert, shift, one_color, .. } = model.pattern else {
+            panic!("a gradient model")
+        };
+        assert_eq!(kind, crate::scene::model::hatch_model::GradientKind::Curved);
+        assert!(!invert && !one_color);
+        assert!((angle_deg - 30.0).abs() < 1e-4);
+        assert_eq!(shift, 1.0);
+        assert_eq!(model.name, "CURVED");
+        assert!(model.pattern_origin.is_none());
+        assert!((model.angle_offset - 30f32.to_radians()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_models_second_colour_is_the_effective_one() {
+        let settings = gradient_settings(|g| {
+            g.one_color = true;
+            g.tint = 0.25;
+            g.color1 = codec::types::Color::Rgb { r: 200, g: 100, b: 50 };
+            g.color2 = codec::types::Color::Rgb { r: 1, g: 2, b: 3 }; // hidden
+        });
+        let model = committed(gradient_command(&settings).on_enter());
+        let base = rgba_of(codec::types::Color::Rgb { r: 200, g: 100, b: 50 }).unwrap();
+        let expected = rgba_of(tinted_second_color(base, 0.25)).unwrap();
+        let HatchPattern::Gradient { color2, one_color, tint, .. } = model.pattern else {
+            panic!("a gradient model")
+        };
+        assert!(one_color);
+        assert_eq!(tint, 0.25);
+        assert_eq!(color2, expected, "never the raw hidden Color 2");
+        assert_eq!(model.color, base);
+    }
+
+    #[test]
+    fn a_gradient_command_keeps_the_rings_the_sources_and_the_island_style() {
+        let mut settings = gradient_settings(|_| {});
+        settings.island_detection = false; // Ignore
+        let model = committed(gradient_command(&settings).on_enter());
+        assert_eq!(model.style, codec::entities::HatchStyleType::Ignore);
+        assert!(model.boundary_paths.is_some() && model.fill_plane.is_some());
+        assert_eq!(model.boundary_exterior.as_deref().map(|e| e.len()), Some(1));
+    }
+
+    #[test]
+    fn a_creation_style_turns_every_commit_into_a_styled_one() {
+        use codec::types::{Color, Transparency};
+        let style = (Color::Index(1), Transparency::ByLayer);
+        let settings = HatchSettings::default();
+        // One hatch.
+        let mut one = square_command()
+            .with_settings(&settings.resolve().unwrap())
+            .with_creation_style(Some(style.clone()));
+        match one.on_enter() {
+            CmdResult::CommitStyledHatch { color, transparency, .. } => {
+                assert_eq!((color, transparency), style)
+            }
+            _ => panic!("a styled hatch"),
+        }
+        // Separate hatches.
+        let mut separate = settings.clone();
+        separate.set_separate(true);
+        let mut command = square_command()
+            .with_settings(&separate.resolve().unwrap())
+            .with_creation_style(Some(style.clone()));
+        match command.on_enter() {
+            CmdResult::CommitHatches { hatches, entity_style } => {
+                assert_eq!(hatches.len(), 1);
+                assert_eq!(entity_style, Some(style.clone()));
+            }
+            _ => panic!("separate hatches"),
+        }
+        // Retained boundaries.
+        let mut retain = settings.clone();
+        retain.set_retain(true);
+        let mut command = square_command()
+            .with_settings(&retain.resolve().unwrap())
+            .with_creation_style(Some(style.clone()));
+        match command.on_enter() {
+            CmdResult::CommitHatchWithBoundaries { entity_style, .. } => {
+                assert_eq!(entity_style, Some(style))
+            }
+            _ => panic!("hatch with boundaries"),
+        }
+    }
+
+    #[test]
+    fn a_creation_style_also_styles_a_manual_boundary() {
+        use codec::types::{Color, Transparency};
+        let style = (Color::Index(3), Transparency::ByLayer);
+        let mut command = HatchCommand::new(
+            Vec::new(),
+            rustc_hash::FxHashMap::default(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_creation_style(Some(style.clone()));
+        command.mode = HatchMode::Manual;
+        for point in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)] {
+            command.manual_pts.push(DVec3::new(point.0, point.1, 0.0));
+        }
+        match command.on_enter() {
+            CmdResult::CommitStyledHatch { color, transparency, .. } => {
+                assert_eq!((color, transparency), style)
+            }
+            _ => panic!("a styled manual hatch"),
+        }
+    }
+
+    #[test]
+    fn without_a_creation_style_the_commit_is_what_it_always_was() {
+        let mut command = square_command().with_settings(&HatchSettings::default().resolve().unwrap());
+        assert!(matches!(command.on_enter(), CmdResult::CommitHatch(_)));
+    }
+
+    #[test]
+    fn the_collector_is_given_neither_style_nor_preview_colour() {
+        let ring = rect(0.0, 0.0, 10.0, 10.0);
+        let collector = HatchCommand::collecting(
+            vec![ring.clone()],
+            sources_for(std::slice::from_ref(&ring)),
+            WorkingPlane::default(),
+            false,
+        );
+        assert!(collector.creation_style.is_none() && collector.preview_color.is_none());
+    }
+
+    #[test]
+    fn the_preview_uses_the_chosen_colour_and_blue_by_default() {
+        let settings = HatchSettings::default().resolve().unwrap();
+        let blue = square_command().with_settings(&settings).preview_models();
+        assert_eq!(blue[0].color, [0.15, 0.55, 1.0, 0.75]);
+        let chosen = square_command()
+            .with_settings(&settings)
+            .with_preview_color(Some([1.0, 0.0, 0.0, 0.75]))
+            .preview_models();
+        assert_eq!(chosen[0].color, [1.0, 0.0, 0.0, 0.75]);
+    }
+
+    #[test]
+    fn the_gradient_preview_shows_both_real_colours_translucent() {
+        let settings = gradient_settings(|g| {
+            g.color1 = codec::types::Color::Rgb { r: 255, g: 0, b: 0 };
+            g.color2 = codec::types::Color::Rgb { r: 0, g: 0, b: 255 };
+        });
+        let models = gradient_command(&settings)
+            .with_preview_color(Some([0.0, 1.0, 0.0, 0.75])) // must not win over the gradient
+            .preview_models();
+        assert_eq!(models[0].color, [1.0, 0.0, 0.0, 0.75]);
+        let HatchPattern::Gradient { color2, .. } = &models[0].pattern else {
+            panic!("a gradient preview")
+        };
+        assert_eq!(*color2, [0.0, 0.0, 1.0, 0.75]);
+    }
+
+    #[test]
+    fn a_one_colour_preview_shows_the_tint_and_ignores_the_hidden_colour() {
+        let preview = |color2| {
+            let settings = gradient_settings(|g| {
+                g.one_color = true;
+                g.tint = 0.25;
+                g.color1 = codec::types::Color::Rgb { r: 200, g: 100, b: 50 };
+                g.color2 = color2;
+            });
+            gradient_command(&settings).preview_models().remove(0)
+        };
+        let a = preview(codec::types::Color::Rgb { r: 1, g: 2, b: 3 });
+        let b = preview(codec::types::Color::Rgb { r: 250, g: 250, b: 250 });
+        let colour2 = |m: &HatchModel| match &m.pattern {
+            HatchPattern::Gradient { color2, .. } => *color2,
+            _ => panic!("gradient"),
+        };
+        assert_eq!(colour2(&a), colour2(&b), "the hidden Color 2 changes nothing");
+        let base = rgba_of(codec::types::Color::Rgb { r: 200, g: 100, b: 50 }).unwrap();
+        let mut expected = rgba_of(tinted_second_color(base, 0.25)).unwrap();
+        expected[3] = 0.75;
+        assert_eq!(colour2(&a), expected);
+    }
+
+    #[test]
+    fn separate_gradient_hatches_get_one_gradient_each() {
+        let ring_a = rect(0.0, 0.0, 10.0, 10.0);
+        let ring_b = rect(20.0, 0.0, 30.0, 10.0);
+        let rings = [ring_a.clone(), ring_b.clone()];
+        let mut settings = gradient_settings(|_| {});
+        settings.set_separate(true);
+        let mut command = HatchCommand::new(
+            rings.to_vec(),
+            sources_for(&rings),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        )
+        .with_regions(vec![
+            HatchRegion { rings: vec![ring_a] },
+            HatchRegion { rings: vec![ring_b] },
+        ])
+        .with_settings(&settings.resolve().unwrap());
+        match command.on_enter() {
+            CmdResult::CommitHatches { hatches, .. } => {
+                assert_eq!(hatches.len(), 2);
+                assert!(hatches.iter().all(|h| matches!(h.pattern, HatchPattern::Gradient { .. })));
+            }
+            _ => panic!("separate hatches"),
+        }
     }
 }
