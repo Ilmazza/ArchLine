@@ -2278,8 +2278,11 @@ mod tests {
         ]
     }
 
-    fn nested_command(style: HatchStyleType, plane: WorkingPlane) -> HatchCommand {
-        let rings = nested_rings();
+    fn command_for(
+        rings: Vec<Vec<[f64; 2]>>,
+        style: HatchStyleType,
+        plane: WorkingPlane,
+    ) -> HatchCommand {
         let mut settings = HatchSettings::default();
         settings.island_style = style;
         HatchCommand::new(rings.clone(), sources_for(&rings), Vec::new(), None, plane)
@@ -2287,27 +2290,213 @@ mod tests {
             .with_regions(vec![HatchRegion { rings }])
     }
 
+    fn nested_command(style: HatchStyleType, plane: WorkingPlane) -> HatchCommand {
+        command_for(nested_rings(), style, plane)
+    }
+
+    const ALL_STYLES: [HatchStyleType; 3] = [
+        HatchStyleType::Normal,
+        HatchStyleType::Outer,
+        HatchStyleType::Ignore,
+    ];
+
+    /// Half-sizes of the three nested squares, in the orders they are given
+    /// (the second and third put the outer square somewhere other than first,
+    /// so a filter that just keeps "the first N" is caught).
+    const NESTING_ORDERS: [[f64; 3]; 3] = [
+        [30.0, 15.0, 5.0],
+        [15.0, 30.0, 5.0],
+        [5.0, 15.0, 30.0],
+    ];
+
+    /// The rings of a NaN-separated buffer, one vector each.
+    fn split_rings(buffer: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {
+        if buffer.is_empty() {
+            return Vec::new();
+        }
+        buffer
+            .split(|point| point[0].is_nan() || point[1].is_nan())
+            .map(|ring| ring.to_vec())
+            .collect()
+    }
+
+    /// Nesting depth of the square of half-size `half` among 30 / 15 / 5.
+    fn square_depth(half: f64) -> usize {
+        [30.0, 15.0, 5.0]
+            .iter()
+            .position(|&size| size == half)
+            .expect("one of the nested squares")
+    }
+
+    /// The island rule of the spec, written out independently of the code.
+    fn style_keeps(style: HatchStyleType, depth: usize) -> bool {
+        match style {
+            HatchStyleType::Normal => true,
+            HatchStyleType::Outer => depth <= 1,
+            HatchStyleType::Ignore => depth == 0,
+        }
+    }
+
+    fn min_max(points: impl Iterator<Item = [f64; 2]>) -> [f64; 4] {
+        let mut bounds = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for [x, y] in points {
+            bounds = [
+                bounds[0].min(x),
+                bounds[1].min(y),
+                bounds[2].max(x),
+                bounds[3].max(y),
+            ];
+        }
+        bounds
+    }
+
+    fn assert_close(a: [f64; 4], b: [f64; 4], what: &str) {
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1.0e-3, "{what}: {a:?} vs {b:?}");
+        }
+    }
+
+    /// Every rendered buffer of the preview holds exactly the rings the style
+    /// keeps, in the order they were given, with the coordinates each buffer
+    /// is meant to have (world offsets for `boundary`, plane-local for
+    /// `fill_plane_boundary`), and the consumers (CPU pattern, GPU box) agree.
+    fn assert_preview_follows(style: HatchStyleType, plane: WorkingPlane, halves: &[f64]) {
+        let label = format!("{style:?} {halves:?}");
+        let rings: Vec<Vec<[f64; 2]>> = halves.iter().map(|&h| rect(-h, -h, h, h)).collect();
+        let models = command_for(rings.clone(), style, plane).preview_models();
+        assert_eq!(models.len(), 1, "{label}");
+        let model = &models[0];
+
+        // Expected, computed here from the input rings and the plane.
+        let world_of = |point: [f64; 2]| {
+            let world = plane.to_world(DVec3::new(point[0], point[1], 0.0));
+            [world.x, world.y]
+        };
+        let anchor = world_of(rings[0][0]);
+        let kept: Vec<usize> = (0..halves.len())
+            .filter(|&i| style_keeps(style, square_depth(halves[i])))
+            .collect();
+        let expected_world: Vec<Vec<[f32; 2]>> = kept
+            .iter()
+            .map(|&i| {
+                rings[i]
+                    .iter()
+                    .map(|&point| {
+                        let world = world_of(point);
+                        [(world[0] - anchor[0]) as f32, (world[1] - anchor[1]) as f32]
+                    })
+                    .collect()
+            })
+            .collect();
+        let expected_local: Vec<Vec<[f32; 2]>> = kept
+            .iter()
+            .map(|&i| rings[i].iter().map(|&[x, y]| [x as f32, y as f32]).collect())
+            .collect();
+        let expected_exterior: Vec<bool> = kept
+            .iter()
+            .map(|&i| square_depth(halves[i]) == 0)
+            .collect();
+        // Outer must leave two rings, Ignore one, Normal all three.
+        let survivors = match style {
+            HatchStyleType::Normal => 3,
+            HatchStyleType::Outer => 2,
+            HatchStyleType::Ignore => 1,
+        };
+        assert_eq!(kept.len(), survivors, "{label}");
+
+        let local_buffer = model.fill_plane_boundary.as_ref().unwrap();
+        assert_eq!(split_rings(&model.boundary), expected_world, "boundary {label}");
+        assert_eq!(
+            split_rings(local_buffer),
+            expected_local,
+            "fill_plane_boundary {label}"
+        );
+        assert_eq!(
+            **model.boundary_exterior.as_ref().unwrap(),
+            expected_exterior,
+            "boundary_exterior {label}"
+        );
+        assert_eq!(model.world_origin, anchor, "{label}");
+
+        // GPU consumer: the box comes from `fill_plane_boundary`; mapped to the
+        // world it has to be the box of what `boundary` describes.
+        let gpu = min_max(
+            local_buffer
+                .iter()
+                .filter(|point| point[0].is_finite() && point[1].is_finite())
+                .map(|&[x, y]| [x as f64, y as f64]),
+        );
+        let local_box = min_max(kept.iter().flat_map(|&i| rings[i].iter().copied()));
+        assert_close(gpu, local_box, &format!("gpu box {label}"));
+        let gpu_in_world = min_max(
+            [
+                [gpu[0], gpu[1]],
+                [gpu[2], gpu[1]],
+                [gpu[2], gpu[3]],
+                [gpu[0], gpu[3]],
+            ]
+            .into_iter()
+            .map(world_of),
+        );
+        let cpu_box = min_max(
+            model
+                .boundary
+                .iter()
+                .filter(|point| point[0].is_finite() && point[1].is_finite())
+                .map(|&[x, y]| {
+                    [
+                        x as f64 + model.world_origin[0],
+                        y as f64 + model.world_origin[1],
+                    ]
+                }),
+        );
+        assert_close(gpu_in_world, cpu_box, &format!("gpu vs cpu box {label}"));
+
+        // CPU consumer: the pattern is clipped against `boundary`, so it must
+        // equal what the expected rings alone give, and the islands the style
+        // keeps (and only those) must show in it.
+        let mut reference = model.clone();
+        let mut joined: Vec<[f32; 2]> = Vec::new();
+        for ring in &expected_world {
+            if !joined.is_empty() {
+                joined.push([f32::NAN, f32::NAN]);
+            }
+            joined.extend(ring.iter().copied());
+        }
+        reference.boundary = std::sync::Arc::new(joined);
+        let segments = model.pattern_segments();
+        assert!(!segments.is_empty(), "{label}");
+        assert_eq!(segments, reference.pattern_segments(), "pattern {label}");
+        let (mut core, mut band) = (false, false);
+        for [a, b] in &segments {
+            let middle = plane.to_local(DVec3::new(
+                (a[0] + b[0]) / 2.0,
+                (a[1] + b[1]) / 2.0,
+                0.0,
+            ));
+            let reach = middle.x.abs().max(middle.y.abs());
+            core |= reach < 5.0;
+            band |= reach > 5.0 && reach < 15.0;
+        }
+        let (want_core, want_band) = match style {
+            HatchStyleType::Normal => (true, false),
+            HatchStyleType::Outer => (false, false),
+            HatchStyleType::Ignore => (true, true),
+        };
+        assert_eq!((core, band), (want_core, want_band), "pattern islands {label}");
+    }
+
     #[test]
     fn preview_rings_follow_the_island_style() {
-        for (style, expected) in [
-            (HatchStyleType::Normal, 3),
-            (HatchStyleType::Outer, 2),
-            (HatchStyleType::Ignore, 1),
-        ] {
-            let models = nested_command(style, WorkingPlane::default()).preview_models();
-            assert_eq!(models.len(), 1, "{style:?}");
-            let model = &models[0];
-            assert_eq!(ring_count(&model.boundary), expected, "boundary {style:?}");
-            assert_eq!(
-                ring_count(model.fill_plane_boundary.as_ref().unwrap()),
-                expected,
-                "fill_plane_boundary {style:?}"
-            );
-            assert_eq!(
-                model.boundary_exterior.as_ref().unwrap().len(),
-                expected,
-                "boundary_exterior {style:?}"
-            );
+        for style in ALL_STYLES {
+            for halves in NESTING_ORDERS {
+                assert_preview_follows(style, WorkingPlane::default(), &halves);
+            }
         }
     }
 
@@ -2323,17 +2512,69 @@ mod tests {
 
     #[test]
     fn preview_buffers_stay_in_step_on_a_rotated_plane() {
-        // Local x runs along world +Y, local y along world -X.
-        let plane = WorkingPlane::new(DVec3::ZERO, DVec3::Y, DVec3::NEG_X);
-        let models = nested_command(HatchStyleType::Ignore, plane).preview_models();
-        let model = &models[0];
-        let world = &model.boundary;
-        let local = model.fill_plane_boundary.as_ref().unwrap();
-        assert_eq!(ring_count(world), 1);
-        assert_eq!(ring_count(local), 1);
-        // On a rotated plane the two buffers really are different coordinates.
-        assert_ne!(world[1], local[1]);
-        assert!(model.boundary_exterior.as_ref().unwrap().iter().all(|&outer| outer));
+        // Local x runs along world +Y, local y along world -X, and the plane
+        // sits away from the world origin.
+        let plane = WorkingPlane::new(DVec3::new(100.0, -40.0, 0.0), DVec3::Y, DVec3::NEG_X);
+        for style in ALL_STYLES {
+            for halves in NESTING_ORDERS {
+                assert_preview_follows(style, plane, &halves);
+            }
+            // On a rotated plane the two buffers really are different coordinates.
+            let models = nested_command(style, plane).preview_models();
+            let model = &models[0];
+            assert_ne!(
+                model.boundary[1],
+                model.fill_plane_boundary.as_ref().unwrap()[1],
+                "{style:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_matches_the_rings_the_entity_path_draws() {
+        // The same persisted paths rebuilt through the DXF entity (what a
+        // committed hatch goes through) keep the same rings, in the same order.
+        let world_boxes = |model: &HatchModel| -> Vec<[f64; 4]> {
+            split_rings(&model.boundary)
+                .iter()
+                .map(|ring| {
+                    min_max(ring.iter().map(|&[x, y]| {
+                        [
+                            x as f64 + model.world_origin[0],
+                            y as f64 + model.world_origin[1],
+                        ]
+                    }))
+                })
+                .collect()
+        };
+        for style in ALL_STYLES {
+            for halves in NESTING_ORDERS {
+                let label = format!("{style:?} {halves:?}");
+                let rings: Vec<Vec<[f64; 2]>> =
+                    halves.iter().map(|&h| rect(-h, -h, h, h)).collect();
+                let models = command_for(rings, style, WorkingPlane::default()).preview_models();
+                let preview = &models[0];
+                let mut dxf = codec::entities::Hatch::new();
+                dxf.is_solid = true;
+                dxf.style = style;
+                dxf.paths = preview.boundary_paths.as_ref().unwrap().as_ref().clone();
+                let entity = crate::scene::Scene::hatch_model_from_dxf(&dxf, [1.0; 4])
+                    .expect("entity model");
+
+                let from_preview = world_boxes(preview);
+                let from_entity = world_boxes(&entity);
+                assert_eq!(from_preview.len(), from_entity.len(), "{label}");
+                for (a, b) in from_preview.iter().zip(&from_entity) {
+                    assert_close(*a, *b, &format!("ring box {label}"));
+                }
+                assert_eq!(preview.boundary_exterior, entity.boundary_exterior, "{label}");
+                assert_eq!(
+                    split_rings(preview.fill_plane_boundary.as_ref().unwrap()).len(),
+                    split_rings(entity.fill_plane_boundary.as_ref().unwrap()).len(),
+                    "{label}"
+                );
+            }
+        }
     }
 
     #[test]
