@@ -733,26 +733,15 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
-            "HATCH" => {
+            // HATCH opens the dialog; `-HATCH` (and every programmatic channel)
+            // runs the command line version below.
+            "HATCH" if !self.scripted_dispatch => {
+                return Some(self.hatch_dialog_open());
+            }
+
+            "HATCH" | "-HATCH" => {
                 use crate::modules::draw::draw::hatch::HatchCommand;
-                let working_plane = if self.tabs[i].editing_model_space() {
-                    self.tabs[i].ucs_xform().working_plane()
-                } else {
-                    crate::command::WorkingPlane::default()
-                };
-                let normal = working_plane.z.normalize_or(glam::DVec3::Z);
-                let elevation = working_plane.origin.dot(normal);
-                let storage = crate::entities::curve::ocs_plane(
-                    codec::types::Vector3::new(normal.x, normal.y, normal.z),
-                    elevation,
-                );
-                let plane = crate::command::WorkingPlane::new(
-                    glam::DVec3::from_array(storage.origin),
-                    glam::DVec3::from_array(storage.x_axis),
-                    glam::DVec3::from_array(storage.y_axis),
-                );
-                let boundary_sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
-                let outlines = crate::scene::boundary_faces(&boundary_sources, 1.0e-6);
+                let (plane, boundary_sources, outlines) = self.hatch_boundary_context(i);
                 let selected = self.tabs[i]
                     .scene
                     .selected_entities()

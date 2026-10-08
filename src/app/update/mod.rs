@@ -434,6 +434,13 @@ impl OpenCADStudio {
                     return self.update(Message::WblockApply);
                 }
             }
+            if self.active_modal == Some(super::ModalKind::Hatch) {
+                if matches!(msg, Message::CommandFinalize)
+                    || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN"))
+                {
+                    return self.update(Message::HatchDialogOk);
+                }
+            }
             if is_modal_blocked_key_msg(&msg) {
                 return Task::none();
             }
@@ -4831,13 +4838,15 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
-            // Replaced by the real handlers in the HATCH dialog wiring task.
-            Message::HatchDialogField(_)
-            | Message::HatchDialogAdd(_)
+            Message::OpenHatchDialog => self.hatch_dialog_open(),
+            Message::HatchDialogField(field) => {
+                self.hatch_dialog_field(field);
+                Task::none()
+            }
+            Message::HatchDialogOk => self.hatch_dialog_ok(),
+            Message::HatchDialogAdd(_)
             | Message::HatchDialogPickOrigin
-            | Message::HatchDialogPreview
-            | Message::HatchDialogOk
-            | Message::OpenHatchDialog => Task::none(),
+            | Message::HatchDialogPreview => Task::none(), // Task 8
             Message::DrawingUnitsApply => {
                 let Some(state) = self.drawing_units.take() else {
                     self.active_modal = None;
@@ -8531,6 +8540,10 @@ impl OpenCADStudio {
             }
 
             Message::CloseModal => {
+                if self.active_modal == Some(super::ModalKind::Hatch) {
+                    self.hatch_dialog_cancel();
+                    return Task::none();
+                }
                 if self.active_modal == Some(super::ModalKind::Field) {
                     self.close_field_dialog();
                     return Task::none();

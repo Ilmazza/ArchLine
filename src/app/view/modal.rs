@@ -23,6 +23,7 @@ impl OpenCADStudio {
             Some(K::LayerStateManager) => crate::tr!("modal", "layer-state-manager"),
             Some(K::LayerTranslator) => crate::t!("Layer Translator").into_owned(),
             Some(K::DrawingUnits) => crate::t!("Drawing Units").into_owned(),
+            Some(K::Hatch) => crate::t!("Hatch and Gradient").into_owned(),
             Some(K::BlockDefinition) => crate::t!("Block Definition").into_owned(),
             Some(K::PdfAttach) => match self.pdf_attach.as_ref().map(|s| s.kind) {
                 Some(codec::entities::UnderlayType::Dwf) => crate::t!("Attach DWF Underlay").into_owned(),
@@ -515,6 +516,12 @@ impl OpenCADStudio {
                 let state = self.drawing_units.as_ref()?;
                 sized_flow(ex, 560, 420, |flow| {
                     crate::ui::window::drawing_units::view_window(state, flow)
+                })
+            }
+            super::super::ModalKind::Hatch => {
+                let state = self.hatch_dialog.as_ref()?;
+                sized_flow(ex, 940, 560, |flow| {
+                    crate::ui::window::hatch_dialog::view_window(state, flow)
                 })
             }
             super::super::ModalKind::BlockDefinition => {
