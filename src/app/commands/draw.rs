@@ -761,7 +761,14 @@ impl OpenCADStudio {
                 self.refresh_area_preview(i);
             }
 
-            "HATCHEDIT" => {
+            // HATCHEDIT on one selected pattern hatch opens the Hatch Edit
+            // window; `-HATCHEDIT` (and every programmatic channel) runs the
+            // command line version below.
+            "HATCHEDIT" if !self.scripted_dispatch && self.hatchedit_window_target(i).is_some() => {
+                return Some(self.hatch_dialog_open_edit_selected(i));
+            }
+
+            "HATCHEDIT" | "-HATCHEDIT" => {
                 use crate::modules::draw::draw::hatchedit::HatcheditCommand;
                 // If a single hatch is already selected, skip the pick step.
                 let sel = self.tabs[i].scene.selected_entities();

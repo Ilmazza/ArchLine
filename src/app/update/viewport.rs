@@ -5396,7 +5396,9 @@ properties={:.1}ms picked={}",
                         candidate_handles.as_ref(),
                         crate::ui::overlay::pick_box_aperture_px(self.pick_box),
                     )
-                });
+                })
+                // A hatch has no wire: its fill is hit-tested on its own.
+                .or_else(|| self.hatch_double_click_hit(i, p, view_rot, eye, bounds, candidate_handles.as_ref()));
                 if let Some(handle) = hit {
                     // Locked layer: double-click must not open any editor
                     // (text / attribute / in-place block edit).
@@ -5428,6 +5430,8 @@ properties={:.1}ms picked={}",
                         self.tabs[i].active_cmd = Some(Box::new(prompt));
                         return Task::none();
                     }
+                    // A hatch opens the Hatch Edit window.
+                    if let Some(task) = self.hatch_double_click(handle) { return task; }
                     // Any text-bearing entity opens its in-place editor
                     // (plain box or rich MText editor, per type). A
                     // Leader resolves to the entity it annotates.

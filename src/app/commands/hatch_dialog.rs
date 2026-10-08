@@ -42,6 +42,16 @@ pub(in crate::app) fn hatch_command_from_state(
     )
 }
 
+/// The plane a hatch lies in: where HATCHEDIT measures its pattern origin.
+fn hatch_plane(hatch: &codec::entities::Hatch) -> WorkingPlane {
+    let storage = crate::entities::curve::ocs_plane(hatch.normal, hatch.elevation);
+    WorkingPlane::new(
+        glam::DVec3::from_array(storage.origin),
+        glam::DVec3::from_array(storage.x_axis),
+        glam::DVec3::from_array(storage.y_axis),
+    )
+}
+
 impl OpenCADStudio {
     /// The working plane and the boundary data HATCH works from, exactly as the
     /// command computes them: the UCS plane in model space, the default plane
@@ -123,6 +133,174 @@ impl OpenCADStudio {
         Task::none()
     }
 
+    /// Double-click on a hatch and HATCHEDIT on a selected one: open the window
+    /// on that hatch ("Hatch Edit").
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_open_edit(&mut self, handle: Handle) -> Task<Message> {
+        use crate::modules::draw::draw::hatch_edit_settings::{is_pattern_hatch, EditTarget};
+        // A window left over from an abandoned flow must not leak into this one.
+        self.hatch_dialog_cancel();
+        let i = self.active_tab;
+        let opened = match self.tabs[i].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => {
+                Some((EditTarget::from_hatch(handle, hatch), hatch_plane(hatch)))
+            }
+            Some(codec::EntityType::Hatch(_)) => None,
+            _ => return Task::none(),
+        };
+        let Some((target, plane)) = opened else {
+            self.command_line.push_info(
+                crate::t!(
+                    "HATCHEDIT: solid and gradient hatches are edited from the Properties panel or with -HATCHEDIT."
+                )
+                .as_ref(),
+            );
+            return Task::none();
+        };
+        if self.reject_locked_edit(i, handle) {
+            return Task::none();
+        }
+        self.hatch_dialog = Some(State::for_edit(self.tabs[i].id, plane, target));
+        self.active_modal = Some(ModalKind::Hatch);
+        // The window is the command: Enter / Space repeat it.
+        self.tabs[i].last_cmd = Some("HATCHEDIT".to_string());
+        Task::none()
+    }
+
+    /// HATCHEDIT on the one selected pattern hatch.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_open_edit_selected(&mut self, i: usize) -> Task<Message> {
+        match self.hatchedit_window_target(i) {
+            Some(handle) => self.hatch_dialog_open_edit(handle),
+            None => Task::none(),
+        }
+    }
+
+    /// The hatch HATCHEDIT opens the window on: the only selected object,
+    /// when it is a pattern hatch. Anything else keeps the command line.
+    pub(in crate::app) fn hatchedit_window_target(&self, i: usize) -> Option<Handle> {
+        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
+        let selected = self.selected_handles(i);
+        let [handle] = selected.as_slice() else {
+            return None;
+        };
+        match self.tabs[i].scene.document.get_entity(*handle) {
+            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => Some(*handle),
+            _ => None,
+        }
+    }
+
+    /// Double-click on `handle` in model space: a hatch opens "Hatch Edit"
+    /// (or says where a solid or gradient fill is edited); `None` for any
+    /// other object, which keeps its own double-click.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_double_click(&mut self, handle: Handle) -> Option<Task<Message>> {
+        let i = self.active_tab;
+        matches!(
+            self.tabs[i].scene.document.get_entity(handle),
+            Some(codec::EntityType::Hatch(_))
+        )
+        .then(|| self.hatch_dialog_open_edit(handle))
+    }
+
+    /// The hatch whose fill is under `cursor`, for a double-click that hit
+    /// no wire. A hatch carries no wire (`scene::convert::tessellate`), so
+    /// the wire pick never finds one; the fill test is the one single clicks
+    /// use to select it.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_double_click_hit(
+        &self,
+        i: usize,
+        cursor: iced::Point,
+        view_rot: glam::Mat4,
+        eye: glam::DVec3,
+        bounds: iced::Rectangle,
+        candidates: Option<&rustc_hash::FxHashSet<Handle>>,
+    ) -> Option<Handle> {
+        crate::scene::pick::hit_test::click_hit_hatch(
+            cursor,
+            &self.tabs[i].scene.visible_hatches_for_click(candidates),
+            view_rot,
+            eye,
+            bounds,
+            candidates,
+        )
+    }
+
+    /// The window's title: "Hatch Edit" on an existing hatch.
+    pub(in crate::app) fn hatch_dialog_title(&self) -> String {
+        let editing = self
+            .hatch_dialog
+            .as_ref()
+            .is_some_and(|state| state.edit.is_some());
+        if editing {
+            crate::t!("Hatch Edit").into_owned()
+        } else {
+            crate::t!("Hatch and Gradient").into_owned()
+        }
+    }
+
+    /// OK on "Hatch Edit": the fields the user changed, and only those, go to
+    /// the hatch through HATCHEDIT's own update, as one undo step.
+    #[inline(never)]
+    fn hatch_dialog_ok_edit(&mut self) -> Task<Message> {
+        use crate::modules::draw::draw::hatchedit::HatcheditCommand;
+        let i = self.active_tab;
+        let Some(state) = self.hatch_dialog.as_ref() else {
+            return Task::none();
+        };
+        let Some(target) = state.edit.clone() else {
+            return Task::none();
+        };
+        // The update acts on the active tab, so the window must belong to it.
+        if state.owner_tab_id != self.tabs[i].id {
+            self.hatch_dialog_cancel();
+            return Task::none();
+        }
+        let Some(changes) = target
+            .changes(&state.settings, state.specified_origin)
+            .filter(|changes| !changes.is_empty())
+        else {
+            return Task::none();
+        };
+        self.hatch_dialog = None;
+        if self.active_modal == Some(ModalKind::Hatch) {
+            self.close_active_modal();
+        }
+        // The hatch may have gone, or its layer been locked, while the window
+        // was open: then nothing is applied and nothing is left running.
+        let handle = target.handle;
+        // What the user changed is measured against the window as it opened;
+        // what they left alone is the hatch as it is now (it may have changed
+        // while the window was hidden for the origin pick).
+        let current = match self.tabs[i].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Hatch(hatch)) => {
+                crate::modules::draw::draw::hatch_edit_settings::EditTarget::from_hatch(
+                    handle, hatch,
+                )
+            }
+            _ => {
+                self.command_line
+                    .push_error(crate::t!("HATCHEDIT: hatch entity not found.").as_ref());
+                return Task::none();
+            }
+        };
+        if self.reject_locked_edit(i, handle) {
+            return Task::none();
+        }
+        // Run it as HATCHEDIT does from the command line, so the end of the
+        // command (nothing left selected, the hatch kept as "Previous") is
+        // the same.
+        self.tabs[i].active_cmd = Some(Box::new(HatcheditCommand::with_handle(
+            handle,
+            current.pattern.clone(),
+            current.scale,
+            current.angle_deg,
+            false,
+        )));
+        self.apply_cmd_result(current.apply_result(&changes))
+    }
+
     pub(in crate::app) fn hatch_dialog_field(&mut self, field: Field) {
         if let Some(state) = self.hatch_dialog.as_mut() {
             state.apply(field);
@@ -136,6 +314,9 @@ impl OpenCADStudio {
         // Enter / OK with the palette open means "use the chosen pattern".
         if self.hatch_palette_open() {
             return self.hatch_dialog_palette(PaletteAction::Apply);
+        }
+        if self.hatch_dialog.as_ref().is_some_and(|state| state.edit.is_some()) {
+            return self.hatch_dialog_ok_edit();
         }
         let i = self.active_tab;
         let Some(state) = self.hatch_dialog.as_ref() else {
@@ -316,6 +497,10 @@ impl OpenCADStudio {
             self.hatch_dialog_cancel();
             return Task::none();
         }
+        // Editing keeps the hatch's own boundaries.
+        if state.edit.is_some() {
+            return Task::none();
+        }
         let Some(resolved) = state.settings.resolve() else {
             return Task::none();
         };
@@ -405,7 +590,8 @@ impl OpenCADStudio {
             self.hatch_dialog_cancel();
             return Task::none();
         }
-        if !state.can_ok() {
+        // Editing has no Preview: the hatch on screen is the preview.
+        if state.edit.is_some() || !state.can_ok() {
             return Task::none();
         }
         let document_origin = self.tabs[i].scene.document.hatch_origin();
@@ -2154,6 +2340,737 @@ mod tests {
         assert_eq!(hatch_count(&app), 0);
         assert!(app.hatch_dialog.is_some());
         assert!(palette_of(&app).is_none());
+    }
+
+    // ── Hatch Edit: the window on an existing hatch ────────────────────────
+
+    use crate::modules::draw::draw::hatch_settings::{HatchSettings, OriginMode};
+    use codec::entities::HatchStyleType;
+
+    /// The rectangle hatched through the window with `edit` applied to its
+    /// fields first; nothing stays selected and `hatch_last` is put back to
+    /// the defaults. Returns the hatch.
+    fn hatch_made_with(app: &mut OpenCADStudio, edit: &[Field]) -> Handle {
+        open_dialog(app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        for field in edit {
+            let _ = app.update(Message::HatchDialogField(field.clone()));
+        }
+        let _ = app.update(Message::HatchDialogOk);
+        let i = app.active_tab;
+        assert_eq!(app.tabs[i].scene.hatches.len(), 1, "one hatch made");
+        app.hatch_last = HatchSettings::default();
+        *app.tabs[i].scene.hatches.keys().next().unwrap()
+    }
+
+    /// The rectangle (four lines) with an associative ANSI31 hatch.
+    fn app_with_hatch() -> (OpenCADStudio, Handle) {
+        let mut app = app_with_rectangle();
+        let hatch = hatch_made_with(&mut app, &[]);
+        assert!(stored(&app, hatch).is_associative, "the lines bound it");
+        (app, hatch)
+    }
+
+    fn stored(app: &OpenCADStudio, handle: Handle) -> codec::entities::Hatch {
+        match app.tabs[app.active_tab].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Hatch(hatch)) => hatch.clone(),
+            other => panic!("not a hatch: {other:?}"),
+        }
+    }
+
+    fn set_stored(app: &mut OpenCADStudio, handle: Handle, edit: impl FnOnce(&mut codec::entities::Hatch)) {
+        let i = app.active_tab;
+        match app.tabs[i].scene.document.get_entity_mut(handle) {
+            Some(codec::EntityType::Hatch(hatch)) => edit(hatch),
+            other => panic!("not a hatch: {other:?}"),
+        }
+    }
+
+    fn edit_handle(app: &OpenCADStudio) -> Option<Handle> {
+        app.hatch_dialog
+            .as_ref()
+            .and_then(|state| state.edit.as_ref())
+            .map(|edit| edit.handle)
+    }
+
+    fn undo_depth(app: &OpenCADStudio) -> usize {
+        app.tabs[app.active_tab].history.undo_stack.len()
+    }
+
+    fn last_line(app: &OpenCADStudio) -> String {
+        app.command_line
+            .history
+            .last()
+            .map(|entry| entry.text.clone())
+            .unwrap_or_default()
+    }
+
+    fn field(app: &mut OpenCADStudio, field: Field) {
+        let _ = app.update(Message::HatchDialogField(field));
+    }
+
+    #[test]
+    fn the_edit_window_is_filled_from_the_hatch_and_not_from_the_remembered_settings() {
+        let mut app = app_with_rectangle();
+        let hatch = hatch_made_with(
+            &mut app,
+            &[
+                Field::Scale("2".into()),
+                Field::Angle("30".into()),
+                Field::IslandStyle(HatchStyleType::Outer),
+            ],
+        );
+        app.hatch_last = HatchSettings {
+            pattern: "BRICK".into(),
+            angle: "45".into(),
+            scale: "9".into(),
+            associative: false,
+            separate: true,
+            retain: false,
+            island_detection: false,
+            island_style: HatchStyleType::Ignore,
+            origin_mode: OriginMode::Specified,
+        };
+        let remembered = app.hatch_last.clone();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(edit_handle(&app), Some(hatch));
+        let settings = &app.hatch_dialog.as_ref().unwrap().settings;
+        assert_eq!(settings.pattern, "ANSI31");
+        assert_eq!(settings.scale, "2");
+        assert_eq!(settings.angle, "30");
+        assert!(settings.island_detection);
+        assert_eq!(settings.island_style, HatchStyleType::Outer);
+        assert!(settings.associative);
+        assert!(!settings.separate && !settings.retain);
+        assert_eq!(settings.origin_mode, OriginMode::Current);
+        assert_eq!(app.hatch_last, remembered, "opening reads nothing from it");
+        assert_eq!(app.hatch_dialog_title(), "Hatch Edit");
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        assert_eq!(app.tabs[app.active_tab].last_cmd.as_deref(), Some("HATCHEDIT"));
+    }
+
+    #[test]
+    fn leaving_the_tab_during_the_origin_pick_abandons_the_edit() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::OriginMode(OriginMode::Specified));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        assert!(app.tabs[first].active_cmd.is_some(), "the origin pick runs");
+        let _ = app.update(Message::TabSwitch(second));
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(app.tabs[first].active_cmd.is_none(), "the owner's pick is stopped");
+        assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
+            Some(codec::EntityType::Hatch(before)));
+    }
+
+    #[test]
+    fn another_command_during_the_origin_pick_abandons_the_edit() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::OriginMode(OriginMode::Specified));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        let _ = app.dispatch_command("LINE");
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert_eq!(command_name(&app, app.active_tab), Some("LINE"));
+        assert_eq!(stored(&app, hatch), before);
+    }
+
+    #[test]
+    fn the_creation_window_keeps_its_title() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        assert_eq!(app.hatch_dialog_title(), "Hatch and Gradient");
+    }
+
+    #[test]
+    fn ok_changes_only_the_touched_fields_and_one_undo_puts_everything_back() {
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| {
+            h.common.color = codec::types::Color::Index(3);
+            h.common.transparency = codec::types::Transparency::T_20;
+        });
+        let before = stored(&app, hatch);
+        let depth = undo_depth(&app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Pattern("BRICK".into()));
+        field(&mut app, Field::Scale("3".into()));
+        field(&mut app, Field::IslandDetection(false));
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "closed");
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let after = stored(&app, hatch);
+        assert_eq!(after.pattern.name, "BRICK");
+        assert_eq!(after.pattern_scale, 3.0);
+        assert_eq!(after.style, HatchStyleType::Ignore);
+        assert_eq!(after.pattern_angle, before.pattern_angle, "angle untouched");
+        assert_eq!(after.common.color, before.common.color);
+        assert_eq!(after.common.layer, before.common.layer);
+        assert_eq!(after.common.transparency, before.common.transparency);
+        assert_eq!(after.is_associative, before.is_associative);
+        assert_eq!(after.paths, before.paths, "boundaries and their links untouched");
+        assert_eq!(hatch_count(&app), 1, "the same hatch, no new one");
+        assert_eq!(undo_depth(&app), depth + 1, "one undo step");
+        let _ = app.update(Message::Undo);
+        assert_eq!(stored(&app, hatch), before, "one undo restores it all");
+    }
+
+    #[test]
+    fn a_style_only_change_leaves_the_pattern_geometry_exactly_as_it_was() {
+        // Scale and angle that f32 cannot hold exactly, and an origin away
+        // from zero: re-applying them would move the pattern lines a little.
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| {
+            h.pattern_scale = 0.1;
+            h.pattern_angle = 0.1;
+            assert!(h.set_pattern_origin(codec::types::Vector2::new(1.234_567_8, 5.678_912_3)));
+        });
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::IslandStyle(HatchStyleType::Outer));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(after.style, HatchStyleType::Outer);
+        assert_eq!(after.pattern_scale, 0.1);
+        assert_eq!(after.pattern_angle, 0.1);
+        assert_eq!(after.pattern, before.pattern, "pattern lines untouched");
+    }
+
+    #[test]
+    fn a_scale_change_keeps_the_pattern_and_scales_its_lines() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(after.pattern.name, before.pattern.name);
+        assert_eq!(after.pattern_scale, 2.0);
+        let (old, new) = (&before.pattern.lines[0], &after.pattern.lines[0]);
+        assert!((new.offset.x - 2.0 * old.offset.x).abs() < 1.0e-9);
+        assert!((new.offset.y - 2.0 * old.offset.y).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn cancel_and_escape_change_nothing() {
+        for close in [Message::CloseModal, Message::CommandEscape] {
+            let (mut app, hatch) = app_with_hatch();
+            let before = stored(&app, hatch);
+            let depth = undo_depth(&app);
+            let _ = app.hatch_dialog_open_edit(hatch);
+            field(&mut app, Field::Scale("5".into()));
+            field(&mut app, Field::Associative(false));
+            assert!(app.hatch_dialog.as_ref().unwrap().can_ok(), "there was something to apply");
+            let _ = app.update(close);
+            assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+            assert_eq!(stored(&app, hatch), before);
+            assert_eq!(undo_depth(&app), depth);
+        }
+    }
+
+    #[test]
+    fn escape_with_the_palette_open_closes_only_the_palette_in_edit_too() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        palette_do(&mut app, PaletteAction::Open);
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        let _ = app.update(Message::CloseModal);
+        assert!(palette_of(&app).is_none());
+        assert_eq!(edit_handle(&app), Some(hatch), "the edit window stays");
+        palette_do(&mut app, PaletteAction::Open);
+        palette_do(&mut app, PaletteAction::Pick("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Apply);
+        assert_eq!(pattern_of(&app), "BRICK");
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(stored(&app, hatch).pattern.name, "BRICK");
+    }
+
+    #[test]
+    fn switching_associative_off_disassociates_the_hatch() {
+        let (mut app, hatch) = app_with_hatch();
+        assert!(stored(&app, hatch).paths.iter().any(|p| !p.boundary_handles.is_empty()));
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Associative(false));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert!(!after.is_associative);
+        assert!(after.paths.iter().all(|p| p.boundary_handles.is_empty()));
+    }
+
+    #[test]
+    fn a_hatch_that_is_not_associative_cannot_be_associated_here() {
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| {
+            h.is_associative = false;
+            for path in &mut h.paths {
+                path.boundary_handles.clear();
+            }
+        });
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        assert!(!app.hatch_dialog.as_ref().unwrap().settings.associative);
+        field(&mut app, Field::Associative(true));
+        assert!(!app.hatch_dialog.as_ref().unwrap().settings.associative);
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "nothing to apply: still open");
+        assert_eq!(stored(&app, hatch), before);
+    }
+
+    #[test]
+    fn ok_without_a_change_does_nothing() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let depth = undo_depth(&app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        let _ = app.update(Message::HatchDialogOk);
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(edit_handle(&app), Some(hatch), "the same edit window, still open");
+        assert_eq!(stored(&app, hatch), before);
+        assert_eq!(undo_depth(&app), depth);
+    }
+
+    #[test]
+    fn enter_in_the_edit_window_is_ok() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(stored(&app, hatch).pattern_scale, 2.0);
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn editing_never_touches_the_remembered_settings() {
+        let (mut app, hatch) = app_with_hatch();
+        app.hatch_last.scale = "7".into();
+        let remembered = app.hatch_last.clone();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("3".into()));
+        field(&mut app, Field::Pattern("BRICK".into()));
+        palette_do(&mut app, PaletteAction::Open);
+        palette_do(&mut app, PaletteAction::Pick("ANSI37".into()));
+        palette_do(&mut app, PaletteAction::Apply);
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(stored(&app, hatch).pattern.name, "ANSI37");
+        assert_eq!(app.hatch_last, remembered);
+    }
+
+    #[test]
+    fn add_and_preview_are_refused_in_edit() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        for message in [
+            Message::HatchDialogAdd(AddKind::Points),
+            Message::HatchDialogAdd(AddKind::Objects),
+            Message::HatchDialogPreview,
+        ] {
+            let _ = app.update(message);
+            assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+            assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::None);
+            assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        }
+        assert_eq!(hatch_count(&app), 1);
+    }
+
+    #[test]
+    fn a_hatch_erased_while_the_window_is_open_is_left_alone() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        let i = app.active_tab;
+        app.tabs[i].scene.erase_entities(&[hatch]);
+        let depth = undo_depth(&app);
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "closed");
+        assert!(app.tabs[i].active_cmd.is_none(), "no HATCHEDIT left running");
+        assert!(app.tabs[i].scene.document.get_entity(hatch).is_none());
+        assert_eq!(undo_depth(&app), depth, "nothing applied");
+        assert!(last_line(&app).contains("not found"), "{}", last_line(&app));
+    }
+
+    #[test]
+    fn a_hatch_erased_during_the_origin_pick_is_left_alone_too() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::OriginMode(OriginMode::Specified));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        let i = app.active_tab;
+        app.tabs[i].scene.erase_entities(&[hatch]);
+        click_at(&mut app, 3.0, 4.0);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "back to the window");
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.tabs[i].active_cmd.is_none());
+        assert!(app.tabs[i].scene.document.get_entity(hatch).is_none());
+    }
+
+    #[test]
+    fn a_hatch_whose_layer_was_locked_meanwhile_is_left_alone() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        let i = app.active_tab;
+        app.tabs[i].scene.document.layers.get_mut("0").unwrap().flags.locked = true;
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.tabs[i].active_cmd.is_none(), "no HATCHEDIT left running");
+        assert_eq!(stored(&app, hatch), before);
+        assert!(last_line(&app).contains("locked"), "{}", last_line(&app));
+    }
+
+    #[test]
+    fn a_new_origin_is_picked_in_the_hatch_plane_and_applied() {
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::OriginMode(OriginMode::Specified));
+        assert!(!app.hatch_dialog.as_ref().unwrap().can_ok(), "no point yet");
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Origin);
+        assert!(app.active_modal.is_none(), "hidden while picking");
+        click_at(&mut app, 3.0, 4.0);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        let _ = app.update(Message::HatchDialogOk);
+        let origin = stored(&app, hatch).pattern_origin();
+        assert!((origin.x - 3.0).abs() < 1.0e-9 && (origin.y - 4.0).abs() < 1.0e-9, "{origin:?}");
+    }
+
+    #[test]
+    fn untouched_fields_follow_the_hatch_as_it_is_at_ok() {
+        // The hatch changes while the window is hidden for the origin pick
+        // (an undo, say): OK must not put back the values it opened with.
+        let (mut app, hatch) = app_with_hatch();
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::OriginMode(OriginMode::Specified));
+        let _ = app.update(Message::HatchDialogPickOrigin);
+        set_stored(&mut app, hatch, |h| {
+            h.pattern_scale = 5.0;
+            h.pattern_angle = 0.25;
+        });
+        let meanwhile = stored(&app, hatch);
+        click_at(&mut app, 3.0, 4.0);
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(after.pattern_scale, 5.0, "scale untouched");
+        assert_eq!(after.pattern_angle, 0.25, "angle untouched");
+        assert_eq!(after.pattern.lines.len(), meanwhile.pattern.lines.len());
+        assert_eq!(after.pattern.lines[0].offset, meanwhile.pattern.lines[0].offset);
+        let origin = after.pattern_origin();
+        assert!((origin.x - 3.0).abs() < 1.0e-9 && (origin.y - 4.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn leaving_or_closing_the_tab_abandons_the_edit() {
+        for close in [false, true] {
+            let (mut app, hatch) = app_with_hatch();
+            let before = stored(&app, hatch);
+            let (first, second) = open_second_tab(&mut app);
+            let _ = app.update(Message::TabSwitch(first));
+            let _ = app.hatch_dialog_open_edit(hatch);
+            field(&mut app, Field::Scale("2".into()));
+            assert_eq!(edit_handle(&app), Some(hatch));
+            if close {
+                // A dirty tab would only ask to save first.
+                app.tabs[first].dirty = false;
+                let id = app.tabs[first].id;
+                let _ = app.update(Message::TabClose(id));
+                assert!(app.tabs.iter().all(|tab| tab.id != id), "owner closed");
+            } else {
+                let _ = app.update(Message::TabSwitch(second));
+                assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
+                    Some(codec::EntityType::Hatch(before.clone())), "untouched");
+            }
+            assert!(app.hatch_dialog.is_none(), "close={close}");
+            assert!(app.active_modal.is_none(), "close={close}");
+        }
+    }
+
+    #[test]
+    fn ok_on_another_tab_is_refused_in_edit() {
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Scale("2".into()));
+        assert_eq!(edit_handle(&app), Some(hatch));
+        app.active_tab = second;
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none());
+        app.active_tab = first;
+        assert_eq!(stored(&app, hatch), before);
+    }
+
+    #[test]
+    fn a_solid_or_gradient_hatch_does_not_open_the_window() {
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        assert!(stored(&app, solid).is_solid);
+        let _ = app.hatch_dialog_open_edit(solid);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| h.gradient_color.enabled = true);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+    }
+
+    #[test]
+    fn a_hatch_on_a_locked_layer_does_not_open_the_window() {
+        let (mut app, hatch) = app_with_hatch();
+        let i = app.active_tab;
+        app.tabs[i].scene.document.layers.get_mut("0").unwrap().flags.locked = true;
+        let _ = app.hatch_dialog_open_edit(hatch);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("locked"), "{}", last_line(&app));
+    }
+
+    // ── HATCHEDIT and -HATCHEDIT ───────────────────────────────────────────
+
+    fn select_only(app: &mut OpenCADStudio, handle: Handle) {
+        let i = app.active_tab;
+        app.tabs[i].scene.deselect_all();
+        app.tabs[i].scene.select_entity(handle, false);
+    }
+
+    #[test]
+    fn hatchedit_on_one_selected_pattern_hatch_opens_the_window() {
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(edit_handle(&app), Some(hatch));
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    }
+
+    #[test]
+    fn hatchedit_from_the_ribbon_opens_the_window() {
+        use crate::modules::ModuleEvent;
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.update(Message::RibbonToolClick {
+            tool_id: "HATCHEDIT".to_string(),
+            event: ModuleEvent::Command("HATCHEDIT".to_string()),
+        });
+        assert_eq!(edit_handle(&app), Some(hatch));
+    }
+
+    #[test]
+    fn ok_ends_like_hatchedit_from_the_command_line() {
+        // The window...
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("HATCHEDIT");
+        field(&mut app, Field::IslandStyle(HatchStyleType::Outer));
+        let _ = app.update(Message::HatchDialogOk);
+        let i = app.active_tab;
+        let window = (
+            stored(&app, hatch).style,
+            app.tabs[i].scene.selected.is_empty(),
+            app.tabs[i].prev_selection.clone(),
+            app.tabs[i].active_cmd.is_none(),
+            last_line(&app),
+        );
+        // ...and the command line, on the same drawing.
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("-HATCHEDIT");
+        let _ = app.feed_command(StepInput::Text("S".into()));
+        let _ = app.feed_command(StepInput::Text("O".into()));
+        let i = app.active_tab;
+        let command_line = (
+            stored(&app, hatch).style,
+            app.tabs[i].scene.selected.is_empty(),
+            app.tabs[i].prev_selection.clone(),
+            app.tabs[i].active_cmd.is_none(),
+            last_line(&app),
+        );
+        assert_eq!(window, command_line);
+        assert_eq!(window.0, HatchStyleType::Outer);
+        assert_eq!(window.2, vec![hatch], "kept as Previous");
+    }
+
+    fn assert_command_line_hatchedit(app: &mut OpenCADStudio, hatch: Handle, channel: &str) {
+        let i = app.active_tab;
+        assert!(app.hatch_dialog.is_none(), "{channel}: no window");
+        assert!(app.active_modal.is_none(), "{channel}: no window");
+        assert_eq!(command_name(app, i), Some("HATCHEDIT"), "{channel}: the command runs");
+        let _ = app.feed_command(StepInput::Text("S".into()));
+        let _ = app.feed_command(StepInput::Text("O".into()));
+        assert_eq!(stored(app, hatch).style, HatchStyleType::Outer, "{channel}: and works");
+        assert!(app.tabs[i].active_cmd.is_none(), "{channel}");
+    }
+
+    #[test]
+    fn dash_hatchedit_and_scripted_hatchedit_run_the_command_line() {
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("-HATCHEDIT");
+        assert_command_line_hatchedit(&mut app, hatch, "-HATCHEDIT");
+
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        app.scripted_dispatch = true;
+        let _ = app.dispatch_command("HATCHEDIT");
+        app.scripted_dispatch = false;
+        assert_command_line_hatchedit(&mut app, hatch, "scripted_dispatch");
+
+        let (mut app, hatch) = app_with_hatch();
+        select_only(&mut app, hatch);
+        let _ = app.update(Message::ScriptLine("HATCHEDIT".into()));
+        assert!(!app.scripted_dispatch, "the flag is restored");
+        assert_command_line_hatchedit(&mut app, hatch, "ScriptLine");
+    }
+
+    #[test]
+    fn hatchedit_without_a_selection_still_asks_for_the_hatch() {
+        let (mut app, _hatch) = app_with_hatch();
+        let _ = app.dispatch_command("HATCHEDIT");
+        let i = app.active_tab;
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(command_name(&app, i), Some("HATCHEDIT"));
+        assert!(app.tabs[i].active_cmd.as_ref().unwrap().needs_entity_pick());
+    }
+
+    #[test]
+    fn hatchedit_on_a_solid_hatch_runs_the_command_line() {
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        select_only(&mut app, solid);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(command_name(&app, app.active_tab), Some("HATCHEDIT"));
+    }
+
+    #[test]
+    fn hatchedit_on_two_selected_hatches_runs_the_command_line() {
+        let (mut app, hatch) = app_with_hatch();
+        let i = app.active_tab;
+        let line = add_line(&mut app, 100.0, 0.0, 110.0, 0.0);
+        select_only(&mut app, hatch);
+        app.tabs[i].scene.select_entity(line, false);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn command_registration_lists_dash_hatchedit() {
+        let registered = inventory::iter::<crate::command::CommandRegistration>()
+            .any(|registration| registration.names.contains(&"-HATCHEDIT"));
+        assert!(registered);
+    }
+
+    // ── Double-click in the viewport ───────────────────────────────────────
+
+    /// A viewport of 800 x 600 framing the drawing.
+    fn frame(app: &mut OpenCADStudio) {
+        let i = app.active_tab;
+        app.tabs[i].scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        app.tabs[i].scene.fit_all();
+    }
+
+    fn screen_point(app: &OpenCADStudio, x: f64, y: f64) -> iced::Point {
+        let i = app.active_tab;
+        let p = app.tabs[i]
+            .scene
+            .camera
+            .borrow()
+            .project(
+                glam::DVec3::new(x, y, 0.0),
+                iced::Rectangle::with_size(iced::Size::new(800.0, 600.0)),
+            )
+            .expect("on screen");
+        assert!(p.x > 0.0 && p.x < 800.0 && p.y > 0.0 && p.y < 600.0, "{p:?}");
+        iced::Point::new(p.x, p.y)
+    }
+
+    fn double_click(app: &mut OpenCADStudio, x: f64, y: f64) {
+        let p = screen_point(app, x, y);
+        for _ in 0..2 {
+            let _ = app.update(Message::ViewportMove(p));
+            let _ = app.update(Message::ViewportLeftPress);
+            let _ = app.update(Message::ViewportLeftRelease);
+        }
+    }
+
+    #[test]
+    fn double_clicking_inside_a_pattern_hatch_opens_the_edit_window() {
+        let (mut app, hatch) = app_with_hatch();
+        frame(&mut app);
+        // Inside the fill, away from the boundary lines and the centre grip.
+        double_click(&mut app, 4.0, 3.0);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(edit_handle(&app), Some(hatch));
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().settings.pattern, "ANSI31");
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    }
+
+    #[test]
+    fn double_clicking_near_the_edge_of_a_hatch_without_boundary_objects_opens_it_too() {
+        let (mut app, hatch) = app_with_hatch();
+        let i = app.active_tab;
+        let lines: Vec<Handle> = app.tabs[i]
+            .scene
+            .document
+            .entities()
+            .filter(|entity| matches!(entity, codec::EntityType::Line(_)))
+            .map(|entity| entity.common().handle)
+            .collect();
+        assert_eq!(lines.len(), 4);
+        app.tabs[i].scene.erase_entities(&lines);
+        frame(&mut app);
+        double_click(&mut app, 0.2, 9.8);
+        assert_eq!(edit_handle(&app), Some(hatch));
+    }
+
+    #[test]
+    fn double_clicking_a_solid_hatch_only_writes_a_line() {
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        frame(&mut app);
+        double_click(&mut app, 4.0, 3.0);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+        assert!(stored(&app, solid).is_solid);
+    }
+
+    #[test]
+    fn double_clicking_a_gradient_hatch_only_writes_a_line() {
+        let (mut app, hatch) = app_with_hatch();
+        set_stored(&mut app, hatch, |h| h.gradient_color.enabled = true);
+        frame(&mut app);
+        double_click(&mut app, 4.0, 3.0);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+    }
+
+    #[test]
+    fn double_clicking_a_hatch_on_a_locked_layer_opens_nothing() {
+        let (mut app, _hatch) = app_with_hatch();
+        let i = app.active_tab;
+        app.tabs[i].scene.document.layers.get_mut("0").unwrap().flags.locked = true;
+        frame(&mut app);
+        double_click(&mut app, 4.0, 3.0);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(last_line(&app).contains("locked"), "{}", last_line(&app));
+    }
+
+    #[test]
+    fn double_clicking_a_hatch_while_a_command_runs_opens_nothing() {
+        let (mut app, _hatch) = app_with_hatch();
+        frame(&mut app);
+        let _ = app.dispatch_command("LINE");
+        double_click(&mut app, 4.0, 3.0);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert_eq!(command_name(&app, app.active_tab), Some("LINE"));
     }
 
     #[test]

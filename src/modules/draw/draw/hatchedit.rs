@@ -845,4 +845,4 @@ mod tests {
 
 
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["HATCHEDIT"] });  // HatcheditCommand
+inventory::submit!(crate::command::CommandRegistration { names: &["HATCHEDIT", "-HATCHEDIT"] });  // HatcheditCommand
