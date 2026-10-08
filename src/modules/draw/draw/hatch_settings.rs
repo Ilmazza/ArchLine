@@ -62,8 +62,23 @@ fn canonical_ring(ring: &[[f64; 2]]) -> QuantizedRing {
     if twice_area < 0 {
         points.reverse();
     }
-    if let Some(start) = (0..points.len()).min_by_key(|&index| points[index]) {
-        points.rotate_left(start);
+    // A pinched ring can visit its smallest vertex more than once; of those
+    // starts, take the rotation that reads smallest, so the result depends only
+    // on the cyclic sequence and not on where the tracing began.
+    let smallest = points.iter().min().copied();
+    if let Some(smallest) = smallest {
+        let len = points.len();
+        let rotation = |start: usize| (0..len).map(move |step| (start + step) % len);
+        let start = (0..len)
+            .filter(|&index| points[index] == smallest)
+            .min_by(|&a, &b| {
+                rotation(a)
+                    .map(|i| points[i])
+                    .cmp(rotation(b).map(|i| points[i]))
+            });
+        if let Some(start) = start {
+            points.rotate_left(start);
+        }
     }
     points
 }
@@ -72,9 +87,13 @@ pub fn region_key(region: &HatchRegion) -> RegionKey {
     let mut rings = region.rings.iter();
     let outer = rings
         .next()
-        .map(|ring| canonical_ring(ring))
+        .map(Vec::as_slice)
+        .map(canonical_ring)
         .unwrap_or_default();
-    let mut holes: Vec<QuantizedRing> = rings.map(|ring| canonical_ring(ring)).collect();
+    let mut holes: Vec<QuantizedRing> = rings
+        .map(Vec::as_slice)
+        .map(canonical_ring)
+        .collect();
     holes.sort();
     (outer, holes)
 }
@@ -239,6 +258,27 @@ mod tests {
         ]]);
         assert_eq!(region_key(&a), region_key(&rotated));
         assert_eq!(region_key(&a), region_key(&reversed));
+    }
+
+    #[test]
+    fn pinched_ring_is_one_region_whichever_loop_is_traced_first() {
+        // Two loops touching at A = (0, 0): the smallest vertex appears twice.
+        // Both loops run counter-clockwise, the first one enclosing more area.
+        let (a, b, c) = ([0.0, 0.0], [8.0, 0.0], [8.0, 8.0]);
+        let (d, e) = ([2.0, -2.0], [2.0, 0.0]);
+        let first = region(vec![vec![a, b, c, a, d, e]]);
+        let second = region(vec![vec![a, d, e, a, b, c]]);
+        assert_eq!(region_key(&first), region_key(&second));
+    }
+
+    #[test]
+    fn genuinely_different_pinched_rings_are_different_regions() {
+        let (a, b, c) = ([0.0, 0.0], [8.0, 0.0], [8.0, 8.0]);
+        let (d, e) = ([2.0, -2.0], [2.0, 0.0]);
+        let one = region(vec![vec![a, b, c, a, d, e]]);
+        // Same vertices, but the second loop is walked the other way round.
+        let other = region(vec![vec![a, b, c, a, e, d]]);
+        assert_ne!(region_key(&one), region_key(&other));
     }
 
     #[test]
