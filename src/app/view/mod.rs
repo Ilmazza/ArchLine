@@ -3573,7 +3573,7 @@ fn start_page_content<'a>(
     action_width_out: std::sync::Arc<std::sync::atomic::AtomicU32>,
     active: super::StartSection,
 ) -> Element<'a, Message> {
-    let headline = text(crate::privacy::APP_NAME).size(40).style(start_primary_style);
+    let headline = crate::ui::wordmark::wordmark(48.0);
 
     // Plain outlined button (Open / New / Help / Contribute).
     let outline_btn = |label: String, msg: Message| {

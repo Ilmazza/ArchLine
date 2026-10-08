@@ -1,163 +1,87 @@
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="docs/readme/README.bg.md">Български</a> ·
-  <a href="docs/readme/README.pt-BR.md">Português (Brasil)</a> ·
-  <a href="docs/readme/README.cs.md">Čeština</a> ·
-  <a href="docs/readme/README.nl.md">Nederlands</a> ·
-  <a href="docs/readme/README.fr.md">Français</a> ·
-  <a href="docs/readme/README.fi.md">Suomi</a> ·
-  <a href="docs/readme/README.de.md">Deutsch</a> ·
-  <a href="docs/readme/README.el.md">Ελληνικά</a> ·
-  <a href="docs/readme/README.hu.md">Magyar</a> ·
-  <a href="docs/readme/README.it.md">Italiano</a> ·
-  <a href="docs/readme/README.ja.md">日本語</a> ·
-  <a href="docs/readme/README.ko.md">한국어</a> ·
-  <a href="docs/readme/README.pl.md">Polski</a> ·
-  <a href="docs/readme/README.ru.md">Русский</a> ·
-  <a href="docs/readme/README.zh-CN.md">简体中文</a> ·
-  <a href="docs/readme/README.es.md">Español</a> ·
-  <a href="docs/readme/README.zh-TW.md">繁體中文</a> ·
-  <a href="docs/readme/README.tr.md">Türkçe</a> ·
-  <a href="docs/readme/README.hi.md">हिन्दी</a> ·
-  <a href="docs/readme/README.ar.md">العربية</a>
-</p>
-
-<p align="center">
-  <img src="assets/logo.svg" width="112" alt="Open CAD Studio logo">
+  <img src="assets/logo.svg" width="112" alt="Logo ArchLine">
 </p>
 
 <h1 align="center">ArchLine</h1>
 
 <p align="center">
-  Fork di <a href="https://github.com/HakanSeven12/OpenCADStudio">Open CAD Studio</a> per lo studio di architettura. Vedi <a href="FORK.md">FORK.md</a>.<br>
-  Offline di default: nessuna richiesta di rete all'avvio (aggiornamenti, Discussions, video, Patreon). Per riattivarle: <code>ARCHLINE_ONLINE=1</code>.
+  CAD 2D/3D open source per lo studio di architettura, con un workspace in stile "AutoCAD classico".<br>
+  Scritto in Rust. Legge e scrive DWG e DXF in modo nativo.
 </p>
 
 <p align="center">
-  Open-source 2D drafting and 3D modeling for desktop and web, built with Rust.
+  <a href="LICENSE"><img alt="Licenza GPL-3.0" src="https://img.shields.io/github/license/Ilmazza/ArchLine"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/HakanSeven12/OpenCADStudio/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HakanSeven12/OpenCADStudio"></a>
-  <a href="https://github.com/HakanSeven12/OpenCADStudio/releases"><img alt="Release downloads" src="https://img.shields.io/github/downloads/HakanSeven12/OpenCADStudio/total"></a>
-  <a href="https://github.com/HakanSeven12/OpenCADStudio/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HakanSeven12/OpenCADStudio"></a>
-  <a href="LICENSE"><img alt="GPL-3.0 license" src="https://img.shields.io/github/license/HakanSeven12/OpenCADStudio"></a>
+  <img src="docs/screenshots/workspace-classico.png" alt="Il workspace classico di ArchLine: barre Draw e Modify, barra Layers, palette Properties e riga di comando" width="100%">
 </p>
 
-<p align="center">
-  <a href="https://www.opencadstudio.com"><strong>Launch the web app</strong></a>
-  ·
-  <a href="https://github.com/HakanSeven12/OpenCADStudio/releases/latest"><strong>Download the desktop app</strong></a>
-  ·
-  <a href="https://github.com/HakanSeven12/OpenCADStudio/discussions"><strong>Join the discussion</strong></a>
-</p>
+## Cos'è
 
-<p align="center">
-  <img src="site/workspace.png" alt="Open CAD Studio workspace" width="100%">
-</p>
+ArchLine è un fork di [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) (Rust, interfaccia [iced](https://iced.rs), rendering `wgpu`) pensato per chi disegna ogni giorno in AutoCAD e vuole un'alternativa libera, con gli stessi riferimenti: barre degli strumenti docked, riga di comando, palette, layer sempre a portata di mano.
 
-## Overview
+Il progetto ha due obiettivi:
 
-Open CAD Studio is a cross-platform application for technical drawing, layout work, and solid modeling. It reads and writes DWG and DXF drawings natively, with a shared editing core across the desktop and browser versions.
+1. **Workspace "AutoCAD classico"** — barre Draw e Modify agganciate ai lati, barra dei menu, riga di comando, barra dei layer, pagina iniziale con i file recenti.
+2. **Strato architettonico come plugin** *(da fare)* — locali, abachi, IFC e quantità, con la fonte di ogni dato e il suo stato.
 
-The project is under active development. Keep backups of important production drawings and report reproducible problems through [GitHub Issues](https://github.com/HakanSeven12/OpenCADStudio/issues).
+> **Stato: sviluppo attivo, non ancora per la produzione.** Tieni sempre una copia dei disegni importanti e non sovrascrivere i file originali. Le segnalazioni riproducibili sono benvenute nelle [Issues](https://github.com/Ilmazza/ArchLine/issues).
 
-## Highlights
+## Cosa c'è di diverso da Open CAD Studio
 
-- **Native drawing workflow** — open, edit, recover, and save DWG and DXF files without a conversion service.
-- **Precise 2D drafting** — lines, polylines, curves, splines, hatches, object snaps, tracking, layers, blocks, and external references.
-- **Documentation tools** — text, dimensions, leaders, tolerances, tables, model space, paper space, viewports, and plot styles.
-- **Kernel-backed 3D modeling** — solid primitives, extrusion, revolution, sweep, loft, Boolean operations, and ACIS entity tessellation.
-- **GPU rendering** — accelerated 2D and 3D viewports through `wgpu`, with orthographic and perspective cameras.
-- **Extensible workflows** — native plugins, command scripts, headless conversion, and a line-based JSON automation API.
-
-<p align="center">
-  <img src="site/modeling.png" alt="3D model in Open CAD Studio" width="100%">
-</p>
-
-## File workflows
-
-| Format or workflow | Support |
+| Area | In ArchLine |
 | --- | --- |
-| DWG | Read and write; versioned save targets from R14 through 2018 |
-| DXF | Read and write; versioned save targets from R14 through 2018 |
-| BAK / SV$ | Open drawing backups and autosave files |
-| OBJ | Import polygon meshes |
-| LandXML | Import `CgPoint` survey points |
-| STL | Export 3D mesh data |
-| STEP AP203 | Export 3D mesh data |
-| PDF | Plot layouts and selected geometry on desktop |
-| CSV | Extract entity property data |
-| CTB / STB | Load and edit plot style tables |
+| **Workspace** | Modalità classica di default: barre Draw (sinistra) e Modify (destra), barra Layers, barre dai menu (Dimension, Insert, Inquiry…), barre sganciabili e con elenco di visibilità (tasto destro). Un pulsante per comando; pressione prolungata sui sottomenu per i flyout con le varianti. Il ribbon resta disponibile con `ARCHLINE_WORKSPACE=ribbon`. |
+| **Barra Layers** | Gestione layer, menu layer, i comandi layer del ribbon (compresi `LAYCUR` e `LAYERP`), menu Colore / Tipo linea / Spessore; segue l'oggetto selezionato come in AutoCAD. |
+| **Pagina iniziale** | In stile AutoCAD: barra laterale, file recenti a schede con ordinamento, ricerca e vista griglia/elenco. |
+| **Offline di default** | Nessuna richiesta di rete all'avvio (aggiornamenti, Discussions, video, Patreon). Si riattiva con `ARCHLINE_ONLINE=1`. |
+| **Interfaccia ripulita** | Niente inviti a donazioni, sponsor e social nella schermata principale (`ARCHLINE_PROMO=1` li riporta). |
+| **Marchio** | Nome, logo e logotipo ArchLine. |
+| **Immagini** | `XREF Reload`, la palette e `Reload All` ricaricano anche le immagini. |
+| **Banco di conformità DXF/DWG** | Misura la fedeltà di lettura/scrittura del codec con [ezdxf](https://ezdxf.mozman.at) come oracolo indipendente (vedi sotto). |
 
-## Desktop or web
+I nuclei più specifici del fork sono concentrati, quando possibile, in file separati, per tenere piccoli i conflitti quando si riallinea con upstream: `src/privacy.rs`, `src/workspace.rs`, `src/ui/classic_*.rs`, `src/ui/wordmark.rs`, `tests/conformance/`. Altre modifiche toccano file condivisi con upstream (ad esempio in `src/app/`, `src/scene/`, `src/command.rs`). Le istruzioni per chi lavora sul codice sono in [CLAUDE.md](CLAUDE.md).
 
-Use the [web app](https://www.opencadstudio.com) for immediate access with no installation. Drawings are selected through the browser and saved as local downloads.
+## Verso lo strato architettonico
 
-Use the desktop application for native file associations, file-manager thumbnails, system printing, PDF output, external plugins, command scripts, and headless automation. Release builds are available for Windows, Linux, and Apple Silicon macOS.
+Il plugin architettonico non c'è ancora. L'idea di partenza:
 
-## Install
+- **Locali e abachi** a partire dal disegno, con superfici e perimetri ricavati dalla geometria.
+- **IFC** in lettura e scrittura.
+- **Quantità con fonte e stato**: ogni numero dichiara da dove viene. Un dato deterministico (da IFC o DXF) è tenuto distinto da un dato desunto da raster o PDF, che resta una *bozza da verificare*. Nessun valore viene inventato.
+- Gestione esplicita del tipo di intervento (nuova costruzione, ristrutturazione, manutenzione, restauro), perché cambia le regole del computo.
 
-Download all current packages from the [latest release](https://github.com/HakanSeven12/OpenCADStudio/releases/latest).
+Le specifiche di progetto sono in [docs/superpowers/specs/](docs/superpowers/specs/); l'analisi di cosa manca rispetto ad AutoCAD è in [docs/gap-ocs-vs-autocad.md](docs/gap-ocs-vs-autocad.md).
 
-### Windows
+## Formati supportati
 
-Choose one of these signed x86-64 packages:
+| Formato | Supporto |
+| --- | --- |
+| DWG | Lettura e scrittura; versioni di salvataggio da R14 a 2018 |
+| DXF | Lettura e scrittura; versioni di salvataggio da R14 a 2018 |
+| BAK / SV$ | Apertura di backup e salvataggi automatici |
+| OBJ | Importazione di mesh poligonali |
+| LandXML | Importazione dei punti `CgPoint` |
+| STL | Esportazione mesh 3D |
+| STEP AP203 | Esportazione mesh 3D |
+| PDF | Stampa di layout e geometrie selezionate (desktop) |
+| CSV | Estrazione delle proprietà degli oggetti |
+| CTB / STB | Caricamento e modifica degli stili di stampa |
 
-- `OpenCADStudio-*-windows-x86_64-installer.msi` — recommended installer with Start Menu shortcuts, DWG/DXF file associations, and drawing thumbnails.
-- `OpenCADStudio-*-windows-x86_64-portable.exe` — standalone application; no installation required.
+Dal motore di Open CAD Studio eredita anche disegno 2D di precisione (polilinee, spline, retini, snap, blocchi, riferimenti esterni), quotatura e spazio carta con viewport, modellazione solida 3D (estrusione, rivoluzione, sweep, loft, booleane) e 21 lingue di interfaccia, italiano compreso.
 
-### Linux
+## Installazione
 
-Download the x86-64 AppImage, make it executable, and run it:
+Non ci sono ancora release ufficiali di ArchLine. Le strade possibili sono due.
 
-```bash
-chmod +x OpenCADStudio-*-linux-x86_64.AppImage
-./OpenCADStudio-*-linux-x86_64.AppImage
-```
+### Windows — build della CI
 
-Or install it as a Flatpak from [FlatPark](https://flatpark.org/apps/io.github.HakanSeven12.OpenCadStudio), which installs the official AppImage and follows new releases:
+A ogni push su un branch `claude/**` il workflow [archline-windows.yml](.github/workflows/archline-windows.yml) compila su `windows-latest` e pubblica l'artefatto `ArchLine-windows-N`: **Actions → corsa → Artifacts**. Contiene l'eseguibile e il rapporto del banco di conformità.
 
-```bash
-flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
-flatpak install flatpark io.github.HakanSeven12.OpenCadStudio
-```
+### Dal sorgente
 
-The Flatpak opens and saves drawings through the file chooser. External references and underlays that point at other files need home access:
-
-```bash
-flatpak override --user --filesystem=home io.github.HakanSeven12.OpenCadStudio
-```
-
-### macOS
-
-The published macOS package supports Apple Silicon:
-
-1. Download `OpenCADStudio-*-macos-arm64.dmg`.
-2. Open the image and drag `OpenCADStudio.app` into **Applications**.
-3. If Gatekeeper blocks the first launch, approve the app from **System Settings → Privacy & Security**.
-
-The application is ad-hoc signed but is not currently notarized by Apple.
-
-## Languages
-
-Open CAD Studio can follow the system language or use any of these 21 interface languages:
-
-> Arabic · Brazilian Portuguese · Bulgarian · Czech · Dutch · English · Finnish · French · German · Greek · Hindi · Hungarian · Italian · Japanese · Korean · Polish · Russian · Simplified Chinese · Spanish · Traditional Chinese · Turkish
-
-Change the language from the application settings. The browser version also uses the browser's preferred locale when **System** is selected.
-
-## Build from source
-
-### Desktop
-
-Requirements:
-
-- Git
-- Current stable Rust toolchain
-- Platform graphics and font development libraries
-
-On Ubuntu or Debian, install the native dependencies with:
+Requisiti: Git, toolchain Rust stabile, librerie grafiche e font della piattaforma. Su Ubuntu/Debian:
 
 ```bash
 sudo apt update
@@ -166,99 +90,66 @@ sudo apt install libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev \
   libfreetype6-dev
 ```
 
-Then build and run:
+Poi:
 
 ```bash
-git clone https://github.com/HakanSeven12/OpenCADStudio.git
-cd OpenCADStudio
+git clone https://github.com/Ilmazza/ArchLine.git
+cd ArchLine
 cargo build --release --bin OpenCADStudio
 ```
 
-The resulting binary is written to `target/release/OpenCADStudio` (`OpenCADStudio.exe` on Windows).
+L'eseguibile è `target/release/OpenCADStudio` (`OpenCADStudio.exe` su Windows). Il nome del binario e del package Cargo resta quello di upstream di proposito, per non rompere il merge periodico.
 
-### Web
+> Non rimuovere `RUST_MIN_STACK` da [.cargo/config.toml](.cargo/config.toml) (64 MiB): senza, `rustc` va in stack overflow su Windows in release.
 
-Install the WebAssembly target and build tools once:
+## Variabili d'ambiente
+
+| Variabile | Effetto |
+| --- | --- |
+| `ARCHLINE_ONLINE=1` | Riattiva aggiornamenti, Discussions, video e Patreon |
+| `ARCHLINE_PROMO=1` | Riporta Donate, Sponsors, Reddit, Patreon, OCS Web, Send Feedback |
+| `ARCHLINE_WORKSPACE=ribbon` | Ripristina il ribbon al posto del workspace classico |
+
+## Test
 
 ```bash
-rustup target add wasm32-unknown-unknown
-cargo install trunk wasm-bindgen-cli
+cargo check --locked
+cargo test --locked --lib classic_toolbar     # altri filtri: start, i18n
 ```
 
-Start the development server:
+### Banco di conformità DXF/DWG
+
+Misura `OpenCADStudio --export` su 9 casi sintetici × R2000/R2018 × DXF→DXF e DXF→DWG→DXF, confrontando il risultato con [ezdxf](https://ezdxf.mozman.at), che fa da oracolo indipendente. Le divergenze note sono registrate (con nota) in `tests/conformance/expected.json`.
 
 ```bash
-trunk serve
+python -m pip install ezdxf
+python -m unittest discover -s tests/conformance -p "test_*.py"
+python tests/conformance/run.py target/release/OpenCADStudio.exe
 ```
 
-## Automation
+Limiti dichiarati: ezdxf non legge DWG, quindi il DWG è verificato solo in modo indiretto; i casi sono disegni sintetici; il caso `colors` viene eseguito ma nessun controllo ne verifica ancora colori e layer. Uso e dettagli in [tests/conformance/README.md](tests/conformance/README.md).
 
-The desktop binary supports one-shot conversion, a persistent headless server, and a client-neutral MCP endpoint for AI applications:
+## Automazione
+
+Il binario desktop eredita da upstream l'esportazione da riga di comando, un server headless e un endpoint MCP:
 
 ```bash
 OpenCADStudio --export input.dwg output.dxf
 OpenCADStudio --export input-r12.dxf output.dwg --target-version R14
 OpenCADStudio --serve
-OpenCADStudio --serve --port 4242
 OpenCADStudio --mcp
 ```
 
-The automation server exchanges one JSON object per line over standard input/output or a local TCP socket. The self-contained MCP endpoint exposes the live desktop editor through the same tools to every compatible client. Its `audit` and `save_verified` operations check an explicit DWG/DXF target version, lossy records, raw DXF handle references, reopen the output, compare its semantic manifest, and return a SHA-256 hash. To connect a client, configure it to launch `OpenCADStudio --mcp`. See the [MCP control guide](docs/automation/README.md).
+Dettagli nella [guida all'automazione](docs/automation/README.md). I plugin nativi girano in processi separati: vedi [architettura dei plugin](docs/plugin-architecture.md).
 
-## Plugins
+## Sviluppo e contributi
 
-Desktop plugins run in separate processes and communicate with the host through the versioned plugin API. The browser build does not load native plugins.
+- Il lavoro quotidiano avviene sul branch `lavoro`; il lavoro assistito va su branch `claude/…` e si unisce con pull request.
+- `main` è riservato al riallineamento con upstream (`HakanSeven12/OpenCADStudio`) e non ospita il lavoro del fork; non si tocca senza conferma.
+- Segnalazioni e proposte: [Issues](https://github.com/Ilmazza/ArchLine/issues). Vulnerabilità: [SECURITY.md](SECURITY.md).
 
-- [Plugin architecture](docs/plugin-architecture.md)
-- [Plugin template](docs/plugin-template/README.md)
-- [Plugin registry](plugins/README.md)
+## Crediti e licenza
 
-## Project documentation
+ArchLine nasce da [Open CAD Studio](https://github.com/HakanSeven12/OpenCADStudio) di Hakan Seven e dei suoi collaboratori, a cui va il merito del motore, del codec DWG/DXF e della maggior parte delle funzioni. Se ti serve il progetto originale, con le sue release multipiattaforma e la versione web, vai lì.
 
-- [Automation API](docs/automation/README.md)
-- [Plugin architecture](docs/plugin-architecture.md)
-- [Tessellation pipeline](docs/tessellation.md)
-- [Security policy](SECURITY.md)
-
-## Contributing
-
-Bug reports, focused pull requests, translations, documentation improvements, and plugin contributions are welcome.
-
-- Search existing [issues](https://github.com/HakanSeven12/OpenCADStudio/issues) before opening a new report.
-- Use [Discussions](https://github.com/HakanSeven12/OpenCADStudio/discussions) for questions and ideas.
-- Report vulnerabilities privately by following the [security policy](SECURITY.md).
-
-Application translations live in `locales/*/opencadstudio.ftl`; source labels map through
-`src/locale_catalog.rs`. After editing translations, run `python3 scripts/export-locales.py`
-to refresh web and desktop packaging labels. Validate with `python3 scripts/test_site.py`
-and `cargo test --lib i18n::tests`.
-
-## Project growth
-
-### Stars
-
-<a href="https://github.com/HakanSeven12/OpenCADStudio/stargazers">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://www.opencadstudio.com/star-history-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://www.opencadstudio.com/star-history-light.svg">
-    <img alt="Open CAD Studio star history" src="https://www.opencadstudio.com/star-history-light.svg">
-  </picture>
-</a>
-
-### Release downloads
-
-<a href="https://github.com/HakanSeven12/OpenCADStudio/releases">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://www.opencadstudio.com/download-history-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://www.opencadstudio.com/download-history-light.svg">
-    <img alt="Open CAD Studio release download history" src="https://www.opencadstudio.com/download-history-light.svg">
-  </picture>
-</a>
-
-## Support the project
-
-If Open CAD Studio helps your work, support continued development through [GitHub Sponsors](https://github.com/sponsors/HakanSeven12) or [Patreon](https://www.patreon.com/HakanSeven12).
-
-## License
-
-Open CAD Studio is distributed under the [GNU General Public License v3.0](LICENSE).
+L'applicazione è distribuita con licenza [GNU GPL v3.0](LICENSE); il codec DWG/DXF è sotto licenza MPL-2.0. "ArchLine" è il nome di lavoro di questo fork. Esiste già un prodotto con un nome molto vicino, [ARCHLine.XP](https://www.archlinexp.com/) (CAD/BIM di CADLINE), la cui documentazione lo dichiara marchio registrato: il nome pubblico è da verificare prima di una diffusione più ampia.

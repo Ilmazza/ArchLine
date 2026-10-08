@@ -27,6 +27,7 @@ pub mod style;
 pub mod text_util;
 pub mod wide_menu;
 pub mod window;
+pub mod wordmark;
 pub mod wrap_bar;
 
 pub use command_line::CommandLine;

@@ -5,12 +5,6 @@ use crate::ui::style::form::dialog_button;
 use iced::widget::{column, container, row, svg, text, Space};
 use iced::{Background, Border, Element, Fill, Length, Shrink, Theme};
 
-fn primary_style(theme: &Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style {
-        color: Some(theme.palette().primary.base.color),
-    }
-}
-
 fn surface_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(
@@ -106,7 +100,7 @@ pub fn view_window(
         row![
             logo,
             column![
-                text(crate::privacy::APP_NAME).size(28).style(primary_style),
+                crate::ui::wordmark::wordmark(34.0),
                 text(t!("CAD application for Architecture & Engineering"))
                     .size(11)
                     .style(muted_style),

@@ -310,11 +310,7 @@ fn sidebar<'a>(d: &StartData<'a>) -> Element<'a, Message> {
     }
     container(
         column![
-            text(crate::privacy::APP_NAME)
-                .size(32)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().background.base.text),
-                }),
+            crate::ui::wordmark::wordmark(38.0),
             Space::new().height(24),
             wide_button(crate::tr!("start", "open-file"), Message::OpenFile),
             Space::new().height(10),
@@ -837,11 +833,10 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_has_the_title_and_open_and_new_publish_the_usual_messages() {
+    fn open_and_new_in_the_sidebar_publish_the_usual_messages() {
         use crate::app::Message;
         let f = Fixture::new(&["a.dwg"]);
         let mut ui = iced_test::simulator(f.page());
-        assert!(ui.find(crate::privacy::APP_NAME).is_ok());
         ui.click(crate::tr!("start", "open-file").as_str()).expect("an Open button");
         ui.click(crate::tr!("start", "new-drawing").as_str()).expect("a New button");
         let msgs: Vec<Message> = ui.into_messages().collect();
