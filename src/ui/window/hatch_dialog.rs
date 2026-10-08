@@ -112,6 +112,28 @@ impl State {
     pub fn can_ok(&self) -> bool {
         self.fields_valid() && !self.regions.is_empty()
     }
+
+    /// Message shown under Angle while it is not a number.
+    pub fn angle_message(&self) -> Option<String> {
+        self.settings
+            .angle_error()
+            .then(|| t!("Not a valid number").into_owned())
+    }
+
+    /// Message shown under Scale while it is not a number above zero.
+    pub fn scale_message(&self) -> Option<String> {
+        self.settings
+            .scale_error()
+            .then(|| t!("Not a valid number").into_owned())
+    }
+
+    /// Message shown under the pattern list when the remembered pattern is no
+    /// longer in the catalog (Add, Preview and OK are off until another is chosen).
+    pub fn pattern_message(&self) -> Option<String> {
+        crate::scene::model::hatch_patterns::find(&self.settings.pattern)
+            .is_none()
+            .then(|| t!("Pattern not found: choose another").into_owned())
+    }
 }
 
 // ── View ───────────────────────────────────────────────────────────────────
@@ -162,9 +184,18 @@ fn labelled<'a>(label: String, control: Element<'a, Message>) -> Element<'a, Mes
         .into()
 }
 
+/// Border of a field holding an unusable value.
+fn invalid_field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = crate::ui::style::form::field_style(theme, status);
+    style.border.color = theme.palette().danger.base.color;
+    style
+}
+
+/// A text field; with a `message` it gets the error border and the message
+/// sits on its own line below it.
 fn field<'a>(
     value: &str,
-    invalid: bool,
+    message: Option<String>,
     ctor: fn(String) -> Field,
 ) -> Element<'a, Message> {
     let input = text_input("", value)
@@ -172,13 +203,14 @@ fn field<'a>(
         .size(12)
         .padding([3, 6])
         .width(Length::Fixed(90.0));
-    if invalid {
-        row![input, text(t!("Not a valid number")).size(10).style(danger)]
-            .spacing(6)
-            .align_y(iced::Center)
-            .into()
-    } else {
-        input.into()
+    match message {
+        Some(message) => column![
+            input.style(invalid_field_style),
+            text(message).size(10).style(danger)
+        ]
+        .spacing(2)
+        .into(),
+        None => input.into(),
     }
 }
 
@@ -224,11 +256,25 @@ fn type_and_pattern<'a>(state: &State) -> Element<'a, Message> {
     .width(Fill)
     .height(Length::Fixed(44.0));
 
+    let pattern_note: Element<'a, Message> = match state.pattern_message() {
+        Some(message) => text(message).size(10).style(danger).into(),
+        None => Space::new().into(),
+    };
     group(
         t!("Type and pattern").into_owned(),
         column![
             labelled(t!("Type").into_owned(), grey(t!("Predefined").into_owned())),
-            labelled(t!("Pattern").into_owned(), picker.into()),
+            labelled(
+                t!("Pattern").into_owned(),
+                row![
+                    picker,
+                    // Pattern palette: not available yet, shown inert.
+                    button(text("...").size(12)).padding([3, 8]).style(button::secondary),
+                ]
+                .spacing(6)
+                .into()
+            ),
+            pattern_note,
             labelled(t!("Color").into_owned(), grey(t!("Use Current").into_owned())),
             labelled(t!("Swatch").into_owned(), swatch.into()),
             labelled(
@@ -247,11 +293,11 @@ fn angle_and_scale<'a>(state: &State) -> Element<'a, Message> {
         column![
             labelled(
                 t!("Angle").into_owned(),
-                field(&state.settings.angle, state.settings.angle_error(), Field::Angle)
+                field(&state.settings.angle, state.angle_message(), Field::Angle)
             ),
             labelled(
                 t!("Scale").into_owned(),
-                field(&state.settings.scale, state.settings.scale_error(), Field::Scale)
+                field(&state.settings.scale, state.scale_message(), Field::Scale)
             ),
             grey_check(t!("Double").into_owned()),
             grey_check(t!("Relative to paper space").into_owned()),
@@ -288,6 +334,7 @@ fn origin_group<'a>(state: &State) -> Element<'a, Message> {
             ),
             set_origin,
             grey_check(t!("Default to boundary extents").into_owned()),
+            grey(t!("Bottom left").into_owned()),
             grey_check(t!("Store as default origin").into_owned()),
         ]
         .spacing(6)
@@ -542,6 +589,26 @@ mod tests {
         assert!(!state.settings.island_detection);
         assert_eq!(state.settings.island_style, HatchStyleType::Outer);
         assert_eq!(state.settings.origin_mode, OriginMode::Specified);
+    }
+
+    #[test]
+    fn field_messages_follow_the_settings() {
+        let mut state = state();
+        assert!(state.angle_message().is_none());
+        assert!(state.scale_message().is_none());
+        assert!(state.pattern_message().is_none());
+        state.apply(Field::Angle("abc".into()));
+        state.apply(Field::Scale("0".into()));
+        state.apply(Field::Pattern("NO_SUCH_PATTERN".into()));
+        assert!(state.angle_message().is_some());
+        assert!(state.scale_message().is_some());
+        assert!(state.pattern_message().is_some());
+        state.apply(Field::Angle("-12,5".into()));
+        state.apply(Field::Scale("0,5".into()));
+        state.apply(Field::Pattern("ANSI31".into()));
+        assert!(state.angle_message().is_none());
+        assert!(state.scale_message().is_none());
+        assert!(state.pattern_message().is_none());
     }
 
     #[test]
