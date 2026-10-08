@@ -14,7 +14,7 @@ python -m unittest discover -s tests/conformance -p "test_*.py"   # test del ban
 python tests/conformance/run.py target\release\OpenCADStudio.exe  # misura DXF/DWG con oracolo ezdxf (~35 s)
 ```
 - `.cargo/config.toml`: `RUST_MIN_STACK` è a 64 MiB (upstream 8 MiB). Non rimuoverlo: senza, `rustc` è andato in stack overflow su Windows in release.
-- CI: `.github/workflows/archline-windows.yml` compila su `windows-latest` a ogni push su `claude/**` e pubblica l'artefatto `ArchLine-windows-N` (Actions → corsa → Artifacts). `Tests` è il `ci.yml` di upstream. Lo stesso workflow esegue il banco di conformità (passo non bloccante, `continue-on-error`) e mette `conformance-report.md` nell'artefatto.
+- CI: `.github/workflows/archline-windows.yml` compila su `windows-latest` a ogni push su `claude/**` e su `lavoro` e pubblica l'artefatto `ArchLine-windows-N` (Actions → corsa → Artifacts). `Tests` è il `ci.yml` di upstream. Lo stesso workflow esegue il banco di conformità (passo non bloccante, `continue-on-error`) e mette `conformance-report.md` nell'artefatto.
 - Il container cloud non ha GPU: la verifica visiva si fa solo su Windows, con screenshot dell'utente.
 
 ## Branch e flusso

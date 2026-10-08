@@ -4,7 +4,7 @@ name: ArchLine Windows build
 
 on:
   push:
-    branches: ["claude/**"]
+    branches: ["claude/**", "lavoro"]
   workflow_dispatch:
 
 concurrency:

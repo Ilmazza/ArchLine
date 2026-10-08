@@ -77,7 +77,7 @@ Non ci sono ancora release ufficiali di ArchLine. Le strade possibili sono due.
 
 ### Windows — build della CI
 
-A ogni push su un branch `claude/**` il workflow [archline-windows.yml](.github/workflows/archline-windows.yml) compila su `windows-latest` e pubblica l'artefatto `ArchLine-windows-N`: **Actions → corsa → Artifacts**. Contiene l'eseguibile e il rapporto del banco di conformità.
+A ogni push su `lavoro` o su un branch `claude/**` il workflow [archline-windows.yml](.github/workflows/archline-windows.yml) compila su `windows-latest` e pubblica l'artefatto `ArchLine-windows-N`: **Actions → corsa → Artifacts**. Contiene l'eseguibile e il rapporto del banco di conformità.
 
 ### Dal sorgente
 
