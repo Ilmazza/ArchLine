@@ -6,6 +6,10 @@
 //! tested with plain values.
 
 use codec::entities::HatchStyleType;
+use codec::types::Color as AcadColor;
+
+use crate::entities::hatch_fill::{GradientSpec, DEFAULT_GRADIENT_COLOR1, DEFAULT_GRADIENT_COLOR2};
+use crate::scene::model::hatch_model::GradientKind;
 
 // ── Regions ────────────────────────────────────────────────────────────────
 
@@ -124,10 +128,92 @@ pub enum OriginMode {
     Specified,
 }
 
+/// The two ways to fill: the window's tabs. Pattern and solid share the Hatch
+/// tab (SOLID is a catalog entry); the gradient is the other tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillTab {
+    Hatch,
+    Gradient,
+}
+
+/// Colour of a pattern or solid hatch. `UseCurrent` follows the drawing's
+/// current colour at the moment the hatch is made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HatchColor {
+    UseCurrent,
+    Color(AcadColor),
+}
+
+/// What the Gradient tab edits. Angle stays as typed text, like the pattern's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GradientSettings {
+    /// Index into `GradientKind::CHOICES`.
+    pub shape: usize,
+    pub one_color: bool,
+    pub color1: AcadColor,
+    pub color2: AcadColor,
+    /// 0 = black end, 1 = white end; only with `one_color`.
+    pub tint: f32,
+    pub centered: bool,
+    pub angle: String,
+}
+
+impl Default for GradientSettings {
+    fn default() -> Self {
+        Self {
+            shape: 0,
+            one_color: false,
+            color1: DEFAULT_GRADIENT_COLOR1,
+            color2: DEFAULT_GRADIENT_COLOR2,
+            tint: 1.0,
+            centered: true,
+            angle: "0".into(),
+        }
+    }
+}
+
+impl GradientSettings {
+    pub fn angle_error(&self) -> bool {
+        parse_angle_deg(&self.angle).is_none()
+    }
+
+    pub fn kind_invert(&self) -> (GradientKind, bool) {
+        GradientKind::CHOICES[self.shape.min(GradientKind::CHOICES.len() - 1)]
+    }
+
+    /// `None` while the angle is unusable. The tint comes from a slider as an
+    /// `f32`: a non-finite value never reaches the spec (it falls back to the
+    /// white end) and a finite one is held to 0..=1.
+    pub fn spec(&self) -> Option<GradientSpec> {
+        let angle = parse_angle_deg(&self.angle)?;
+        let (kind, invert) = self.kind_invert();
+        let tint = if self.tint.is_finite() {
+            self.tint.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Some(GradientSpec {
+            kind,
+            invert,
+            one_color: self.one_color,
+            color1: self.color1,
+            color2: self.color2,
+            tint: tint as f64,
+            angle_rad: (angle as f64).to_radians(),
+            centered: self.centered,
+        })
+    }
+}
+
 /// What the dialog edits. Angle and scale stay as typed text so a half-typed
 /// number does not snap back while it is being typed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HatchSettings {
+    /// The active tab; decides which fields `resolve` checks.
+    pub tab: FillTab,
+    /// Colour of a pattern or solid hatch (the Hatch tab).
+    pub color: HatchColor,
+    pub gradient: GradientSettings,
     /// Catalog name of the pattern.
     pub pattern: String,
     /// Degrees, as typed.
@@ -146,6 +232,9 @@ pub struct HatchSettings {
 impl Default for HatchSettings {
     fn default() -> Self {
         Self {
+            tab: FillTab::Hatch,
+            color: HatchColor::UseCurrent,
+            gradient: GradientSettings::default(),
             pattern: "ANSI31".into(),
             angle: "0".into(),
             scale: "1".into(),
@@ -159,16 +248,22 @@ impl Default for HatchSettings {
     }
 }
 
-/// Settings once every field is known to be usable.
+/// What the active tab fills with, once its fields are known to be usable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvedFill {
+    Hatch { pattern: String, angle_rad: f32, scale: f32, color: HatchColor },
+    Gradient(GradientSpec),
+}
+
+/// Settings once every field of the active tab is known to be usable. Pure
+/// data: the current colour, layers and transparency are the app's to resolve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedSettings {
-    pub pattern: String,
-    pub angle_rad: f32,
-    pub scale: f32,
     pub associative: bool,
     pub separate: bool,
     pub retain: bool,
     pub island_style: HatchStyleType,
+    pub fill: ResolvedFill,
 }
 
 /// A finite number of degrees; comma or dot as the decimal mark.
@@ -192,17 +287,32 @@ impl HatchSettings {
         parse_scale(&self.scale).is_none()
     }
 
-    /// `None` while any field is unusable or the pattern is not in the catalog.
+    pub fn gradient_angle_error(&self) -> bool {
+        self.gradient.angle_error()
+    }
+
+    /// `None` while a field of the active tab is unusable (on the Hatch tab,
+    /// also when the pattern is not in the catalog). The other tab's fields
+    /// never block.
     pub fn resolve(&self) -> Option<ResolvedSettings> {
-        crate::scene::model::hatch_patterns::find(&self.pattern)?;
+        let fill = match self.tab {
+            FillTab::Hatch => {
+                crate::scene::model::hatch_patterns::find(&self.pattern)?;
+                ResolvedFill::Hatch {
+                    pattern: self.pattern.clone(),
+                    angle_rad: parse_angle_deg(&self.angle)?.to_radians(),
+                    scale: parse_scale(&self.scale)?,
+                    color: self.color,
+                }
+            }
+            FillTab::Gradient => ResolvedFill::Gradient(self.gradient.spec()?),
+        };
         Some(ResolvedSettings {
-            pattern: self.pattern.clone(),
-            angle_rad: parse_angle_deg(&self.angle)?.to_radians(),
-            scale: parse_scale(&self.scale)?,
             associative: self.associative,
             separate: self.separate,
             retain: self.retain,
             island_style: self.effective_island_style(),
+            fill,
         })
     }
 
@@ -234,6 +344,7 @@ impl HatchSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codec::types::Color as AcadColor;
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> HatchRing {
         vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
@@ -363,11 +474,118 @@ mod tests {
     #[test]
     fn default_settings_resolve() {
         let resolved = HatchSettings::default().resolve().expect("defaults are valid");
-        assert_eq!(resolved.pattern, "ANSI31");
-        assert_eq!(resolved.angle_rad, 0.0);
-        assert_eq!(resolved.scale, 1.0);
+        let ResolvedFill::Hatch { pattern, angle_rad, scale, color } = &resolved.fill else {
+            panic!("the Hatch tab resolves to a hatch fill")
+        };
+        assert_eq!(pattern, "ANSI31");
+        assert_eq!(*angle_rad, 0.0);
+        assert_eq!(*scale, 1.0);
+        assert_eq!(*color, HatchColor::UseCurrent);
         assert!(resolved.associative && !resolved.separate && !resolved.retain);
         assert_eq!(resolved.island_style, HatchStyleType::Normal);
+    }
+
+    #[test]
+    fn a_new_settings_value_starts_on_the_hatch_tab_with_the_current_colour() {
+        let s = HatchSettings::default();
+        assert_eq!(s.tab, FillTab::Hatch);
+        assert_eq!(s.color, HatchColor::UseCurrent);
+        assert_eq!(s.gradient, GradientSettings::default());
+        let g = GradientSettings::default();
+        assert_eq!((g.shape, g.one_color, g.centered), (0, false, true));
+        assert_eq!(g.angle, "0");
+        assert_eq!(g.tint, 1.0);
+        assert_eq!(g.color1, crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR1);
+        assert_eq!(g.color2, crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR2);
+    }
+
+    #[test]
+    fn resolve_follows_the_tab() {
+        // A pattern that left the catalog blocks the Hatch tab only.
+        let mut s = HatchSettings {
+            pattern: "NO_SUCH_PATTERN".into(),
+            ..HatchSettings::default()
+        };
+        assert!(s.resolve().is_none());
+        s.tab = FillTab::Gradient;
+        assert!(matches!(s.resolve().unwrap().fill, ResolvedFill::Gradient(_)));
+        // A bad gradient angle blocks the Gradient tab and not the Hatch tab.
+        s.gradient.angle = "x".into();
+        assert!(s.resolve().is_none());
+        assert!(s.gradient_angle_error());
+        s.tab = FillTab::Hatch;
+        s.pattern = "ANSI31".into();
+        assert!(s.resolve().is_some());
+        // A bad pattern angle does not block the Gradient tab.
+        s.tab = FillTab::Gradient;
+        s.gradient.angle = "15".into();
+        s.angle = "x".into();
+        assert!(s.resolve().is_some());
+    }
+
+    #[test]
+    fn the_hatch_tab_resolves_to_pattern_angle_scale_and_colour() {
+        let s = HatchSettings {
+            angle: "30".into(),
+            scale: "2".into(),
+            color: HatchColor::Color(AcadColor::Index(1)),
+            ..HatchSettings::default()
+        };
+        match s.resolve().unwrap().fill {
+            ResolvedFill::Hatch { pattern, angle_rad, scale, color } => {
+                assert_eq!(pattern, "ANSI31");
+                assert!((angle_rad - 30f32.to_radians()).abs() < 1e-6);
+                assert_eq!(scale, 2.0);
+                assert_eq!(color, HatchColor::Color(AcadColor::Index(1)));
+            }
+            other => panic!("expected the hatch fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_gradient_tab_resolves_to_a_full_spec() {
+        use crate::scene::model::hatch_model::GradientKind;
+        let mut s = HatchSettings::default();
+        s.tab = FillTab::Gradient;
+        s.gradient.shape = 2; // CHOICES[2] = inverted cylindrical
+        s.gradient.one_color = true;
+        s.gradient.tint = 0.4;
+        s.gradient.centered = false;
+        s.gradient.angle = "90".into();
+        s.gradient.color1 = AcadColor::Index(5);
+        s.gradient.color2 = AcadColor::Index(6);
+        let ResolvedFill::Gradient(spec) = s.resolve().unwrap().fill else {
+            panic!("a gradient")
+        };
+        assert_eq!((spec.kind, spec.invert), (GradientKind::Cylinder, true));
+        assert!(spec.one_color && !spec.centered);
+        assert!((spec.tint - 0.4).abs() < 1e-6);
+        assert!((spec.angle_rad - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        assert_eq!((spec.color1, spec.color2), (AcadColor::Index(5), AcadColor::Index(6)));
+    }
+
+    #[test]
+    fn an_out_of_range_shape_is_held_to_the_last_choice() {
+        let g = GradientSettings { shape: 99, ..GradientSettings::default() };
+        assert_eq!(
+            g.kind_invert(),
+            *crate::scene::model::hatch_model::GradientKind::CHOICES.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_tint_that_reaches_the_spec_is_always_finite_and_in_range() {
+        for (tint, expected) in [
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (f32::NEG_INFINITY, 1.0),
+            (-3.0, 0.0),
+            (7.0, 1.0),
+            (0.25, 0.25),
+        ] {
+            let g = GradientSettings { tint, ..GradientSettings::default() };
+            assert_eq!(g.spec().unwrap().tint, expected, "tint {tint}");
+        }
     }
 
     #[test]

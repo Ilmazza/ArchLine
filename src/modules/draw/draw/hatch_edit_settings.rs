@@ -7,7 +7,7 @@
 use codec::entities::{Hatch, HatchStyleType};
 use codec::Handle;
 
-use super::hatch_settings::{parse_angle_deg, parse_scale, HatchSettings, OriginMode};
+use super::hatch_settings::{parse_angle_deg, parse_scale, HatchColor, HatchSettings, OriginMode};
 use crate::command::{CmdResult, HatchEditOperation};
 
 /// Whether the window can edit `hatch`: pattern fills only. Solid and gradient
@@ -84,6 +84,8 @@ impl EditTarget {
             .map(|entry| entry.name.clone())
             .unwrap_or_else(|| hatch.pattern.name.clone());
         let initial = HatchSettings {
+            // An existing hatch has a colour of its own, never "use current".
+            color: HatchColor::Color(hatch.common.color),
             pattern,
             angle: format_number(hatch.pattern_angle.to_degrees()),
             scale: format_number(hatch.pattern_scale),
@@ -93,6 +95,7 @@ impl EditTarget {
             island_detection: hatch.style != HatchStyleType::Ignore,
             island_style: hatch.style,
             origin_mode: OriginMode::Current,
+            ..HatchSettings::default()
         };
         Self {
             handle,

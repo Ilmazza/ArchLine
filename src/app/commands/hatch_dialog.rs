@@ -2552,6 +2552,7 @@ mod tests {
             island_detection: false,
             island_style: HatchStyleType::Ignore,
             origin_mode: OriginMode::Specified,
+            ..HatchSettings::default()
         };
         let remembered = app.hatch_last.clone();
         let _ = app.hatch_dialog_open_edit(hatch);

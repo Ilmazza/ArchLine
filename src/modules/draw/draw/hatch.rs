@@ -11,7 +11,7 @@ use kernel::geom2d::{
 use glam::DVec3;
 use crate::t;
 use crate::modules::draw::draw::hatch_settings::{
-    add_region, HatchRegion, RegionOrigin, ResolvedSettings,
+    add_region, HatchRegion, RegionOrigin, ResolvedFill, ResolvedSettings,
 };
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -291,6 +291,9 @@ pub struct HatchCommand {
     /// The HATCH dialog's collector: Enter hands the regions back instead of
     /// committing a hatch, and the settings keywords belong to the dialog.
     collect_only: bool,
+    /// The dialog's Gradient tab; `None` for a pattern or solid hatch. Set by
+    /// `with_settings`.
+    gradient: Option<crate::entities::hatch_fill::GradientSpec>,
 }
 
 impl HatchCommand {
@@ -340,6 +343,7 @@ impl HatchCommand {
             inherited,
             plane,
             collect_only: false,
+            gradient: None,
         };
         command.set_object_selection(selected_objects);
         command
@@ -350,10 +354,21 @@ impl HatchCommand {
     /// Apply the dialog's settings as the overrides the command line sets with
     /// `P`, `A`, `L`, `N`, `D`, `B` and `Y`.
     pub fn with_settings(mut self, settings: &ResolvedSettings) -> Self {
-        let entry = crate::scene::model::hatch_patterns::find(&settings.pattern);
-        self.pattern_override = entry.map(|entry| (entry.name.clone(), entry.gpu.clone()));
-        self.angle_override = Some(settings.angle_rad);
-        self.scale_override = Some(settings.scale);
+        match &settings.fill {
+            ResolvedFill::Hatch { pattern, angle_rad, scale, .. } => {
+                let entry = crate::scene::model::hatch_patterns::find(pattern);
+                self.pattern_override = entry.map(|entry| (entry.name.clone(), entry.gpu.clone()));
+                self.angle_override = Some(*angle_rad);
+                self.scale_override = Some(*scale);
+                self.gradient = None;
+            }
+            ResolvedFill::Gradient(spec) => {
+                self.pattern_override = None;
+                self.angle_override = None;
+                self.scale_override = None;
+                self.gradient = Some(spec.clone());
+            }
+        }
         self.associative = settings.associative;
         self.retain_boundaries = settings.retain;
         self.separate_hatches = settings.separate && !settings.retain;
@@ -1904,7 +1919,7 @@ mod tests {
     // ── HATCH dialog support ───────────────────────────────────────────────
 
     use crate::modules::draw::draw::hatch_settings::{
-        HatchRegion, HatchSettings, RegionOrigin,
+        FillTab, HatchRegion, HatchSettings, RegionOrigin,
     };
 
     fn sources_for(
@@ -1943,6 +1958,40 @@ mod tests {
             .map(|entry| entry.name.clone())
             .find(|name| !name.eq_ignore_ascii_case("ANSI31"))
             .expect("the catalog has more than one pattern")
+    }
+
+    #[test]
+    fn with_settings_follows_the_tab_and_never_mixes_the_two_fills() {
+        let command = || {
+            HatchCommand::new(Vec::new(), Default::default(), Vec::new(), None, WorkingPlane::default())
+        };
+        let mut gradient_settings = HatchSettings {
+            tab: FillTab::Gradient,
+            ..HatchSettings::default()
+        };
+        gradient_settings.gradient.shape = 3;
+        gradient_settings.gradient.angle = "90".into();
+        let gradient_resolved = gradient_settings.resolve().unwrap();
+        let hatch_resolved = HatchSettings::default().resolve().unwrap();
+
+        let by_gradient = command().with_settings(&gradient_resolved);
+        let spec = by_gradient.gradient.as_ref().expect("the gradient is kept");
+        assert_eq!(spec, &gradient_settings.gradient.spec().unwrap());
+        assert!(by_gradient.pattern_override.is_none());
+        assert!(by_gradient.angle_override.is_none() && by_gradient.scale_override.is_none());
+
+        let by_pattern = command().with_settings(&hatch_resolved);
+        assert!(by_pattern.gradient.is_none());
+        assert_eq!(by_pattern.pattern_override.as_ref().map(|(n, _)| n.as_str()), Some("ANSI31"));
+        assert_eq!(by_pattern.angle_override, Some(0.0));
+        assert_eq!(by_pattern.scale_override, Some(1.0));
+
+        // Going back to a pattern clears the gradient, and the other way round.
+        let back = by_gradient.with_settings(&hatch_resolved);
+        assert!(back.gradient.is_none() && back.pattern_override.is_some());
+        let again = back.with_settings(&gradient_resolved);
+        assert!(again.gradient.is_some() && again.pattern_override.is_none());
+        assert!(again.angle_override.is_none() && again.scale_override.is_none());
     }
 
     #[test]

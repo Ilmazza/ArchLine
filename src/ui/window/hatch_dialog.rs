@@ -14,8 +14,9 @@ use crate::app::Message;
 use crate::command::WorkingPlane;
 use crate::modules::draw::draw::hatch_edit_settings::EditTarget;
 use crate::modules::draw::draw::hatch_settings::{
-    HatchRegion, HatchSettings, OriginMode, RegionOrigin,
+    FillTab, HatchColor, HatchRegion, HatchSettings, OriginMode, RegionOrigin,
 };
+use crate::scene::model::hatch_model::GradientKind;
 use crate::t;
 use crate::ui::style::form::{dialog_button_styled_opt, form_radio};
 
@@ -36,9 +37,43 @@ pub enum AddKind {
     Objects,
 }
 
+/// Which colour control: the fill colour of a pattern or solid, or one of the
+/// gradient's two colours. Tells "Select Color" where its answer goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HatchColorSlot {
+    Fill,
+    Gradient1,
+    Gradient2,
+}
+
+impl HatchColorSlot {
+    /// The field that sets this slot to `color`.
+    pub fn field(self, color: codec::types::Color) -> Field {
+        match self {
+            Self::Fill => Field::Color(HatchColor::Color(color)),
+            Self::Gradient1 => Field::GradientColor1(color),
+            Self::Gradient2 => Field::GradientColor2(color),
+        }
+    }
+}
+
 /// One field of the dialog changed.
 #[derive(Clone, Debug)]
 pub enum Field {
+    Tab(FillTab),
+    Color(HatchColor),
+    GradientShape(usize),
+    GradientOneColor(bool),
+    GradientColor1(codec::types::Color),
+    GradientColor2(codec::types::Color),
+    GradientTint(f32),
+    GradientCentered(bool),
+    GradientAngle(String),
+    /// Opens (`Some`) or closes (`None`) a colour list; view state only.
+    ColorList(Option<HatchColorSlot>),
+    /// "Select Color..." was chosen in a list. Opening the colour window is the
+    /// app's job; here it only closes the list.
+    SelectColor(HatchColorSlot),
     Pattern(String),
     Angle(String),
     Scale(String),
@@ -71,6 +106,9 @@ pub struct State {
     pub palette: Option<super::hatch_palette::Palette>,
     /// "Hatch Edit": the hatch the window edits. `None` while HATCH creates one.
     pub edit: Option<EditTarget>,
+    /// The colour list that is open, if any. View state: never part of the
+    /// settings and never remembered.
+    pub color_list: Option<HatchColorSlot>,
 }
 
 impl State {
@@ -94,6 +132,7 @@ impl State {
             flow: Flow::None,
             palette: None,
             edit: None,
+            color_list: None,
         }
     }
 
@@ -118,10 +157,41 @@ impl State {
                 Field::Separate(_) | Field::Retain(_) => return,
                 // A hatch can be disassociated here, never associated.
                 Field::Associative(_) if !edit.initial.associative => return,
+                // An existing hatch always has a colour of its own.
+                Field::Color(HatchColor::UseCurrent) => return,
                 _ => {}
             }
         }
         match field {
+            Field::Tab(tab) => self.settings.tab = tab,
+            Field::Color(color) => {
+                self.settings.color = color;
+                self.color_list = None;
+            }
+            Field::GradientShape(index) => {
+                self.settings.gradient.shape = index.min(GradientKind::CHOICES.len() - 1)
+            }
+            Field::GradientOneColor(on) => self.settings.gradient.one_color = on,
+            Field::GradientColor1(color) => {
+                self.settings.gradient.color1 = color;
+                self.color_list = None;
+            }
+            Field::GradientColor2(color) => {
+                self.settings.gradient.color2 = color;
+                self.color_list = None;
+            }
+            // A tint that is not a number is refused: the previous one stays.
+            Field::GradientTint(tint) => {
+                if tint.is_finite() {
+                    self.settings.gradient.tint = tint.clamp(0.0, 1.0);
+                }
+            }
+            Field::GradientCentered(on) => self.settings.gradient.centered = on,
+            Field::GradientAngle(text) => self.settings.gradient.angle = text,
+            Field::ColorList(slot) => self.color_list = slot,
+            // Opening "Select Color" is the app's job (it needs the colour
+            // window); the state only closes the list.
+            Field::SelectColor(_) => self.color_list = None,
             Field::Pattern(name) => self.settings.pattern = name,
             Field::Angle(text) => self.settings.angle = text,
             Field::Scale(text) => self.settings.scale = text,
@@ -158,6 +228,13 @@ impl State {
     pub fn angle_message(&self) -> Option<String> {
         self.settings
             .angle_error()
+            .then(|| t!("Not a valid number").into_owned())
+    }
+
+    /// Message shown under the Gradient tab's Angle while it is not a number.
+    pub fn gradient_angle_message(&self) -> Option<String> {
+        self.settings
+            .gradient_angle_error()
             .then(|| t!("Not a valid number").into_owned())
     }
 
@@ -594,7 +671,9 @@ pub fn view_window<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::draw::draw::hatch_settings::{HatchRegion, RegionOrigin};
+    use crate::modules::draw::draw::hatch_settings::{
+        FillTab, HatchColor, HatchRegion, RegionOrigin,
+    };
     use crate::command::WorkingPlane;
 
     fn state() -> State {
@@ -800,6 +879,122 @@ mod tests {
         assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
         let mut ui = iced_test::simulator(view_window(&create, crate::ui::modal::ModalSizing::FILL));
         assert!(ui.find("1 region(s) selected").is_ok());
+    }
+
+    #[test]
+    fn the_new_fields_change_the_settings() {
+        use codec::types::Color;
+        let mut state = state();
+        state.apply(Field::Tab(FillTab::Gradient));
+        state.apply(Field::Color(HatchColor::Color(Color::Index(1))));
+        state.apply(Field::GradientShape(4));
+        state.apply(Field::GradientOneColor(true));
+        state.apply(Field::GradientColor1(Color::Index(2)));
+        state.apply(Field::GradientColor2(Color::Index(3)));
+        state.apply(Field::GradientTint(0.5));
+        state.apply(Field::GradientCentered(false));
+        state.apply(Field::GradientAngle("45".into()));
+        let s = &state.settings;
+        assert_eq!(s.tab, FillTab::Gradient);
+        assert_eq!(s.color, HatchColor::Color(Color::Index(1)));
+        let g = &s.gradient;
+        assert_eq!((g.shape, g.one_color, g.tint, g.centered), (4, true, 0.5, false));
+        assert_eq!((g.color1, g.color2), (Color::Index(2), Color::Index(3)));
+        assert_eq!(g.angle, "45");
+    }
+
+    #[test]
+    fn a_shape_beyond_the_list_is_clamped() {
+        let mut state = state();
+        state.apply(Field::GradientShape(500));
+        assert_eq!(state.settings.gradient.shape, 8);
+    }
+
+    #[test]
+    fn a_tint_that_is_not_a_number_never_gets_stored() {
+        let mut state = state();
+        state.apply(Field::GradientTint(0.3));
+        state.apply(Field::GradientTint(f32::NAN));
+        assert_eq!(state.settings.gradient.tint, 0.3, "NaN is refused");
+        state.apply(Field::GradientTint(f32::INFINITY));
+        assert_eq!(state.settings.gradient.tint, 0.3, "infinity is refused");
+        state.apply(Field::GradientTint(9.0));
+        assert_eq!(state.settings.gradient.tint, 1.0);
+        state.apply(Field::GradientTint(-9.0));
+        assert_eq!(state.settings.gradient.tint, 0.0);
+    }
+
+    #[test]
+    fn the_colour_list_opens_and_closes_and_choosing_a_colour_closes_it() {
+        use codec::types::Color;
+        let mut state = state();
+        state.apply(Field::ColorList(Some(HatchColorSlot::Gradient1)));
+        assert_eq!(state.color_list, Some(HatchColorSlot::Gradient1));
+        state.apply(Field::GradientColor1(Color::Index(2)));
+        assert_eq!(state.color_list, None);
+        state.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
+        state.apply(Field::ColorList(None));
+        assert_eq!(state.color_list, None);
+        // Every way out of the list closes it, and the choice lands in its slot.
+        state.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
+        state.apply(Field::Color(HatchColor::UseCurrent));
+        assert_eq!(state.color_list, None);
+        state.apply(Field::ColorList(Some(HatchColorSlot::Gradient2)));
+        state.apply(Field::GradientColor2(Color::Index(4)));
+        assert_eq!(state.color_list, None);
+        assert_eq!(state.settings.gradient.color2, Color::Index(4));
+        state.apply(Field::ColorList(Some(HatchColorSlot::Gradient2)));
+        state.apply(Field::SelectColor(HatchColorSlot::Gradient2));
+        assert_eq!(state.color_list, None, "Select Color closes the list");
+        assert_eq!(state.settings.gradient.color2, Color::Index(4), "and changes nothing itself");
+    }
+
+    #[test]
+    fn the_slot_makes_the_matching_field() {
+        use codec::types::Color;
+        assert!(matches!(
+            HatchColorSlot::Fill.field(Color::Index(3)),
+            Field::Color(HatchColor::Color(c)) if c == Color::Index(3)
+        ));
+        assert!(matches!(
+            HatchColorSlot::Gradient1.field(Color::Index(3)),
+            Field::GradientColor1(c) if c == Color::Index(3)
+        ));
+        assert!(matches!(
+            HatchColorSlot::Gradient2.field(Color::Index(3)),
+            Field::GradientColor2(c) if c == Color::Index(3)
+        ));
+    }
+
+    #[test]
+    fn can_ok_follows_the_active_tab() {
+        let mut state = state();
+        state.regions.push(one_region());
+        state.apply(Field::Scale("0".into())); // bad on the Hatch tab only
+        assert!(!state.can_ok());
+        state.apply(Field::Tab(FillTab::Gradient));
+        assert!(state.can_ok());
+        assert!(state.gradient_angle_message().is_none());
+        state.apply(Field::GradientAngle("x".into()));
+        assert!(!state.can_ok());
+        assert!(state.gradient_angle_message().is_some());
+    }
+
+    #[test]
+    fn editing_never_goes_back_to_use_current() {
+        let mut state = edit_state(true, "ANSI31");
+        state.apply(Field::Color(HatchColor::UseCurrent));
+        assert!(matches!(state.settings.color, HatchColor::Color(_)));
+    }
+
+    #[test]
+    fn editing_can_still_change_tab_and_colour() {
+        use codec::types::Color;
+        let mut state = edit_state(true, "ANSI31");
+        state.apply(Field::Color(HatchColor::Color(Color::Index(5))));
+        assert_eq!(state.settings.color, HatchColor::Color(Color::Index(5)));
+        state.apply(Field::Tab(FillTab::Gradient));
+        assert_eq!(state.settings.tab, FillTab::Gradient);
     }
 
     #[test]
