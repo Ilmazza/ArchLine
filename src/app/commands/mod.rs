@@ -532,6 +532,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "BLOCKSPALETTECLOSE",
         "-INSERT",
         "-HATCH",
+        "-GRADIENT",
         "-HATCHEDIT",
         "BLOCKMRULIST",
         "BLOCKREDEFINEMODE",

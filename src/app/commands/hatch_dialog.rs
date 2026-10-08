@@ -6,7 +6,7 @@ use iced::Task;
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::command::{CadCommand, WorkingPlane};
 use crate::modules::draw::draw::hatch::{object_regions, HatchCommand};
-use crate::modules::draw::draw::hatch_settings::{add_region, OriginMode, RegionOrigin};
+use crate::modules::draw::draw::hatch_settings::{add_region, FillTab, OriginMode, RegionOrigin};
 use crate::ui::window::hatch_dialog::{Field, State};
 use crate::ui::window::hatch_palette::{Palette, PaletteAction, PALETTE_SEARCH_ID};
 use codec::Handle;
@@ -94,21 +94,19 @@ impl OpenCADStudio {
             .collect()
     }
 
-    /// `HATCH`: open the dialog on the active drawing.
+    /// `HATCH` / `GRADIENT`: open the dialog on the active drawing, on `tab`.
+    /// The remembered settings fill both tabs; the command decides which one
+    /// shows.
     #[inline(never)]
-    pub(in crate::app) fn hatch_dialog_open(&mut self) -> Task<Message> {
+    pub(in crate::app) fn hatch_dialog_open(&mut self, tab: FillTab) -> Task<Message> {
         // A dialog left over from an abandoned flow must not leak into this one.
         self.hatch_dialog_cancel();
         let i = self.active_tab;
         let (plane, boundary_sources, outlines) = self.hatch_boundary_context(i);
         let selected = self.selected_handles(i);
-        let mut state = State::new(
-            self.tabs[i].id,
-            plane,
-            outlines,
-            boundary_sources,
-            self.hatch_last.clone(),
-        );
+        let mut settings = self.hatch_last.clone();
+        settings.tab = tab;
+        let mut state = State::new(self.tabs[i].id, plane, outlines, boundary_sources, settings);
         // Closed (or together closing) objects already selected seed the first
         // collection, as they used to skip the pick step.
         if !selected.is_empty() {
@@ -128,8 +126,12 @@ impl OpenCADStudio {
         }
         self.hatch_dialog = Some(state);
         self.active_modal = Some(ModalKind::Hatch);
-        // The dialog is the command: Enter / Space repeat it.
-        self.tabs[i].last_cmd = Some("HATCH".to_string());
+        // The dialog is the command: Enter / Space repeat it, on the same tab.
+        let command = match tab {
+            FillTab::Hatch => "HATCH",
+            FillTab::Gradient => "GRADIENT",
+        };
+        self.tabs[i].last_cmd = Some(command.to_string());
         Task::none()
     }
 
@@ -457,6 +459,12 @@ impl OpenCADStudio {
         let Some(command) = hatch_command_from_state(state, document_origin) else {
             return Task::none();
         };
+        // The colour is resolved here, from the owner tab (the active one, as
+        // checked above): a gradient's colours are in its own settings, so it
+        // keeps the entity defaults.
+        let style = (state.settings.tab == FillTab::Hatch)
+            .then(|| self.hatch_creation_style(i, state.settings.color));
+        let command = command.with_creation_style(style);
         let settings = state.settings.clone();
         self.hatch_last = settings;
         self.hatch_dialog = None;
@@ -720,7 +728,10 @@ impl OpenCADStudio {
         let Some(command) = hatch_command_from_state(state, document_origin) else {
             return Task::none();
         };
-        let models = command.preview_models();
+        // A gradient previews in its own colours.
+        let preview_color = (state.settings.tab == FillTab::Hatch)
+            .then(|| self.hatch_preview_rgba(i, state.settings.color));
+        let models = command.with_preview_color(preview_color).preview_models();
         if let Some(state) = self.hatch_dialog.as_mut() {
             state.flow = Flow::Preview;
         }

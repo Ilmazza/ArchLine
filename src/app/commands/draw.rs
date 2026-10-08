@@ -1,4 +1,5 @@
 use super::*;
+use crate::modules::draw::draw::hatch_settings::FillTab;
 
 impl OpenCADStudio {
     pub(super) fn dispatch_draw(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
@@ -733,10 +734,14 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
-            // HATCH opens the dialog; `-HATCH` (and every programmatic channel)
-            // runs the command line version below.
+            // HATCH and GRADIENT open the dialog on their tab; `-HATCH` and
+            // `-GRADIENT` (and every programmatic channel) run the command line
+            // versions below.
             "HATCH" if !self.scripted_dispatch => {
-                return Some(self.hatch_dialog_open());
+                return Some(self.hatch_dialog_open(FillTab::Hatch));
+            }
+            "GRADIENT" if !self.scripted_dispatch => {
+                return Some(self.hatch_dialog_open(FillTab::Gradient));
             }
 
             "HATCH" | "-HATCH" => {
@@ -822,7 +827,7 @@ impl OpenCADStudio {
                 }
             }
 
-            "GRADIENT" => {
+            "GRADIENT" | "-GRADIENT" => {
                 use crate::modules::draw::draw::hatch::GradientCommand;
                 let boundary_sources = self.tabs[i]
                     .scene
