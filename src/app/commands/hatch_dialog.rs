@@ -221,12 +221,7 @@ impl OpenCADStudio {
         if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
             return None;
         }
-        let double = self
-            .last_vp_click_time
-            .is_some_and(|time| time.elapsed().as_millis() < 400)
-            && self
-                .last_vp_click_pos
-                .is_some_and(|last| (cursor.x - last.x).hypot(cursor.y - last.y) < 8.0);
+        let double = self.second_click_of_a_double_click(cursor);
         let pattern_hatch = matches!(
             self.tabs[i].scene.document.get_entity(handle),
             Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch)
@@ -236,6 +231,90 @@ impl OpenCADStudio {
         }
         // The double-click is used up: a third quick press is a new gesture.
         self.last_vp_click_time = None;
+        self.grip_hover = None;
+        self.grip_popup = None;
+        self.tabs[i]
+            .scene
+            .selection
+            .borrow_mut()
+            .clear_left_selection_gesture();
+        Some(self.hatch_dialog_open_edit(handle))
+    }
+
+    /// Whether a press at `cursor` (tile coordinates) is the second click of
+    /// a double-click: the thresholds of the double-click in
+    /// `on_viewport_left_release`.
+    fn second_click_of_a_double_click(&self, cursor: iced::Point) -> bool {
+        self.last_vp_click_time
+            .is_some_and(|time| time.elapsed().as_millis() < 400)
+            && self
+                .last_vp_click_pos
+                .is_some_and(|last| (cursor.x - last.x).hypot(cursor.y - last.y) < 8.0)
+    }
+
+    /// A canvas point in the coordinates of the active model tile, as the
+    /// release handler maps it before it records a click.
+    fn tile_point(&self, i: usize, canvas: iced::Point) -> iced::Point {
+        let size = self.tabs[i].scene.selection.borrow().vp_size;
+        let offset = match self.tabs[i].scene.viewport_edit_frame(size) {
+            Some((_, full)) => (full.x, full.y),
+            None => {
+                let tile = self.tabs[i].scene.active_model_tile_bounds(size.0, size.1);
+                (tile.x, tile.y)
+            }
+        };
+        iced::Point::new(canvas.x - offset.0, canvas.y - offset.1)
+    }
+
+    /// The pattern hatch whose grip is hot in tab `i`, with no command
+    /// running, in model space.
+    fn hot_pattern_hatch_grip(&self, i: usize) -> Option<Handle> {
+        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
+        if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
+            return None;
+        }
+        let handle = self.tabs[i].active_grip.as_ref()?.handle;
+        match self.tabs[i].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// The click that just made a grip of a pattern hatch hot returns early
+    /// from the release handler, before it records the click for double-click
+    /// detection: record it here, so a quick second click can still open
+    /// Hatch Edit. `canvas` is the release point in canvas coordinates.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_note_hot_grip_click(&mut self, i: usize, canvas: iced::Point) {
+        if self.hot_pattern_hatch_grip(i).is_none() {
+            return;
+        }
+        self.last_vp_click_time = Some(iced::time::Instant::now());
+        self.last_vp_click_pos = Some(self.tile_point(i, canvas));
+    }
+
+    /// A press while a grip of a pattern hatch is hot: when it is the second
+    /// click of a double-click, the grip is dropped as Escape drops it (the
+    /// hatch back as it was, no base point left) and Hatch Edit opens.
+    /// Otherwise `None`, and the press places the grip as before. `canvas` is
+    /// the press point in canvas coordinates.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_double_click_on_hot_grip(
+        &mut self,
+        i: usize,
+        canvas: iced::Point,
+    ) -> Option<Task<Message>> {
+        let handle = self.hot_pattern_hatch_grip(i)?;
+        let double = self.second_click_of_a_double_click(self.tile_point(i, canvas));
+        // Paired or not, the recorded click is used up.
+        self.last_vp_click_time = None;
+        if !double {
+            return None;
+        }
+        self.grip_pending = None;
+        if self.cancel_active_grip_edit() {
+            self.command_line.input.clear();
+        }
         self.grip_hover = None;
         self.grip_popup = None;
         self.tabs[i]
@@ -3277,6 +3356,81 @@ mod tests {
         assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
         assert!(app.tabs[i].active_grip.is_none(), "the drag was committed");
         assert_ne!(stored(&app, hatch).pattern, before.pattern, "the pattern moved");
+    }
+
+    /// The hatch selected by a click away from its grips, as a gesture of
+    /// some time ago.
+    fn select_hatch_earlier(app: &mut OpenCADStudio, hatch: Handle) {
+        click(app, 4.0, 3.0);
+        assert!(app.tabs[app.active_tab].scene.selected.contains(&hatch));
+        app.last_vp_click_time = None;
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_an_already_selected_hatch_opens_the_window() {
+        let (mut app, hatch) = app_with_hatch();
+        no_snaps(&mut app);
+        frame(&mut app);
+        select_hatch_earlier(&mut app, hatch);
+        let before = stored(&app, hatch);
+        let dirty = app.tabs[app.active_tab].dirty;
+        // The first click lands on the centre grip and makes it hot; the hand
+        // drifts 5 px before the second (still a double-click), so the hot
+        // grip has already dragged the pattern a little.
+        let p = screen_point(&app, 10.0, 5.0);
+        for at in [p, iced::Point::new(p.x + 4.0, p.y + 3.0)] {
+            let _ = app.update(Message::ViewportMove(at));
+            let _ = app.update(Message::ViewportLeftPress);
+            let _ = app.update(Message::ViewportLeftRelease);
+        }
+        let i = app.active_tab;
+        assert!(app.tabs[i].active_grip.is_none(), "the hot grip is dropped");
+        assert!(!app.tabs[i].grip_base_pending);
+        assert_eq!(edit_handle(&app), Some(hatch));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(stored(&app, hatch), before, "the grip changed nothing");
+        assert_eq!(app.tabs[i].dirty, dirty);
+    }
+
+    #[test]
+    fn a_hot_hatch_grip_is_still_placed_by_a_second_click_that_is_not_a_double_click() {
+        // A slow second click, and a quick one too far away to be a double click.
+        for pause in [true, false] {
+            let (mut app, hatch) = app_with_hatch();
+            no_snaps(&mut app);
+            frame(&mut app);
+            select_hatch_earlier(&mut app, hatch);
+            let before = stored(&app, hatch);
+            click(&mut app, 10.0, 5.0);
+            let i = app.active_tab;
+            assert!(app.tabs[i].active_grip.is_some(), "pause={pause}: the grip is hot");
+            if pause {
+                app.last_vp_click_time = None;
+            }
+            click(&mut app, 12.0, 6.0);
+            assert!(app.tabs[i].active_grip.is_none(), "pause={pause}: placed");
+            assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "pause={pause}");
+            assert_ne!(stored(&app, hatch).pattern, before.pattern, "pause={pause}: moved");
+        }
+    }
+
+    #[test]
+    fn double_clicking_the_hot_grip_of_another_object_places_it_as_before() {
+        let (mut app, _hatch) = app_with_hatch();
+        let line = add_line(&mut app, 30.0, 0.0, 40.0, 0.0);
+        no_snaps(&mut app);
+        frame(&mut app);
+        click(&mut app, 33.0, 0.0);
+        let i = app.active_tab;
+        assert!(app.tabs[i].scene.selected.contains(&line));
+        app.last_vp_click_time = None;
+        let depth = undo_depth(&app);
+        // The first click makes the midpoint grip hot; the quick second one
+        // places it, as it always did (a grip edit, one undo step).
+        double_click(&mut app, 35.0, 0.0);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(app.tabs[i].active_grip.is_none(), "placed");
+        assert_eq!(undo_depth(&app), depth + 1, "committed, not dropped");
     }
 
     #[test]

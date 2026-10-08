@@ -3474,6 +3474,8 @@ impl OpenCADStudio {
         // normal box/lasso state or trigger another viewport control; the
         // release path below will commit the grip.
         if self.tabs[i].active_grip.is_some() {
+            // The second click of a double-click on a hot hatch grip opens Hatch Edit.
+            if let Some(task) = self.hatch_double_click_on_hot_grip(i, p) { return task; }
             self.tabs[i]
                 .scene
                 .selection
@@ -3827,6 +3829,7 @@ impl OpenCADStudio {
             let moved = grip.last_world != grip.origin_world;
             if is_click && !moved {
                 // Engaging click — stay hot, wait for the placement click.
+                self.hatch_note_hot_grip_click(i, p);
                 return Task::none();
             }
             return self.commit_active_grip_edit();
