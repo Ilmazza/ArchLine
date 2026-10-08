@@ -143,31 +143,45 @@ condivisa (`Message::OpenColorWindow` / `ColorWindowPick`, già usata da ModalKi
   Registrazione: `names: &["GRADIENT", "-GRADIENT"]` e `"-GRADIENT"` nell'elenco di `app/commands/mod.rs`.
 - `GradientCommand` non cambia (resta il comando da riga di comando, piano XY).
 
-### 5.2 `HatchCommand`
+### 5.2 `HatchCommand` e dove si risolve il colore
 
-- `with_settings(&ResolvedSettings)` imposta un campo `fill: FillChoice { Pattern(override) | Gradient(GradientSpec) }`
-  e `creation_style: Option<(Color, Transparency)>`. `pattern_override` esistente resta per `-HATCH` (P).
+**Contratto.** `ResolvedSettings` è dato puro: non conosce `ribbon.active_color`, la trasparenza corrente, i layer né
+il documento, e non li acquisisce. La risoluzione a runtime sta **solo** nell'app (`hatch_dialog_ok`,
+`hatch_dialog_preview`), che legge il tab proprietario (`owner_tab_id`) e il suo documento.
+
+- `hatch_command_from_state(state, document_origin)` resta pura (stato + origine). Costruisce il comando con
+  `with_settings(&ResolvedSettings)`, che imposta soltanto `fill: FillChoice { Pattern(override) | Gradient(GradientSpec) }`
+  e le opzioni geometriche (associativo, separati, contorni, stile isole, angolo, scala). `pattern_override` esistente
+  resta per `-HATCH` (P).
+- Due builder separati, chiamati solo dall'app, nessuno dei quali tocca `ResolvedSettings`:
+  - `HatchCommand::with_creation_style(Option<(Color, Transparency)>)`, chiamato da `hatch_dialog_ok` dopo la
+    costruzione. Il colore è: `UseCurrent` → `ribbon.active_color`; `Color(c)` → `c`. La trasparenza è
+    `scene.document.current_entity_transparency()` del tab proprietario. Per `Gradient` si passa `None`: il colore
+    dell'entità non entra nel disegno.
+  - `HatchCommand::with_preview_color(Option<[f32;4]>)`, chiamato da `hatch_dialog_preview`: colore RGBA con alpha 0.75
+    (`UseCurrent` → `ribbon.active_color`; `ByLayer` → colore del layer corrente del tab proprietario; `ByBlock` → lo
+    stesso colore di ripiego del rendering per un ByBlock fuori da un blocco). `None` lascia il blu di oggi (solo
+    `-HATCH`). Per il gradiente non serve: i colori vengono dal `GradientSpec`.
+- **Il comando di Add** (`HatchCommand::collecting`) non riceve né stile né colore di anteprima: raccoglie aree e basta.
 - `make_hatch` con `Gradient`: stesso modello di oggi (anelli, fonti, percorsi, piano di riempimento, stile isole) ma
-  `pattern: HatchPattern::Gradient{..}`, `name = kind.dxf_name(invert)`, `color = colore 1`, `angle_offset =` angolo
-  dello sfumato, `pattern_origin = None`, nessuna regolazione di famiglie.
+  `pattern: HatchPattern::Gradient{..}` con `color2 = spec.effective_color2()` (vedi §7: **mai** il `color2` grezzo),
+  `one_color` e `tint` della spec, `name = kind.dxf_name(invert)`, `color = colore 1`, `angle_offset =` angolo dello
+  sfumato, `pattern_origin = None`, nessuna regolazione di famiglie.
 - `on_enter` con `creation_style`: tutti i rami restituiscono le varianti con stile (`CommitStyledHatch`,
-  `CommitHatches{entity_style}`, `CommitHatchWithBoundaries{entity_style}`); senza stile restano come oggi. Lo stile
-  per HATCH-finestra è `(colore, current_entity_transparency())`, dove il colore è: `UseCurrent` → `ribbon.active_color`,
-  `Color(c)` → `c`. Per `Gradient` lo stile non serve (None): il colore dell'entità non viene usato nel disegno.
-- **Anteprima.** `preview_models` smette di forzare `[0.15,0.55,1.0,0.75]`: per pattern/solido usa il colore scelto
-  risolto in RGBA con alpha 0.75 (`UseCurrent` → `ribbon.active_color`; `ByLayer` → colore del layer corrente;
-  `ByBlock` → lo stesso colore di ripiego che usa il rendering per un retino ByBlock fuori da un blocco); per il gradiente usa i due colori veri con alpha 0.75
-  (anche il secondo, che in `GradientCommand` oggi ha alpha 0). Il filtro anelli per stile isole è invariato.
-  `HatchCommand::with_preview_color(Option<[f32;4]>)` lo riceve dall'app, che sa risolvere il layer; `None` lascia il blu.
+  `CommitHatches{entity_style}`, `CommitHatchWithBoundaries{entity_style}`); senza stile restano come oggi.
+- **Anteprima.** `preview_models` smette di forzare `[0.15,0.55,1.0,0.75]`: per pattern/solido usa il colore di
+  `with_preview_color`; per il gradiente usa `effective_color2()` e colore 1 con alpha 0.75 (anche il secondo, che in
+  `GradientCommand` oggi ha alpha 0). In "One color" il colore 2 dell'anteprima è quindi lo stesso che l'entità
+  ricostruita mostrerà dopo il commit. Il filtro anelli per stile isole è invariato.
 
 ### 5.3 `Scene::add_hatch`
 
 `HatchPattern::Gradient` guadagna `one_color: bool` e `tint: f32` (i siti che costruiscono la variante a mano sono
 pochi: `GradientCommand::make_hatch`, `hatch_model_from_dxf`; gli altri usano `..`; lo dirà il compilatore).
-Il blocco gradiente di `add_hatch` (oggi ~2947-2987) sparisce e chiama `hatch_fill::apply_gradient` con la
-`GradientSpec` ricavata dal modello: così `is_single_color`, `color_tint` e le fermate si scrivono **sempre** qui. Con
-"one color" la seconda fermata scritta è il colore tinto (lo stesso calcolo di `hatch_model_from_dxf`, che resta
-l'unico lettore). `gradient_tint_color` si sposta (pubblica) in `hatch_fill.rs`.
+Il blocco gradiente di `add_hatch` (oggi ~2947-2987) sparisce e chiama `hatch_fill::apply_gradient` (scrittura completa, §7) con la
+`GradientSpec` ricavata dal modello (colore 1 = `model.color`, `one_color`, `tint`, `color2` = quello del modello, già
+effettivo): così `is_single_color`, `color_tint` e le fermate si scrivono **sempre** qui, con la scrittura canonica
+completa. `gradient_tint_color` si sposta (pubblica) in `hatch_fill.rs`, dove vive l'unico `effective_color2`.
 
 ## 6. Modifica
 
@@ -196,13 +210,19 @@ HatchEditChanges {
 FillEdit =
     Pattern { pattern: Option<String>, scale: Option<f32>, angle_deg: Option<f32> }   // retino Pattern/Solid, scheda Hatch
   | ToPattern { name, scale, angle_deg }          // retino Gradient, scheda Hatch (con name == SOLID diventa solido)
-  | Gradient(GradientPatch)                       // retino Gradient, scheda Gradient: solo i campi cambiati
+  | Gradient(GradientPatch)                       // retino Gradient, scheda Gradient: solo i campi cambiati e visibili
   | ToGradient(GradientSpec)                      // retino Pattern/Solid, scheda Gradient: completo
 ```
 Regole: conta la scheda attiva rispetto a `kind` (scelta f). `fill == None` solo se la scheda è quella del tipo del
 retino e nessun suo campo è cambiato. Le modifiche valgono per la scheda attiva; quelle fatte sull'altra scheda
 sono ignorate. Stile isole, associativo e origine valgono per tutti i tipi (l'origine solo dalla scheda Hatch: lo
 sfumato non ne ha). `can_ok` = campi validi della scheda attiva e `changes` non vuoto.
+
+**Campi nascosti non contano.** Il modo *finale* (`one_color` della scheda, non quello di partenza) decide quali
+campi dello sfumato sono visibili: con "One color" una differenza di `color2` è ignorata, con "Two colors" lo è una
+differenza di `tint`. Cambiare solo un campo nascosto non produce alcuna modifica e non abilita OK. Il passaggio
+One color ↔ Two colors è invece una modifica a sé (`one_color: Some(..)`); in quel caso la `GradientPatch` porta anche
+i campi che diventano visibili solo se differiscono dal valore di partenza.
 
 ### 6.3 Applicazione: un'operazione, un undo
 
@@ -219,11 +239,16 @@ stile) viene estratto in `hatch_fill::apply_pattern_update` e richiamato da `Upd
 ## 7. Funzione condivisa: `src/entities/hatch_fill.rs` (file nuovo, solo su `&mut Hatch`)
 
 ```
-FillKind, GradientSpec { kind, invert, one_color, color1, color2, tint, angle_rad, centered }
+FillKind
+GradientSpec { kind, invert, one_color, color1, color2, tint, angle_rad, centered }
+    effective_color2(&self) -> AcadColor     // one_color: gradient_tint_color(color1, tint) in Rgb; altrimenti color2
 GradientPatch { kind: Option<(GradientKind,bool)>, one_color: Option<bool>, color1/color2: Option<Color>,
                 tint: Option<f64>, angle_rad: Option<f64>, centered: Option<bool> }
 read_gradient(&Hatch) -> GradientSpec                 // default per i campi mancanti
-apply_gradient(&mut Hatch, &GradientPatch)            // converte a sfumato se serve e scrive tutto
+
+apply_gradient(&mut Hatch, &GradientSpec)             // scrittura CANONICA COMPLETA: creazione e ToGradient
+apply_gradient_patch(&mut Hatch, &GradientPatch)      // SOLO i campi presenti e i loro campi fisici dipendenti
+
 set_catalog_pattern(&mut Hatch, &PatternEntry, scale, angle)   // pattern o SOLID; spegne il gradiente (scelta g)
 apply_pattern_update(&mut Hatch, name, scale, angle, origin, disassociate, style)
 apply_window_edit(&mut Hatch, &HatchWindowEdit)
@@ -231,16 +256,37 @@ gradient_tint_color(base, target) -> [f32;4]          // spostata da scene/entit
 gradient_profile(kind, invert, t) -> f32              // stessa curva dello shader, per swatch e test
 ```
 
-`apply_gradient` scrive: `gradient_color.enabled = true`, `name = kind.dxf_name(invert)`, **entrambi** gli angoli
-(`gradient_color.angle` e `pattern_angle`), `shift = if centered {0} else {1}`, `is_single_color`, `color_tint`,
-le due fermate (`value` 0 e 1; per Linear invertito si scambiano le fermate, come fa oggi `add_hatch`), `is_solid =
-true`, e se il retino non era uno sfumato sostituisce `pattern` col pattern pieno (`Hatch::solid()`). Passando a "One
-color" senza tinta esplicita la tinta diventa 1.0 (comportamento attuale di `"fill_type"`).
+**Un solo calcolo del colore 2.** `GradientSpec::effective_color2` è l'unico posto che decide il colore 2 reale:
+lo usano `HatchCommand::make_hatch` (modello e anteprima), `apply_gradient` (seconda fermata), lo swatch e
+`hatch_model_from_dxf` (lettore). Così l'anteprima di un "One color" non può mostrare un vecchio Color 2 mentre
+l'entità ricostruita mostra la tinta.
+
+**`apply_gradient` (completa)** scrive tutto da zero: `gradient_color.enabled = true`, `name = kind.dxf_name(invert)`,
+**entrambi** gli angoli (`gradient_color.angle` e `pattern_angle`), `shift = if centered {0} else {1}`,
+`is_single_color`, `color_tint`, le due fermate (`value` 0 e 1: colore 1 e `effective_color2()`; per Linear invertito si
+scambiano, come fa oggi `add_hatch`), `is_solid = true`, e se il retino non era uno sfumato sostituisce `pattern` col
+pattern pieno (`Hatch::solid()`).
+
+**`apply_gradient_patch` (parziale)** non ricostruisce né normalizza nulla: per ogni campo presente scrive solo ciò che
+quel campo possiede, e lascia intatti gli altri byte dell'entità.
+
+| Campo della patch | Scrive |
+|---|---|
+| `kind` | solo `name` (come `"gradient_type"` oggi) |
+| `one_color` | `is_single_color`; passando a "One color" senza `tint` nella patch, `color_tint = 1.0` (come `"fill_type"` oggi) |
+| `color1` / `color2` | solo la fermata corrispondente (creandola se manca, come il ciclo di oggi); `color2` resta memorizzato anche in "One color" |
+| `tint` | solo `color_tint` (clamp 0..1) |
+| `angle_rad` | `gradient_color.angle` **e** `pattern_angle` (i due restano allineati) |
+| `centered` | solo `shift` |
+
+Se il retino non è uno sfumato (`gradient_color.enabled == false`) la patch non converte: la conversione è sempre
+`apply_gradient` con una `GradientSpec` completa. Usi: creazione e `ToGradient` → `apply_gradient`; modifica di uno
+sfumato esistente (`FillEdit::Gradient`) e pannello Proprietà → `apply_gradient_patch`.
 
 I quattro siti esistenti passano da qui:
 1. `src/entities/hatch.rs` `apply_geom_prop`: `fill_type`, `gradient_type`, `gradient_centered`, `gradient_tint`,
-   `pattern_angle` (ramo gradiente) → un `GradientPatch` con un solo campo.
-2. `src/app/update/mod.rs` ~7268 (colori 1/2 dal pannello Proprietà) → `GradientPatch{color1|color2}`; scompare il
+   `pattern_angle` (ramo gradiente) → `apply_gradient_patch` con un solo campo.
+2. `src/app/update/mod.rs` ~7268 (colori 1/2 dal pannello Proprietà) → `apply_gradient_patch(GradientPatch{color1|color2})`; scompare il
    ciclo che spinge fermate a mano. La riga `populate_hatches_from_document` che segue resta.
 3. `src/app/update/command.rs` `on_prop_hatch_pattern_changed` → `set_catalog_pattern`.
 4. `src/app/command_driver/modify.rs` ramo `Update` → `apply_pattern_update`; ramo `Window` → `apply_window_edit`.
@@ -250,6 +296,7 @@ I quattro siti esistenti passano da qui:
 Si estende sul posto: `with_colors(color1, color2: Option<..>)` e `with_gradient(kind, invert, angle_deg, centered)`.
 - Pattern: linee nel colore scelto (oggi colore del testo del tema); `UseCurrent` → colore corrente risolto.
 - Solido: riempimento nel colore scelto (oggi grigio).
+- Il colore 2 dello swatch è sempre `GradientSpec::effective_color2()` (in "One color" la tinta, non il Color 2 nascosto).
 - Gradiente lineare: `canvas::Gradient::Linear` esatto, con le fermate che seguono `gradient_profile` (Linear: 2;
   Cylinder: 3 a 0/0.5/1; Curved: ~8 per approssimare t²).
 - Sferico/emisferico: `canvas::Gradient` è solo lineare, quindi si disegnano ~16 ellissi concentriche dall'esterno al
@@ -294,13 +341,22 @@ campi dell'entità, non solo "c'è un retino"); per i punti segnati (M) si dichi
 - `resolve()` per scheda: con Gradient un pattern assente dal catalogo non blocca; con Hatch sì; angolo non valido
   blocca la scheda attiva e non l'altra. (M: ignorare `tab`.)
 - `FillKind::of` per i quattro casi (gradiente con `is_solid` vero, `SOLID` per nome, pattern, solido).
-- `apply_gradient`: scrive `is_single_color` e `color_tint` (M: non scriverli), entrambi gli angoli, `shift`, nome,
-  due fermate; Linear invertito scambia le fermate; "One color" senza tinta → 1.0; da pattern converte e azzera le
-  linee del pattern; i campi non indicati non cambiano (patch con un solo campo).
+- `apply_gradient` (completa): scrive `is_single_color` e `color_tint` (M: non scriverli), entrambi gli angoli,
+  `shift`, nome, due fermate con la seconda = `effective_color2()`; Linear invertito scambia le fermate; da pattern
+  converte e azzera le linee del pattern.
+- `apply_gradient_patch` (parziale): per **ogni** campo della patch, preso da solo, l'entità resta identica byte per
+  byte tranne i campi della tabella di §7 (M: una patch che riscrive fermate/tinta/angoli); "One color" senza tinta
+  → 1.0; `angle_rad` aggiorna entrambi gli angoli; su un retino non sfumato non converte.
+- `effective_color2`: Two colors → `color2`; One color → `gradient_tint_color(color1, tint)` in Rgb, per tinta
+  0 / 0.5 / 1 (M: restituire sempre `color2`).
 - `set_catalog_pattern` da gradiente: `gradient_color.enabled == false` e azzerato; da pattern a SOLID: `is_solid`.
 - `changes`: stessa scheda senza modifiche → vuoto; cambio scheda → `ToGradient`/`ToPattern` (anche senza altri
   campi); ritorno alla scheda di partenza → vuoto; un solo campo gradiente → `Gradient` con quel solo campo;
   colore cambiato solo con scheda Hatch; campi dell'altra scheda ignorati. (M: calcolare le modifiche senza guardare `tab`.)
+- `changes`, campi nascosti: in One color una differenza di `color2` è vuota e `can_ok` resta falso; in Two colors
+  una differenza di `tint` idem; il passaggio One↔Two è una modifica. (M: confrontare tutti i campi.)
+- `ResolvedSettings` non dipende dall'app: `resolve()` si chiama senza `OpenCADStudio` (garantito dalla firma) e non
+  contiene colore corrente, trasparenza né layer.
 - `gradient_profile` e `gradient_tint_color`: valori noti (cylinder a 0/0.5/1, curved t², tinta 0/0.5/1).
 
 **Creazione** (flusso `app.update(Message::…)`)
@@ -314,7 +370,12 @@ campi dell'entità, non solo "c'è un retino"); per i punti segnati (M) si dichi
   (`assert_runs_dialog_free`) non aprono finestra; `-GRADIENT` produce lo stesso sfumato di oggi.
 - Add: Pick points / Select objects dalla scheda Gradient raccolgono aree; OK con isole (Normal/Outer/Ignore),
   associativo e "separati" creano il numero giusto di sfumati; undo a un passo.
-- Anteprima: i colori del modello sono quelli scelti (non il blu), anche il secondo con alpha 0.75.
+- Anteprima: i colori del modello sono quelli scelti (non il blu), anche il secondo con alpha 0.75; pattern con
+  "Use Current" e ribbon rosso → anteprima rossa; con `ByLayer` → colore del layer corrente del tab proprietario.
+- Anteprima **One color**: il `color2` del modello di anteprima è uguale a `gradient_tint_color(color1, tint)` ed è
+  uguale al `color2` del `HatchModel` ricostruito dall'entità dopo OK; cambiando il Color 2 nascosto l'anteprima non
+  cambia. (M: usare `color2` grezzo.)
+- Il comando di Add non porta stile né colore di anteprima; OK passa lo stile risolto dal tab proprietario.
 - `hatch_last` conserva entrambe le schede dopo Add/OK; Preview non lo tocca.
 
 **Modifica**
@@ -332,7 +393,8 @@ campi dell'entità, non solo "c'è un retino"); per i punti segnati (M) si dichi
 - Modifica con "separati"/"retain" ancora ignorati; origine specificata solo dalla scheda Hatch.
 - `-HATCHEDIT` invariato (stessi test di oggi).
 - Pannello Proprietà: ogni campo gradiente produce lo stesso risultato di prima (test di non regressione) e passa
-  da `apply_gradient`.
+  da `apply_gradient_patch`; cambiare solo la forma non tocca fermate, tinta e angoli.
+- Modifica di uno sfumato: cambiare solo la forma (o solo la centratura) lascia fermate, tinta e angoli identici.
 
 **Select Color e tastiera**
 - Esc con "Select Color" aperta chiude solo quella (la finestra Hatch e il suo stato restano); Esc con elenco colori
