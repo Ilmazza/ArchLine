@@ -5,10 +5,11 @@
 //! never be persisted two different ways.
 
 use codec::entities::hatch::GradientColorEntry;
-use codec::entities::Hatch;
+use codec::entities::{Hatch, HatchPatternType, HatchStyleType};
 use codec::types::Color as AcadColor;
 
 use crate::scene::model::hatch_model::GradientKind;
+use crate::scene::model::hatch_patterns::{self, PatternEntry};
 
 /// What kind of fill a stored hatch has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +242,91 @@ pub fn apply_gradient_patch(hatch: &mut Hatch, patch: &GradientPatch) {
     if let Some(centered) = patch.centered {
         g.shift = if centered { 0.0 } else { 1.0 };
     }
+}
+
+/// Put a catalog pattern (or SOLID) into the hatch as its fill: the stored
+/// lines are final world geometry, so they are scaled, rotated and moved to
+/// the current pattern origin. A gradient the hatch had is cleared.
+/// `pattern_scale` and `pattern_angle` are the caller's to set.
+pub fn set_catalog_pattern(h: &mut Hatch, entry: &PatternEntry, scale: f64, angle: f64) {
+    let mut pattern = hatch_patterns::build_dxf_pattern(entry);
+    crate::entities::hatch::scale_pattern_geometry(&mut pattern, scale);
+    crate::entities::hatch::rotate_pattern_geometry(&mut pattern, angle);
+    let origin = h.pattern_origin();
+    crate::entities::hatch::translate_pattern_geometry(&mut pattern, origin.x, origin.y);
+    h.pattern = pattern;
+    h.is_solid = matches!(
+        entry.gpu,
+        crate::scene::model::hatch_model::HatchPattern::Solid
+    );
+    h.pattern_type = HatchPatternType::Predefined;
+    h.gradient_color = codec::entities::hatch::HatchGradientPattern::new();
+}
+
+/// Origin, association and island style: the part of an update that is the
+/// same whatever the fill is.
+pub fn apply_common_update(
+    h: &mut Hatch,
+    origin: Option<(f64, f64)>,
+    disassociate: bool,
+    style: Option<HatchStyleType>,
+) {
+    if let Some((x, y)) = origin {
+        h.set_pattern_origin(codec::types::Vector2::new(x, y));
+    }
+    if disassociate {
+        for path in &mut h.paths {
+            path.boundary_handles.clear();
+            path.flags.set_external(false);
+        }
+        h.is_associative = false;
+    }
+    if let Some(style) = style {
+        h.style = style;
+    }
+}
+
+/// HATCHEDIT's update of one hatch. A scale or angle left alone comes back as
+/// the stored value rounded to f32 (HATCHEDIT and the Hatch Edit window read
+/// it that way): the stored value is kept then, so the pattern does not drift.
+pub fn apply_pattern_update(
+    h: &mut Hatch,
+    name: &str,
+    scale: f32,
+    angle: f32,
+    origin: Option<(f64, f64)>,
+    disassociate: bool,
+    style: Option<HatchStyleType>,
+) {
+    let keep_scale = h.pattern_scale >= 1.0e-6 && scale == h.pattern_scale as f32;
+    let keep_angle = angle == h.pattern_angle.to_degrees() as f32;
+    let requested_scale = if keep_scale {
+        h.pattern_scale
+    } else {
+        scale.max(1.0e-6) as f64
+    };
+    let requested_angle = if keep_angle {
+        h.pattern_angle
+    } else {
+        (angle as f64).to_radians()
+    };
+    if !name.is_empty() && name != h.pattern.name {
+        if let Some(entry) = hatch_patterns::find(name) {
+            set_catalog_pattern(h, entry, requested_scale, requested_angle);
+        }
+    } else {
+        if !keep_scale && h.pattern_scale > 1.0e-12 {
+            let factor = requested_scale / h.pattern_scale;
+            h.scale_pattern_about_origin(factor);
+        }
+        if !keep_angle {
+            let delta = requested_angle - h.pattern_angle;
+            h.rotate_pattern_about_origin(delta);
+        }
+    }
+    h.pattern_scale = requested_scale;
+    h.pattern_angle = requested_angle;
+    apply_common_update(h, origin, disassociate, style);
 }
 
 #[cfg(test)]
@@ -542,5 +628,105 @@ mod tests {
         assert!(GradientPatch::default().is_empty());
         let (before, after) = patched(GradientPatch::default());
         assert_eq!(before, after);
+    }
+
+    // ── set_catalog_pattern / apply_pattern_update ─────────────────────────
+
+    use crate::scene::model::hatch_patterns;
+
+    fn ansi31_hatch(scale: f64, angle: f64) -> Hatch {
+        let entry = hatch_patterns::find("ANSI31").expect("catalog has ANSI31");
+        let mut hatch = Hatch::solid();
+        hatch.pattern_scale = scale;
+        hatch.pattern_angle = angle;
+        set_catalog_pattern(&mut hatch, entry, scale, angle);
+        hatch
+    }
+
+    #[test]
+    fn a_catalog_pattern_replaces_the_fill_and_clears_any_gradient() {
+        let mut hatch = gradient_hatch();
+        let entry = hatch_patterns::find("ANSI31").unwrap();
+        set_catalog_pattern(&mut hatch, entry, 1.0, 0.0);
+        assert!(!hatch.is_solid);
+        assert!(!hatch.pattern.lines.is_empty());
+        assert_eq!(hatch.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
+        assert_eq!(FillKind::of(&hatch), FillKind::Pattern);
+    }
+
+    #[test]
+    fn the_solid_catalog_entry_makes_a_solid_fill() {
+        let mut hatch = gradient_hatch();
+        let entry = hatch_patterns::find("SOLID").expect("catalog has SOLID");
+        set_catalog_pattern(&mut hatch, entry, 1.0, 0.0);
+        assert!(hatch.is_solid);
+        assert_eq!(FillKind::of(&hatch), FillKind::Solid);
+        assert!(!hatch.gradient_color.enabled);
+    }
+
+    #[test]
+    fn a_new_pattern_keeps_the_pattern_origin() {
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        hatch.set_pattern_origin(Vector2::new(3.0, 4.0));
+        let before = hatch.pattern_origin();
+        let entry = hatch_patterns::find("ANSI37").expect("catalog has ANSI37");
+        set_catalog_pattern(&mut hatch, entry, 1.0, 0.0);
+        assert_eq!(hatch.pattern_origin(), before);
+    }
+
+    #[test]
+    fn an_unchanged_scale_and_angle_are_kept_to_the_last_bit() {
+        // 0.1 is not an f32: the value comes back through f32 and must not drift.
+        let mut hatch = ansi31_hatch(0.1, 0.3);
+        let (scale, angle) = (hatch.pattern_scale as f32, hatch.pattern_angle.to_degrees() as f32);
+        let before = hatch.clone();
+        apply_pattern_update(&mut hatch, "ANSI31", scale, angle, None, false, None);
+        assert_eq!(hatch, before);
+    }
+
+    #[test]
+    fn a_scale_change_rescales_the_lines_by_the_ratio() {
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        let spacing = hatch.pattern.lines[0].offset.length();
+        apply_pattern_update(&mut hatch, "ANSI31", 4.0, 0.0, None, false, None);
+        assert_eq!(hatch.pattern_scale, 4.0);
+        let now = hatch.pattern.lines[0].offset.length();
+        assert!((now / spacing - 4.0).abs() < 1.0e-9, "{now} vs {spacing}");
+    }
+
+    #[test]
+    fn a_name_change_converts_a_solid_to_a_pattern_and_back() {
+        let mut hatch = Hatch::solid();
+        apply_pattern_update(&mut hatch, "ANSI31", 1.0, 0.0, None, false, None);
+        assert_eq!(FillKind::of(&hatch), FillKind::Pattern);
+        apply_pattern_update(&mut hatch, "SOLID", 1.0, 0.0, None, false, None);
+        assert_eq!(FillKind::of(&hatch), FillKind::Solid);
+    }
+
+    #[test]
+    fn disassociating_clears_the_source_handles_and_the_flag() {
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        let mut path = codec::entities::BoundaryPath::new();
+        path.add_boundary_handle(codec::Handle::new(9));
+        path.flags.set_external(true);
+        hatch.paths.push(path);
+        hatch.is_associative = true;
+        apply_pattern_update(&mut hatch, "ANSI31", 1.0, 0.0, None, true, None);
+        assert!(!hatch.is_associative);
+        assert!(hatch.paths[0].boundary_handles.is_empty());
+        assert!(!hatch.paths[0].flags.is_external());
+    }
+
+    #[test]
+    fn style_and_origin_are_the_common_part() {
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        apply_common_update(
+            &mut hatch,
+            Some((5.0, 6.0)),
+            false,
+            Some(codec::entities::HatchStyleType::Outer),
+        );
+        assert_eq!(hatch.style, codec::entities::HatchStyleType::Outer);
+        assert_eq!(hatch.pattern_origin(), Vector2::new(5.0, 6.0));
     }
 }

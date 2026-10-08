@@ -439,79 +439,15 @@ impl OpenCADStudio {
                     if let Some(codec::EntityType::Hatch(hatch)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
-                        // A scale or angle left alone comes back as the
-                        // stored value rounded to f32 (HATCHEDIT and the
-                        // Hatch Edit window read it that way): keep the
-                        // stored value then, so the pattern does not drift.
-                        let keep_scale = hatch.pattern_scale >= 1.0e-6
-                            && scale == hatch.pattern_scale as f32;
-                        let keep_angle = angle == hatch.pattern_angle.to_degrees() as f32;
-                        let requested_scale = if keep_scale {
-                            hatch.pattern_scale
-                        } else {
-                            scale.max(1.0e-6) as f64
-                        };
-                        let requested_angle = if keep_angle {
-                            hatch.pattern_angle
-                        } else {
-                            (angle as f64).to_radians()
-                        };
-                        if !name.is_empty() && name != hatch.pattern.name {
-                            if let Some(entry) =
-                                crate::scene::model::hatch_patterns::find(&name)
-                            {
-                                let mut pattern =
-                                    crate::scene::model::hatch_patterns::build_dxf_pattern(
-                                        entry,
-                                    );
-                                crate::entities::hatch::scale_pattern_geometry(
-                                    &mut pattern,
-                                    requested_scale,
-                                );
-                                crate::entities::hatch::rotate_pattern_geometry(
-                                    &mut pattern,
-                                    requested_angle,
-                                );
-                                let origin = hatch.pattern_origin();
-                                crate::entities::hatch::translate_pattern_geometry(
-                                    &mut pattern,
-                                    origin.x,
-                                    origin.y,
-                                );
-                                hatch.pattern = pattern;
-                                hatch.is_solid = matches!(
-                                    entry.gpu,
-                                    crate::scene::model::hatch_model::HatchPattern::Solid
-                                );
-                                hatch.pattern_type =
-                                    codec::entities::HatchPatternType::Predefined;
-                                hatch.gradient_color.enabled = false;
-                            }
-                        } else {
-                            if !keep_scale && hatch.pattern_scale > 1.0e-12 {
-                                let factor = requested_scale / hatch.pattern_scale;
-                                hatch.scale_pattern_about_origin(factor);
-                            }
-                            if !keep_angle {
-                                let delta = requested_angle - hatch.pattern_angle;
-                                hatch.rotate_pattern_about_origin(delta);
-                            }
-                        }
-                        hatch.pattern_scale = requested_scale;
-                        hatch.pattern_angle = requested_angle;
-                        if let Some((x, y)) = origin {
-                            hatch.set_pattern_origin(codec::types::Vector2::new(x, y));
-                        }
-                        if disassociate {
-                            for path in &mut hatch.paths {
-                                path.boundary_handles.clear();
-                                path.flags.set_external(false);
-                            }
-                            hatch.is_associative = false;
-                        }
-                        if let Some(style) = style {
-                            hatch.style = style;
-                        }
+                        crate::entities::hatch_fill::apply_pattern_update(
+                            hatch,
+                            &name,
+                            scale,
+                            angle,
+                            origin,
+                            disassociate,
+                            style,
+                        );
                     }
                     if let Some(value) = annotative {
                         crate::scene::annotative::set_entity_annotative(
