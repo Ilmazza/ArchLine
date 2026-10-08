@@ -2956,6 +2956,18 @@ pub enum Message {
     DrawingUnitsField(crate::ui::window::drawing_units::Field),
     /// Drawing Units OK — write the working copy into the drawing.
     DrawingUnitsApply,
+    /// Open the HATCH dialog (what the `HATCH` command does).
+    OpenHatchDialog,
+    /// One field of the HATCH dialog changed.
+    HatchDialogField(crate::ui::window::hatch_dialog::Field),
+    /// HATCH dialog: hide it and pick areas by internal point or by object.
+    HatchDialogAdd(crate::ui::window::hatch_dialog::AddKind),
+    /// HATCH dialog: hide it and pick a hatch origin.
+    HatchDialogPickOrigin,
+    /// HATCH dialog: hide it and show the hatch it would create.
+    HatchDialogPreview,
+    /// HATCH dialog OK — create the hatch from the collected areas.
+    HatchDialogOk,
     /// Block Definition dialog field updates
     BlockDefName(String),
     BlockDefNameSelect(String),

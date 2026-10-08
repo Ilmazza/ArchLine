@@ -4831,6 +4831,13 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            // Replaced by the real handlers in the HATCH dialog wiring task.
+            Message::HatchDialogField(_)
+            | Message::HatchDialogAdd(_)
+            | Message::HatchDialogPickOrigin
+            | Message::HatchDialogPreview
+            | Message::HatchDialogOk
+            | Message::OpenHatchDialog => Task::none(),
             Message::DrawingUnitsApply => {
                 let Some(state) = self.drawing_units.take() else {
                     self.active_modal = None;
