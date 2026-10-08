@@ -703,6 +703,8 @@ mod tests {
         let _ = app.feed_command(StepInput::Escape);
         let _ = app.update(Message::CloseModal);
         assert_eq!(app.hatch_last.scale, "4", "Cancel after an Add keeps the change");
+        assert!(app.hatch_dialog.is_none(), "Cancel drops the dialog state");
+        assert!(app.active_modal.is_none());
     }
 
     #[test]
@@ -779,10 +781,18 @@ mod tests {
         assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Preview);
         assert!(app.tabs[i].active_cmd.is_some());
         assert_eq!(hatch_count(&app), 0);
+        assert!(
+            !app.tabs[i].scene.preview_hatches.is_empty(),
+            "the preview is drawn while the dialog is hidden"
+        );
         let _ = app.feed_command(StepInput::Enter);
         assert_eq!(app.active_modal, Some(ModalKind::Hatch));
         assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::None);
         assert_eq!(hatch_count(&app), 0);
+        assert!(
+            app.tabs[i].scene.preview_hatches.is_empty(),
+            "the preview is gone once the dialog is back"
+        );
     }
 
     #[test]
@@ -813,18 +823,30 @@ mod tests {
         let _ = app.update(Message::HatchDialogField(Field::OriginMode(
             crate::modules::draw::draw::hatch_settings::OriginMode::Specified,
         )));
+        // A plane away from the world origin with local x along world +Y and
+        // local y along world -X: the identity plane would hide a missing
+        // conversion.
+        app.hatch_dialog.as_mut().unwrap().plane = crate::command::WorkingPlane::new(
+            glam::DVec3::new(100.0, -40.0, 0.0),
+            glam::DVec3::Y,
+            glam::DVec3::NEG_X,
+        );
         let _ = app.update(Message::HatchDialogPickOrigin);
         assert_eq!(app.hatch_dialog.as_ref().unwrap().flow, Flow::Origin);
         let i = app.active_tab;
+        // World (103, -35): from the plane origin that is (+3, +5), so local
+        // x = 5 (along +Y) and local y = -3 (along -X). Worked out by hand.
         let result = app.tabs[i]
             .active_cmd
             .as_mut()
             .unwrap()
-            .on_point(glam::DVec3::new(3.0, 4.0, 0.0));
+            .on_point(glam::DVec3::new(103.0, -35.0, 0.0));
         let _ = app.apply_cmd_result(result);
         let state = app.hatch_dialog.as_ref().unwrap();
         assert_eq!(state.flow, Flow::None);
-        assert_eq!(state.specified_origin, Some([3.0, 4.0]));
+        let local = state.specified_origin.expect("an origin was picked");
+        assert!((local[0] - 5.0).abs() < 1.0e-9, "local x was {}", local[0]);
+        assert!((local[1] + 3.0).abs() < 1.0e-9, "local y was {}", local[1]);
         assert_eq!(app.active_modal, Some(ModalKind::Hatch));
     }
 
@@ -839,5 +861,171 @@ mod tests {
         let _ = app.feed_command(StepInput::Escape);
         assert!(app.hatch_dialog.as_ref().unwrap().specified_origin.is_none());
         assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    fn add_rect(app: &mut OpenCADStudio, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Handle> {
+        vec![
+            add_line(app, x0, y0, x1, y0),
+            add_line(app, x1, y0, x1, y1),
+            add_line(app, x1, y1, x0, y1),
+            add_line(app, x0, y1, x0, y0),
+        ]
+    }
+
+    fn click_at(app: &mut OpenCADStudio, x: f64, y: f64) {
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .expect("a collector is running")
+            .on_point(glam::DVec3::new(x, y, 0.0));
+        let _ = app.apply_cmd_result(result);
+    }
+
+    /// Hand the collector the objects the user would have picked in the
+    /// viewport (the direct path: no mouse), then finish with Enter.
+    fn choose_objects(app: &mut OpenCADStudio, handles: Vec<Handle>) {
+        let _ = app.feed_command(StepInput::SelectionComplete(handles));
+        let _ = app.feed_command(StepInput::Enter);
+    }
+
+    #[test]
+    fn select_objects_collects_the_chosen_boundary_objects() {
+        let mut app = new_app();
+        let sides = add_rect(&mut app, 0.0, 0.0, 20.0, 10.0);
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        choose_objects(&mut app, sides.clone());
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(state.regions.len(), 1);
+        assert_eq!(state.regions[0].1, RegionOrigin::Objects);
+        assert_eq!(state.taken_objects.len(), 4);
+        for side in &sides {
+            assert!(state.taken_objects.contains(side));
+        }
+    }
+
+    /// Two squares side by side; returns (square A, square B), both including
+    /// the shared middle line.
+    fn two_squares(app: &mut OpenCADStudio) -> (Vec<Handle>, Vec<Handle>) {
+        let bottom_left = add_line(app, 0.0, 0.0, 10.0, 0.0);
+        let bottom_right = add_line(app, 10.0, 0.0, 20.0, 0.0);
+        let right = add_line(app, 20.0, 0.0, 20.0, 10.0);
+        let top_right = add_line(app, 20.0, 10.0, 10.0, 10.0);
+        let top_left = add_line(app, 10.0, 10.0, 0.0, 10.0);
+        let left = add_line(app, 0.0, 10.0, 0.0, 0.0);
+        let middle = add_line(app, 10.0, 0.0, 10.0, 10.0);
+        (
+            vec![bottom_left, top_left, left, middle],
+            vec![bottom_right, right, top_right, middle],
+        )
+    }
+
+    #[test]
+    fn a_second_select_objects_starts_empty_and_reuses_already_taken_objects() {
+        let mut app = new_app();
+        let (square_a, square_b) = two_squares(&mut app);
+        let far = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+        let i = app.active_tab;
+        open_dialog(&mut app);
+
+        // First round: A. The unrelated global selection is hidden meanwhile.
+        app.tabs[i].scene.select_entity(far, false);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        assert!(app.tabs[i].scene.selected.is_empty(), "round 1 starts empty");
+        choose_objects(&mut app, square_a.clone());
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+        assert!(app.tabs[i].scene.selected.contains(&far), "selection restored");
+
+        // Second round: B shares the middle line already used by A.
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        assert!(
+            app.tabs[i].scene.selected.is_empty(),
+            "round 2 does not inherit the global selection"
+        );
+        choose_objects(&mut app, square_b);
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().regions.len(),
+            2,
+            "no filtering by already-used handles: both areas form"
+        );
+
+        // Third round: A again adds nothing.
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        choose_objects(&mut app, square_a);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 2);
+    }
+
+    #[test]
+    fn the_same_area_by_points_and_by_objects_is_one_region() {
+        // Points first, then objects.
+        let mut app = new_app();
+        let sides = add_rect(&mut app, 0.0, 0.0, 20.0, 10.0);
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(StepInput::Enter);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        choose_objects(&mut app, sides);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+        // And the other way round.
+        let mut app = new_app();
+        let sides = add_rect(&mut app, 0.0, 0.0, 20.0, 10.0);
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        choose_objects(&mut app, sides);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_inside(&mut app);
+        let _ = app.feed_command(StepInput::Enter);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+    }
+
+    #[test]
+    fn leaving_select_objects_puts_the_exact_previous_selection_back() {
+        for (finish_with_escape, had_selection) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let mut app = new_app();
+            let keep = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+            let other = add_line(&mut app, 200.0, 100.0, 210.0, 100.0);
+            let i = app.active_tab;
+            if had_selection {
+                app.tabs[i].scene.select_entity(keep, false);
+            }
+            open_dialog(&mut app);
+            let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+            // The user picks something else while the round runs.
+            app.tabs[i].scene.select_entity(other, false);
+            let input = if finish_with_escape {
+                StepInput::Escape
+            } else {
+                StepInput::Enter
+            };
+            let _ = app.feed_command(input);
+            let selected = &app.tabs[i].scene.selected;
+            assert!(!selected.contains(&other), "round pick must not leak");
+            assert_eq!(selected.contains(&keep), had_selection);
+            assert_eq!(selected.len(), usize::from(had_selection));
+            assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        }
+    }
+
+    #[test]
+    fn the_boundary_data_is_rebuilt_for_every_add() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        let _ = app.feed_command(StepInput::Escape);
+        let before = app.hatch_dialog.as_ref().unwrap().boundary_sources.len();
+        // The drawing changes while the dialog is open.
+        add_rect(&mut app, 100.0, 0.0, 120.0, 10.0);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        click_at(&mut app, 110.0, 5.0);
+        let _ = app.feed_command(StepInput::Enter);
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert_eq!(state.boundary_sources.len(), before + 4);
+        assert_eq!(state.regions.len(), 1, "the new rectangle was seen");
     }
 }
