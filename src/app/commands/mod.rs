@@ -198,6 +198,7 @@ impl OpenCADStudio {
         }
         // Cancel any running command before starting a new one.
         if self.tabs[i].active_cmd.is_some() {
+            self.hatch_dialog_abandon_for_new_command(i);
             self.tabs[i].scene.clear_preview_wire();
             self.tabs[i].active_cmd = None;
             // Interrupting an ADDSELECTED draw with another command reverts its

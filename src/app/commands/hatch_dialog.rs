@@ -117,6 +117,8 @@ impl OpenCADStudio {
         }
         self.hatch_dialog = Some(state);
         self.active_modal = Some(ModalKind::Hatch);
+        // The dialog is the command: Enter / Space repeat it.
+        self.tabs[i].last_cmd = Some("HATCH".to_string());
         Task::none()
     }
 
@@ -144,28 +146,42 @@ impl OpenCADStudio {
             return Task::none();
         }
         let document_origin = self.tabs[i].scene.document.hatch_origin();
-        let Some(mut command) = hatch_command_from_state(state, document_origin) else {
+        let Some(command) = hatch_command_from_state(state, document_origin) else {
             return Task::none();
         };
         let settings = state.settings.clone();
-        let result = command.on_enter();
         self.hatch_last = settings;
         self.hatch_dialog = None;
         if self.active_modal == Some(ModalKind::Hatch) {
             self.close_active_modal();
         }
+        // Run it as the active command, like `-HATCH` does: the end-of-command
+        // bookkeeping (nothing left selected, the hatch kept as "Previous")
+        // only happens for a command that was running.
+        let result = self.tabs[i]
+            .active_cmd
+            .insert(Box::new(command))
+            .on_enter();
         self.apply_cmd_result(result)
     }
 
-    /// Cancel / X / Esc, and every abandonment (tab left or closed): drop the
-    /// state, stop a hidden-step command in the owner tab, put the selection
-    /// back and close the window.
+    /// Cancel / X / Esc, and every abandonment (tab left or closed, another
+    /// command started): drop the state, stop a hidden-step command in the
+    /// owner tab, put the selection back and close the window.
     pub(in crate::app) fn hatch_dialog_cancel(&mut self) {
         if let Some(state) = self.hatch_dialog.take() {
             if let Some(index) = self.tabs.iter().position(|tab| tab.id == state.owner_tab_id) {
-                if state.flow != crate::ui::window::hatch_dialog::Flow::None {
+                // Only a command of the flow itself is stopped: a stale flow
+                // marker must never take another command down with it.
+                let hatch_runs = self.tabs[index]
+                    .active_cmd
+                    .as_ref()
+                    .is_some_and(|command| command.name() == "HATCH");
+                if state.flow != crate::ui::window::hatch_dialog::Flow::None && hatch_runs {
                     self.tabs[index].active_cmd = None;
+                    self.tabs[index].snap_result = None;
                     self.tabs[index].scene.clear_preview_wire();
+                    self.restore_pre_cmd_tangent();
                 }
                 if let Some(saved) = state.saved_selection {
                     self.hatch_restore_selection(index, saved);
@@ -174,6 +190,33 @@ impl OpenCADStudio {
         }
         if self.active_modal == Some(ModalKind::Hatch) {
             self.close_active_modal();
+        }
+    }
+
+    /// A new command is about to replace the running one in tab `i`: when the
+    /// running one is a hidden step of the HATCH dialog, the flow ends here, so
+    /// no state outlives its collector.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_abandon_for_new_command(&mut self, i: usize) {
+        let in_flow = self.hatch_dialog.as_ref().is_some_and(|state| {
+            state.owner_tab_id == self.tabs[i].id
+                && state.flow != crate::ui::window::hatch_dialog::Flow::None
+        });
+        if in_flow {
+            self.hatch_dialog_cancel();
+        }
+    }
+
+    /// The tab `tab_id` is going away without `on_tab_close` (a queued close
+    /// answered with Discard): a flow it owned can never finish.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_abandon_for_tab(&mut self, tab_id: u64) {
+        if self
+            .hatch_dialog
+            .as_ref()
+            .is_some_and(|state| state.owner_tab_id == tab_id)
+        {
+            self.hatch_dialog_cancel();
         }
     }
 
@@ -1300,5 +1343,196 @@ mod tests {
         let _ = app.update(Message::HatchDialogOk);
         assert_eq!(hatch_count(&app), 0);
         assert!(app.hatch_dialog.is_none());
+    }
+
+    fn command_name(app: &OpenCADStudio, tab: usize) -> Option<&'static str> {
+        app.tabs[tab].active_cmd.as_ref().map(|command| command.name())
+    }
+
+    #[test]
+    fn starting_another_command_in_a_hidden_flow_abandons_it() {
+        for flow in FLOWS {
+            let mut app = new_app();
+            // Two lines that enclose nothing: the user's own selection.
+            let a = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+            let b = add_line(&mut app, 100.0, 120.0, 110.0, 120.0);
+            let i = app.active_tab;
+            app.tabs[i].scene.select_entity(a, false);
+            app.tabs[i].scene.select_entity(b, false);
+            open_dialog(&mut app);
+            start_flow(&mut app, flow);
+            assert!(app.tabs[i].active_cmd.is_some(), "{flow}: flow started");
+            let _ = app.dispatch_command("LINE");
+            assert!(app.hatch_dialog.is_none(), "{flow}: state discarded");
+            assert!(app.active_modal.is_none(), "{flow}: no dialog");
+            assert_eq!(command_name(&app, i), Some("LINE"), "{flow}: LINE runs");
+            let mut selected = app.selected_handles(i);
+            selected.sort();
+            let mut expected = vec![a, b];
+            expected.sort();
+            assert_eq!(selected, expected, "{flow}: selection put back");
+        }
+    }
+
+    #[test]
+    fn a_hatch_after_an_interrupted_select_round_keeps_its_own_preselection() {
+        let mut app = new_app();
+        let a = add_line(&mut app, 100.0, 100.0, 110.0, 100.0);
+        let i = app.active_tab;
+        app.tabs[i].scene.select_entity(a, false);
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        let _ = app.dispatch_command("LINE");
+        let _ = app.update(Message::CommandEscape);
+        // The user now selects a closed rectangle and starts HATCH again.
+        app.tabs[i].scene.deselect_all();
+        for handle in add_rect(&mut app, 0.0, 0.0, 20.0, 10.0) {
+            app.tabs[i].scene.select_entity(handle, false);
+        }
+        let _ = app.dispatch_command("HATCH");
+        let state = app.hatch_dialog.as_ref().expect("the dialog opened");
+        assert_eq!(state.regions.len(), 1, "the new preselection seeds the dialog");
+        assert_eq!(app.selected_handles(i).len(), 4, "and is still selected");
+        assert!(!app.selected_handles(i).contains(&a), "the old selection did not come back");
+    }
+
+    #[test]
+    fn a_tab_switch_after_an_interrupted_flow_leaves_the_new_command_alone() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        let _ = app.dispatch_command("LINE");
+        let _ = app.update(Message::TabSwitch(second));
+        assert_eq!(command_name(&app, first), Some("LINE"), "the LINE of the owner tab survives");
+    }
+
+    #[test]
+    fn cancelling_a_flow_only_stops_a_hatch_command() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        let i = app.active_tab;
+        // A stale flow marker with an unrelated command in the owner tab.
+        app.hatch_dialog.as_mut().unwrap().flow = Flow::Pick;
+        app.set_active_command(
+            i,
+            Box::new(crate::modules::draw::draw::line::LineCommand::new()),
+        );
+        app.hatch_dialog_cancel();
+        assert_eq!(command_name(&app, i), Some("LINE"));
+    }
+
+    #[test]
+    fn closing_all_tabs_discarding_a_dirty_owner_abandons_its_flow() {
+        let mut app = app_with_rectangle();
+        let (first, _second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Objects));
+        app.tabs[first].dirty = true;
+        let owner_id = app.tabs[first].id;
+        let _ = app.update(Message::DocTabCloseAll);
+        assert!(app.tabs.iter().any(|tab| tab.id == owner_id), "waiting for the answer");
+        let _ = app.update(Message::UnsavedDialogDiscard);
+        assert!(app.tabs.iter().all(|tab| tab.id != owner_id), "owner tab discarded");
+        assert!(app.hatch_dialog.is_none(), "the flow went with its tab");
+        assert!(app.active_modal.is_none());
+    }
+
+    #[test]
+    fn the_last_tab_discarded_while_in_a_flow_abandons_it_too() {
+        let mut app = app_with_rectangle();
+        assert_eq!(app.tabs.len(), 1);
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        app.tabs[0].dirty = true;
+        let _ = app.update(Message::DocTabCloseAll);
+        let _ = app.update(Message::UnsavedDialogDiscard);
+        assert!(app.hatch_dialog.is_none());
+    }
+
+    #[test]
+    fn ok_leaves_nothing_selected_and_remembers_the_hatch_as_previous() {
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 1);
+        let hatch = *app.tabs[i].scene.hatches.keys().next().unwrap();
+        assert!(app.tabs[i].scene.selected.is_empty(), "nothing stays selected");
+        assert_eq!(app.tabs[i].prev_selection, vec![hatch], "available as Previous");
+        assert!(app.tabs[i].active_cmd.is_none());
+    }
+
+    #[test]
+    fn a_second_hatch_after_ok_does_not_seed_from_the_first_hatch() {
+        let mut app = app_with_rectangle();
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push(region());
+        let _ = app.update(Message::HatchDialogOk);
+        open_dialog(&mut app);
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert!(state.regions.is_empty());
+        assert!(state.taken_objects.is_empty());
+    }
+
+    #[test]
+    fn separate_hatches_all_end_unselected() {
+        let mut app = new_app();
+        add_rect(&mut app, 0.0, 0.0, 10.0, 10.0);
+        add_rect(&mut app, 20.0, 0.0, 30.0, 10.0);
+        let i = app.active_tab;
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogField(Field::Separate(true)));
+        for x in [5.0, 25.0] {
+            let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+            click_at(&mut app, x, 5.0);
+            let _ = app.feed_command(StepInput::Enter);
+        }
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(hatch_count(&app), 2);
+        assert!(app.tabs[i].scene.selected.is_empty(), "no grips left on the last hatch");
+        // The commit handler selects each new hatch exclusively (as with
+        // -HATCH), so "Previous" holds the last one.
+        let previous = app.tabs[i].prev_selection.clone();
+        assert_eq!(previous.len(), 1);
+        assert!(app.tabs[i].scene.hatches.contains_key(&previous[0]));
+    }
+
+    #[test]
+    fn opening_the_dialog_makes_hatch_the_command_to_repeat() {
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        let _ = app.dispatch_command("LINE");
+        let _ = app.update(Message::CommandEscape);
+        assert_eq!(app.tabs[i].last_cmd.as_deref(), Some("LINE"));
+        let _ = app.dispatch_command("HATCH");
+        assert_eq!(app.tabs[i].last_cmd.as_deref(), Some("HATCH"));
+    }
+
+    #[test]
+    fn cancelling_a_flow_clears_the_snap_result() {
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        open_dialog(&mut app);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        app.tabs[i].snap_result = Some(crate::snap::SnapResult {
+            world: glam::DVec3::ZERO,
+            model_point: None,
+            screen: iced::Point::ORIGIN,
+            snap_type: crate::snap::SnapType::Endpoint,
+            tangent_obj: None,
+            extension_base: None,
+            extension_base2: None,
+            extension_origin: None,
+            extension_dir: None,
+            viewport: None,
+            source: None,
+            secondary_source: None,
+        });
+        app.hatch_dialog_cancel();
+        assert!(app.tabs[i].snap_result.is_none());
     }
 }
