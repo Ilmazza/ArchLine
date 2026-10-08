@@ -62,6 +62,27 @@ impl GradientSpec {
         let base = rgba_of(self.color1).unwrap_or([1.0; 4]);
         tinted_second_color(base, self.tint as f32)
     }
+
+    /// The render pattern for this gradient and its first colour, as the HATCH
+    /// command and the swatch build them. The second colour is the effective
+    /// one, never the raw `color2`.
+    pub fn model_pattern(&self) -> (crate::scene::model::hatch_model::HatchPattern, [f32; 4]) {
+        use crate::scene::model::hatch_model::HatchPattern;
+        let first = rgba_of(self.color1).unwrap_or([1.0; 4]);
+        let second = rgba_of(self.effective_color2()).unwrap_or([1.0; 4]);
+        (
+            HatchPattern::Gradient {
+                angle_deg: self.angle_rad.to_degrees() as f32,
+                color2: second,
+                kind: self.kind,
+                invert: self.invert,
+                shift: if self.centered { 0.0 } else { 1.0 },
+                one_color: self.one_color,
+                tint: self.tint as f32,
+            },
+            first,
+        )
+    }
 }
 
 /// Some fields of a gradient; `None` means "leave as it is".
@@ -346,6 +367,30 @@ mod tests {
             angle_rad: 0.5,
             centered: false,
         }
+    }
+
+    #[test]
+    fn model_pattern_carries_the_effective_second_colour_and_the_flags() {
+        use crate::scene::model::hatch_model::HatchPattern;
+        let two = spec();
+        let (pattern, first) = two.model_pattern();
+        assert_eq!(first, rgba_of(two.color1).unwrap());
+        let HatchPattern::Gradient { color2, one_color, shift, kind, invert, angle_deg, .. } = pattern
+        else {
+            panic!("a gradient")
+        };
+        assert_eq!(color2, rgba_of(two.color2).unwrap());
+        assert!(!one_color && shift == 1.0 && invert && kind == GradientKind::Cylinder);
+        assert!((angle_deg - 0.5_f64.to_degrees() as f32).abs() < 1e-4);
+
+        let one = GradientSpec { one_color: true, centered: true, ..spec() };
+        let (pattern, _) = one.model_pattern();
+        let HatchPattern::Gradient { color2, one_color, tint, shift, .. } = pattern else {
+            panic!("a gradient")
+        };
+        assert_eq!(color2, rgba_of(one.effective_color2()).unwrap(), "never the raw color2");
+        assert_ne!(color2, rgba_of(one.color2).unwrap());
+        assert!(one_color && tint == 0.25 && shift == 0.0);
     }
 
     fn gradient_hatch() -> Hatch {

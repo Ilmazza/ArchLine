@@ -188,6 +188,10 @@ pub enum HatchPattern {
         invert: bool,
         /// 0 = centred, 1 = shifted towards the upper-left light source.
         shift: f32,
+        /// Colour 2 is the tint of colour 1 (a one-colour gradient).
+        one_color: bool,
+        /// 0 = black end, 1 = white end; only with `one_color`.
+        tint: f32,
     },
 }
 

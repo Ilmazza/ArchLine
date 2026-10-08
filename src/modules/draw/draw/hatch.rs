@@ -1205,6 +1205,8 @@ impl GradientCommand {
                 kind: self.kind,
                 invert: self.invert,
                 shift: 0.0,
+                one_color: false,
+                tint: 1.0,
             },
             name: self.kind.dxf_name(self.invert).into(),
             color: [0.30, 0.60, 0.95, 0.80],
