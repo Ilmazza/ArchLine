@@ -365,7 +365,8 @@ impl OpenCADStudio {
     }
 
     /// OK on "Hatch Edit": the fields the user changed, and only those, go to
-    /// the hatch through HATCHEDIT's own update, as one undo step.
+    /// the hatch through the window's own HATCHEDIT operation (`Window`), as
+    /// one undo step.
     #[inline(never)]
     fn hatch_dialog_ok_edit(&mut self) -> Task<Message> {
         use crate::modules::draw::draw::hatchedit::HatcheditCommand;

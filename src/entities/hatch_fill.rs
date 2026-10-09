@@ -1121,6 +1121,34 @@ mod tests {
     }
 
     #[test]
+    fn a_gradient_never_takes_an_origin() {
+        // A gradient has no pattern origin: one in the edit is not recorded
+        // in its XDATA, whether the gradient is new or edited.
+        let edited = GradientPatch {
+            centered: Some(true),
+            ..Default::default()
+        };
+        for fill in [FillEdit::ToGradient(spec()), FillEdit::Gradient(edited)] {
+            let mut before = bounded_hatch();
+            if matches!(fill, FillEdit::Gradient(_)) {
+                apply_gradient(&mut before, &spec());
+            }
+            let mut after = before.clone();
+            apply_window_edit(
+                &mut after,
+                &HatchWindowEdit {
+                    fill: Some(fill),
+                    origin: Some([4.0, 5.0]),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(FillKind::of(&after), FillKind::Gradient);
+            assert_eq!(after.common, before.common, "XDATA (the origin) untouched");
+            assert_eq!(after.pattern_origin(), before.pattern_origin());
+        }
+    }
+
+    #[test]
     fn an_empty_edit_changes_nothing() {
         assert!(HatchWindowEdit::default().is_empty());
         let before = bounded_hatch();

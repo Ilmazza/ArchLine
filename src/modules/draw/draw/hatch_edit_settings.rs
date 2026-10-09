@@ -963,6 +963,47 @@ mod tests {
     }
 
     #[test]
+    fn a_specified_origin_counts_only_from_the_hatch_tab() {
+        let picked = Some([3.0, 4.0]);
+        let specified = |target: &EditTarget, tab: FillTab| {
+            let mut s = target.initial.clone();
+            s.origin_mode = OriginMode::Specified;
+            s.tab = tab;
+            s
+        };
+        // A gradient on its own tab: a picked point alone is no change.
+        let gradient = gradient_target();
+        let on_gradient = specified(&gradient, FillTab::Gradient);
+        assert_eq!(gradient.changes(&on_gradient, picked), Some(HatchWindowEdit::default()));
+        let mut state = crate::ui::window::hatch_dialog::State::for_edit(
+            1,
+            crate::command::WorkingPlane::default(),
+            gradient.clone(),
+        );
+        state.settings = on_gradient;
+        state.specified_origin = picked;
+        assert!(!state.can_ok(), "a picked point alone does not enable OK");
+        // A pattern turned into a gradient: the gradient has no origin.
+        let pattern = target();
+        let to_gradient = pattern.changes(&specified(&pattern, FillTab::Gradient), picked).unwrap();
+        assert!(matches!(to_gradient.fill, Some(FillEdit::ToGradient(_))));
+        assert_eq!(to_gradient.origin, None);
+        // The Hatch tab of a pattern: the picked point is the new origin, as before.
+        let on_hatch_tab = pattern.changes(&specified(&pattern, FillTab::Hatch), picked).unwrap();
+        assert_eq!(
+            on_hatch_tab,
+            HatchWindowEdit {
+                origin: picked,
+                ..Default::default()
+            }
+        );
+        // A gradient turned into a pattern takes it too.
+        let to_pattern = gradient.changes(&specified(&gradient, FillTab::Hatch), picked).unwrap();
+        assert!(matches!(to_pattern.fill, Some(FillEdit::ToPattern { .. })));
+        assert_eq!(to_pattern.origin, picked);
+    }
+
+    #[test]
     fn apply_result_carries_the_whole_edit_in_one_operation() {
         let target = gradient_target();
         let changes = edit(&target, |s| s.gradient.shape = 5).unwrap();
