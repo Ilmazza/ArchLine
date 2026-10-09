@@ -105,6 +105,7 @@ pub(crate) struct HatchPatternPreview {
     pattern: crate::scene::model::hatch_model::HatchPattern,
     user_angle: f32,
     user_scale: f32,
+    color: Option<Color>,
 }
 
 impl HatchPatternPreview {
@@ -113,7 +114,24 @@ impl HatchPatternPreview {
             pattern,
             user_angle: 0.0,
             user_scale: 1.0,
+            color: None,
         }
+    }
+
+    /// The colour the swatch draws in: the pattern's lines, the solid fill, or
+    /// colour 1 of a gradient (whose colour 2 is part of the pattern).
+    // Callers are the Hatch window's swatches, wired in a later task.
+    #[allow(dead_code)]
+    pub(crate) fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// The given colour, unless a component is NaN, infinite or outside 0..=1:
+    /// such a colour is ignored and the swatch keeps the theme's colours.
+    fn usable_color(&self) -> Option<Color> {
+        self.color
+            .filter(|c| valid_rgba([c.r, c.g, c.b, c.a]))
     }
 
     /// Angle in radians and scale factor as the user typed them.
@@ -200,6 +218,218 @@ pub(crate) fn swatch_segments(
     (!segments.is_empty()).then_some(segments)
 }
 
+fn mix4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t)
+}
+
+/// Stops (offset, RGBA) of a linear swatch gradient, taken from the shader's
+/// profile where it bends: the ends for Linear, the middle too for Cylinder,
+/// nine samples for Curved.
+pub(crate) fn swatch_linear_stops(
+    kind: crate::scene::model::hatch_model::GradientKind,
+    invert: bool,
+    c1: [f32; 4],
+    c2: [f32; 4],
+) -> Vec<(f32, [f32; 4])> {
+    use crate::entities::hatch_fill::gradient_profile;
+    use crate::scene::model::hatch_model::GradientKind;
+    let offsets: &[f32] = match kind {
+        GradientKind::Cylinder => &[0.0, 0.5, 1.0],
+        GradientKind::Curved => &[0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
+        _ => &[0.0, 1.0],
+    };
+    offsets
+        .iter()
+        .map(|&t| (t, mix4(c1, c2, gradient_profile(kind, invert, t))))
+        .collect()
+}
+
+/// Concentric rings of a radial swatch, outermost first: (fraction of the
+/// radius, colour). Radial stops run outside-in, as in the shader: colour 2 at
+/// the centre.
+pub(crate) fn swatch_ring_colors(
+    kind: crate::scene::model::hatch_model::GradientKind,
+    invert: bool,
+    c1: [f32; 4],
+    c2: [f32; 4],
+    rings: usize,
+) -> Vec<(f32, [f32; 4])> {
+    use crate::entities::hatch_fill::gradient_profile;
+    (0..rings)
+        .map(|k| {
+            let outer = 1.0 - k as f32 / rings as f32;
+            let middle = outer - 0.5 / rings as f32;
+            (outer, mix4(c2, c1, gradient_profile(kind, invert, middle)))
+        })
+        .collect()
+}
+
+/// How many concentric rings a radial swatch is drawn with.
+pub(crate) const SWATCH_RINGS: usize = 16;
+/// A canvas linear gradient keeps at most this many stops; later ones are
+/// silently dropped, and the last one carries the end colour.
+const SWATCH_MAX_STOPS: usize = 8;
+/// Padding around the sample, in pixels (the same on every side).
+const SWATCH_PAD: f32 = 4.0;
+
+/// A usable colour has every component in 0..=1 (which also rules out NaN).
+/// `Color::from_rgba` panics otherwise, so nothing reaches it unchecked.
+fn valid_rgba(c: [f32; 4]) -> bool {
+    c.iter().all(|v| (0.0..=1.0).contains(v))
+}
+
+/// What a gradient swatch is asked to draw, in canvas coordinates (y down).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SwatchGradient {
+    /// An exact `canvas::Gradient::Linear` from `start` to `end`.
+    Linear {
+        start: Point,
+        end: Point,
+        stops: Vec<(f32, [f32; 4])>,
+    },
+    /// Concentric circles, outermost first, clipped to the sample.
+    Rings {
+        center: Point,
+        radius: f32,
+        rings: Vec<(f32, [f32; 4])>,
+    },
+    /// The frame could not be built: flat colour 1, still a fill.
+    Flat([f32; 4]),
+    /// Nothing sensible to draw (bad colours, no room): the tinted fill the
+    /// pattern swatch uses, never a blank box.
+    Tint,
+}
+
+/// Drops interior stops until at most `limit` remain, keeping both ends.
+fn trim_stops(mut stops: Vec<(f32, [f32; 4])>, limit: usize) -> Vec<(f32, [f32; 4])> {
+    while stops.len() > limit.max(2) {
+        // The stop just before the end bends the curve least where it eases in.
+        let drop = stops.len() - 2;
+        stops.remove(drop);
+    }
+    stops
+}
+
+/// Plan of a gradient swatch of `width` x `height` px, with the sample inset by
+/// `SWATCH_PAD`. `c2` is always the effective colour 2 given by the caller.
+/// Uses the renderer's `gradient_frame`, so the swatch and the fill agree on
+/// the direction and on the radial centre.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn swatch_gradient(
+    kind: crate::scene::model::hatch_model::GradientKind,
+    invert: bool,
+    angle_deg: f32,
+    shift: f32,
+    c1: [f32; 4],
+    c2: [f32; 4],
+    width: f32,
+    height: f32,
+) -> SwatchGradient {
+    let pad = SWATCH_PAD;
+    let room = width.is_finite()
+        && height.is_finite()
+        && width - pad * 2.0 > 0.0
+        && height - pad * 2.0 > 0.0;
+    if !room || !valid_rgba(c1) || !valid_rgba(c2) {
+        return SwatchGradient::Tint;
+    }
+    let (w, h) = (width as f64, height as f64);
+    let pad = pad as f64;
+    // The sample in y-up coordinates, like the renderer's boundary.
+    let rect = [[pad, pad], [w - pad, pad], [w - pad, h - pad], [pad, h - pad]];
+    let Some(frame) = kernel::geom2d::gradient_frame(
+        &rect,
+        (angle_deg as f64).to_radians(),
+        shift as f64,
+        kernel::geom2d::Tolerance::default(),
+    ) else {
+        return SwatchGradient::Flat(c1);
+    };
+    // y-up to canvas.
+    let canvas_point = |x: f64, y: f64| Point::new(x as f32, (h - y) as f32);
+    if kind.radial() {
+        let center = canvas_point(frame.center[0], frame.center[1]);
+        let radius = frame.radius as f32;
+        if !(center.x.is_finite() && center.y.is_finite() && radius.is_finite() && radius > 0.0) {
+            return SwatchGradient::Flat(c1);
+        }
+        SwatchGradient::Rings {
+            center,
+            radius,
+            rings: swatch_ring_colors(kind, invert, c1, c2, SWATCH_RINGS),
+        }
+    } else {
+        let angle = (angle_deg as f64).to_radians();
+        let (dx, dy) = (angle.cos(), angle.sin());
+        let near = frame.projection_min;
+        let far = frame.projection_min + frame.projection_span;
+        let start = canvas_point(dx * near, dy * near);
+        let end = canvas_point(dx * far, dy * far);
+        if !(start.x.is_finite() && start.y.is_finite() && end.x.is_finite() && end.y.is_finite()) {
+            return SwatchGradient::Flat(c1);
+        }
+        SwatchGradient::Linear {
+            start,
+            end,
+            stops: trim_stops(
+                swatch_linear_stops(kind, invert, c1, c2),
+                SWATCH_MAX_STOPS,
+            ),
+        }
+    }
+}
+
+fn rgba_color(c: [f32; 4]) -> Color {
+    // Not `Color::from_rgba`, which panics out of range: clamp instead.
+    let [r, g, b, a] = c.map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) });
+    Color { r, g, b, a }
+}
+
+/// Paints a gradient swatch plan into `sample`.
+fn paint_swatch_gradient(
+    frame: &mut canvas::Frame,
+    sample: &canvas::Path,
+    sample_rect: Rectangle,
+    plan: &SwatchGradient,
+    tint: Color,
+) {
+    match plan {
+        SwatchGradient::Tint => frame.fill(sample, tint),
+        SwatchGradient::Flat(c) => frame.fill(sample, rgba_color(*c)),
+        SwatchGradient::Linear { start, end, stops } => {
+            let linear = stops.iter().fold(
+                canvas::gradient::Linear::new(*start, *end),
+                |linear, (offset, c)| linear.add_stop(*offset, rgba_color(*c)),
+            );
+            frame.fill(
+                sample,
+                canvas::Fill {
+                    style: canvas::Style::Gradient(canvas::Gradient::Linear(linear)),
+                    ..Default::default()
+                },
+            );
+        }
+        SwatchGradient::Rings {
+            center,
+            radius,
+            rings,
+        } => {
+            // Colour 1 first, in case a ring is lost: the sample is never bare.
+            if let Some((_, outer)) = rings.first() {
+                frame.fill(sample, rgba_color(*outer));
+            }
+            frame.with_clip(sample_rect, |clipped| {
+                for (fraction, c) in rings {
+                    clipped.fill(
+                        &canvas::Path::circle(*center, fraction * radius),
+                        rgba_color(*c),
+                    );
+                }
+            });
+        }
+    }
+}
+
 impl canvas::Program<Message> for HatchPatternPreview {
     type State = ();
 
@@ -227,10 +457,45 @@ impl canvas::Program<Message> for HatchPatternPreview {
 
         match &self.pattern {
             HatchPattern::Solid => {
-                frame.fill(&sample, palette.background.base.text.scale_alpha(0.72));
+                frame.fill(
+                    &sample,
+                    self.usable_color()
+                        .unwrap_or(palette.background.base.text.scale_alpha(0.72)),
+                );
             }
-            HatchPattern::Gradient { .. } => {
-                frame.fill(&sample, palette.primary.weak.color);
+            HatchPattern::Gradient {
+                angle_deg,
+                color2,
+                kind,
+                invert,
+                shift,
+                ..
+            } => {
+                let tint = palette.primary.weak.color;
+                match self.usable_color() {
+                    // No colour given: the flat fill of before.
+                    None => frame.fill(&sample, tint),
+                    Some(color) => {
+                        let sample_rect = Rectangle::new(
+                            Point::new(pad, pad),
+                            Size::new(
+                                (bounds.width - pad * 2.0).max(0.0),
+                                (bounds.height - pad * 2.0).max(0.0),
+                            ),
+                        );
+                        let plan = swatch_gradient(
+                            *kind,
+                            *invert,
+                            *angle_deg,
+                            *shift,
+                            [color.r, color.g, color.b, color.a],
+                            *color2,
+                            bounds.width,
+                            bounds.height,
+                        );
+                        paint_swatch_gradient(&mut frame, &sample, sample_rect, &plan, tint);
+                    }
+                }
             }
             HatchPattern::Pattern(_) => {
                 let segments = swatch_segments(
@@ -243,7 +508,7 @@ impl canvas::Program<Message> for HatchPatternPreview {
                 match segments {
                     Some(segments) => {
                         let stroke = canvas::Stroke::default()
-                            .with_color(palette.background.base.text)
+                            .with_color(self.usable_color().unwrap_or(palette.background.base.text))
                             .with_width(1.0);
                         for segment in segments {
                             frame.stroke(
@@ -262,7 +527,12 @@ impl canvas::Program<Message> for HatchPatternPreview {
                         }
                     }
                     // Too fine, invalid or no line on the sample: never blank.
-                    None => frame.fill(&sample, palette.background.base.text.scale_alpha(0.35)),
+                    None => frame.fill(
+                        &sample,
+                        self.usable_color()
+                            .unwrap_or(palette.background.base.text)
+                            .scale_alpha(0.35),
+                    ),
                 }
             }
         }
@@ -2474,5 +2744,228 @@ mod swatch_tests {
         assert!(swatch_segments(&lines(3.175), 0.0, f32::NAN, 120.0, 60.0).is_none());
         // Solid has no lines at all.
         assert!(swatch_segments(&HatchPattern::Solid, 0.0, 1.0, 120.0, 60.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod swatch_color_tests {
+    use super::*;
+    use crate::scene::model::hatch_model::GradientKind;
+
+    const C1: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const C2: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    #[test]
+    fn linear_has_two_stops_cylinder_three_and_curved_nine() {
+        assert_eq!(swatch_linear_stops(GradientKind::Linear, false, C1, C2).len(), 2);
+        assert_eq!(swatch_linear_stops(GradientKind::Cylinder, false, C1, C2).len(), 3);
+        assert_eq!(swatch_linear_stops(GradientKind::Curved, false, C1, C2).len(), 9);
+    }
+
+    #[test]
+    fn the_stops_follow_the_shader_profile() {
+        let linear = swatch_linear_stops(GradientKind::Linear, false, C1, C2);
+        assert_eq!(linear[0], (0.0, C1));
+        assert_eq!(linear[1], (1.0, C2));
+        // Cylinder: colour 1 at both edges, colour 2 in the middle.
+        let cylinder = swatch_linear_stops(GradientKind::Cylinder, false, C1, C2);
+        assert_eq!(cylinder[0].1, C1);
+        assert_eq!(cylinder[1], (0.5, C2));
+        assert_eq!(cylinder[2].1, C1);
+        // Inverted: the other way round.
+        let inverted = swatch_linear_stops(GradientKind::Cylinder, true, C1, C2);
+        assert_eq!(inverted[1].1, C1);
+        assert_eq!(inverted[0].1, C2);
+        // Curved eases in: the middle is a quarter of the way, not a half.
+        let curved = swatch_linear_stops(GradientKind::Curved, false, C1, C2);
+        let middle = curved[4];
+        assert_eq!(middle.0, 0.5);
+        assert!((middle.1[2] - 0.25).abs() < 1e-6, "{middle:?}");
+    }
+
+    #[test]
+    fn rings_run_from_the_outside_in_with_colour_two_at_the_centre() {
+        let rings = swatch_ring_colors(GradientKind::Spherical, false, C1, C2, 16);
+        assert_eq!(rings.len(), 16);
+        assert_eq!(rings[0].0, 1.0);
+        assert!(rings[15].0 > 0.0 && rings[15].0 < 0.1);
+        // Radial stops run outside-in: colour 1 outside, colour 2 inside.
+        assert!(rings[0].1[0] > 0.9, "{:?}", rings[0]);
+        assert!(rings[15].1[2] > 0.9, "{:?}", rings[15]);
+        // Radii strictly decrease.
+        assert!(rings.windows(2).all(|w| w[0].0 > w[1].0));
+    }
+
+    #[test]
+    fn hemispherical_reaches_colour_one_sooner_than_spherical() {
+        let sphere = swatch_ring_colors(GradientKind::Spherical, false, C1, C2, 16);
+        let hemi = swatch_ring_colors(GradientKind::Hemispherical, false, C1, C2, 16);
+        // Same ring, nearer the edge: the sqrt profile has moved further to colour 1.
+        assert!(hemi[8].1[0] > sphere[8].1[0]);
+    }
+
+    #[test]
+    fn inverted_rings_put_colour_one_at_the_centre() {
+        let rings = swatch_ring_colors(GradientKind::Spherical, true, C1, C2, 16);
+        assert!(rings[0].1[2] > 0.9, "{:?}", rings[0]);
+        assert!(rings[15].1[0] > 0.9, "{:?}", rings[15]);
+    }
+
+    #[test]
+    fn the_swatch_keeps_the_colour_it_is_given() {
+        let preview =
+            HatchPatternPreview::new(crate::scene::model::hatch_model::HatchPattern::Solid)
+                .with_color(iced::Color::from_rgb(1.0, 0.0, 0.0));
+        assert_eq!(preview.color, Some(iced::Color::from_rgb(1.0, 0.0, 0.0)));
+        // Without a colour the swatch keeps today's look.
+        let plain = HatchPatternPreview::new(crate::scene::model::hatch_model::HatchPattern::Solid);
+        assert_eq!(plain.color, None);
+    }
+
+    // What the canvas is asked to draw.
+
+    fn plan(
+        kind: GradientKind,
+        invert: bool,
+        angle: f32,
+        shift: f32,
+        w: f32,
+        h: f32,
+    ) -> SwatchGradient {
+        swatch_gradient(kind, invert, angle, shift, C1, C2, w, h)
+    }
+
+    #[test]
+    fn a_linear_plan_runs_across_the_sample_along_the_angle() {
+        // 0 degrees: left to right over the 100 x 50 sample (4 px padding).
+        let SwatchGradient::Linear { start, end, stops } =
+            plan(GradientKind::Linear, false, 0.0, 0.0, 108.0, 58.0)
+        else {
+            panic!("expected a linear plan");
+        };
+        assert!(
+            (start.x - 4.0).abs() < 1e-3 && (end.x - 104.0).abs() < 1e-3,
+            "{start:?} {end:?}"
+        );
+        assert!((start.y - end.y).abs() < 1e-3);
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0], (0.0, C1));
+        assert_eq!(stops[1], (1.0, C2));
+
+        // 90 degrees: bottom to top, which on the canvas (y down) is decreasing y.
+        let SwatchGradient::Linear { start, end, .. } =
+            plan(GradientKind::Linear, false, 90.0, 0.0, 108.0, 58.0)
+        else {
+            panic!("expected a linear plan");
+        };
+        assert!(start.y > end.y, "{start:?} {end:?}");
+        assert!((start.x - end.x).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_linear_plan_never_exceeds_the_eight_stops_the_canvas_keeps() {
+        let SwatchGradient::Linear { stops, .. } =
+            plan(GradientKind::Curved, false, 0.0, 0.0, 108.0, 58.0)
+        else {
+            panic!("expected a linear plan");
+        };
+        assert_eq!(stops.len(), 8);
+        // Both ends survive the trimming: they carry the two colours.
+        assert_eq!(stops[0], (0.0, C1));
+        assert_eq!(stops[7], (1.0, C2));
+        assert!(stops.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn a_radial_plan_is_sixteen_rings_around_the_centre() {
+        let SwatchGradient::Rings {
+            center,
+            radius,
+            rings,
+        } = plan(GradientKind::Spherical, false, 0.0, 0.0, 108.0, 58.0)
+        else {
+            panic!("expected a ring plan");
+        };
+        assert_eq!(rings.len(), 16);
+        assert!(
+            (center.x - 54.0).abs() < 1e-3 && (center.y - 29.0).abs() < 1e-3,
+            "{center:?}"
+        );
+        // The farthest corner of a 100 x 50 sample from its centre.
+        let expected = (50.0f32.powi(2) + 25.0f32.powi(2)).sqrt();
+        assert!((radius - expected).abs() < 1e-2, "{radius}");
+        assert_eq!(rings[0].0, 1.0);
+        assert!(rings[0].1[0] > 0.9 && rings[15].1[2] > 0.9);
+    }
+
+    #[test]
+    fn a_shifted_radial_plan_moves_the_centre_up_and_left() {
+        let SwatchGradient::Rings { center, .. } =
+            plan(GradientKind::Spherical, false, 0.0, 1.0, 108.0, 58.0)
+        else {
+            panic!("expected a ring plan");
+        };
+        // Upper-left light source: smaller x, and smaller canvas y (up).
+        assert!(center.x < 54.0 && center.y < 29.0, "{center:?}");
+    }
+
+    #[test]
+    fn degenerate_input_never_leaves_the_swatch_blank_or_panics() {
+        let nan = f32::NAN;
+        for kind in [
+            GradientKind::Linear,
+            GradientKind::Cylinder,
+            GradientKind::Spherical,
+            GradientKind::Hemispherical,
+            GradientKind::Curved,
+        ] {
+            // No room for a sample: the tint (not a gradient, not nothing).
+            for (w, h) in [(0.0, 0.0), (8.0, 8.0), (4.0, 58.0), (-5.0, 10.0), (nan, 10.0)] {
+                assert!(
+                    matches!(plan(kind, false, 0.0, 0.0, w, h), SwatchGradient::Tint),
+                    "{kind:?} {w}x{h}"
+                );
+            }
+            // Bad colours: tint.
+            assert!(matches!(
+                swatch_gradient(kind, false, 0.0, 0.0, [nan, 0.0, 0.0, 1.0], C2, 108.0, 58.0),
+                SwatchGradient::Tint
+            ));
+            let inf = f32::INFINITY;
+            // Out of range: from_rgba would panic, so it is refused up front.
+            assert!(matches!(
+                swatch_gradient(kind, false, 0.0, 0.0, C1, [0.0, 2.0, 0.0, 1.0], 108.0, 58.0),
+                SwatchGradient::Tint
+            ));
+            assert!(matches!(
+                swatch_gradient(kind, false, 0.0, 0.0, C1, [0.0, 0.0, inf, 1.0], 108.0, 58.0),
+                SwatchGradient::Tint
+            ));
+            // Bad geometry (no frame): flat colour 1, still a fill.
+            assert!(
+                matches!(plan(kind, false, nan, 0.0, 108.0, 58.0), SwatchGradient::Flat(c) if c == C1),
+                "{kind:?}"
+            );
+            assert!(
+                matches!(plan(kind, false, 0.0, nan, 108.0, 58.0), SwatchGradient::Flat(c) if c == C1),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unusable_colours_fall_back_to_the_theme_ones() {
+        let solid = || HatchPatternPreview::new(crate::scene::model::hatch_model::HatchPattern::Solid);
+        for bad in [
+            iced::Color { r: f32::NAN, g: 0.0, b: 0.0, a: 1.0 },
+            iced::Color { r: 0.0, g: f32::INFINITY, b: 0.0, a: 1.0 },
+            iced::Color { r: 0.0, g: 0.0, b: 1.5, a: 1.0 },
+            iced::Color { r: 0.0, g: 0.0, b: 0.0, a: -0.1 },
+        ] {
+            assert_eq!(solid().with_color(bad).usable_color(), None, "{bad:?}");
+        }
+        let preview = solid();
+        let good = iced::Color::from_rgb(0.1, 0.2, 0.3);
+        assert_eq!(preview.with_color(good).usable_color(), Some(good));
     }
 }
