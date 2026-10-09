@@ -1508,6 +1508,7 @@ fn render_signature(vp: &ViewportData, placement: &PhysicalViewport) -> u64 {
                 kind,
                 invert,
                 shift,
+                ..
             } => {
                 2_u8.hash(&mut h);
                 angle_deg.to_bits().hash(&mut h);

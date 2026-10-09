@@ -439,62 +439,15 @@ impl OpenCADStudio {
                     if let Some(codec::EntityType::Hatch(hatch)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
-                        if !name.is_empty() && name != hatch.pattern.name {
-                            if let Some(entry) =
-                                crate::scene::model::hatch_patterns::find(&name)
-                            {
-                                let mut pattern =
-                                    crate::scene::model::hatch_patterns::build_dxf_pattern(
-                                        entry,
-                                    );
-                                crate::entities::hatch::scale_pattern_geometry(
-                                    &mut pattern,
-                                    scale.max(1.0e-6) as f64,
-                                );
-                                crate::entities::hatch::rotate_pattern_geometry(
-                                    &mut pattern,
-                                    (angle as f64).to_radians(),
-                                );
-                                let origin = hatch.pattern_origin();
-                                crate::entities::hatch::translate_pattern_geometry(
-                                    &mut pattern,
-                                    origin.x,
-                                    origin.y,
-                                );
-                                hatch.pattern = pattern;
-                                hatch.is_solid = matches!(
-                                    entry.gpu,
-                                    crate::scene::model::hatch_model::HatchPattern::Solid
-                                );
-                                hatch.pattern_type =
-                                    codec::entities::HatchPatternType::Predefined;
-                                hatch.gradient_color.enabled = false;
-                            }
-                        } else {
-                            let requested_scale = scale.max(1.0e-6) as f64;
-                            if hatch.pattern_scale > 1.0e-12 {
-                                let factor = requested_scale / hatch.pattern_scale;
-                                hatch.scale_pattern_about_origin(factor);
-                            }
-                            let requested_angle = (angle as f64).to_radians();
-                            let delta = requested_angle - hatch.pattern_angle;
-                            hatch.rotate_pattern_about_origin(delta);
-                        }
-                        hatch.pattern_scale = scale.max(1.0e-6) as f64;
-                        hatch.pattern_angle = (angle as f64).to_radians();
-                        if let Some((x, y)) = origin {
-                            hatch.set_pattern_origin(codec::types::Vector2::new(x, y));
-                        }
-                        if disassociate {
-                            for path in &mut hatch.paths {
-                                path.boundary_handles.clear();
-                                path.flags.set_external(false);
-                            }
-                            hatch.is_associative = false;
-                        }
-                        if let Some(style) = style {
-                            hatch.style = style;
-                        }
+                        crate::entities::hatch_fill::apply_pattern_update(
+                            hatch,
+                            &name,
+                            scale,
+                            angle,
+                            origin,
+                            disassociate,
+                            style,
+                        );
                     }
                     if let Some(value) = annotative {
                         crate::scene::annotative::set_entity_annotative(
@@ -514,9 +467,26 @@ impl OpenCADStudio {
                             }
                         }
                     }
+                    // The scene draws from the cached fill model: rebuild it from
+                    // the updated entity (name, scale and angle may have changed).
+                    self.tabs[i].scene.refresh_fill_model(handle);
                     self.tabs[i]
                         .scene
                         .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+                }
+                HatchEditOperation::Window(edit) => {
+                    if let Some(codec::EntityType::Hatch(hatch)) =
+                        self.tabs[i].scene.document.get_entity_mut(handle)
+                    {
+                        crate::entities::hatch_fill::apply_window_edit(hatch, &edit);
+                    }
+                    // The cached fill model is rebuilt from the entity: a change of
+                    // kind (pattern/solid/gradient) is not a patch of the old one.
+                    self.tabs[i].scene.refresh_fill_model(handle);
+                    self.tabs[i]
+                        .scene
+                        .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+                    self.refresh_properties();
                 }
                 HatchEditOperation::AddBoundaries(handles) => {
                     self.tabs[i]

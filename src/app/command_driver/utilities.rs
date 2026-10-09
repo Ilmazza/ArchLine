@@ -1121,6 +1121,17 @@ impl OpenCADStudio {
         }
     }
 
+    /// A script line is a programmatic channel: nobody is there to answer the
+    /// dialogs a command opens for a person (HATCH's), so it runs as scripted.
+    /// The previous value is restored, so an outer scripted run stays scripted.
+    #[inline(never)]
+    pub(in crate::app) fn feed_scripted_line(&mut self, line: &str) -> Task<Message> {
+        let previous = std::mem::replace(&mut self.scripted_dispatch, true);
+        let task = self.feed_script_line(line);
+        self.scripted_dispatch = previous;
+        task
+    }
+
     /// Feed one line from a command script (.scr) into the command pipeline.
     ///
     /// If an interactive command is active, the line (or its tokens) is routed to

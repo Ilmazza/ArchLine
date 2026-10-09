@@ -173,6 +173,7 @@ impl OpenCADStudio {
                 | CmdResult::SolidSubtract { .. }
                 | CmdResult::SliceEntities { .. }
                 | CmdResult::SliceSurfaceEntities { .. }
+                | CmdResult::HatchBoundariesPicked { .. }
         );
         let task = self.apply_cmd_result_inner(result);
         let i = self.active_tab;
@@ -624,6 +625,9 @@ impl OpenCADStudio {
                 entity_style,
             } => {
                 self.handle_commit_hatches(hatches, entity_style);
+            }
+            CmdResult::HatchBoundariesPicked { regions, objects } => {
+                return self.handle_hatch_boundaries_picked(regions, objects);
             }
             CmdResult::BatchCopy(handles, transforms) => {
                 if let Some(task) = self.handle_batch_copy(handles, transforms) {

@@ -23,6 +23,7 @@ impl OpenCADStudio {
             Some(K::LayerStateManager) => crate::tr!("modal", "layer-state-manager"),
             Some(K::LayerTranslator) => crate::t!("Layer Translator").into_owned(),
             Some(K::DrawingUnits) => crate::t!("Drawing Units").into_owned(),
+            Some(K::Hatch) => self.hatch_dialog_title(),
             Some(K::BlockDefinition) => crate::t!("Block Definition").into_owned(),
             Some(K::PdfAttach) => match self.pdf_attach.as_ref().map(|s| s.kind) {
                 Some(codec::entities::UnderlayType::Dwf) => crate::t!("Attach DWF Underlay").into_owned(),
@@ -515,6 +516,18 @@ impl OpenCADStudio {
                 let state = self.drawing_units.as_ref()?;
                 sized_flow(ex, 560, 420, |flow| {
                     crate::ui::window::drawing_units::view_window(state, flow)
+                })
+            }
+            super::super::ModalKind::Hatch => {
+                use crate::ui::window::hatch_dialog;
+                let state = self.hatch_dialog.as_ref()?;
+                // "Use Current" is drawn with the owner drawing's current colour.
+                let current = self.hatch_dialog_current_color();
+                // 940 x 760: 560 cut off Preview/OK/Cancel (three columns plus
+                // tabs and buttons are taller). The Gradient tab is lower than
+                // the Hatch tab and the window measures it as the Hatch tab.
+                sized_flow(ex, hatch_dialog::MAX_WIDTH, hatch_dialog::MAX_HEIGHT, |flow| {
+                    hatch_dialog::view_window(state, current, flow)
                 })
             }
             super::super::ModalKind::BlockDefinition => {

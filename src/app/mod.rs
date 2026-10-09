@@ -502,6 +502,17 @@ pub(super) struct OpenCADStudio {
     layer_translator: Option<crate::ui::window::layer_translator::State>,
     /// Working copy of the Drawing Units dialog; `None` while it is closed.
     drawing_units: Option<crate::ui::window::drawing_units::State>,
+    /// Working state of the HATCH dialog while its flow is under way — visible
+    /// or hidden behind a pick; `None` otherwise.
+    hatch_dialog: Option<crate::ui::window::hatch_dialog::State>,
+    /// The last valid HATCH dialog preferences, kept for the session. Holds
+    /// no areas, handles or document references.
+    hatch_last: crate::modules::draw::draw::hatch_settings::HatchSettings,
+    /// True while a programmatic channel (script, plugin host, automation)
+    /// dispatches a command. Distinct from `suppress_plugin_dispatch`, which
+    /// only means "do not recurse into a plugin": here it makes `HATCH` run the
+    /// dialog-free `-HATCH`.
+    pub(crate) scripted_dispatch: bool,
     /// Working copy of the Block Definition dialog; `None` while it is closed.
     block_definition: Option<crate::ui::window::block_definition::BlockDefinitionState>,
     /// PDF dialogs' working copies; `None` while closed.
@@ -1607,6 +1618,8 @@ pub enum ColorPickTarget {
     LayerState(usize),
     /// The MText editor's selection (or global) colour.
     MText,
+    /// A colour of the HATCH window: the fill colour or one of the gradient's.
+    Hatch(crate::ui::window::hatch_dialog::HatchColorSlot),
 }
 
 /// Table records the clipboard entities depend on, snapshotted from the source
@@ -1947,6 +1960,7 @@ pub enum ModalKind {
     LayerStateManager,
     LayerTranslator,
     DrawingUnits,
+    Hatch,
     BlockDefinition,
     PdfAttach,
     PointCloudAttach,
@@ -2956,6 +2970,18 @@ pub enum Message {
     DrawingUnitsField(crate::ui::window::drawing_units::Field),
     /// Drawing Units OK — write the working copy into the drawing.
     DrawingUnitsApply,
+    /// One field of the HATCH dialog changed.
+    HatchDialogField(crate::ui::window::hatch_dialog::Field),
+    /// HATCH dialog: hide it and pick areas by internal point or by object.
+    HatchDialogAdd(crate::ui::window::hatch_dialog::AddKind),
+    /// HATCH dialog: hide it and pick a hatch origin.
+    HatchDialogPickOrigin,
+    /// HATCH dialog: hide it and show the hatch it would create.
+    HatchDialogPreview,
+    /// HATCH dialog OK — create the hatch from the collected areas.
+    HatchDialogOk,
+    /// HATCH dialog: the pattern palette behind "...".
+    HatchDialogPalette(crate::ui::window::hatch_palette::PaletteAction),
     /// Block Definition dialog field updates
     BlockDefName(String),
     BlockDefNameSelect(String),
@@ -4110,6 +4136,9 @@ impl OpenCADStudio {
             last_layer_translation: None,
             layer_translator: None,
             drawing_units: None,
+            hatch_dialog: None,
+            hatch_last: crate::modules::draw::draw::hatch_settings::HatchSettings::default(),
+            scripted_dispatch: false,
             block_definition: None,
             pdf_attach: None,
             point_cloud_attach: None,

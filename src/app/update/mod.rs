@@ -411,6 +411,11 @@ impl OpenCADStudio {
                         }
                     }
                 }
+                if self.active_modal == Some(super::ModalKind::Hatch) {
+                    if let Some(task) = self.hatch_dialog_escape_overlay() {
+                        return task;
+                    }
+                }
                 return self.update(Message::CloseModal);
             }
             if self.active_modal == Some(super::ModalKind::BlockDefinition) {
@@ -432,6 +437,13 @@ impl OpenCADStudio {
                     || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN"))
                 {
                     return self.update(Message::WblockApply);
+                }
+            }
+            if self.active_modal == Some(super::ModalKind::Hatch) {
+                if matches!(msg, Message::CommandFinalize)
+                    || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN"))
+                {
+                    return self.hatch_dialog_enter();
                 }
             }
             if is_modal_blocked_key_msg(&msg) {
@@ -1889,6 +1901,9 @@ impl OpenCADStudio {
                         // The attribute editor is tab-scoped; leaving its tab
                         // drops it (its handle is that document's, not this one's).
                         self.cancel_attr_editor();
+                        // The HATCH dialog belongs to the tab that opened it;
+                        // leaving that tab abandons the flow.
+                        self.hatch_dialog_cancel();
                         // Persist the outgoing drawing's Ortho / running OSNAP
                         // before leaving it, so switching back restores them.
                         let prev = self.active_tab;
@@ -2533,7 +2548,7 @@ impl OpenCADStudio {
                 self.dispatch_command(&cmd)
             }
 
-            Message::ScriptLine(line) => self.feed_script_line(&line),
+            Message::ScriptLine(line) => self.feed_scripted_line(&line),
 
             Message::ToggleLayers => {
                 if self.active_modal == Some(super::ModalKind::Layers) {
@@ -4831,6 +4846,12 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Message::HatchDialogField(field) => self.hatch_dialog_field(field),
+            Message::HatchDialogOk => self.hatch_dialog_ok(),
+            Message::HatchDialogAdd(kind) => self.hatch_dialog_add(kind),
+            Message::HatchDialogPickOrigin => self.hatch_dialog_pick_origin(),
+            Message::HatchDialogPreview => self.hatch_dialog_preview(),
+            Message::HatchDialogPalette(action) => self.hatch_dialog_palette(action),
             Message::DrawingUnitsApply => {
                 let Some(state) = self.drawing_units.take() else {
                     self.active_modal = None;
@@ -7246,25 +7267,22 @@ impl OpenCADStudio {
                     return Task::none();
                 }
                 if !handles.is_empty() {
-                    let idx = if field == "gradient_color_2" { 1 } else { 0 };
+                    let patch = if field == "gradient_color_2" {
+                        crate::entities::hatch_fill::GradientPatch {
+                            color2: Some(color.clone()),
+                            ..Default::default()
+                        }
+                    } else {
+                        crate::entities::hatch_fill::GradientPatch {
+                            color1: Some(color.clone()),
+                            ..Default::default()
+                        }
+                    };
                     self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
                         if let Some(codec::EntityType::Hatch(h)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
-                            while h.gradient_color.colors.len() <= idx {
-                                let value = if h.gradient_color.colors.is_empty() {
-                                    0.0
-                                } else {
-                                    1.0
-                                };
-                                h.gradient_color.colors.push(
-                                    codec::entities::hatch::GradientColorEntry {
-                                        value,
-                                        color: codec::types::Color::Index(7),
-                                    },
-                                );
-                            }
-                            h.gradient_color.colors[idx].color = color.clone();
+                            crate::entities::hatch_fill::apply_gradient_patch(h, &patch);
                         }
                     });
                     // Rebuild hatch seeds so the gradient fill picks up the new
@@ -8524,6 +8542,13 @@ impl OpenCADStudio {
             }
 
             Message::CloseModal => {
+                if self.active_modal == Some(super::ModalKind::Hatch) {
+                    // Esc / Cancel close the palette first, the window next.
+                    if !self.hatch_dialog_close_palette() {
+                        self.hatch_dialog_cancel();
+                    }
+                    return Task::none();
+                }
                 if self.active_modal == Some(super::ModalKind::Field) {
                     self.close_field_dialog();
                     return Task::none();

@@ -1167,6 +1167,9 @@ pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
                     Some(crate::app::ColorPickTarget::LayerState(idx)) => {
                         Some(Message::LayerStateEditorLayerColor(idx, color))
                     }
+                    Some(crate::app::ColorPickTarget::Hatch(slot)) => {
+                        crate::ui::window::hatch_dialog::color_pick_message(slot, color)
+                    }
                     Some(crate::app::ColorPickTarget::PlotStyle) => None,
                     None => None,
                 };

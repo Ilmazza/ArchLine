@@ -1315,7 +1315,20 @@ impl<'a> HostSession<'a> {
         }
     }
 
+    /// Every command a plugin or script starts runs as scripted: the dialogs a
+    /// command would open for a person (HATCH's) are for the command line, not
+    /// for a script that cannot answer them.
     pub fn run_command(
+        &mut self,
+        request: ocs_plugin_api::host::CommandRequest,
+    ) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
+        let previous = std::mem::replace(&mut self.app.scripted_dispatch, true);
+        let result = self.run_command_inner(request);
+        self.app.scripted_dispatch = previous;
+        result
+    }
+
+    fn run_command_inner(
         &mut self,
         request: ocs_plugin_api::host::CommandRequest,
     ) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
@@ -2288,6 +2301,13 @@ impl<'a> HostSession<'a> {
     /// Supports AutoCAD-style `PAUSE` (and `\`) input queuing, explicit `ENTER` /
     /// `RETURN` tokens, and `\n` trailing newline execution.
     pub fn execute_command(&mut self, cmd: &str) -> bool {
+        let previous = std::mem::replace(&mut self.app.scripted_dispatch, true);
+        let accepted = self.execute_command_inner(cmd);
+        self.app.scripted_dispatch = previous;
+        accepted
+    }
+
+    fn execute_command_inner(&mut self, cmd: &str) -> bool {
         let has_newline = cmd.ends_with('\n') || cmd.ends_with('\r');
         let trimmed = cmd.trim();
 
@@ -8519,6 +8539,51 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert!(app.script_commands);
         assert!(run(&mut app, "LINE 0,0 20,0").is_ok());
         assert_eq!(app.tabs[0].scene.document.entities().count(), 2);
+    }
+
+    fn hatch_app() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        // Tab 0 is the Start page, where HATCH is not allowed.
+        app.tabs[0].is_start = false;
+        app
+    }
+
+    fn assert_hatch_ran_dialog_free(app: &OpenCADStudio, channel: &str) {
+        assert!(app.active_modal.is_none(), "{channel}: no dialog");
+        assert!(app.hatch_dialog.is_none(), "{channel}: no dialog state");
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().map(|command| command.name()),
+            Some("HATCH"),
+            "{channel}: the command-line HATCH runs"
+        );
+        assert!(!app.scripted_dispatch, "{channel}: the flag is restored");
+    }
+
+    #[test]
+    fn plugin_run_command_run_hatch_has_no_dialog() {
+        use ocs_plugin_api::host::CommandRequest as R;
+        let mut app = hatch_app();
+        HostSession::new(&mut app, 0)
+            .run_command(R::Run { line: "HATCH".into() })
+            .unwrap();
+        assert_hatch_ran_dialog_free(&app, "run_command Run");
+    }
+
+    #[test]
+    fn plugin_run_command_start_hatch_has_no_dialog() {
+        use ocs_plugin_api::host::CommandRequest as R;
+        let mut app = hatch_app();
+        HostSession::new(&mut app, 0)
+            .run_command(R::Start { name: "HATCH".into() })
+            .unwrap();
+        assert_hatch_ran_dialog_free(&app, "run_command Start");
+    }
+
+    #[test]
+    fn plugin_execute_command_hatch_has_no_dialog() {
+        let mut app = hatch_app();
+        assert!(HostSession::new(&mut app, 0).execute_command("HATCH"));
+        assert_hatch_ran_dialog_free(&app, "execute_command");
     }
 
     /// Exploration harness (not a gate): prints how the real commands answer

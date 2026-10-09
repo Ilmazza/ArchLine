@@ -101,36 +101,6 @@ fn family_from_stored_line(
     }
 }
 
-/// Preserve the selected hue while moving its HSL lightness towards the
-/// persisted one-colour tint/shade target (0 = black, 1 = white).
-fn gradient_tint_color(base: [f32; 4], target: f32) -> [f32; 4] {
-    let max = base[0].max(base[1]).max(base[2]);
-    let min = base[0].min(base[1]).min(base[2]);
-    let lightness = (max + min) * 0.5;
-    let target = target.clamp(0.0, 1.0);
-    let mut result = base;
-    if target <= lightness {
-        let factor = if lightness > 1.0e-6 {
-            target / lightness
-        } else {
-            0.0
-        };
-        for channel in &mut result[..3] {
-            *channel *= factor;
-        }
-    } else {
-        let factor = if lightness < 1.0 - 1.0e-6 {
-            (target - lightness) / (1.0 - lightness)
-        } else {
-            1.0
-        };
-        for channel in &mut result[..3] {
-            *channel += (1.0 - *channel) * factor;
-        }
-    }
-    result
-}
-
 impl Scene {
     // ── Entity management ─────────────────────────────────────────────────
 
@@ -2131,11 +2101,7 @@ impl Scene {
             .zip(ring_sources)
             .zip(depths)
         {
-            let keep = match dxf.style {
-                codec::entities::HatchStyleType::Normal => true,
-                codec::entities::HatchStyleType::Outer => depth <= 1,
-                codec::entities::HatchStyleType::Ignore => depth == 0,
-            };
+            let keep = crate::scene::model::hatch_model::island_ring_kept(dxf.style, depth);
             if !keep {
                 continue;
             }
@@ -2192,29 +2158,36 @@ impl Scene {
         // entity colour); capture it so the HatchModel draws stop-0 → stop-1.
         let mut gradient_color1: Option<[f32; 4]> = None;
         let mut pattern = if dxf.gradient_color.is_enabled() {
-            let stop = |i: usize| {
-                dxf.gradient_color
-                    .colors
-                    .get(i)
-                    .and_then(|e| e.color.rgb())
-                    .map(|(r, g, b)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+            // The stops in colour 1 / colour 2 order (an inverted Linear
+            // one-colour gradient is stored swapped).
+            let stops = crate::entities::hatch_fill::read_stops(dxf);
+            let stop = |c: Option<codec::types::Color>| {
+                c.and_then(crate::entities::hatch_fill::rgba_of)
             };
-            gradient_color1 = stop(0);
+            gradient_color1 = stop(stops.color1);
             let color1 = gradient_color1.unwrap_or(color);
-            let color2 = if dxf.gradient_color.is_single_color {
-                gradient_tint_color(color1, dxf.gradient_color.color_tint as f32)
+            let single = dxf.gradient_color.is_single_color;
+            let tint = dxf.gradient_color.color_tint as f32;
+            let color2 = if single {
+                crate::entities::hatch_fill::rgba_of(
+                    crate::entities::hatch_fill::tinted_second_color(color1, tint),
+                )
+                .unwrap_or(color1)
             } else {
-                stop(1).unwrap_or(color)
+                stop(stops.color2).unwrap_or(color)
             };
             let angle_deg = dxf.gradient_color.angle.to_degrees() as f32;
             let (kind, invert) =
                 model::hatch_model::GradientKind::from_name(&dxf.gradient_color.name);
+            let invert = invert || stops.swapped;
             model::hatch_model::HatchPattern::Gradient {
                 angle_deg,
                 color2,
                 kind,
                 invert,
                 shift: dxf.gradient_color.shift as f32,
+                one_color: single,
+                tint,
             }
         } else if dxf.is_solid {
             model::hatch_model::HatchPattern::Solid
@@ -2954,6 +2927,8 @@ impl Scene {
             kind,
             invert,
             shift,
+            one_color,
+            tint,
         } = &model.pattern
         {
             let to_color = |c: [f32; 4]| codec::types::Color::Rgb {
@@ -2961,33 +2936,20 @@ impl Scene {
                 g: (c[1] * 255.0).round().clamp(0.0, 255.0) as u8,
                 b: (c[2] * 255.0).round().clamp(0.0, 255.0) as u8,
             };
-            dxf.is_solid = true;
-            dxf.gradient_color.enabled = true;
-            dxf.gradient_color.name = kind.dxf_name(*invert).to_string();
-            // Keep both persisted angle fields aligned.
-            dxf.pattern_angle = (*angle_deg as f64).to_radians();
-            dxf.gradient_color.angle = (*angle_deg as f64).to_radians();
-            dxf.gradient_color.shift = *shift as f64;
-            dxf.gradient_color.is_single_color = false;
-            // Linear has no INV name in the standard set: persist an inverted
-            // linear by swapping the colour stops instead.
-            let (c0, c1) = if *invert
-                && matches!(kind, crate::scene::model::hatch_model::GradientKind::Linear)
-            {
-                (*color2, model.color)
-            } else {
-                (model.color, *color2)
-            };
-            dxf.gradient_color.colors = vec![
-                codec::entities::hatch::GradientColorEntry {
-                    value: 0.0,
-                    color: to_color(c0),
+            // `color2` of the model is already the effective second colour.
+            crate::entities::hatch_fill::apply_gradient(
+                &mut dxf,
+                &crate::entities::hatch_fill::GradientSpec {
+                    kind: *kind,
+                    invert: *invert,
+                    one_color: *one_color,
+                    color1: to_color(model.color),
+                    color2: to_color(*color2),
+                    tint: *tint as f64,
+                    angle_rad: (*angle_deg as f64).to_radians(),
+                    centered: *shift < 0.5,
                 },
-                codec::entities::hatch::GradientColorEntry {
-                    value: 1.0,
-                    color: to_color(c1),
-                },
-            ];
+            );
         }
         // `add_entity` already builds the render model from the DXF entity via
         // `hatch_model_from_dxf` and inserts it with a correct `world_origin`
@@ -3069,5 +3031,180 @@ impl Scene {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gradient_fill_tests {
+    use super::*;
+    use crate::command::{CadCommand, CmdResult};
+    use crate::entities::hatch_fill::{rgba_of, tinted_second_color};
+    use crate::modules::draw::draw::hatch::GradientCommand;
+    use crate::scene::model::hatch_model::{GradientKind, HatchPattern};
+
+    /// The model a click inside a 10 x 10 square makes.
+    fn model() -> HatchModel {
+        let ring = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let mut command = GradientCommand::new(vec![ring], Default::default());
+        match command.on_point(glam::DVec3::new(5.0, 5.0, 0.0)) {
+            CmdResult::CommitHatch(model) => model,
+            _ => panic!("expected CommitHatch"),
+        }
+    }
+
+    fn with_pattern(mut model: HatchModel, pattern: HatchPattern) -> HatchModel {
+        model.pattern = pattern;
+        model
+    }
+
+    fn stored(scene: &Scene, handle: Handle) -> codec::entities::Hatch {
+        match scene.document.get_entity(handle) {
+            Some(EntityType::Hatch(h)) => h.clone(),
+            other => panic!("not a hatch: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_two_colour_gradient_is_written_with_both_stops_and_a_zero_tint_flag() {
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(model(), None, None);
+        let h = stored(&scene, handle);
+        assert!(h.gradient_color.enabled && h.is_solid);
+        assert!(!h.gradient_color.is_single_color);
+        assert_eq!(h.gradient_color.colors.len(), 2);
+    }
+
+    #[test]
+    fn a_one_colour_gradient_persists_the_flag_the_tint_and_the_tinted_stop() {
+        let base = model();
+        let HatchPattern::Gradient { angle_deg, kind, invert, shift, .. } = base.pattern.clone() else {
+            panic!("a gradient")
+        };
+        // The model's first colour is a whole-byte colour, as a stored stop is.
+        let color1 = crate::entities::hatch_fill::rgba_of(
+            crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR1,
+        )
+        .unwrap();
+        let tinted = tinted_second_color(color1, 0.25);
+        let mut one = with_pattern(
+            base,
+            HatchPattern::Gradient {
+                angle_deg,
+                color2: rgba_of(tinted).unwrap(),
+                kind,
+                invert,
+                shift,
+                one_color: true,
+                tint: 0.25,
+            },
+        );
+        one.color = color1;
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(one, None, None);
+        let h = stored(&scene, handle);
+        assert!(h.gradient_color.is_single_color, "was never written before");
+        assert_eq!(h.gradient_color.color_tint, 0.25);
+        assert_eq!(h.gradient_color.colors[1].color, tinted);
+        // The rebuilt model agrees.
+        let rebuilt = scene.hatches.get(&handle).expect("model");
+        let HatchPattern::Gradient { one_color, tint, color2, .. } = &rebuilt.pattern else {
+            panic!("rebuilt as a gradient")
+        };
+        assert!(*one_color);
+        assert_eq!(*tint, 0.25);
+        assert_eq!(*color2, rgba_of(tinted).unwrap(), "the same second colour, to the bit");
+    }
+
+    #[test]
+    fn the_kind_and_inversion_survive_the_round_trip() {
+        let base = model();
+        let HatchPattern::Gradient { angle_deg, color2, shift, one_color, tint, .. } = base.pattern.clone() else {
+            panic!("a gradient")
+        };
+        let inverted = with_pattern(
+            base,
+            HatchPattern::Gradient {
+                angle_deg, color2, shift, one_color, tint,
+                kind: GradientKind::Cylinder,
+                invert: true,
+            },
+        );
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(inverted, None, None);
+        assert_eq!(stored(&scene, handle).gradient_color.name, "INVCYLINDER");
+    }
+
+    fn linear(model: HatchModel, color1: [f32; 4], color2: [f32; 4], one_color: bool, tint: f32) -> HatchModel {
+        let HatchPattern::Gradient { angle_deg, shift, .. } = model.pattern.clone() else {
+            panic!("a gradient")
+        };
+        let mut m = with_pattern(
+            model,
+            HatchPattern::Gradient {
+                angle_deg,
+                color2,
+                shift,
+                one_color,
+                tint,
+                kind: GradientKind::Linear,
+                invert: true,
+            },
+        );
+        m.color = color1;
+        m
+    }
+
+    #[test]
+    fn an_inverted_linear_one_colour_gradient_is_rebuilt_as_one_not_flat() {
+        let color1 = rgba_of(crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR1).unwrap();
+        let tinted = rgba_of(tinted_second_color(color1, 0.25)).unwrap();
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(linear(model(), color1, tinted, true, 0.25), None, None);
+        let rebuilt = scene.hatches.get(&handle).expect("model");
+        let HatchPattern::Gradient { one_color, tint, color2, invert, kind, .. } = &rebuilt.pattern else {
+            panic!("rebuilt as a gradient")
+        };
+        assert_eq!(rebuilt.color, color1);
+        assert_eq!(*color2, tinted, "the effective second colour");
+        assert_ne!(*color2, rebuilt.color, "not a flat fill");
+        assert!(*one_color && *invert && *tint == 0.25);
+        assert_eq!(*kind, GradientKind::Linear);
+    }
+
+    #[test]
+    fn an_inverted_linear_two_colour_gradient_keeps_the_same_two_ends() {
+        let c1 = [0.30, 0.60, 0.95, 1.0];
+        let c2 = [0.9, 0.1, 0.2, 1.0];
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(linear(model(), c1, c2, false, 1.0), None, None);
+        let rebuilt = scene.hatches.get(&handle).expect("model");
+        let HatchPattern::Gradient { color2, one_color, .. } = &rebuilt.pattern else {
+            panic!("rebuilt as a gradient")
+        };
+        assert!(!*one_color);
+        // Inverted linear is stored as swapped stops: the visual start is c2.
+        let byte = |c: [f32; 4]| [c[0], c[1], c[2]].map(|v| (v * 255.0).round() as u8);
+        assert_eq!(byte(rebuilt.color), byte(c2));
+        assert_eq!(byte(*color2), byte(c1));
+    }
+
+    #[test]
+    fn a_one_colour_linear_gradient_from_another_program_is_recomputed_from_stop_zero() {
+        let mut scene = Scene::new();
+        let handle = scene.add_hatch(model(), None, None);
+        let mut dxf = stored(&scene, handle);
+        let stop0 = codec::types::Color::Rgb { r: 10, g: 20, b: 30 };
+        let stop1 = codec::types::Color::Rgb { r: 200, g: 0, b: 0 };
+        dxf.gradient_color.is_single_color = true;
+        dxf.gradient_color.color_tint = 0.25;
+        dxf.gradient_color.colors[0].color = stop0;
+        dxf.gradient_color.colors[1].color = stop1;
+        let rebuilt = Scene::hatch_model_from_dxf(&dxf, [1.0; 4]).expect("model");
+        let HatchPattern::Gradient { color2, invert, one_color, .. } = &rebuilt.pattern else {
+            panic!("a gradient")
+        };
+        assert_eq!(rebuilt.color, rgba_of(stop0).unwrap());
+        assert!(!*invert && *one_color);
+        assert_eq!(*color2, rgba_of(tinted_second_color(rgba_of(stop0).unwrap(), 0.25)).unwrap());
     }
 }

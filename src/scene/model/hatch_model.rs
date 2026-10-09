@@ -188,6 +188,10 @@ pub enum HatchPattern {
         invert: bool,
         /// 0 = centred, 1 = shifted towards the upper-left light source.
         shift: f32,
+        /// Colour 2 is the tint of colour 1 (a one-colour gradient).
+        one_color: bool,
+        /// 0 = black end, 1 = white end; only with `one_color`.
+        tint: f32,
     },
 }
 
@@ -270,6 +274,20 @@ pub struct HatchModel {
     /// hatch pipeline as a small clip-z bias so this fill orders correctly
     /// against other entity types. 0.0 for transient/preview hatches.
     pub draw_depth: f32,
+}
+
+/// Whether a boundary ring at nesting `depth` is drawn under island `style`.
+///
+/// One rule for every consumer: the model rebuilt from a stored hatch
+/// (`scene/entity.rs`) and the previews the HATCH dialog draws. Keeping two
+/// copies would let the preview show rings the committed hatch later drops.
+pub fn island_ring_kept(style: codec::entities::HatchStyleType, depth: usize) -> bool {
+    use codec::entities::HatchStyleType as Style;
+    match style {
+        Style::Normal => true,
+        Style::Outer => depth <= 1,
+        Style::Ignore => depth == 0,
+    }
 }
 
 impl HatchModel {
@@ -586,5 +604,33 @@ impl HatchModel {
             }
         }
         segments
+    }
+}
+
+#[cfg(test)]
+mod island_rule_tests {
+    use super::island_ring_kept;
+    use codec::entities::HatchStyleType as Style;
+
+    #[test]
+    fn normal_keeps_every_ring() {
+        for depth in 0..5 {
+            assert!(island_ring_kept(Style::Normal, depth), "depth {depth}");
+        }
+    }
+
+    #[test]
+    fn outer_keeps_depth_zero_and_one_only() {
+        assert!(island_ring_kept(Style::Outer, 0));
+        assert!(island_ring_kept(Style::Outer, 1));
+        assert!(!island_ring_kept(Style::Outer, 2));
+        assert!(!island_ring_kept(Style::Outer, 3));
+    }
+
+    #[test]
+    fn ignore_keeps_depth_zero_only() {
+        assert!(island_ring_kept(Style::Ignore, 0));
+        assert!(!island_ring_kept(Style::Ignore, 1));
+        assert!(!island_ring_kept(Style::Ignore, 2));
     }
 }

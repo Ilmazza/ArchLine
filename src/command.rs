@@ -25,6 +25,9 @@ pub enum HatchEditOperation {
         style: Option<codec::entities::HatchStyleType>,
         annotative: Option<bool>,
     },
+    /// One OK of the Hatch Edit window: fill (in place or converted),
+    /// colour, island style, association and origin under one undo step.
+    Window(Box<crate::entities::hatch_fill::HatchWindowEdit>),
     RecreateBoundary {
         associate: bool,
         region: bool,
@@ -1847,6 +1850,16 @@ pub enum CmdResult {
     CommitHatches {
         hatches: Vec<HatchModel>,
         entity_style: Option<(codec::types::Color, codec::types::Transparency)>,
+    },
+    /// The HATCH dialog's collector finished a round of picking: the regions
+    /// gathered (with which "Add" produced each) and the boundary objects chosen.
+    /// The host hands them to the dialog; nothing is committed to the drawing.
+    HatchBoundariesPicked {
+        regions: Vec<(
+            crate::modules::draw::draw::hatch_settings::HatchRegion,
+            crate::modules::draw::draw::hatch_settings::RegionOrigin,
+        )>,
+        objects: Vec<Handle>,
     },
     /// Copy selected entities with multiple transforms (e.g. rectangular array); end command.
     BatchCopy(Vec<Handle>, Vec<EntityTransform>),

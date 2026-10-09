@@ -9,6 +9,7 @@ pub mod ellipse;
 pub mod extended;
 pub mod field;
 pub mod hatch;
+pub mod hatch_fill;
 pub mod helix;
 pub mod insert;
 pub mod leader;
