@@ -3838,10 +3838,18 @@ mod tests {
             panic!("expected attribute definition text");
         };
         assert!(!strokes.is_empty());
-        assert!(strokes.iter().any(|stroke| stroke
-            .run
-            .as_ref()
-            .is_some_and(|run| run.text.contains("PN-002"))));
+        // A definition draws its tag; the default value only shows on block
+        // references (see `AttributeDefinition::to_render`).
+        let drawn = |needle: &str| {
+            strokes.iter().any(|stroke| {
+                stroke
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.text.contains(needle))
+            })
+        };
+        assert!(drawn("PART_NO"));
+        assert!(!drawn("PN-002"));
 
         for (label, patch, message) in [
             ("Reject tag", "'tag':'BAD TAG'", "whitespace"),
@@ -6411,12 +6419,10 @@ mod tests {
             expect_created: "PART_NO|Part number|PN-001 ins1.0,2.0 al3.0,4.0 h2.5 r0.25 wf1.25 ob0.10 Center/Top f1010 fl12 tg2 lock1",
             expect_edited: "PART_NO|Serial|PN-002 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
             expect_reedited: "PART_NO|Serial|PN-003 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
-            // BLOCKER (opencadcodec): the DXF ATTDEF writer emits no group 280 at
-            // all — neither the version byte nor the lock-position flag the
-            // reader looks for after it — so `lock_position` reopens false. Every
-            // other field round-trips since opencadcodec dd1d7bf.
-            expect_edited_dxf: "PART_NO|Serial|PN-002 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock0",
-            expect_reedited_dxf: "PART_NO|Serial|PN-003 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock0",
+            // The DXF writer emits the lock-position flag (group 280) since the
+            // codec bump to fe69506, so DXF round-trips like DWG.
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
             expect_edited_dwg: "",
             expect_reedited_dwg: "",
         });
