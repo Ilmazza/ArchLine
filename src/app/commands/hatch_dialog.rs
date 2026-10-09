@@ -377,6 +377,7 @@ impl OpenCADStudio {
             return Task::none();
         };
         self.hatch_dialog = None;
+        self.hatch_close_color_window();
         if self.active_modal == Some(ModalKind::Hatch) {
             self.close_active_modal();
         }
@@ -414,10 +415,16 @@ impl OpenCADStudio {
         self.apply_cmd_result(current.apply_result(&changes))
     }
 
-    pub(in crate::app) fn hatch_dialog_field(&mut self, field: Field) {
+    /// A field of the window changed. "Select Color..." also opens the
+    /// colour window, which only the app can do.
+    pub(in crate::app) fn hatch_dialog_field(&mut self, field: Field) -> Task<Message> {
+        if let Field::SelectColor(slot) = field {
+            return self.hatch_dialog_select_color(slot);
+        }
         if let Some(state) = self.hatch_dialog.as_mut() {
             state.apply(field);
         }
+        Task::none()
     }
 
     /// OK: create the hatch the dialog describes through the same commit paths
@@ -457,6 +464,7 @@ impl OpenCADStudio {
         let settings = state.settings.clone();
         self.hatch_last = settings;
         self.hatch_dialog = None;
+        self.hatch_close_color_window();
         if self.active_modal == Some(ModalKind::Hatch) {
             self.close_active_modal();
         }
@@ -555,6 +563,9 @@ impl OpenCADStudio {
                 }
             }
         }
+        // Even without a state: a colour window of the HATCH window never
+        // outlives it.
+        self.hatch_close_color_window();
         if self.active_modal == Some(ModalKind::Hatch) {
             self.close_active_modal();
         }

@@ -411,6 +411,11 @@ impl OpenCADStudio {
                         }
                     }
                 }
+                if self.active_modal == Some(super::ModalKind::Hatch) {
+                    if let Some(task) = self.hatch_dialog_escape_overlay() {
+                        return task;
+                    }
+                }
                 return self.update(Message::CloseModal);
             }
             if self.active_modal == Some(super::ModalKind::BlockDefinition) {
@@ -438,7 +443,7 @@ impl OpenCADStudio {
                 if matches!(msg, Message::CommandFinalize)
                     || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN"))
                 {
-                    return self.update(Message::HatchDialogOk);
+                    return self.hatch_dialog_enter();
                 }
             }
             if is_modal_blocked_key_msg(&msg) {
@@ -4841,10 +4846,7 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
-            Message::HatchDialogField(field) => {
-                self.hatch_dialog_field(field);
-                Task::none()
-            }
+            Message::HatchDialogField(field) => self.hatch_dialog_field(field),
             Message::HatchDialogOk => self.hatch_dialog_ok(),
             Message::HatchDialogAdd(kind) => self.hatch_dialog_add(kind),
             Message::HatchDialogPickOrigin => self.hatch_dialog_pick_origin(),

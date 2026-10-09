@@ -1618,6 +1618,8 @@ pub enum ColorPickTarget {
     LayerState(usize),
     /// The MText editor's selection (or global) colour.
     MText,
+    /// A colour of the HATCH window: the fill colour or one of the gradient's.
+    Hatch(crate::ui::window::hatch_dialog::HatchColorSlot),
 }
 
 /// Table records the clipboard entities depend on, snapshotted from the source

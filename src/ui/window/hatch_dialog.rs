@@ -57,6 +57,17 @@ impl HatchColorSlot {
     }
 }
 
+/// The message that sets `slot` to the colour "Select Color" returned. A
+/// gradient's colours are true colours: ByLayer, ByBlock and None are refused.
+pub fn color_pick_message(slot: HatchColorSlot, color: codec::types::Color) -> Option<Message> {
+    use codec::types::Color;
+    let logical = matches!(color, Color::ByLayer | Color::ByBlock | Color::None);
+    if slot != HatchColorSlot::Fill && logical {
+        return None;
+    }
+    Some(Message::HatchDialogField(slot.field(color)))
+}
+
 /// One field of the dialog changed.
 #[derive(Clone, Debug)]
 pub enum Field {
@@ -963,6 +974,47 @@ mod tests {
         assert!(matches!(
             HatchColorSlot::Gradient2.field(Color::Index(3)),
             Field::GradientColor2(c) if c == Color::Index(3)
+        ));
+    }
+
+    #[test]
+    fn choosing_a_fill_colour_closes_the_list() {
+        use codec::types::Color;
+        let mut state = state();
+        state.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
+        state.apply(Field::Color(HatchColor::Color(Color::Index(5))));
+        assert_eq!(state.color_list, None);
+        assert_eq!(state.settings.color, HatchColor::Color(Color::Index(5)));
+    }
+
+    #[test]
+    fn the_pick_message_refuses_the_logical_colours_for_a_gradient_only() {
+        use codec::types::Color;
+        let field = |message: Option<Message>| match message {
+            Some(Message::HatchDialogField(field)) => Some(field),
+            Some(other) => panic!("a field message, got {other:?}"),
+            None => None,
+        };
+        for logical in [Color::ByLayer, Color::ByBlock, Color::None] {
+            assert!(field(color_pick_message(HatchColorSlot::Gradient1, logical)).is_none());
+            assert!(field(color_pick_message(HatchColorSlot::Gradient2, logical)).is_none());
+            assert!(matches!(
+                field(color_pick_message(HatchColorSlot::Fill, logical)),
+                Some(Field::Color(HatchColor::Color(c))) if c == logical
+            ));
+        }
+        let rgb = Color::Rgb { r: 1, g: 2, b: 3 };
+        assert!(matches!(
+            field(color_pick_message(HatchColorSlot::Gradient1, rgb)),
+            Some(Field::GradientColor1(c)) if c == rgb
+        ));
+        assert!(matches!(
+            field(color_pick_message(HatchColorSlot::Gradient2, Color::Index(4))),
+            Some(Field::GradientColor2(c)) if c == Color::Index(4)
+        ));
+        assert!(matches!(
+            field(color_pick_message(HatchColorSlot::Fill, Color::Index(4))),
+            Some(Field::Color(HatchColor::Color(c))) if c == Color::Index(4)
         ));
     }
 

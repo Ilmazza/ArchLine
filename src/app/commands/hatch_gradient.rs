@@ -3,11 +3,96 @@
 //! the Properties panel's gradient colours.)
 
 use codec::types::{Color, Transparency};
+use iced::Task;
 
-use crate::app::OpenCADStudio;
+use crate::app::{ColorPickTarget, ColorPickerTab, Message, ModalKind, OpenCADStudio};
 use crate::modules::draw::draw::hatch_settings::HatchColor;
+use crate::ui::window::hatch_dialog::HatchColorSlot;
 
 impl OpenCADStudio {
+    /// "Select Color..." in a colour list of the window: close the list and
+    /// open the colour window for `slot`, showing the slot's colour. For the
+    /// fill colour on "Use Current" that is the owner drawing's current
+    /// colour, as everywhere in the window (not the ribbon's, which follows
+    /// the selection).
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_select_color(
+        &mut self,
+        slot: HatchColorSlot,
+    ) -> Task<Message> {
+        // Only from the visible window, never over the palette or a hidden step.
+        if self.hatch_palette_open() || self.active_modal != Some(ModalKind::Hatch) {
+            return Task::none();
+        }
+        let Some(state) = self.hatch_dialog.as_mut() else {
+            return Task::none();
+        };
+        state.color_list = None;
+        let owner_tab_id = state.owner_tab_id;
+        let (fill, color1, color2) = (
+            state.settings.color,
+            state.settings.gradient.color1,
+            state.settings.gradient.color2,
+        );
+        let Some(owner) = self.tabs.iter().position(|tab| tab.id == owner_tab_id) else {
+            return Task::none();
+        };
+        let current = match slot {
+            HatchColorSlot::Fill => match fill {
+                HatchColor::UseCurrent => self.hatch_current_color(owner),
+                HatchColor::Color(color) => color,
+            },
+            HatchColorSlot::Gradient1 => color1,
+            HatchColorSlot::Gradient2 => color2,
+        };
+        self.update(Message::OpenColorWindow(ColorPickTarget::Hatch(slot), current))
+    }
+
+    /// Close "Select Color" when the HATCH window opened it; the colour
+    /// window of anything else is left alone.
+    pub(in crate::app) fn hatch_close_color_window(&mut self) {
+        if matches!(self.color_pick_target, Some((ColorPickTarget::Hatch(_), _))) {
+            self.color_pick_target = None;
+        }
+    }
+
+    /// Esc with the HATCH window up: an overlay above it closes first (the
+    /// colour window, then an open colour list). `None` when there is none,
+    /// and Esc goes on to the window itself (palette, then window).
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_escape_overlay(&mut self) -> Option<Task<Message>> {
+        if self.color_pick_target.is_some() {
+            self.color_pick_target = None;
+            return Some(Task::none());
+        }
+        let closed = self
+            .hatch_dialog
+            .as_mut()
+            .is_some_and(|state| state.color_list.take().is_some());
+        closed.then(Task::none)
+    }
+
+    /// Enter with the HATCH window up: the colour window confirms its pending
+    /// colour (Index page) or ignores Enter (True Color page); an open colour
+    /// list closes; otherwise Enter is OK.
+    #[inline(never)]
+    pub(in crate::app) fn hatch_dialog_enter(&mut self) -> Task<Message> {
+        if let Some(pending) = self.color_pick_target.as_ref().map(|(_, color)| *color) {
+            return match self.color_picker_tab {
+                ColorPickerTab::Index => self.update(Message::ColorWindowPick(pending)),
+                ColorPickerTab::TrueColor => Task::none(),
+            };
+        }
+        let closed = self
+            .hatch_dialog
+            .as_mut()
+            .is_some_and(|state| state.color_list.take().is_some());
+        if closed {
+            return Task::none();
+        }
+        self.update(Message::HatchDialogOk)
+    }
+
     /// The drawing's current colour (CECOLOR) in tab `i`: what "Use Current"
     /// means. Not the ribbon's colour, which follows the selection (and HATCH
     /// keeps its preselected boundaries selected until OK).
@@ -1065,5 +1150,432 @@ mod tests {
             }
             other => panic!("a gradient model, got {other:?}"),
         }
+    }
+
+    // ── "Select Color" and the colour lists ────────────────────────────────
+
+    use crate::app::ColorPickTarget;
+    use crate::ui::window::hatch_dialog::HatchColorSlot;
+
+    fn target_slot(app: &OpenCADStudio) -> Option<HatchColorSlot> {
+        match &app.color_pick_target {
+            Some((ColorPickTarget::Hatch(slot), _)) => Some(*slot),
+            _ => None,
+        }
+    }
+
+    fn open_picker(app: &mut OpenCADStudio, slot: HatchColorSlot) {
+        let _ = app.update(Message::HatchDialogField(Field::SelectColor(slot)));
+        assert_eq!(target_slot(app), Some(slot), "Select Color is open on the slot");
+    }
+
+    fn window_open(app: &OpenCADStudio) -> bool {
+        app.active_modal == Some(ModalKind::Hatch) && app.hatch_dialog.is_some()
+    }
+
+    #[test]
+    fn select_color_opens_the_colour_window_with_the_slots_colour_and_closes_the_list() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "GRADIENT", &[Field::GradientColor2(Color::Index(4))]);
+        let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(
+            HatchColorSlot::Gradient2,
+        ))));
+        open_picker(&mut app, HatchColorSlot::Gradient2);
+        assert_eq!(app.color_pick_target.as_ref().unwrap().1, Color::Index(4));
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().color_list, None);
+        // Each slot shows its own colour.
+        let _ = app.update(Message::CloseColorPicker);
+        let _ = app.update(Message::HatchDialogField(Field::GradientColor1(Color::Index(2))));
+        open_picker(&mut app, HatchColorSlot::Gradient1);
+        assert_eq!(app.color_pick_target.as_ref().unwrap().1, Color::Index(2));
+        let _ = app.update(Message::CloseColorPicker);
+        let _ = app.update(Message::HatchDialogField(Field::Color(HatchColor::Color(
+            Color::Index(5),
+        ))));
+        open_picker(&mut app, HatchColorSlot::Fill);
+        assert_eq!(app.color_pick_target.as_ref().unwrap().1, Color::Index(5));
+    }
+
+    // Controller's decision (replaces the letter of spec §4): "Use Current"
+    // is the owner drawing's current colour (CECOLOR) everywhere in the
+    // window, the colour window included; never the ribbon's colour, which
+    // follows the selection.
+    #[test]
+    fn use_current_shows_the_drawings_current_colour_in_the_colour_window() {
+        let mut app = app_with_rectangle();
+        set_current_colour(&mut app, Color::Index(6), Color::Index(2));
+        open_with(&mut app, "HATCH", &[]);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().settings.color, HatchColor::UseCurrent);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        assert_eq!(
+            app.color_pick_target.as_ref().unwrap().1,
+            Color::Index(6),
+            "CECOLOR, not the ribbon"
+        );
+    }
+
+    #[test]
+    fn a_pick_reaches_the_slot_it_was_opened_for() {
+        for (slot, read) in [
+            (
+                HatchColorSlot::Fill,
+                (|a: &OpenCADStudio| {
+                    let s = &a.hatch_dialog.as_ref().unwrap().settings;
+                    s.color == HatchColor::Color(Color::Index(3))
+                        && s.gradient.color1 != Color::Index(3)
+                        && s.gradient.color2 != Color::Index(3)
+                }) as fn(&OpenCADStudio) -> bool,
+            ),
+            (HatchColorSlot::Gradient1, |a| {
+                let s = &a.hatch_dialog.as_ref().unwrap().settings;
+                s.gradient.color1 == Color::Index(3)
+                    && s.color == HatchColor::UseCurrent
+                    && s.gradient.color2 != Color::Index(3)
+            }),
+            (HatchColorSlot::Gradient2, |a| {
+                let s = &a.hatch_dialog.as_ref().unwrap().settings;
+                s.gradient.color2 == Color::Index(3)
+                    && s.color == HatchColor::UseCurrent
+                    && s.gradient.color1 != Color::Index(3)
+            }),
+        ] {
+            let mut app = app_with_rectangle();
+            open_with(&mut app, "HATCH", &[]);
+            open_picker(&mut app, slot);
+            let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
+            assert!(read(&app), "{slot:?}");
+            assert!(app.color_pick_target.is_none(), "the colour window closed");
+            assert!(window_open(&app), "the Hatch window is still there");
+        }
+    }
+
+    #[test]
+    fn a_gradient_colour_refuses_the_logical_colours() {
+        for logical in [Color::ByLayer, Color::ByBlock, Color::None] {
+            for slot in [HatchColorSlot::Gradient1, HatchColorSlot::Gradient2] {
+                let mut app = app_with_rectangle();
+                open_with(&mut app, "GRADIENT", &[]);
+                let before = app.hatch_dialog.as_ref().unwrap().settings.clone();
+                open_picker(&mut app, slot);
+                let _ = app.update(Message::ColorWindowPick(logical));
+                assert_eq!(
+                    app.hatch_dialog.as_ref().unwrap().settings,
+                    before,
+                    "{slot:?} {logical:?}"
+                );
+                assert!(app.color_pick_target.is_none(), "{slot:?} {logical:?}");
+                assert!(window_open(&app));
+            }
+        }
+        // The fill colour does take ByLayer.
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::ColorWindowPick(Color::ByLayer));
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.color,
+            HatchColor::Color(Color::ByLayer)
+        );
+    }
+
+    #[test]
+    fn a_pick_after_the_window_is_gone_does_nothing() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        app.hatch_dialog = None;
+        let last = app.hatch_last.clone();
+        let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(app.hatch_last, last);
+        assert!(all_hatches(&app).is_empty());
+    }
+
+    #[test]
+    fn a_pick_in_hatch_edit_changes_the_edited_hatchs_colour() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        ok(&mut app);
+        let i = app.active_tab;
+        let handle = *app.tabs[i].scene.hatches.keys().next().unwrap();
+        let _ = app.hatch_dialog_open_edit(handle);
+        assert!(window_open(&app));
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
+        assert!(app.hatch_dialog.as_ref().unwrap().can_ok(), "the colour is a change");
+        ok(&mut app);
+        assert_eq!(the_hatch(&app).common.color, Color::Index(3));
+    }
+
+    // ── keys ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_with_select_color_open_closes_only_the_colour_window() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "GRADIENT", &[Field::GradientShape(4)]);
+        open_picker(&mut app, HatchColorSlot::Gradient1);
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
+        let before = app.hatch_dialog.as_ref().unwrap().settings.clone();
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.color_pick_target.is_none());
+        assert!(window_open(&app), "the Hatch window and its state stay");
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().settings, before, "nothing picked");
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+        // The next Esc closes the window as it always did.
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        assert!(all_hatches(&app).is_empty());
+    }
+
+    #[test]
+    fn the_keyboard_escape_takes_the_same_path() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert!(app.color_pick_target.is_none() && window_open(&app));
+        let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(HatchColorSlot::Fill))));
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert!(window_open(&app));
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().color_list, None);
+    }
+
+    #[test]
+    fn escape_with_the_colour_list_open_closes_only_the_list() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(HatchColorSlot::Fill))));
+        let _ = app.update(Message::CommandEscape);
+        assert!(window_open(&app));
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().color_list, None);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1, "state kept");
+        // Nothing open: Esc closes the window.
+        let _ = app.update(Message::CommandEscape);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+    }
+
+    #[test]
+    fn enter_with_select_color_open_confirms_the_colour_and_makes_no_hatch() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]); // a region is collected: OK would make a hatch
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
+        let _ = app.update(Message::CommandFinalize);
+        assert!(app.color_pick_target.is_none());
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.color,
+            HatchColor::Color(Color::Index(3))
+        );
+        assert!(window_open(&app));
+        assert_eq!(all_hatches(&app).len(), 0, "Enter acted on the colour window only");
+        // And the shortcut form of Enter does the same.
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(5)));
+        let _ = app.update(Message::ShortcutPressed("ENTER".into()));
+        assert!(app.color_pick_target.is_none());
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.color,
+            HatchColor::Color(Color::Index(5))
+        );
+        assert!(window_open(&app));
+        assert_eq!(all_hatches(&app).len(), 0);
+    }
+
+    #[test]
+    fn enter_confirms_into_the_slot_the_window_was_opened_for() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "GRADIENT", &[]);
+        let before = app.hatch_dialog.as_ref().unwrap().settings.clone();
+        open_picker(&mut app, HatchColorSlot::Gradient2);
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
+        let _ = app.update(Message::CommandFinalize);
+        let after = &app.hatch_dialog.as_ref().unwrap().settings;
+        assert_eq!(after.gradient.color2, Color::Index(3));
+        assert_eq!(after.gradient.color1, before.gradient.color1);
+        assert_eq!(after.color, before.color);
+        assert!(window_open(&app));
+        assert!(all_hatches(&app).is_empty());
+    }
+
+    #[test]
+    fn enter_on_the_true_colour_page_does_nothing() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        app.color_picker_tab = crate::app::ColorPickerTab::TrueColor;
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(target_slot(&app), Some(HatchColorSlot::Fill), "still open");
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().settings.color, HatchColor::UseCurrent);
+        assert_eq!(all_hatches(&app).len(), 0);
+        assert!(window_open(&app));
+    }
+
+    #[test]
+    fn enter_with_the_colour_list_open_only_closes_it() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(HatchColorSlot::Fill))));
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(app.hatch_dialog.as_ref().unwrap().color_list, None);
+        assert_eq!(all_hatches(&app).len(), 0);
+        assert!(window_open(&app));
+        // With nothing open Enter is OK again.
+        let _ = app.update(Message::CommandFinalize);
+        assert_eq!(all_hatches(&app).len(), 1);
+        assert_eq!(the_hatch(&app).pattern.name, "ANSI31");
+    }
+
+    // ── life cycle ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cancel_closes_the_colour_window_with_the_dialog() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        app.hatch_dialog_cancel();
+        assert!(app.color_pick_target.is_none() && app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+        // The window's Cancel / X path (CloseModal) under the colour window.
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::CloseModal);
+        assert!(app.color_pick_target.is_none() && app.hatch_dialog.is_none());
+        assert!(app.active_modal.is_none());
+        assert!(all_hatches(&app).is_empty());
+    }
+
+    #[test]
+    fn ok_with_a_stray_colour_window_closes_it() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        // The colour window covers OK; a message from elsewhere still lands.
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(all_hatches(&app).len(), 1);
+        assert!(app.color_pick_target.is_none(), "no colour window outlives the window");
+        // The same on Hatch Edit.
+        let i = app.active_tab;
+        let handle = *app.tabs[i].scene.hatches.keys().next().unwrap();
+        let _ = app.hatch_dialog_open_edit(handle);
+        let _ = app.update(Message::HatchDialogField(Field::Scale("2".into())));
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.color_pick_target.is_none());
+    }
+
+    #[test]
+    fn switching_tab_with_select_color_open_drops_everything() {
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::TabSwitch(second));
+        assert!(app.color_pick_target.is_none(), "no stray colour window");
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
+        // A late pick or Enter finds nothing to act on.
+        let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
+        let _ = app.update(Message::CommandFinalize);
+        assert!(app.hatch_dialog.is_none());
+        assert!(app.tabs.iter().all(|tab| tab.scene.hatches.is_empty()));
+    }
+
+    #[test]
+    fn closing_the_owner_tab_with_select_color_open_drops_everything() {
+        for (case, dirty, close_all) in [
+            ("close", false, false),
+            ("close, dirty", true, false),
+            ("close all, dirty, discard", true, true),
+        ] {
+            let mut app = app_with_rectangle();
+            let (first, _second) = open_second_tab(&mut app);
+            let _ = app.update(Message::TabSwitch(first));
+            open_with(&mut app, "HATCH", &[]);
+            open_picker(&mut app, HatchColorSlot::Fill);
+            app.tabs[first].dirty = dirty;
+            let owner_id = app.tabs[first].id;
+            if close_all {
+                let _ = app.update(Message::DocTabCloseAll);
+                let _ = app.update(Message::UnsavedDialogDiscard);
+                assert!(app.tabs.iter().all(|tab| tab.id != owner_id), "{case}: discarded");
+            } else {
+                let _ = app.update(Message::TabClose(owner_id));
+            }
+            assert!(app.color_pick_target.is_none(), "{case}: no stray colour window");
+            assert!(app.hatch_dialog.is_none(), "{case}: state dropped");
+            assert_ne!(app.active_modal, Some(ModalKind::Hatch), "{case}");
+            assert!(app.tabs.iter().all(|tab| tab.scene.hatches.is_empty()), "{case}");
+        }
+    }
+
+    #[test]
+    fn select_color_opens_nothing_while_the_window_is_hidden_or_under_the_palette() {
+        // Hidden behind "Add: Pick points": no colour window over the drawing.
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
+        assert!(app.active_modal.is_none(), "the window is hidden");
+        let _ = app.update(Message::HatchDialogField(Field::SelectColor(HatchColorSlot::Fill)));
+        assert!(app.color_pick_target.is_none());
+        // Under the pattern palette.
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        let _ = app.update(Message::HatchDialogPalette(
+            crate::ui::window::hatch_palette::PaletteAction::Open,
+        ));
+        let _ = app.update(Message::HatchDialogField(Field::SelectColor(HatchColorSlot::Fill)));
+        assert!(app.color_pick_target.is_none());
+        assert!(window_open(&app));
+    }
+
+    #[test]
+    fn a_window_command_with_select_color_open_starts_afresh() {
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.dispatch_command("GRADIENT");
+        assert!(app.color_pick_target.is_none(), "the old colour window went");
+        let state = app.hatch_dialog.as_ref().expect("a window again");
+        assert_eq!(state.settings.tab, FillTab::Gradient);
+        assert!(state.regions.is_empty(), "a fresh window");
+    }
+
+    #[test]
+    fn another_windows_colour_picker_is_not_touched_by_the_hatch_rules() {
+        // Without a Hatch window, the window's clean-up leaves it alone.
+        let mut app = app_with_rectangle();
+        let _ = app.update(Message::OpenColorWindow(ColorPickTarget::Ribbon, Color::Index(1)));
+        app.hatch_dialog_cancel(); // no Hatch window at all
+        assert!(matches!(app.color_pick_target, Some((ColorPickTarget::Ribbon, _))));
+        let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
+        assert_eq!(app.ribbon.active_color, Color::Index(3), "its pick goes where it did");
+
+        // The Layers window keeps its own Enter and Esc (the known gap of
+        // spec §12, not addressed here): Enter picks nothing, Esc goes to
+        // the window as before.
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        let colours = |app: &OpenCADStudio| {
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .iter()
+                .map(|layer| (layer.name.clone(), layer.color))
+                .collect::<Vec<_>>()
+        };
+        let _ = app.update(Message::ToggleLayers);
+        assert_eq!(app.active_modal, Some(ModalKind::Layers));
+        let before = colours(&app);
+        let _ = app.update(Message::OpenColorWindow(ColorPickTarget::Layer(0), Color::Index(7)));
+        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
+        let _ = app.update(Message::CommandFinalize);
+        assert!(matches!(app.color_pick_target, Some((ColorPickTarget::Layer(0), _))));
+        assert_eq!(colours(&app), before, "Enter picked nothing");
+        let _ = app.update(Message::CommandEscape);
+        assert_ne!(app.active_modal, Some(ModalKind::Layers), "Esc went to the window");
     }
 }
