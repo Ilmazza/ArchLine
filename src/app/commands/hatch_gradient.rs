@@ -8,32 +8,42 @@ use crate::app::OpenCADStudio;
 use crate::modules::draw::draw::hatch_settings::HatchColor;
 
 impl OpenCADStudio {
+    /// The drawing's current colour (CECOLOR) in tab `i`: what "Use Current"
+    /// means. Not the ribbon's colour, which follows the selection (and HATCH
+    /// keeps its preselected boundaries selected until OK).
+    pub(in crate::app) fn hatch_current_color(&self, i: usize) -> Color {
+        self.tabs[i].scene.document.header.current_entity_color
+    }
+
     /// The colour and transparency a hatch made by the window gets in tab
-    /// `i` (the window's owner): "Use Current" is the current colour, as for
-    /// every other drawing command; a chosen colour is that colour. The
-    /// transparency is the current one of that tab's drawing.
+    /// `i` (the window's owner): "Use Current" is that drawing's current
+    /// colour; a chosen colour is that colour. The transparency is the
+    /// current one of that tab's drawing.
     pub(in crate::app) fn hatch_creation_style(
         &self,
         i: usize,
         color: HatchColor,
     ) -> (Color, Transparency) {
         let color = match color {
-            HatchColor::UseCurrent => self.ribbon.active_color,
+            HatchColor::UseCurrent => self.hatch_current_color(i),
             HatchColor::Color(color) => color,
         };
         (color, self.tabs[i].scene.document.current_entity_transparency())
     }
 
     /// The RGBA the preview of a pattern or solid is drawn with in tab `i`:
-    /// the colour the hatch would get, ByLayer resolved through that tab's
-    /// current layer (ByBlock falls back as the renderer draws it outside a
-    /// block), translucent like every preview.
+    /// the colour the hatch will be drawn with. ByLayer resolves through that
+    /// tab's current layer (ByBlock falls back as the renderer draws it
+    /// outside a block), colour 7 follows the tab's background as the
+    /// renderer adapts it, and the preview is translucent like every other.
     pub(in crate::app) fn hatch_preview_rgba(&self, i: usize, color: HatchColor) -> [f32; 4] {
         let (color, _) = self.hatch_creation_style(i, color);
-        let mut rgba = match color {
-            Color::ByLayer => self.tabs[i].scene.layer_color(&self.tabs[i].active_layer),
+        let scene = &self.tabs[i].scene;
+        let rgba = match color {
+            Color::ByLayer => scene.layer_color(&self.tabs[i].active_layer),
             other => crate::scene::convert::tess_util::aci_to_rgba(&other),
         };
+        let mut rgba = crate::scene::view::render::adapt_to_bg(rgba, scene.current_bg());
         rgba[3] = 0.75;
         rgba
     }
@@ -371,23 +381,38 @@ mod tests {
         }
     }
 
+    /// The drawing's current colour (CECOLOR) in the active tab, with the
+    /// ribbon left on another colour: "Use Current" must read the drawing.
+    fn set_current_colour(app: &mut OpenCADStudio, color: Color, ribbon: Color) {
+        let i = app.active_tab;
+        app.tabs[i].scene.document.header.current_entity_color = color;
+        app.ribbon.active_color = ribbon;
+    }
+
     #[test]
-    fn use_current_follows_the_ribbon_colour_and_a_chosen_colour_wins() {
+    fn use_current_follows_the_drawings_current_colour_and_a_chosen_colour_wins() {
         // Default current colour is ByLayer: the entity is ByLayer, as before.
         let mut app = app_with_rectangle();
-        assert_eq!(app.ribbon.active_color, Color::ByLayer);
+        let i = app.active_tab;
+        assert_eq!(app.tabs[i].scene.document.header.current_entity_color, Color::ByLayer);
         open_with(&mut app, "HATCH", &[]);
         ok(&mut app);
         assert_eq!(the_hatch(&app).common.color, Color::ByLayer);
 
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::Index(1), Color::Index(4));
         open_with(&mut app, "HATCH", &[]);
         ok(&mut app);
-        assert_eq!(the_hatch(&app).common.color, Color::Index(1));
+        assert_eq!(the_hatch(&app).common.color, Color::Index(1), "CECOLOR, not the ribbon");
 
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::ByLayer, Color::Index(4));
+        open_with(&mut app, "HATCH", &[]);
+        ok(&mut app);
+        assert_eq!(the_hatch(&app).common.color, Color::ByLayer, "CECOLOR, not the ribbon");
+
+        let mut app = app_with_rectangle();
+        set_current_colour(&mut app, Color::Index(1), Color::Index(4));
         open_with(&mut app, "HATCH", &[Field::Color(HatchColor::Color(Color::Index(3)))]);
         ok(&mut app);
         assert_eq!(the_hatch(&app).common.color, Color::Index(3));
@@ -396,7 +421,7 @@ mod tests {
     #[test]
     fn use_current_also_applies_to_solids_and_separate_hatches() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(5);
+        set_current_colour(&mut app, Color::Index(5), Color::Index(2));
         open_with(
             &mut app,
             "HATCH",
@@ -406,6 +431,63 @@ mod tests {
         let hatch = the_hatch(&app);
         assert_eq!(hatch.common.color, Color::Index(5));
         assert!(hatch.is_solid);
+    }
+
+    /// A 20 x 10 rectangle of four lines of colour `color`, selected, with
+    /// the properties refreshed as the app does after a selection (the ribbon
+    /// then shows the selection's colour).
+    fn app_with_selected_rectangle(color: Color) -> OpenCADStudio {
+        let mut app = new_app();
+        let i = app.active_tab;
+        for (a, b, c, d) in [
+            (0.0, 0.0, 20.0, 0.0),
+            (20.0, 0.0, 20.0, 10.0),
+            (20.0, 10.0, 0.0, 10.0),
+            (0.0, 10.0, 0.0, 0.0),
+        ] {
+            let mut line = codec::entities::Line::from_points(
+                codec::types::Vector3::new(a, b, 0.0),
+                codec::types::Vector3::new(c, d, 0.0),
+            );
+            line.common.color = color;
+            let handle = app.tabs[i].scene.add_entity(codec::EntityType::Line(line));
+            app.tabs[i].scene.select_entity(handle, false);
+        }
+        app.refresh_properties();
+        app
+    }
+
+    #[test]
+    fn use_current_is_the_drawings_colour_not_the_preselected_objects() {
+        for (case, fields) in [
+            ("pattern", vec![]),
+            ("solid", vec![Field::Pattern("SOLID".into())]),
+            ("separate", vec![Field::Separate(true)]),
+        ] {
+            for (boundary, current) in [
+                (Color::Index(1), Color::ByLayer),
+                (Color::ByLayer, Color::Index(3)),
+            ] {
+                let mut app = app_with_selected_rectangle(boundary);
+                let i = app.active_tab;
+                app.tabs[i].scene.document.header.current_entity_color = current;
+                // What the app shows with the rectangle selected.
+                assert_eq!(app.ribbon.active_color, boundary, "{case}: the ribbon follows");
+                let _ = app.dispatch_command("HATCH");
+                assert_eq!(
+                    app.hatch_dialog.as_ref().unwrap().regions.len(),
+                    1,
+                    "{case}: the preselection seeds the area"
+                );
+                for field in &fields {
+                    let _ = app.update(Message::HatchDialogField(field.clone()));
+                }
+                ok(&mut app);
+                let hatch = the_hatch(&app);
+                assert_eq!(hatch.common.color, current, "{case}: boundary {boundary:?}");
+                assert_eq!(hatch.is_solid, case == "solid", "{case}");
+            }
+        }
     }
 
     #[test]
@@ -424,7 +506,7 @@ mod tests {
     #[test]
     fn the_gradient_tab_does_not_use_the_fill_colour() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::Index(1), Color::Index(1));
         open_with(
             &mut app,
             "GRADIENT",
@@ -479,7 +561,7 @@ mod tests {
     #[test]
     fn dash_gradient_makes_the_gradient_it_always_made() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::Index(1), Color::Index(1));
         let _ = app.dispatch_command("-GRADIENT");
         let i = app.active_tab;
         let result = app.tabs[i]
@@ -581,7 +663,7 @@ mod tests {
     #[test]
     fn the_collector_of_add_carries_no_preview_colour() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::Index(1), Color::Index(1));
         let _ = app.dispatch_command("HATCH");
         let _ = app.update(Message::HatchDialogAdd(AddKind::Points));
         let i = app.active_tab;
@@ -727,33 +809,40 @@ mod tests {
         let (first, second) = open_second_tab(&mut app);
         let _ = app.update(Message::TabSwitch(first));
         assert_eq!(app.active_tab, first);
-        // The second drawing has a red layer 0 and its own current transparency.
+        // The second drawing: current colour ByLayer, a red layer 0 and its
+        // own current transparency. The first (active) one: current colour
+        // yellow. The ribbon shows yet another colour.
+        app.tabs[second].scene.document.header.current_entity_color = Color::ByLayer;
         app.tabs[second].scene.document.layers.get_mut("0").unwrap().color = Color::Index(1);
         let quarter = codec::types::Transparency::Explicit(64);
         assert!(app.tabs[second].scene.document.set_current_entity_transparency(quarter));
-        app.ribbon.active_color = Color::ByLayer;
+        app.tabs[first].scene.document.header.current_entity_color = Color::Index(2);
+        app.ribbon.active_color = Color::Index(6);
 
+        assert_eq!(app.hatch_current_color(second), Color::ByLayer);
+        assert_eq!(app.hatch_current_color(first), Color::Index(2));
         assert_eq!(app.hatch_preview_rgba(second, HatchColor::UseCurrent), [1.0, 0.0, 0.0, 0.75]);
-        let mut white = app.tabs[first].scene.layer_color(&app.tabs[first].active_layer);
-        white[3] = 0.75;
-        assert_eq!(app.hatch_preview_rgba(first, HatchColor::UseCurrent), white);
-        assert_ne!(white, [1.0, 0.0, 0.0, 0.75]);
-
+        assert_eq!(app.hatch_preview_rgba(first, HatchColor::UseCurrent), [1.0, 1.0, 0.0, 0.75]);
         assert_eq!(
             app.hatch_creation_style(second, HatchColor::UseCurrent),
             (Color::ByLayer, quarter)
         );
         assert_eq!(
+            app.hatch_creation_style(first, HatchColor::UseCurrent),
+            (Color::Index(2), codec::types::Transparency::ByLayer)
+        );
+        assert_eq!(
             app.hatch_creation_style(first, HatchColor::Color(Color::Index(4))),
             (Color::Index(4), codec::types::Transparency::ByLayer)
         );
-        // "Use Current" is the ribbon's colour; a chosen one wins over it.
-        app.ribbon.active_color = Color::Index(2);
-        assert_eq!(app.hatch_creation_style(second, HatchColor::UseCurrent).0, Color::Index(2));
-        assert_eq!(app.hatch_preview_rgba(second, HatchColor::UseCurrent), [1.0, 1.0, 0.0, 0.75]);
+        // "Use Current" follows that drawing's current colour; a chosen one
+        // wins over it.
+        app.tabs[second].scene.document.header.current_entity_color = Color::Index(5);
+        assert_eq!(app.hatch_creation_style(second, HatchColor::UseCurrent).0, Color::Index(5));
+        assert_eq!(app.hatch_preview_rgba(second, HatchColor::UseCurrent), [0.0, 0.0, 1.0, 0.75]);
         assert_eq!(
-            app.hatch_preview_rgba(second, HatchColor::Color(Color::Index(5))),
-            [0.0, 0.0, 1.0, 0.75]
+            app.hatch_preview_rgba(second, HatchColor::Color(Color::Index(3))),
+            [0.0, 1.0, 0.0, 0.75]
         );
     }
 
@@ -839,10 +928,10 @@ mod tests {
     #[test]
     fn the_preview_of_a_pattern_uses_the_current_colour_or_the_layers() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(1);
+        set_current_colour(&mut app, Color::Index(1), Color::Index(4));
         open_with(&mut app, "HATCH", &[]);
         let models = preview_models(&mut app);
-        assert_eq!(models[0].color, [1.0, 0.0, 0.0, 0.75]);
+        assert_eq!(models[0].color, [1.0, 0.0, 0.0, 0.75], "CECOLOR, not the ribbon");
 
         let mut app = app_with_rectangle();
         let i = app.active_tab;
@@ -856,6 +945,65 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_uses_the_drawings_colour_not_the_preselected_objects() {
+        for (boundary, current, expected) in [
+            // Layer 0 is magenta below: ByLayer previews magenta.
+            (Color::Index(1), Color::ByLayer, [1.0, 0.0, 1.0, 0.75]),
+            (Color::ByLayer, Color::Index(3), [0.0, 1.0, 0.0, 0.75]),
+        ] {
+            let mut app = app_with_selected_rectangle(boundary);
+            let i = app.active_tab;
+            app.tabs[i].scene.document.layers.get_mut("0").unwrap().color = Color::Index(6);
+            app.tabs[i].scene.document.header.current_entity_color = current;
+            assert_eq!(app.ribbon.active_color, boundary, "the ribbon follows the selection");
+            let _ = app.dispatch_command("HATCH");
+            assert_eq!(app.hatch_dialog.as_ref().unwrap().regions.len(), 1);
+            assert_eq!(preview_models(&mut app)[0].color, expected, "boundary {boundary:?}");
+        }
+    }
+
+    #[test]
+    fn the_preview_of_colour_7_is_adapted_to_the_background_like_the_hatch() {
+        let white = [1.0, 1.0, 1.0, 0.75];
+        let black = [0.0, 0.0, 0.0, 0.75];
+        let dark = [0.1, 0.1, 0.1, 1.0];
+        let light = [0.95, 0.95, 0.95, 1.0];
+        for (case, layout, background, color, expected) in [
+            ("model, dark", false, dark, HatchColor::UseCurrent, white),
+            ("model, light", false, light, HatchColor::UseCurrent, black),
+            ("model, light, chosen 7", false, light, HatchColor::Color(Color::Index(7)), black),
+            ("model, light, red", false, light, HatchColor::Color(Color::Index(1)), [1.0, 0.0, 0.0, 0.75]),
+            ("layout, white sheet", true, [1.0; 4], HatchColor::UseCurrent, black),
+            ("layout, dark sheet", true, dark, HatchColor::UseCurrent, white),
+        ] {
+            let mut app = app_with_rectangle();
+            let i = app.active_tab;
+            // Current colour ByLayer on layer 0, colour 7: the default drawing.
+            app.tabs[i].scene.document.layers.get_mut("0").unwrap().color = Color::Index(7);
+            if layout {
+                app.tabs[i].scene.current_layout = "Layout1".to_string();
+                app.tabs[i].scene.paper_bg_color = background;
+                app.tabs[i].scene.bg_color = dark; // must not be the one used
+            } else {
+                app.tabs[i].scene.bg_color = background;
+                app.tabs[i].scene.paper_bg_color = [1.0; 4];
+            }
+            open_with(&mut app, "HATCH", &[Field::Color(color)]);
+            assert_eq!(app.hatch_preview_rgba(i, color), expected, "{case}");
+            assert_eq!(preview_models(&mut app)[0].color, expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn the_gradient_preview_keeps_its_true_colours_on_a_light_background() {
+        let mut app = app_with_rectangle();
+        let i = app.active_tab;
+        app.tabs[i].scene.bg_color = [0.95, 0.95, 0.95, 1.0];
+        open_with(&mut app, "GRADIENT", &[Field::GradientColor1(Color::Index(7))]);
+        assert_eq!(preview_models(&mut app)[0].color, [1.0, 1.0, 1.0, 0.75]);
+    }
+
+    #[test]
     fn the_preview_of_a_chosen_colour_is_that_colour() {
         let mut app = app_with_rectangle();
         open_with(&mut app, "HATCH", &[Field::Color(HatchColor::Color(Color::Index(3)))]);
@@ -865,7 +1013,7 @@ mod tests {
     #[test]
     fn the_gradient_preview_shows_both_chosen_colours() {
         let mut app = app_with_rectangle();
-        app.ribbon.active_color = Color::Index(5);
+        set_current_colour(&mut app, Color::Index(5), Color::Index(5));
         open_with(
             &mut app,
             "GRADIENT",
