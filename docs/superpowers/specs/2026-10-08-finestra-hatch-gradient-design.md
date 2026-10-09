@@ -1,7 +1,8 @@
 # Finestra "Hatch and Gradient": pattern, solido e sfumato, in creazione e in modifica
 
-Stato: spec da approvare. Estende `2026-10-08-finestra-hatch-design.md` (finestra in creazione, browser dei pattern,
-modalità modifica), tutto già nel branch `claude/finestra-hatch`.
+Stato: implementata nel branch `claude/finestra-hatch` secondo il piano `docs/superpowers/plans/2026-10-08-finestra-hatch-gradient.md`
+(in attesa di PR e di verifica visiva su Windows). Estende `2026-10-08-finestra-hatch-design.md` (finestra in creazione,
+browser dei pattern, modalità modifica), tutto già nel branch `claude/finestra-hatch`.
 
 ## 0. Intesa (da correggere se sbagliata)
 
