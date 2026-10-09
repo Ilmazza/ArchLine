@@ -25,6 +25,9 @@ pub enum HatchEditOperation {
         style: Option<codec::entities::HatchStyleType>,
         annotative: Option<bool>,
     },
+    /// One OK of the Hatch Edit window: fill (in place or converted),
+    /// colour, island style, association and origin under one undo step.
+    Window(Box<crate::entities::hatch_fill::HatchWindowEdit>),
     RecreateBoundary {
         associate: bool,
         region: bool,

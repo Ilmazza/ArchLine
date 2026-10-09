@@ -471,6 +471,20 @@ impl OpenCADStudio {
                         .scene
                         .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
                 }
+                HatchEditOperation::Window(edit) => {
+                    if let Some(codec::EntityType::Hatch(hatch)) =
+                        self.tabs[i].scene.document.get_entity_mut(handle)
+                    {
+                        crate::entities::hatch_fill::apply_window_edit(hatch, &edit);
+                    }
+                    // The cached fill model is rebuilt from the entity: a change of
+                    // kind (pattern/solid/gradient) is not a patch of the old one.
+                    self.tabs[i].scene.refresh_fill_model(handle);
+                    self.tabs[i]
+                        .scene
+                        .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+                    self.refresh_properties();
+                }
                 HatchEditOperation::AddBoundaries(handles) => {
                     self.tabs[i]
                         .scene

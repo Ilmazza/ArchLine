@@ -385,6 +385,95 @@ pub fn apply_pattern_update(
     apply_common_update(h, origin, disassociate, style);
 }
 
+/// What the fill part of a Hatch Edit OK changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FillEdit {
+    /// A pattern or solid hatch, edited on the Hatch tab: only the fields
+    /// that changed (`None` = keep the stored value).
+    Pattern {
+        pattern: Option<String>,
+        scale: Option<f32>,
+        angle_deg: Option<f32>,
+    },
+    /// A gradient turned into a pattern or a solid (`name == "SOLID"`).
+    ToPattern { name: String, scale: f32, angle_deg: f32 },
+    /// A gradient edited on the Gradient tab: only the changed fields.
+    Gradient(GradientPatch),
+    /// A pattern or solid turned into the gradient described.
+    ToGradient(GradientSpec),
+}
+
+/// Everything one OK of the Hatch Edit window changes in a hatch, applied
+/// together so it is one undo step.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HatchWindowEdit {
+    pub fill: Option<FillEdit>,
+    /// The entity's own colour (Hatch tab only).
+    pub color: Option<AcadColor>,
+    pub style: Option<HatchStyleType>,
+    /// The hatch was associative and "Associative" was switched off.
+    pub disassociate: bool,
+    /// New pattern origin in the hatch's plane (Hatch tab only).
+    pub origin: Option<[f64; 2]>,
+}
+
+impl HatchWindowEdit {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Apply one Hatch Edit OK to `h`: the fill (edited in place or converted to
+/// another kind), then the parts common to every kind. Boundaries, their
+/// links and everything not named in `edit` are left as they are.
+pub fn apply_window_edit(h: &mut Hatch, edit: &HatchWindowEdit) {
+    let origin = edit.origin.map(|point| (point[0], point[1]));
+    match &edit.fill {
+        Some(FillEdit::Pattern {
+            pattern,
+            scale,
+            angle_deg,
+        }) => {
+            // A field left alone is handed over as stored (read through f32,
+            // as `apply_pattern_update` expects), so it is kept exactly.
+            let name = pattern.clone().unwrap_or_else(|| h.pattern.name.clone());
+            let scale = scale.unwrap_or(h.pattern_scale as f32);
+            let angle = angle_deg.unwrap_or(h.pattern_angle.to_degrees() as f32);
+            apply_pattern_update(h, &name, scale, angle, origin, edit.disassociate, edit.style);
+        }
+        Some(FillEdit::ToPattern {
+            name,
+            scale,
+            angle_deg,
+        }) => {
+            // Always through `set_catalog_pattern`: the gradient's stored name
+            // is already "SOLID", so a by-name update would keep the gradient.
+            if let Some(entry) = hatch_patterns::find(name) {
+                let scale = (*scale as f64).max(1.0e-6);
+                let angle = (*angle_deg as f64).to_radians();
+                set_catalog_pattern(h, entry, scale, angle);
+                h.pattern_scale = scale;
+                h.pattern_angle = angle;
+            }
+            apply_common_update(h, origin, edit.disassociate, edit.style);
+        }
+        Some(FillEdit::Gradient(patch)) => {
+            apply_gradient_patch(h, patch);
+            apply_common_update(h, None, edit.disassociate, edit.style);
+        }
+        Some(FillEdit::ToGradient(spec)) => {
+            apply_gradient(h, spec);
+            apply_common_update(h, None, edit.disassociate, edit.style);
+        }
+        None => apply_common_update(h, origin, edit.disassociate, edit.style),
+    }
+    if let Some(color) = edit.color {
+        h.common.color = color;
+        h.common.color_name = None;
+        h.common.color_book_handle = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,5 +935,202 @@ mod tests {
         );
         assert_eq!(hatch.style, codec::entities::HatchStyleType::Outer);
         assert_eq!(hatch.pattern_origin(), Vector2::new(5.0, 6.0));
+    }
+
+    // ── apply_window_edit: one OK of the Hatch Edit window ─────────────────
+
+    /// An associative hatch with an outer path, a hole, links to two source
+    /// objects and an island style: everything a conversion must leave alone.
+    fn bounded_hatch() -> Hatch {
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        for (index, handle) in [(0u64, 11u64), (1, 12)] {
+            let mut path = codec::entities::BoundaryPath::new();
+            path.add_boundary_handle(codec::Handle::new(handle));
+            path.flags.set_external(index == 0);
+            hatch.paths.push(path);
+        }
+        hatch.is_associative = true;
+        hatch.style = HatchStyleType::Outer;
+        hatch.elevation = 2.5;
+        hatch.common.color = AcadColor::Index(3);
+        hatch
+    }
+
+    fn same_everything_but_the_fill(before: &Hatch, after: &Hatch) {
+        assert_eq!(after.paths, before.paths, "boundary paths and their links");
+        assert_eq!(after.is_associative, before.is_associative);
+        assert_eq!(after.style, before.style);
+        assert_eq!(after.elevation, before.elevation);
+        assert_eq!(after.normal, before.normal);
+        assert_eq!(after.common, before.common, "colour, layer, transparency, handle");
+    }
+
+    #[test]
+    fn a_pattern_becomes_a_gradient_and_nothing_else_changes() {
+        let before = bounded_hatch();
+        let mut after = before.clone();
+        apply_window_edit(
+            &mut after,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::ToGradient(spec())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(FillKind::of(&after), FillKind::Gradient);
+        assert_eq!(read_gradient(&after), spec());
+        same_everything_but_the_fill(&before, &after);
+    }
+
+    #[test]
+    fn a_gradient_becomes_a_pattern_a_solid_and_nothing_else_changes() {
+        let mut before = bounded_hatch();
+        apply_gradient(&mut before, &spec());
+        let mut pattern = before.clone();
+        apply_window_edit(
+            &mut pattern,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::ToPattern {
+                    name: "ANSI31".into(),
+                    scale: 2.0,
+                    angle_deg: 45.0,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(FillKind::of(&pattern), FillKind::Pattern);
+        assert_eq!(pattern.pattern_scale, 2.0);
+        assert!((pattern.pattern_angle - 45f64.to_radians()).abs() < 1e-12);
+        assert!(!pattern.gradient_color.enabled);
+        same_everything_but_the_fill(&before, &pattern);
+
+        // Same stored name "SOLID" as the gradient's: still a conversion.
+        let mut solid = before.clone();
+        apply_window_edit(
+            &mut solid,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::ToPattern {
+                    name: "SOLID".into(),
+                    scale: 1.0,
+                    angle_deg: 0.0,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(FillKind::of(&solid), FillKind::Solid);
+        assert_eq!(solid.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
+        same_everything_but_the_fill(&before, &solid);
+    }
+
+    #[test]
+    fn a_solid_becomes_a_pattern_and_a_gradient() {
+        let mut before = bounded_hatch();
+        let entry = hatch_patterns::find("SOLID").unwrap();
+        set_catalog_pattern(&mut before, entry, 1.0, 0.0);
+        assert_eq!(FillKind::of(&before), FillKind::Solid);
+        let mut pattern = before.clone();
+        apply_window_edit(
+            &mut pattern,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::Pattern {
+                    pattern: Some("ANSI31".into()),
+                    scale: None,
+                    angle_deg: None,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(FillKind::of(&pattern), FillKind::Pattern);
+        assert_eq!(pattern.pattern.name, "ANSI31");
+        assert_eq!(pattern.pattern_scale, before.pattern_scale, "scale kept");
+        same_everything_but_the_fill(&before, &pattern);
+        let mut gradient = before.clone();
+        apply_window_edit(
+            &mut gradient,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::ToGradient(spec())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(FillKind::of(&gradient), FillKind::Gradient);
+        assert_eq!(read_gradient(&gradient), spec());
+        same_everything_but_the_fill(&before, &gradient);
+    }
+
+    #[test]
+    fn a_gradient_patch_edit_touches_only_the_patched_field() {
+        let mut before = bounded_hatch();
+        apply_gradient(&mut before, &spec());
+        let mut after = before.clone();
+        apply_window_edit(
+            &mut after,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::Gradient(GradientPatch {
+                    kind: Some((GradientKind::Spherical, false)),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let mut expected = before.clone();
+        expected.gradient_color.name = "SPHERICAL".into();
+        assert_eq!(after, expected);
+    }
+
+    #[test]
+    fn colour_style_and_disassociation_apply_with_or_without_a_fill_change() {
+        let before = bounded_hatch();
+        let mut after = before.clone();
+        apply_window_edit(
+            &mut after,
+            &HatchWindowEdit {
+                color: Some(AcadColor::Index(1)),
+                style: Some(HatchStyleType::Ignore),
+                disassociate: true,
+                origin: Some([4.0, 5.0]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(after.common.color, AcadColor::Index(1));
+        assert_eq!(after.style, HatchStyleType::Ignore);
+        assert!(!after.is_associative);
+        assert!(after.paths.iter().all(|p| p.boundary_handles.is_empty()));
+        assert_eq!(after.pattern_origin(), Vector2::new(4.0, 5.0));
+        // Untouched: layer, linetype, the rest of the pattern.
+        assert_eq!(after.common.layer, before.common.layer);
+        assert_eq!(after.common.linetype, before.common.linetype);
+        assert_eq!(after.pattern_scale, before.pattern_scale);
+
+        // The same with a fill change: a gradient made from it keeps the
+        // colour, the style and the disassociation of the same OK.
+        let mut converted = before.clone();
+        apply_window_edit(
+            &mut converted,
+            &HatchWindowEdit {
+                fill: Some(FillEdit::ToGradient(spec())),
+                color: Some(AcadColor::Index(1)),
+                style: Some(HatchStyleType::Ignore),
+                disassociate: true,
+                origin: None,
+            },
+        );
+        assert_eq!(FillKind::of(&converted), FillKind::Gradient);
+        assert_eq!(converted.common.color, AcadColor::Index(1));
+        assert_eq!(converted.style, HatchStyleType::Ignore);
+        assert!(!converted.is_associative);
+        assert!(converted.paths.iter().all(|p| p.boundary_handles.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_edit_changes_nothing() {
+        assert!(HatchWindowEdit::default().is_empty());
+        let before = bounded_hatch();
+        let mut after = before.clone();
+        apply_window_edit(&mut after, &HatchWindowEdit::default());
+        assert_eq!(after, before);
+        let mut gradient = bounded_hatch();
+        apply_gradient(&mut gradient, &spec());
+        let mut after = gradient.clone();
+        apply_window_edit(&mut after, &HatchWindowEdit::default());
+        assert_eq!(after, gradient);
     }
 }

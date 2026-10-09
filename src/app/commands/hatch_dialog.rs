@@ -2653,6 +2653,58 @@ mod tests {
         assert_eq!(stored(&app, hatch), before, "one undo restores it all");
     }
 
+    /// A conversion from the window is one OK and one undo; the scene's fill
+    /// model follows the new kind; boundaries, links, island style and the
+    /// entity's own properties stay as they were.
+    #[test]
+    fn converting_a_pattern_hatch_in_the_window_is_one_undo_and_the_scene_follows() {
+        use crate::entities::hatch_fill::FillKind;
+        use crate::modules::draw::draw::hatch_settings::{FillTab, HatchColor};
+        use crate::scene::model::hatch_model::HatchPattern;
+        let model = |app: &OpenCADStudio, h: Handle| app.tabs[app.active_tab].scene.hatches[&h].clone();
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        assert_eq!(FillKind::of(&before), FillKind::Pattern);
+
+        // pattern -> gradient: only the tab changed
+        let depth = undo_depth(&app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Tab(FillTab::Gradient));
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "closed");
+        let after = stored(&app, hatch);
+        assert_eq!(FillKind::of(&after), FillKind::Gradient);
+        assert_eq!(after.paths, before.paths, "boundaries and their links");
+        assert_eq!(after.is_associative, before.is_associative);
+        assert_eq!(after.style, before.style);
+        assert_eq!(after.common, before.common);
+        assert!(
+            matches!(model(&app, hatch).pattern, HatchPattern::Gradient { .. }),
+            "the scene's model follows the kind"
+        );
+        assert_eq!(undo_depth(&app), depth + 1, "one undo step");
+        let _ = app.update(Message::Undo);
+        assert_eq!(stored(&app, hatch), before, "one undo restores it all");
+        assert!(!matches!(model(&app, hatch).pattern, HatchPattern::Gradient { .. }));
+
+        // pattern -> solid, with a colour of its own in the same OK
+        let depth = undo_depth(&app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Pattern("SOLID".into()));
+        field(&mut app, Field::Color(HatchColor::Color(codec::types::Color::Index(1))));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(FillKind::of(&after), FillKind::Solid);
+        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.layer, before.common.layer);
+        assert_eq!(after.paths, before.paths);
+        assert_eq!(after.style, before.style);
+        assert!(matches!(model(&app, hatch).pattern, HatchPattern::Solid));
+        assert_eq!(undo_depth(&app), depth + 1, "one undo step");
+        let _ = app.update(Message::Undo);
+        assert_eq!(stored(&app, hatch), before, "one undo restores it all");
+    }
+
     #[test]
     fn a_style_only_change_leaves_the_pattern_geometry_exactly_as_it_was() {
         // Scale and angle that f32 cannot hold exactly, and an origin away
