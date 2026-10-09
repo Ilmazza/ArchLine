@@ -136,28 +136,19 @@ impl OpenCADStudio {
     }
 
     /// Double-click on a hatch and HATCHEDIT on a selected one: open the window
-    /// on that hatch ("Hatch Edit").
+    /// on that hatch ("Hatch Edit"), whatever its fill (pattern, solid or
+    /// gradient): the window opens on the tab of its kind.
     #[inline(never)]
     pub(in crate::app) fn hatch_dialog_open_edit(&mut self, handle: Handle) -> Task<Message> {
-        use crate::modules::draw::draw::hatch_edit_settings::{is_pattern_hatch, EditTarget};
+        use crate::modules::draw::draw::hatch_edit_settings::EditTarget;
         // A window left over from an abandoned flow must not leak into this one.
         self.hatch_dialog_cancel();
         let i = self.active_tab;
-        let opened = match self.tabs[i].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => {
-                Some((EditTarget::from_hatch(handle, hatch), hatch_plane(hatch)))
+        let (target, plane) = match self.tabs[i].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Hatch(hatch)) => {
+                (EditTarget::from_hatch(handle, hatch), hatch_plane(hatch))
             }
-            Some(codec::EntityType::Hatch(_)) => None,
             _ => return Task::none(),
-        };
-        let Some((target, plane)) = opened else {
-            self.command_line.push_info(
-                crate::t!(
-                    "HATCHEDIT: solid and gradient hatches are edited from the Properties panel or with -HATCHEDIT."
-                )
-                .as_ref(),
-            );
-            return Task::none();
         };
         if self.reject_locked_edit(i, handle) {
             return Task::none();
@@ -169,7 +160,7 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    /// HATCHEDIT on the one selected pattern hatch.
+    /// HATCHEDIT on the one selected hatch.
     #[inline(never)]
     pub(in crate::app) fn hatch_dialog_open_edit_selected(&mut self, i: usize) -> Task<Message> {
         match self.hatchedit_window_target(i) {
@@ -179,22 +170,20 @@ impl OpenCADStudio {
     }
 
     /// The hatch HATCHEDIT opens the window on: the only selected object,
-    /// when it is a pattern hatch. Anything else keeps the command line.
+    /// when it is a hatch of any kind. Anything else keeps the command line.
     pub(in crate::app) fn hatchedit_window_target(&self, i: usize) -> Option<Handle> {
-        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
         let selected = self.selected_handles(i);
         let [handle] = selected.as_slice() else {
             return None;
         };
         match self.tabs[i].scene.document.get_entity(*handle) {
-            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => Some(*handle),
+            Some(codec::EntityType::Hatch(_)) => Some(*handle),
             _ => None,
         }
     }
 
-    /// Double-click on `handle` in model space: a hatch opens "Hatch Edit"
-    /// (or says where a solid or gradient fill is edited); `None` for any
-    /// other object, which keeps its own double-click.
+    /// Double-click on `handle` in model space: a hatch opens "Hatch Edit";
+    /// `None` for any other object, which keeps its own double-click.
     #[inline(never)]
     pub(in crate::app) fn hatch_double_click(&mut self, handle: Handle) -> Option<Task<Message>> {
         let i = self.active_tab;
@@ -205,10 +194,11 @@ impl OpenCADStudio {
         .then(|| self.hatch_dialog_open_edit(handle))
     }
 
-    /// A press on a grip of the selected pattern hatch `handle` that is the
+    /// A press on a grip of the selected hatch `handle` that is the
     /// second half of a double-click (the first click selected the hatch):
     /// open Hatch Edit instead of starting a grip edit. Without this, a
-    /// double-click on the centre of a hatch lands on its pattern-origin grip.
+    /// double-click on the centre of a hatch lands on its pattern-origin grip
+    /// (a solid or gradient one has it too, when associative).
     /// Same thresholds as the double-click in `on_viewport_left_release`;
     /// `cursor` is in the same tile coordinates as `last_vp_click_pos`.
     /// `None` leaves the grip to work as before.
@@ -219,16 +209,15 @@ impl OpenCADStudio {
         handle: Handle,
         cursor: iced::Point,
     ) -> Option<Task<Message>> {
-        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
         if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
             return None;
         }
         let double = self.second_click_of_a_double_click(cursor);
-        let pattern_hatch = matches!(
+        let is_hatch = matches!(
             self.tabs[i].scene.document.get_entity(handle),
-            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch)
+            Some(codec::EntityType::Hatch(_))
         );
-        if !double || !pattern_hatch {
+        if !double || !is_hatch {
             return None;
         }
         // The double-click is used up: a third quick press is a new gesture.
@@ -268,34 +257,33 @@ impl OpenCADStudio {
         iced::Point::new(canvas.x - offset.0, canvas.y - offset.1)
     }
 
-    /// The pattern hatch whose grip is hot in tab `i`, with no command
-    /// running, in model space.
-    fn hot_pattern_hatch_grip(&self, i: usize) -> Option<Handle> {
-        use crate::modules::draw::draw::hatch_edit_settings::is_pattern_hatch;
+    /// The hatch whose grip is hot in tab `i`, with no command running, in
+    /// model space.
+    fn hot_hatch_grip(&self, i: usize) -> Option<Handle> {
         if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
             return None;
         }
         let handle = self.tabs[i].active_grip.as_ref()?.handle;
         match self.tabs[i].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) if is_pattern_hatch(hatch) => Some(handle),
+            Some(codec::EntityType::Hatch(_)) => Some(handle),
             _ => None,
         }
     }
 
-    /// The click that just made a grip of a pattern hatch hot returns early
+    /// The click that just made a grip of a hatch hot returns early
     /// from the release handler, before it records the click for double-click
     /// detection: record it here, so a quick second click can still open
     /// Hatch Edit. `canvas` is the release point in canvas coordinates.
     #[inline(never)]
     pub(in crate::app) fn hatch_note_hot_grip_click(&mut self, i: usize, canvas: iced::Point) {
-        if self.hot_pattern_hatch_grip(i).is_none() {
+        if self.hot_hatch_grip(i).is_none() {
             return;
         }
         self.last_vp_click_time = Some(iced::time::Instant::now());
         self.last_vp_click_pos = Some(self.tile_point(i, canvas));
     }
 
-    /// A press while a grip of a pattern hatch is hot: when it is the second
+    /// A press while a grip of a hatch is hot: when it is the second
     /// click of a double-click, the grip is dropped as Escape drops it (the
     /// hatch back as it was, no base point left) and Hatch Edit opens.
     /// Otherwise `None`, and the press places the grip as before. `canvas` is
@@ -306,7 +294,7 @@ impl OpenCADStudio {
         i: usize,
         canvas: iced::Point,
     ) -> Option<Task<Message>> {
-        let handle = self.hot_pattern_hatch_grip(i)?;
+        let handle = self.hot_hatch_grip(i)?;
         let double = self.second_click_of_a_double_click(self.tile_point(i, canvas));
         // Paired or not, the recorded click is used up.
         self.last_vp_click_time = None;
@@ -2654,6 +2642,300 @@ mod tests {
         assert_eq!(stored(&app, hatch), before, "one undo restores it all");
     }
 
+    /// OK on `fields` alone must change exactly what `expected` says and
+    /// leave everything else of the hatch as it was; one undo restores it.
+    fn edit_one(
+        app: &mut OpenCADStudio,
+        hatch: Handle,
+        fields: &[Field],
+        expected: impl FnOnce(&mut codec::entities::Hatch),
+    ) {
+        let before = stored(app, hatch);
+        let depth = undo_depth(app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        for f in fields {
+            field(app, f.clone());
+        }
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "closed");
+        let mut want = before.clone();
+        expected(&mut want);
+        assert_eq!(stored(app, hatch), want);
+        assert_eq!(undo_depth(app), depth + 1, "one undo step");
+        let _ = app.update(Message::Undo);
+        assert_eq!(stored(app, hatch), before, "one undo restores it all");
+    }
+
+    #[test]
+    fn each_gradient_field_changes_only_itself() {
+        use codec::types::Color;
+        let mut app = app_with_rectangle();
+        let hatch = gradient_made(&mut app, &[]);
+        edit_one(&mut app, hatch, &[Field::GradientShape(5)], |h| {
+            h.gradient_color.name = "CURVED".into()
+        });
+        edit_one(&mut app, hatch, &[Field::GradientColor1(Color::Index(2))], |h| {
+            h.gradient_color.colors[0].color = Color::Index(2)
+        });
+        edit_one(&mut app, hatch, &[Field::GradientColor2(Color::Index(4))], |h| {
+            h.gradient_color.colors[1].color = Color::Index(4)
+        });
+        edit_one(&mut app, hatch, &[Field::GradientCentered(false)], |h| {
+            h.gradient_color.shift = 1.0
+        });
+        edit_one(&mut app, hatch, &[Field::GradientAngle("30".into())], |h| {
+            h.gradient_color.angle = 30f64.to_radians();
+            h.pattern_angle = 30f64.to_radians();
+        });
+        edit_one(&mut app, hatch, &[Field::GradientOneColor(true)], |h| {
+            h.gradient_color.is_single_color = true;
+            h.gradient_color.color_tint = 1.0;
+        });
+    }
+
+    #[test]
+    fn a_hidden_gradient_field_does_not_enable_ok() {
+        let mut app = app_with_rectangle();
+        let hatch = gradient_made(&mut app, &[]); // two colours: the tint is hidden
+        let before = stored(&app, hatch);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::GradientTint(0.1));
+        assert!(!app.hatch_dialog.as_ref().unwrap().can_ok());
+        let _ = app.update(Message::HatchDialogOk);
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch), "nothing to apply: still open");
+        assert_eq!(stored(&app, hatch), before);
+    }
+
+    #[test]
+    fn a_solid_edits_like_a_hatch_and_keeps_its_colour() {
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        edit_one(&mut app, solid, &[Field::IslandStyle(HatchStyleType::Outer)], |h| {
+            h.style = HatchStyleType::Outer
+        });
+        edit_one(
+            &mut app,
+            solid,
+            &[Field::Color(crate::modules::draw::draw::hatch_settings::HatchColor::Color(
+                codec::types::Color::Index(1),
+            ))],
+            |h| h.common.color = codec::types::Color::Index(1),
+        );
+    }
+
+    /// One conversion: `fields`, OK, the new kind, boundaries untouched, one
+    /// undo step; one undo restores the hatch and one redo brings it back.
+    /// Returns the converted hatch (the undo is left undone).
+    fn convert(
+        app: &mut OpenCADStudio,
+        hatch: Handle,
+        fields: &[Field],
+        to: crate::entities::hatch_fill::FillKind,
+    ) -> codec::entities::Hatch {
+        let before = stored(app, hatch);
+        let depth = undo_depth(app);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        for f in fields {
+            field(app, f.clone());
+        }
+        let _ = app.update(Message::HatchDialogOk);
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none(), "closed");
+        let after = stored(app, hatch);
+        assert_eq!(crate::entities::hatch_fill::FillKind::of(&after), to);
+        // The scene's cached model follows the kind right after OK, not only
+        // after some later rebuild (undo and redo rebuild it too).
+        {
+            use crate::entities::hatch_fill::FillKind;
+            use crate::scene::model::hatch_model::HatchPattern;
+            let model = &app.tabs[app.active_tab].scene.hatches[&hatch].pattern;
+            let follows = match to {
+                FillKind::Solid => matches!(model, HatchPattern::Solid),
+                FillKind::Pattern => matches!(model, HatchPattern::Pattern(_)),
+                FillKind::Gradient => matches!(model, HatchPattern::Gradient { .. }),
+            };
+            assert!(follows, "the model follows the kind {to:?}");
+        }
+        assert_eq!(after.paths, before.paths, "boundaries and links");
+        assert_eq!(undo_depth(app), depth + 1, "one undo step");
+        let _ = app.update(Message::Undo);
+        // As text: a hatch from a file may hold NaN, which is not equal to itself.
+        assert_eq!(format!("{:?}", stored(app, hatch)), format!("{before:?}"), "one undo restores it all");
+        assert_eq!(undo_depth(app), depth);
+        let _ = app.update(Message::Redo);
+        assert_eq!(stored(app, hatch), after, "and one redo brings it back");
+        let _ = app.update(Message::Undo);
+        assert_eq!(format!("{:?}", stored(app, hatch)), format!("{before:?}"));
+        after
+    }
+
+    /// Every way from one kind of fill to another is one OK and one undo, and
+    /// leaves boundaries, links and island style alone. Most OKs also carry a
+    /// colour and an island style: a second undo snapshot taken between the
+    /// fill and the rest would leave the first undo half-way.
+    #[test]
+    fn all_six_conversions_are_one_undo_each() {
+        use crate::entities::hatch_fill::{read_gradient, FillKind};
+        use crate::modules::draw::draw::hatch_settings::{FillTab, HatchColor};
+        use crate::scene::model::hatch_model::GradientKind;
+        let red = || Field::Color(HatchColor::Color(codec::types::Color::Index(1)));
+        let outer = || Field::IslandStyle(HatchStyleType::Outer);
+
+        // pattern -> solid, pattern -> gradient
+        let (mut app, hatch) = app_with_hatch();
+        let before = stored(&app, hatch);
+        let after = convert(
+            &mut app,
+            hatch,
+            &[Field::Pattern("SOLID".into()), red(), outer()],
+            FillKind::Solid,
+        );
+        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.style, HatchStyleType::Outer);
+        let after = convert(&mut app, hatch, &[Field::Tab(FillTab::Gradient), outer()], FillKind::Gradient);
+        assert_eq!(after.is_associative, before.is_associative);
+        assert_eq!(after.style, HatchStyleType::Outer);
+        assert_eq!(after.common.color, before.common.color, "the Gradient tab has no entity colour");
+
+        // solid -> pattern, solid -> gradient
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        let after = convert(
+            &mut app,
+            solid,
+            &[Field::Pattern("ANSI31".into()), red(), outer()],
+            FillKind::Pattern,
+        );
+        assert_eq!(after.pattern.name, "ANSI31");
+        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert!(!after.pattern.lines.is_empty(), "real pattern lines");
+        convert(&mut app, solid, &[Field::Tab(FillTab::Gradient)], FillKind::Gradient);
+
+        // gradient -> pattern, gradient -> solid (same stored name "SOLID")
+        let mut app = app_with_rectangle();
+        let gradient = gradient_made(&mut app, &[Field::GradientShape(4)]);
+        let before = stored(&app, gradient);
+        let after = convert(
+            &mut app,
+            gradient,
+            &[Field::Tab(FillTab::Hatch), red(), outer()],
+            FillKind::Pattern,
+        );
+        assert!(!after.gradient_color.enabled);
+        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.style, HatchStyleType::Outer);
+        assert_eq!(read_gradient(&stored(&app, gradient)).kind, GradientKind::CHOICES[4].0);
+        assert_eq!(stored(&app, gradient), before);
+        let after = convert(
+            &mut app,
+            gradient,
+            &[Field::Tab(FillTab::Hatch), Field::Pattern("SOLID".into()), red()],
+            FillKind::Solid,
+        );
+        assert!(!after.gradient_color.enabled && after.is_solid);
+        assert_eq!(after.common.color, codec::types::Color::Index(1));
+    }
+
+    #[test]
+    fn converting_an_associative_hatch_with_islands_leaves_its_structure_alone() {
+        // Review focus: several paths, links to source objects, island style.
+        let mut app = app_with_rectangle();
+        let hatch = hatch_made_with(&mut app, &[Field::IslandStyle(HatchStyleType::Outer)]);
+        let before = stored(&app, hatch);
+        assert!(before.is_associative);
+        let _ = app.hatch_dialog_open_edit(hatch);
+        field(&mut app, Field::Tab(crate::modules::draw::draw::hatch_settings::FillTab::Gradient));
+        let _ = app.update(Message::HatchDialogOk);
+        let after = stored(&app, hatch);
+        assert_eq!(after.paths, before.paths);
+        assert_eq!(after.is_associative, before.is_associative);
+        assert_eq!(after.style, before.style);
+        assert_eq!(after.common, before.common);
+    }
+
+    /// A hatch read from a file can carry a zero or non-finite scale or
+    /// angle (a solid often does). The window shows the defaults 1 and 0
+    /// instead, and an OK for anything else must not write them to the hatch.
+    #[test]
+    fn a_hatch_with_an_unusable_scale_or_angle_opens_with_defaults_and_keeps_them_stored() {
+        use crate::modules::draw::draw::hatch_settings::HatchColor;
+        let cases = [(0.0, 0.0), (f64::NAN, f64::NAN), (f64::INFINITY, f64::INFINITY), (-2.0, 0.0)];
+        for (scale, angle) in cases {
+            let mut app = app_with_rectangle();
+            let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+            set_stored(&mut app, solid, |h| {
+                h.pattern_scale = scale;
+                h.pattern_angle = angle;
+            });
+            // NaN is not equal to itself: compare the whole entity as text.
+            let text = |h: &codec::entities::Hatch| format!("{h:?}");
+            let before = stored(&app, solid);
+
+            // Opening and OK: nothing to apply, nothing written.
+            let _ = app.hatch_dialog_open_edit(solid);
+            {
+                let state = app.hatch_dialog.as_ref().unwrap();
+                assert_eq!(state.settings.scale, "1", "scale {scale}");
+                assert_eq!(state.settings.angle, "0", "angle {angle}");
+                assert!(state.fields_valid() && !state.can_ok(), "nothing changed: {scale}");
+            }
+            let _ = app.update(Message::HatchDialogOk);
+            assert_eq!(app.active_modal, Some(ModalKind::Hatch), "still open");
+            assert_eq!(text(&stored(&app, solid)), text(&before));
+            app.hatch_dialog_cancel();
+
+            // The colour alone: the entity differs from before only there.
+            let _ = app.hatch_dialog_open_edit(solid);
+            field(&mut app, Field::Color(HatchColor::Color(codec::types::Color::Index(1))));
+            assert!(app.hatch_dialog.as_ref().unwrap().can_ok(), "scale {scale}");
+            let _ = app.update(Message::HatchDialogOk);
+            assert!(app.hatch_dialog.is_none(), "closed");
+            let mut want = before.clone();
+            want.common.color = codec::types::Color::Index(1);
+            assert_eq!(text(&stored(&app, solid)), text(&want), "scale {scale}: only the colour");
+            let _ = app.update(Message::Undo);
+            assert_eq!(text(&stored(&app, solid)), text(&before));
+
+            // The style alone, then the angle alone (the scale stays unusable).
+            let _ = app.hatch_dialog_open_edit(solid);
+            field(&mut app, Field::IslandStyle(HatchStyleType::Outer));
+            let _ = app.update(Message::HatchDialogOk);
+            let mut want = before.clone();
+            want.style = HatchStyleType::Outer;
+            assert_eq!(text(&stored(&app, solid)), text(&want), "scale {scale}: only the style");
+            let _ = app.update(Message::Undo);
+
+            let _ = app.hatch_dialog_open_edit(solid);
+            field(&mut app, Field::Angle("30".into()));
+            let _ = app.update(Message::HatchDialogOk);
+            let after = stored(&app, solid);
+            assert!((after.pattern_angle - 30f64.to_radians()).abs() < 1e-6, "angle {angle}");
+            assert_eq!(
+                after.pattern_scale.to_bits(),
+                scale.to_bits(),
+                "scale {scale}: the angle edit leaves it alone"
+            );
+            let _ = app.update(Message::Undo);
+            assert_eq!(text(&stored(&app, solid)), text(&before));
+        }
+    }
+
+    /// Turning such a solid into a pattern gives the pattern the scale and
+    /// angle the window showed (1 and 0), not 1e-6.
+    #[test]
+    fn a_solid_with_an_unusable_scale_becomes_a_pattern_at_the_scale_shown() {
+        use crate::entities::hatch_fill::FillKind;
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        set_stored(&mut app, solid, |h| {
+            h.pattern_scale = 0.0;
+            h.pattern_angle = f64::NAN;
+        });
+        let after = convert(&mut app, solid, &[Field::Pattern("ANSI31".into())], FillKind::Pattern);
+        assert_eq!(after.pattern_scale, 1.0);
+        assert_eq!(after.pattern_angle, 0.0);
+        assert!(after.pattern.lines.iter().all(|l| l.angle.is_finite() && l.offset.x.is_finite()));
+    }
+
     /// A conversion from the window is one OK and one undo; the scene's fill
     /// model follows the new kind; boundaries, links, island style and the
     /// entity's own properties stay as they were.
@@ -3044,20 +3326,68 @@ mod tests {
         assert_eq!(stored(&app, hatch), before);
     }
 
+    /// A gradient made through the window (tab Gradient) and stored.
+    fn gradient_made(app: &mut OpenCADStudio, fields: &[Field]) -> Handle {
+        let mut all = vec![Field::Tab(crate::modules::draw::draw::hatch_settings::FillTab::Gradient)];
+        all.extend_from_slice(fields);
+        hatch_made_with(app, &all)
+    }
+
     #[test]
-    fn a_solid_or_gradient_hatch_does_not_open_the_window() {
+    fn a_solid_hatch_opens_the_window_on_the_hatch_tab() {
         let mut app = app_with_rectangle();
         let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
         assert!(stored(&app, solid).is_solid);
         let _ = app.hatch_dialog_open_edit(solid);
-        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
-        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(edit_handle(&app), Some(solid));
+        let settings = &app.hatch_dialog.as_ref().unwrap().settings;
+        assert_eq!(settings.tab, crate::modules::draw::draw::hatch_settings::FillTab::Hatch);
+        assert_eq!(settings.pattern, "SOLID");
+        assert_eq!(app.hatch_dialog_title(), "Hatch Edit");
+    }
 
+    #[test]
+    fn a_gradient_hatch_opens_the_window_on_the_gradient_tab_with_its_values() {
+        use crate::modules::draw::draw::hatch_settings::FillTab;
+        let mut app = app_with_rectangle();
+        let gradient = gradient_made(
+            &mut app,
+            &[
+                Field::GradientShape(3),
+                Field::GradientColor1(codec::types::Color::Index(1)),
+                Field::GradientAngle("30".into()),
+            ],
+        );
+        let _ = app.hatch_dialog_open_edit(gradient);
+        assert_eq!(edit_handle(&app), Some(gradient));
+        let settings = &app.hatch_dialog.as_ref().unwrap().settings;
+        assert_eq!(settings.tab, FillTab::Gradient);
+        assert_eq!(settings.gradient.shape, 3);
+        // Creation stores the true colour of ACI 1; the window shows what is stored.
+        assert_eq!(settings.gradient.color1, codec::types::Color::Rgb { r: 255, g: 0, b: 0 });
+        assert_eq!(settings.gradient.angle, "30");
+        assert_eq!(app.tabs[app.active_tab].last_cmd.as_deref(), Some("HATCHEDIT"));
+    }
+
+    #[test]
+    fn a_gradient_with_no_stops_from_another_program_opens_too() {
         let (mut app, hatch) = app_with_hatch();
         set_stored(&mut app, hatch, |h| h.gradient_color.enabled = true);
         let _ = app.hatch_dialog_open_edit(hatch);
+        assert_eq!(edit_handle(&app), Some(hatch));
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.gradient.color1,
+            crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR1
+        );
+    }
+
+    #[test]
+    fn opening_the_window_on_anything_but_a_hatch_does_nothing() {
+        let (mut app, _hatch) = app_with_hatch();
+        let line = add_line(&mut app, 100.0, 0.0, 110.0, 0.0);
+        let _ = app.hatch_dialog_open_edit(line);
         assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
-        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
     }
 
     #[test]
@@ -3178,12 +3508,38 @@ mod tests {
     }
 
     #[test]
-    fn hatchedit_on_a_solid_hatch_runs_the_command_line() {
+    fn hatchedit_on_a_solid_or_gradient_opens_the_window_but_dash_hatchedit_does_not() {
         let mut app = app_with_rectangle();
         let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
         select_only(&mut app, solid);
         let _ = app.dispatch_command("HATCHEDIT");
+        assert_eq!(edit_handle(&app), Some(solid));
+        let _ = app.update(Message::CloseModal);
         assert!(app.hatch_dialog.is_none());
+        let _ = app.dispatch_command("-HATCHEDIT");
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(command_name(&app, app.active_tab), Some("HATCHEDIT"));
+
+        let mut app = app_with_rectangle();
+        let gradient = gradient_made(&mut app, &[]);
+        select_only(&mut app, gradient);
+        let _ = app.dispatch_command("HATCHEDIT");
+        assert_eq!(edit_handle(&app), Some(gradient));
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.tab,
+            crate::modules::draw::draw::hatch_settings::FillTab::Gradient
+        );
+    }
+
+    #[test]
+    fn dash_hatchedit_and_scripted_hatchedit_run_the_command_line_on_a_solid_too() {
+        let mut app = app_with_rectangle();
+        let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        select_only(&mut app, solid);
+        app.scripted_dispatch = true;
+        let _ = app.dispatch_command("HATCHEDIT");
+        app.scripted_dispatch = false;
+        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
         assert_eq!(command_name(&app, app.active_tab), Some("HATCHEDIT"));
     }
 
@@ -3299,24 +3655,22 @@ mod tests {
     }
 
     #[test]
-    fn double_clicking_a_solid_hatch_only_writes_a_line() {
+    fn double_clicking_a_solid_or_gradient_hatch_opens_the_window() {
         let mut app = app_with_rectangle();
         let solid = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
         frame(&mut app);
         double_click(&mut app, 4.0, 3.0);
-        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
-        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
-        assert!(stored(&app, solid).is_solid);
-    }
+        assert_eq!(edit_handle(&app), Some(solid));
 
-    #[test]
-    fn double_clicking_a_gradient_hatch_only_writes_a_line() {
-        let (mut app, hatch) = app_with_hatch();
-        set_stored(&mut app, hatch, |h| h.gradient_color.enabled = true);
+        let mut app = app_with_rectangle();
+        let gradient = gradient_made(&mut app, &[]);
         frame(&mut app);
         double_click(&mut app, 4.0, 3.0);
-        assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
-        assert!(last_line(&app).contains("-HATCHEDIT"), "{}", last_line(&app));
+        assert_eq!(edit_handle(&app), Some(gradient));
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.tab,
+            crate::modules::draw::draw::hatch_settings::FillTab::Gradient
+        );
     }
 
     #[test]
@@ -3455,6 +3809,88 @@ mod tests {
         assert_eq!(app.active_modal, Some(ModalKind::Hatch));
         assert_eq!(stored(&app, hatch), before, "the grip changed nothing");
         assert_eq!(app.tabs[i].dirty, dirty);
+    }
+
+    /// The rectangle with an associative SOLID hatch / gradient: they carry
+    /// the pattern-origin grip like a pattern hatch does (`Grippable for
+    /// Hatch`, grip 0 if associative).
+    fn associative_solid() -> (OpenCADStudio, Handle) {
+        let mut app = app_with_rectangle();
+        let hatch = hatch_made_with(&mut app, &[Field::Pattern("SOLID".into())]);
+        assert!(stored(&app, hatch).is_solid && stored(&app, hatch).is_associative);
+        (app, hatch)
+    }
+
+    fn associative_gradient() -> (OpenCADStudio, Handle) {
+        let mut app = app_with_rectangle();
+        let hatch = gradient_made(&mut app, &[]);
+        assert!(stored(&app, hatch).gradient_color.enabled && stored(&app, hatch).is_associative);
+        (app, hatch)
+    }
+
+    fn double_clicking_the_centre_opens_the_window(app: &mut OpenCADStudio, hatch: Handle) {
+        frame(app);
+        // (10, 5) is the centroid: the grip of the selected hatch.
+        double_click(app, 10.0, 5.0);
+        let i = app.active_tab;
+        assert!(app.tabs[i].active_grip.is_none(), "no grip edit started");
+        assert_eq!(edit_handle(app), Some(hatch));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_a_solid_hatch_opens_the_window_not_a_grip_edit() {
+        let (mut app, hatch) = associative_solid();
+        double_clicking_the_centre_opens_the_window(&mut app, hatch);
+        let settings = &app.hatch_dialog.as_ref().unwrap().settings;
+        assert_eq!(settings.pattern, "SOLID");
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_a_gradient_hatch_opens_the_window_not_a_grip_edit() {
+        let (mut app, hatch) = associative_gradient();
+        double_clicking_the_centre_opens_the_window(&mut app, hatch);
+        assert_eq!(
+            app.hatch_dialog.as_ref().unwrap().settings.tab,
+            crate::modules::draw::draw::hatch_settings::FillTab::Gradient
+        );
+    }
+
+    /// The hot-grip path: the hatch was selected earlier, the first click
+    /// lands on the centre grip and makes it hot, the second is quick.
+    fn double_clicking_the_hot_centre_grip_opens_the_window(app: &mut OpenCADStudio, hatch: Handle) {
+        no_snaps(app);
+        frame(app);
+        select_hatch_earlier(app, hatch);
+        let before = stored(app, hatch);
+        let dirty = app.tabs[app.active_tab].dirty;
+        let depth = undo_depth(app);
+        let p = screen_point(app, 10.0, 5.0);
+        for at in [p, iced::Point::new(p.x + 4.0, p.y + 3.0)] {
+            let _ = app.update(Message::ViewportMove(at));
+            let _ = app.update(Message::ViewportLeftPress);
+            let _ = app.update(Message::ViewportLeftRelease);
+        }
+        let i = app.active_tab;
+        assert!(app.tabs[i].active_grip.is_none(), "the hot grip is dropped");
+        assert!(!app.tabs[i].grip_base_pending);
+        assert_eq!(edit_handle(app), Some(hatch));
+        assert_eq!(app.active_modal, Some(ModalKind::Hatch));
+        assert_eq!(stored(app, hatch), before, "the grip changed nothing");
+        assert_eq!(app.tabs[i].dirty, dirty);
+        assert_eq!(undo_depth(app), depth, "and left no undo step");
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_an_already_selected_solid_hatch_opens_the_window() {
+        let (mut app, hatch) = associative_solid();
+        double_clicking_the_hot_centre_grip_opens_the_window(&mut app, hatch);
+    }
+
+    #[test]
+    fn double_clicking_the_centre_of_an_already_selected_gradient_hatch_opens_the_window() {
+        let (mut app, hatch) = associative_gradient();
+        double_clicking_the_hot_centre_grip_opens_the_window(&mut app, hatch);
     }
 
     #[test]

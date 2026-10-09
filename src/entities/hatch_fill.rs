@@ -436,10 +436,35 @@ pub fn apply_window_edit(h: &mut Hatch, edit: &HatchWindowEdit) {
         }) => {
             // A field left alone is handed over as stored (read through f32,
             // as `apply_pattern_update` expects), so it is kept exactly.
+            //
+            // A stored scale that is zero, negative or not a number, and an
+            // angle that is not a number, are what the window showed as 1 and
+            // 0 (`EditTarget::from_hatch`). The update works from those
+            // defaults (so no pattern line is scaled by a nonsense factor and
+            // a new pattern gets the scale the user saw), and when the pattern
+            // stays and the field was left alone the stored value is put back.
+            let stored_scale = h.pattern_scale;
+            let stored_angle = h.pattern_angle;
+            let scale_unusable = !(stored_scale.is_finite() && stored_scale > 0.0);
+            let angle_unusable = !stored_angle.is_finite();
+            if scale_unusable {
+                h.pattern_scale = 1.0;
+            }
+            if angle_unusable {
+                h.pattern_angle = 0.0;
+            }
             let name = pattern.clone().unwrap_or_else(|| h.pattern.name.clone());
-            let scale = scale.unwrap_or(h.pattern_scale as f32);
+            let scale_f32 = scale.unwrap_or(h.pattern_scale as f32);
             let angle = angle_deg.unwrap_or(h.pattern_angle.to_degrees() as f32);
-            apply_pattern_update(h, &name, scale, angle, origin, edit.disassociate, edit.style);
+            apply_pattern_update(h, &name, scale_f32, angle, origin, edit.disassociate, edit.style);
+            if pattern.is_none() {
+                if scale.is_none() && scale_unusable {
+                    h.pattern_scale = stored_scale;
+                }
+                if angle_deg.is_none() && angle_unusable {
+                    h.pattern_angle = stored_angle;
+                }
+            }
         }
         Some(FillEdit::ToPattern {
             name,

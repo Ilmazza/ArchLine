@@ -43,14 +43,6 @@ pub fn gradient_settings_from(spec: &GradientSpec) -> GradientSettings {
     }
 }
 
-/// Whether the window can edit `hatch`: pattern fills only. Solid and gradient
-/// fills stay with the Properties panel and -HATCHEDIT.
-pub fn is_pattern_hatch(hatch: &Hatch) -> bool {
-    !hatch.is_solid
-        && !hatch.gradient_color.enabled
-        && !hatch.pattern.name.eq_ignore_ascii_case("SOLID")
-}
-
 /// A number for a text field: seven significant digits, no trailing zeros.
 /// Seven digits are what f32 holds, so a value that went through f32 (every
 /// hatch the app makes stores its angle that way) reads as typed, "30" and
@@ -73,6 +65,23 @@ pub fn format_number(value: f64) -> String {
         "-0" => "0".to_string(),
         _ => short.to_string(),
     }
+}
+
+/// The scale the Hatch tab shows for a hatch: its own, or 1 when that is not
+/// a usable scale (zero, negative or not a number).
+fn shown_scale(scale: f64) -> String {
+    if scale.is_finite() && scale > 0.0 {
+        format_number(scale)
+    } else {
+        format_number(1.0)
+    }
+}
+
+/// The angle (degrees) the Hatch tab shows: the hatch's own, or 0 when it is
+/// not a number.
+fn shown_angle_deg(angle_rad: f64) -> String {
+    let degrees = angle_rad.to_degrees();
+    format_number(if degrees.is_finite() { degrees } else { 0.0 })
 }
 
 /// The hatch the window edits and what it held when the window opened.
@@ -113,8 +122,13 @@ impl EditTarget {
                 crate::scene::model::hatch_patterns::find(&hatch.pattern.name)
                     .map(|entry| entry.name.clone())
                     .unwrap_or_else(|| hatch.pattern.name.clone()),
-                format_number(hatch.pattern_angle.to_degrees()),
-                format_number(hatch.pattern_scale),
+                // A scale that is zero, negative or not a number (a solid read
+                // from a file often has one) would show a value the fields
+                // refuse and block OK for a change of colour or style alone:
+                // the defaults are shown instead, and `apply_window_edit` does
+                // not write them back unless the user changes the field.
+                shown_angle_deg(hatch.pattern_angle),
+                shown_scale(hatch.pattern_scale),
                 GradientSettings::default(),
             ),
         };
@@ -397,15 +411,17 @@ mod tests {
     }
 
     #[test]
-    fn only_pattern_fills_are_edited_in_the_window() {
-        assert!(is_pattern_hatch(&hatch("ANSI31", 1.0, 0.0, HatchStyleType::Normal)));
-        assert!(!is_pattern_hatch(&Hatch::solid()));
-        let mut named_solid = hatch("SOLID", 1.0, 0.0, HatchStyleType::Normal);
-        named_solid.is_solid = false;
-        assert!(!is_pattern_hatch(&named_solid), "a SOLID pattern is a solid fill");
-        let mut gradient = hatch("ANSI31", 1.0, 0.0, HatchStyleType::Normal);
-        gradient.gradient_color.enabled = true;
-        assert!(!is_pattern_hatch(&gradient));
+    fn an_unusable_scale_or_angle_shows_the_defaults() {
+        for (scale, angle) in [(0.0, f64::NAN), (-1.0, f64::INFINITY), (f64::NAN, 0.0), (f64::INFINITY, 0.0)] {
+            let target = EditTarget::from_hatch(
+                Handle::new(1),
+                &hatch("SOLID", scale, angle, HatchStyleType::Normal),
+            );
+            assert_eq!(target.initial.scale, "1", "scale {scale}");
+            assert_eq!(target.initial.angle, "0", "angle {angle}");
+            let nothing = target.changes(&target.initial, None).expect("the fields are usable");
+            assert!(nothing.is_empty(), "{nothing:?}");
+        }
     }
 
     fn changes(target: &EditTarget, edit: impl FnOnce(&mut HatchSettings)) -> HatchEditChanges {
