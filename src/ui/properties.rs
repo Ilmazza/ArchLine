@@ -120,11 +120,15 @@ impl HatchPatternPreview {
 
     /// The colour the swatch draws in: the pattern's lines, the solid fill, or
     /// colour 1 of a gradient (whose colour 2 is part of the pattern).
-    // Callers are the Hatch window's swatches, wired in a later task.
-    #[allow(dead_code)]
     pub(crate) fn with_color(mut self, color: Color) -> Self {
         self.color = Some(color);
         self
+    }
+
+    /// What the swatch was built from, for tests of its callers.
+    #[cfg(test)]
+    pub(crate) fn parts(&self) -> (&crate::scene::model::hatch_model::HatchPattern, Option<Color>) {
+        (&self.pattern, self.color)
     }
 
     /// The plan of a gradient swatch; `None` for other fills and for a gradient

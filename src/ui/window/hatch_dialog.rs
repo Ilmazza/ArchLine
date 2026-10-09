@@ -16,8 +16,9 @@ use crate::modules::draw::draw::hatch_edit_settings::EditTarget;
 use crate::modules::draw::draw::hatch_settings::{
     FillTab, HatchColor, HatchRegion, HatchSettings, OriginMode, RegionOrigin,
 };
-use crate::scene::model::hatch_model::GradientKind;
+use crate::scene::model::hatch_model::{GradientKind, HatchPattern};
 use crate::t;
+use codec::types::Color as AcadColor;
 use crate::ui::style::form::{dialog_button_styled_opt, form_radio};
 
 /// Which hidden step the dialog is waiting on. `None` while it is visible.
@@ -263,6 +264,33 @@ impl State {
             .is_none()
             .then(|| t!("Pattern not found: choose another").into_owned())
     }
+
+    /// The gradient the swatch draws and its first colour. An unusable angle
+    /// draws as 0 degrees: the swatch is never empty.
+    pub fn gradient_swatch(&self) -> (HatchPattern, [f32; 4]) {
+        let mut gradient = self.settings.gradient.clone();
+        if gradient.angle_error() {
+            gradient.angle = "0".into();
+        }
+        gradient.spec().expect("the angle is usable").model_pattern()
+    }
+}
+
+/// Largest size the window opens at (the app's `sized_flow` caps). The
+/// Gradient tab is lower than the Hatch tab and is measured as the Hatch tab.
+pub const MAX_WIDTH: u16 = 940;
+pub const MAX_HEIGHT: u16 = 760;
+
+/// Shape names in the order of `GradientKind::CHOICES`.
+pub fn gradient_shape_labels() -> Vec<String> {
+    GradientKind::CHOICES
+        .iter()
+        .map(|&(kind, invert)| t!(kind.choice_label(invert)).into_owned())
+        .collect()
+}
+
+pub fn gradient_shape_index(label: &str) -> Option<usize> {
+    gradient_shape_labels().iter().position(|candidate| candidate == label)
 }
 
 // ── View ───────────────────────────────────────────────────────────────────
@@ -353,8 +381,116 @@ fn add_button<'a>(label: String, kind: AddKind, enabled: bool) -> Element<'a, Me
     .into()
 }
 
-fn type_and_pattern<'a>(state: &State) -> Element<'a, Message> {
-    use crate::scene::model::hatch_model::HatchPattern;
+/// What a colour control shows: the colour of its swatch and, for the fill
+/// colour on "Use Current", those words instead of the colour's name (the
+/// swatch is then the current colour).
+fn color_row_shown(
+    state: &State,
+    slot: HatchColorSlot,
+    current: AcadColor,
+) -> (AcadColor, Option<String>) {
+    let settings = &state.settings;
+    match slot {
+        HatchColorSlot::Fill => match settings.color {
+            HatchColor::UseCurrent => (current, Some(t!("Use Current").into_owned())),
+            HatchColor::Color(color) => (color, None),
+        },
+        HatchColorSlot::Gradient1 => (settings.gradient.color1, None),
+        HatchColorSlot::Gradient2 => (settings.gradient.color2, None),
+    }
+}
+
+/// One colour control: the shared selector, with "Select Color..." wired to
+/// the colour window of this slot. Only the fill colour offers ByLayer and
+/// ByBlock: a gradient's colours are true colours.
+fn color_row<'a>(state: &State, slot: HatchColorSlot, current: AcadColor) -> Element<'a, Message> {
+    use crate::ui::color_select::{color_selector_labelled, ColorExtras};
+    let (shown, label) = color_row_shown(state, slot, current);
+    let open = state.color_list == Some(slot);
+    let logical = slot == HatchColorSlot::Fill;
+    color_selector_labelled(
+        shown,
+        label,
+        open,
+        ColorExtras {
+            by_layer: logical,
+            by_block: logical,
+            ..Default::default()
+        },
+        move |color| Message::HatchDialogField(slot.field(color)),
+        Message::HatchDialogField(Field::ColorList((!open).then_some(slot))),
+        Message::HatchDialogField(Field::SelectColor(slot)),
+    )
+}
+
+/// The small "Use Current" button beside the fill colour: off while already
+/// chosen, absent while editing (a hatch always has a colour of its own).
+fn use_current_button<'a>(state: &State) -> Option<Element<'a, Message>> {
+    if state.edit.is_some() {
+        return None;
+    }
+    let back = (state.settings.color != HatchColor::UseCurrent)
+        .then_some(Message::HatchDialogField(Field::Color(HatchColor::UseCurrent)));
+    Some(
+        button(text(t!("Use Current")).size(11))
+            .padding([3, 8])
+            .style(button::secondary)
+            .on_press_maybe(back)
+            .into(),
+    )
+}
+
+/// The Hatch tab's colour line: the selector and, creating, "Use Current".
+fn fill_color_line<'a>(state: &State, current: AcadColor) -> Element<'a, Message> {
+    let mut line = row![color_row(state, HatchColorSlot::Fill, current)]
+        .spacing(6)
+        .align_y(iced::Center);
+    if let Some(button) = use_current_button(state) {
+        line = line.push(button);
+    }
+    line.into()
+}
+
+/// The colour a pattern or solid swatch draws in. `None` keeps the theme's
+/// colour: ByLayer, ByBlock and None have no colour of their own here, and
+/// colour 7 is white or black after the background, as the theme's text is.
+fn pattern_swatch_color(color: HatchColor, current: AcadColor) -> Option<iced::Color> {
+    let color = match color {
+        HatchColor::UseCurrent => current,
+        HatchColor::Color(color) => color,
+    };
+    if color == AcadColor::Index(7) {
+        return None;
+    }
+    color.rgb().map(|(r, g, b)| iced::Color::from_rgb8(r, g, b))
+}
+
+/// The Hatch tab's swatch: the pattern at the typed angle and scale, in the
+/// fill colour; a plain fill when the pattern is unknown so the box is never
+/// empty.
+fn pattern_preview(state: &State, current: AcadColor) -> crate::ui::properties::HatchPatternPreview {
+    use crate::modules::draw::draw::hatch_settings::{parse_angle_deg, parse_scale};
+    let angle = parse_angle_deg(&state.settings.angle).unwrap_or(0.0).to_radians();
+    let scale = parse_scale(&state.settings.scale).unwrap_or(1.0);
+    let gpu = crate::scene::model::hatch_patterns::find(&state.settings.pattern)
+        .map(|entry| entry.gpu.clone())
+        .unwrap_or(HatchPattern::Solid);
+    let preview =
+        crate::ui::properties::HatchPatternPreview::new(gpu).with_angle_scale(angle, scale);
+    match pattern_swatch_color(state.settings.color, current) {
+        Some(color) => preview.with_color(color),
+        None => preview,
+    }
+}
+
+/// The Gradient tab's swatch: the chosen shape in the colours it will have.
+fn gradient_preview(state: &State) -> crate::ui::properties::HatchPatternPreview {
+    let (pattern, first) = state.gradient_swatch();
+    crate::ui::properties::HatchPatternPreview::new(pattern)
+        .with_color(iced::Color::from_rgba(first[0], first[1], first[2], first[3]))
+}
+
+fn type_and_pattern<'a>(state: &State, current: AcadColor) -> Element<'a, Message> {
     use crate::scene::model::hatch_patterns;
 
     let names: Vec<String> = hatch_patterns::catalog()
@@ -369,21 +505,9 @@ fn type_and_pattern<'a>(state: &State) -> Element<'a, Message> {
         .padding([3, 6])
         .width(Fill);
 
-    // Swatch: the pattern at the typed angle and scale; a plain fill when the
-    // pattern is unknown so the box is never empty.
-    let angle = crate::modules::draw::draw::hatch_settings::parse_angle_deg(&state.settings.angle)
-        .unwrap_or(0.0)
-        .to_radians();
-    let scale = crate::modules::draw::draw::hatch_settings::parse_scale(&state.settings.scale)
-        .unwrap_or(1.0);
-    let gpu = hatch_patterns::find(&state.settings.pattern)
-        .map(|entry| entry.gpu.clone())
-        .unwrap_or(HatchPattern::Solid);
-    let swatch = canvas(
-        crate::ui::properties::HatchPatternPreview::new(gpu).with_angle_scale(angle, scale),
-    )
-    .width(Fill)
-    .height(Length::Fixed(44.0));
+    let swatch = canvas(pattern_preview(state, current))
+        .width(Fill)
+        .height(Length::Fixed(44.0));
 
     let pattern_note: Element<'a, Message> = match state.pattern_message() {
         Some(message) => text(message).size(10).style(danger).into(),
@@ -408,7 +532,7 @@ fn type_and_pattern<'a>(state: &State) -> Element<'a, Message> {
                 .into()
             ),
             pattern_note,
-            labelled(t!("Color").into_owned(), grey(t!("Use Current").into_owned())),
+            labelled(t!("Color").into_owned(), fill_color_line(state, current)),
             labelled(t!("Swatch").into_owned(), swatch.into()),
             labelled(
                 t!("Custom pattern").into_owned(),
@@ -473,6 +597,96 @@ fn origin_group<'a>(state: &State) -> Element<'a, Message> {
         .spacing(6)
         .into(),
     )
+}
+
+/// The Gradient tab's left column: colours, shape (with its swatch) and
+/// orientation. No pattern and no origin: a gradient has neither.
+fn gradient_left<'a>(state: &State, current: AcadColor) -> Element<'a, Message> {
+    let g = &state.settings.gradient;
+    let modes = column![
+        form_radio(t!("One color").into_owned(), true, Some(g.one_color), |on| {
+            Message::HatchDialogField(Field::GradientOneColor(on))
+        }),
+        form_radio(t!("Two colors").into_owned(), false, Some(g.one_color), |on| {
+            Message::HatchDialogField(Field::GradientOneColor(on))
+        }),
+    ]
+    .spacing(6);
+    let second: Element<'a, Message> = if g.one_color {
+        labelled(
+            t!("Tint/Shade").into_owned(),
+            row![
+                iced::widget::slider(0.0..=1.0, g.tint, |v| {
+                    Message::HatchDialogField(Field::GradientTint(v))
+                })
+                .step(0.01),
+                // Fixed width: the slider keeps its length while the value
+                // under it changes.
+                text(format!("{:.0}%", g.tint * 100.0)).size(11).width(34),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+            .into(),
+        )
+    } else {
+        labelled(
+            t!("Color 2").into_owned(),
+            color_row(state, HatchColorSlot::Gradient2, current),
+        )
+    };
+    let labels = gradient_shape_labels();
+    let selected = labels.get(g.shape.min(labels.len() - 1)).cloned();
+    let shapes = pick_list(selected, labels, |label: &String| label.clone())
+        .on_select(|label: String| {
+            Message::HatchDialogField(Field::GradientShape(
+                gradient_shape_index(&label).unwrap_or(0),
+            ))
+        })
+        .text_size(12)
+        .padding([3, 6])
+        .width(Fill);
+    let swatch = canvas(gradient_preview(state)).width(Fill).height(Length::Fixed(44.0));
+    column![
+        group(
+            t!("Color").into_owned(),
+            column![
+                modes,
+                labelled(
+                    t!("Color 1").into_owned(),
+                    color_row(state, HatchColorSlot::Gradient1, current)
+                ),
+                second,
+            ]
+            .spacing(6)
+            .into(),
+        ),
+        group(
+            t!("Gradient pattern").into_owned(),
+            column![shapes, swatch].spacing(6).into(),
+        ),
+        group(
+            t!("Orientation").into_owned(),
+            column![
+                row![
+                    checkbox(g.centered)
+                        .on_toggle(|on| Message::HatchDialogField(Field::GradientCentered(on)))
+                        .size(14),
+                    text(t!("Centered")).size(11),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+                labelled(
+                    t!("Angle").into_owned(),
+                    field(&g.angle, state.gradient_angle_message(), Field::GradientAngle),
+                ),
+            ]
+            .spacing(6)
+            .into(),
+        ),
+    ]
+    .spacing(8)
+    .width(Fill)
+    .into()
 }
 
 fn boundaries_group<'a>(state: &State) -> Element<'a, Message> {
@@ -609,23 +823,63 @@ fn retention_group<'a>(state: &State) -> Element<'a, Message> {
     )
 }
 
+fn tab_button<'a>(label: String, tab: FillTab, active: bool, enabled: bool) -> Element<'a, Message> {
+    button(text(label).size(12))
+        .padding([4, 14])
+        .style(if active { button::primary } else { button::secondary })
+        .on_press_maybe(enabled.then_some(Message::HatchDialogField(Field::Tab(tab))))
+        .into()
+}
+
+/// The left column of `tab`: pattern, angle/scale and origin on the Hatch
+/// tab; colours, shape and orientation on the Gradient tab.
+fn left_column<'a>(state: &State, current: AcadColor, tab: FillTab) -> Element<'a, Message> {
+    match tab {
+        FillTab::Hatch => column![
+            type_and_pattern(state, current),
+            angle_and_scale(state),
+            origin_group(state)
+        ]
+        .spacing(8)
+        .width(Fill)
+        .into(),
+        FillTab::Gradient => gradient_left(state, current),
+    }
+}
+
+/// The window. `current` is the colour "Use Current" stands for: the owner
+/// drawing's current colour.
 pub fn view_window<'a>(
     state: &State,
+    current: AcadColor,
     sizing: crate::ui::modal::ModalSizing,
 ) -> Element<'a, Message> {
+    let active = state.settings.tab;
+    // Under the pattern palette (a page of the Hatch tab) the tabs only say
+    // where it is.
+    let switchable = state.palette.is_none();
     let tabs = row![
-        text(t!("Hatch")).size(12),
-        text(t!("Gradient")).size(12).style(muted),
+        tab_button(t!("Hatch").into_owned(), FillTab::Hatch, active == FillTab::Hatch, switchable),
+        tab_button(
+            t!("Gradient").into_owned(),
+            FillTab::Gradient,
+            active == FillTab::Gradient,
+            switchable
+        ),
     ]
-    .spacing(16);
+    .spacing(8);
 
     if let Some(palette) = &state.palette {
         return super::hatch_palette::page(tabs.into(), palette, sizing);
     }
 
-    let left = column![type_and_pattern(state), angle_and_scale(state), origin_group(state)]
-        .spacing(8)
-        .width(Fill);
+    // A tabbed window keeps its size when the tab changes: the copy that
+    // measures the window always lays out the Hatch tab's left column (the
+    // taller one), and the shown copy fills that frame with the buttons at
+    // the bottom.
+    let measuring = !matches!(sizing.height, Length::Fill);
+    let left = left_column(state, current, if measuring { FillTab::Hatch } else { active });
+    let height = if measuring { Length::Shrink } else { Length::Fill };
     let middle = column![boundaries_group(state), options_group(state)]
         .spacing(8)
         .width(Fill);
@@ -672,10 +926,11 @@ pub fn view_window<'a>(
     .spacing(8)
     .align_y(iced::Center);
 
-    column![tabs, row![left, middle, right].spacing(10), actions]
+    column![tabs, row![left, middle, right].spacing(10).height(height), actions]
         .spacing(10)
         .padding(10)
         .width(sizing.width)
+        .height(height)
         .into()
 }
 
@@ -686,6 +941,7 @@ mod tests {
         FillTab, HatchColor, HatchRegion, RegionOrigin,
     };
     use crate::command::WorkingPlane;
+    use crate::ui::modal::ModalSizing;
 
     fn state() -> State {
         State::new(
@@ -869,7 +1125,7 @@ mod tests {
             )),
             "Add and Preview are grey"
         );
-        let mut ui = iced_test::simulator(view_window(&state, crate::ui::modal::ModalSizing::FILL));
+        let mut ui = iced_test::simulator(view_window(&state, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
         assert!(ui.find("0 region(s) selected").is_err());
         assert!(ui.find("Create separate hatches").is_ok(), "shown, greyed");
         assert!(ui.find("Retain boundaries").is_ok(), "shown, greyed");
@@ -888,7 +1144,7 @@ mod tests {
         let messages = click_all(&create, &["Preview", "OK"]);
         assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogPreview)));
         assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
-        let mut ui = iced_test::simulator(view_window(&create, crate::ui::modal::ModalSizing::FILL));
+        let mut ui = iced_test::simulator(view_window(&create, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
         assert!(ui.find("1 region(s) selected").is_ok());
     }
 
@@ -1058,13 +1314,477 @@ mod tests {
         assert!(state.settings.retain && !state.settings.separate);
     }
 
+    // ── Gradient tab: pure data the view draws ─────────────────────────────
+
+    #[test]
+    fn the_shape_list_has_the_nine_choices_in_order_and_maps_back() {
+        let labels = gradient_shape_labels();
+        assert_eq!(labels.len(), 9);
+        for (index, label) in labels.iter().enumerate() {
+            assert_eq!(gradient_shape_index(label), Some(index), "{label}");
+        }
+        assert_eq!(gradient_shape_index("nonsense"), None);
+        assert_eq!(labels[0], "Linear");
+        assert_eq!(labels[2], "Inverted cylindrical");
+    }
+
+    #[test]
+    fn the_gradient_swatch_shows_the_effective_colours() {
+        use crate::scene::model::hatch_model::HatchPattern;
+        let mut state = state();
+        state.apply(Field::Tab(FillTab::Gradient));
+        state.apply(Field::GradientOneColor(true));
+        state.apply(Field::GradientTint(0.5));
+        state.apply(Field::GradientColor1(codec::types::Color::Index(1)));
+        state.apply(Field::GradientColor2(codec::types::Color::Index(3))); // hidden
+        let (pattern, first) = state.gradient_swatch();
+        assert_eq!(first, [1.0, 0.0, 0.0, 1.0]);
+        let HatchPattern::Gradient { color2, one_color, .. } = pattern else {
+            panic!("a gradient swatch")
+        };
+        assert!(one_color);
+        assert_ne!(color2, [0.0, 1.0, 0.0, 1.0], "never the hidden Color 2");
+    }
+
+    #[test]
+    fn a_bad_gradient_angle_still_gives_a_swatch() {
+        let mut state = state();
+        state.apply(Field::GradientAngle("x".into()));
+        let (_, first) = state.gradient_swatch();
+        assert_eq!(first[3], 1.0);
+    }
+
+    #[test]
+    fn the_colour_control_shows_its_slot_and_use_current_the_current_colour() {
+        use codec::types::Color;
+        let mut state = state();
+        let current = Color::Index(6);
+        assert_eq!(
+            color_row_shown(&state, HatchColorSlot::Fill, current),
+            (current, Some("Use Current".to_string())),
+            "the swatch of the current colour, under the words Use Current"
+        );
+        state.apply(Field::Color(HatchColor::Color(Color::Index(2))));
+        state.apply(Field::GradientColor1(Color::Index(3)));
+        state.apply(Field::GradientColor2(Color::Index(4)));
+        assert_eq!(color_row_shown(&state, HatchColorSlot::Fill, current), (Color::Index(2), None));
+        assert_eq!(
+            color_row_shown(&state, HatchColorSlot::Gradient1, current),
+            (Color::Index(3), None)
+        );
+        assert_eq!(
+            color_row_shown(&state, HatchColorSlot::Gradient2, current),
+            (Color::Index(4), None)
+        );
+    }
+
+    #[test]
+    fn the_pattern_swatch_takes_the_fill_colour() {
+        use codec::types::Color;
+        let red = Some(iced::Color::from_rgb8(255, 0, 0));
+        let green = Some(iced::Color::from_rgb8(0, 255, 0));
+        assert_eq!(pattern_swatch_color(HatchColor::Color(Color::Index(1)), Color::Index(3)), red);
+        assert_eq!(
+            pattern_swatch_color(HatchColor::Color(Color::Rgb { r: 0, g: 255, b: 0 }), Color::Index(1)),
+            green
+        );
+        assert_eq!(pattern_swatch_color(HatchColor::UseCurrent, Color::Index(3)), green);
+        // Colours with no RGB of their own, and colour 7 (white or black
+        // after the background), keep the theme's colour.
+        for theme in [Color::ByLayer, Color::ByBlock, Color::None, Color::Index(7)] {
+            assert_eq!(pattern_swatch_color(HatchColor::Color(theme), Color::Index(1)), None, "{theme:?}");
+            assert_eq!(pattern_swatch_color(HatchColor::UseCurrent, theme), None, "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn the_swatches_are_built_with_their_colours() {
+        use crate::scene::model::hatch_model::HatchPattern;
+        use codec::types::Color;
+        let red = Some(iced::Color::from_rgb8(255, 0, 0));
+        let green = Some(iced::Color::from_rgb8(0, 255, 0));
+        let mut state = state();
+        // "Use Current": the current colour the window was given.
+        let preview = pattern_preview(&state, Color::Index(3));
+        assert!(matches!(preview.parts(), (HatchPattern::Pattern(_), c) if c == green));
+        assert_eq!(pattern_preview(&state, Color::ByLayer).parts().1, None, "theme colour");
+        // A chosen colour, for a pattern and for SOLID.
+        state.apply(Field::Color(HatchColor::Color(Color::Index(1))));
+        assert_eq!(pattern_preview(&state, Color::Index(3)).parts().1, red);
+        state.apply(Field::Pattern("SOLID".into()));
+        let preview = pattern_preview(&state, Color::Index(3));
+        assert!(matches!(preview.parts(), (HatchPattern::Solid, c) if c == red));
+        // The gradient swatch: the swatch's gradient, in its first colour.
+        state.apply(Field::GradientColor1(Color::Index(3)));
+        let (pattern, first) = state.gradient_swatch();
+        let preview = gradient_preview(&state);
+        assert!(matches!(preview.parts().0, HatchPattern::Gradient { .. }));
+        // `HatchPattern` has no `PartialEq`: its debug form says every field.
+        assert_eq!(format!("{:?}", preview.parts().0), format!("{pattern:?}"));
+        assert_eq!(first, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(preview.parts().1, green);
+    }
+
+    // ── The window's widgets per tab and mode, through the simulator ───────
+
+    /// Every text the window shows, in layout order, the open colour list
+    /// included.
+    fn texts_shown(state: &State, current: codec::types::Color) -> Vec<String> {
+        let mut ui = iced_test::simulator(view_window(state, current, ModalSizing::FILL));
+        let mut seen = Vec::new();
+        let _ = ui.find(|candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
+            if let iced_test::selector::Candidate::Text { content, .. } = candidate {
+                seen.push(content.to_string());
+            }
+            None
+        });
+        seen
+    }
+
+    fn texts(state: &State) -> Vec<String> {
+        texts_shown(state, codec::types::Color::ByLayer)
+    }
+
+    fn count(texts: &[String], wanted: &str) -> usize {
+        texts.iter().filter(|text| text.as_str() == wanted).count()
+    }
+
+    fn fields(messages: Vec<Message>) -> Vec<Field> {
+        messages
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::HatchDialogField(field) => Some(field),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The fields the window publishes when the `nth` text `label` (in
+    /// layout order) is clicked, or the point `dx` px to its left/right.
+    fn click_nth(state: &State, label: &str, nth: usize, dx: f32) -> Vec<Field> {
+        let mut ui = iced_test::simulator(view_window(
+            state,
+            codec::types::Color::ByLayer,
+            ModalSizing::FILL,
+        ));
+        let mut found = Vec::new();
+        let _ = ui.find(|candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
+            if let iced_test::selector::Candidate::Text { content, bounds, .. } = candidate {
+                if content == label {
+                    found.push(bounds);
+                }
+            }
+            None
+        });
+        let bounds = found.get(nth).unwrap_or_else(|| panic!("{label} #{nth} is on screen"));
+        let center = bounds.center();
+        let x = if dx < 0.0 { bounds.x + dx } else { center.x + dx };
+        ui.point_at(iced::Point::new(x, center.y));
+        let _ = ui.simulate(iced_test::simulator::click());
+        fields(ui.into_messages().collect())
+    }
+
+    fn gradient_state() -> State {
+        let mut state = state();
+        state.apply(Field::Tab(FillTab::Gradient));
+        state
+    }
+
+    #[test]
+    fn the_tabs_are_buttons_that_switch_the_fill() {
+        let picked = fields(click_all(&state(), &["Gradient"]));
+        assert!(
+            matches!(picked.as_slice(), [Field::Tab(FillTab::Gradient)]),
+            "{picked:?}"
+        );
+        let picked = fields(click_all(&gradient_state(), &["Hatch"]));
+        assert!(matches!(picked.as_slice(), [Field::Tab(FillTab::Hatch)]), "{picked:?}");
+        // The pattern palette belongs to the Hatch tab: there the tabs only
+        // say where it is.
+        let palette = with_palette("", Some("ANSI31"));
+        let picked = fields(click_all(&palette, &["Gradient", "Hatch"]));
+        assert!(picked.is_empty(), "{picked:?}");
+    }
+
+    #[test]
+    fn each_tab_shows_its_own_left_column_and_the_same_others() {
+        let hatch = texts(&state());
+        let gradient = texts(&gradient_state());
+        let hatch_only = [
+            "Type and pattern",
+            "Pattern",
+            "Swatch",
+            "Angle and scale",
+            "Scale",
+            "Hatch origin",
+            "Click to set new origin",
+        ];
+        let gradient_only = [
+            "One color",
+            "Two colors",
+            "Color 1",
+            "Color 2",
+            "Gradient pattern",
+            "Orientation",
+            "Centered",
+        ];
+        for label in hatch_only {
+            assert_eq!(count(&hatch, label), 1, "{label} on the Hatch tab");
+            assert_eq!(count(&gradient, label), 0, "{label} not on the Gradient tab");
+        }
+        for label in gradient_only {
+            assert_eq!(count(&hatch, label), 0, "{label} not on the Hatch tab");
+        }
+        // Radio labels are not texts of their own: the Gradient tab's own
+        // texts are checked where they are texts.
+        for label in ["Color 1", "Color 2", "Gradient pattern", "Orientation", "Centered"] {
+            assert_eq!(count(&gradient, label), 1, "{label} on the Gradient tab");
+        }
+        assert_eq!(count(&gradient, "Angle"), 1, "the gradient's own angle");
+        assert_eq!(count(&gradient, "Color"), 1, "the gradient's Color group");
+        // Middle and right columns and the buttons: the same texts, in the
+        // same order, on both tabs.
+        let from = |texts: &[String]| {
+            let start = texts.iter().position(|t| t == "Boundaries").expect("Boundaries");
+            texts[start..].to_vec()
+        };
+        assert_eq!(from(&hatch), from(&gradient));
+        for label in ["Islands", "Boundary retention", "Inherit options", "OK", "Cancel"] {
+            assert_eq!(count(&gradient, label), 1, "{label}");
+        }
+    }
+
+    #[test]
+    fn one_colour_shows_the_tint_and_two_colours_the_second_colour() {
+        use codec::types::Color;
+        let mut state = gradient_state();
+        state.apply(Field::GradientColor1(Color::Index(1)));
+        state.apply(Field::GradientColor2(Color::Index(3)));
+        let two = texts(&state);
+        assert_eq!(count(&two, "Color 2"), 1);
+        assert_eq!(count(&two, "Green"), 1, "Color 2's name");
+        assert_eq!(count(&two, "Red"), 1, "Color 1's name");
+        assert_eq!(count(&two, "Tint/Shade"), 0);
+        state.apply(Field::GradientOneColor(true));
+        state.apply(Field::GradientTint(0.5));
+        let one = texts(&state);
+        assert_eq!(count(&one, "Tint/Shade"), 1);
+        assert_eq!(count(&one, "50%"), 1, "the tint's value beside the slider");
+        assert_eq!(count(&one, "Color 2"), 0);
+        assert_eq!(count(&one, "Green"), 0, "the hidden Color 2 is not shown");
+        assert_eq!(count(&one, "Red"), 1);
+    }
+
+    #[test]
+    fn the_error_messages_belong_to_their_tab() {
+        let mut state = state();
+        state.apply(Field::Pattern("NO_SUCH_PATTERN".into()));
+        state.apply(Field::Angle("a".into()));
+        state.apply(Field::Scale("0".into()));
+        let not_a_number = "Not a valid number";
+        let not_found = "Pattern not found: choose another";
+        let hatch = texts(&state);
+        assert_eq!(count(&hatch, not_found), 1);
+        assert_eq!(count(&hatch, not_a_number), 2, "angle and scale");
+        state.apply(Field::Tab(FillTab::Gradient));
+        let gradient = texts(&state);
+        assert_eq!(count(&gradient, not_found), 0, "the pattern is not on this tab");
+        assert_eq!(count(&gradient, not_a_number), 0, "nor its angle and scale");
+        state.apply(Field::GradientAngle("x".into()));
+        assert_eq!(count(&texts(&state), not_a_number), 1, "the gradient's angle");
+        state.apply(Field::Tab(FillTab::Hatch));
+        state.apply(Field::Angle("0".into()));
+        state.apply(Field::Scale("1".into()));
+        state.apply(Field::Pattern("ANSI31".into()));
+        assert_eq!(count(&texts(&state), not_a_number), 0, "the gradient's angle is not here");
+    }
+
+    #[test]
+    fn add_preview_and_ok_follow_the_active_tab() {
+        let wanted = |fields: &[Message]| {
+            (
+                fields.iter().any(|m| matches!(m, Message::HatchDialogAdd(AddKind::Points))),
+                fields.iter().any(|m| matches!(m, Message::HatchDialogPreview)),
+                fields.iter().any(|m| matches!(m, Message::HatchDialogOk)),
+            )
+        };
+        let buttons = ["Add: Pick points", "Preview", "OK"];
+        let mut state = state();
+        state.regions.push(one_region());
+        state.apply(Field::Scale("0".into())); // unusable on the Hatch tab only
+        assert_eq!(wanted(&click_all(&state, &buttons)), (false, false, false));
+        state.apply(Field::Tab(FillTab::Gradient));
+        assert_eq!(wanted(&click_all(&state, &buttons)), (true, true, true));
+        state.apply(Field::GradientAngle("x".into()));
+        assert_eq!(wanted(&click_all(&state, &buttons)), (false, false, false));
+        state.apply(Field::Tab(FillTab::Hatch));
+        state.apply(Field::Scale("2".into()));
+        assert_eq!(wanted(&click_all(&state, &buttons)), (true, true, true));
+    }
+
+    #[test]
+    fn the_colour_lists_open_and_publish_into_their_slot() {
+        use codec::types::Color;
+        // Closed: the head opens its own list.
+        let picked = click_nth(&state(), "Use Current", 0, 0.0);
+        assert!(
+            matches!(picked.as_slice(), [Field::ColorList(Some(HatchColorSlot::Fill))]),
+            "{picked:?}"
+        );
+        // Open on the fill colour: ByLayer/ByBlock, the nine colours and
+        // Select Color..., each publishing for the fill colour.
+        let mut fill = state();
+        fill.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
+        let shown = texts(&fill);
+        for label in ["ByLayer", "ByBlock", "Red", "Blue", "Select Color..."] {
+            assert_eq!(count(&shown, label), 1, "{label} in the fill list");
+        }
+        let picked = fields(click_all(&fill, &["Red"]));
+        assert!(
+            matches!(picked.as_slice(), [Field::Color(HatchColor::Color(c))] if *c == Color::Index(1)),
+            "{picked:?}"
+        );
+        let picked = fields(click_all(&fill, &["Select Color..."]));
+        assert!(
+            matches!(picked.as_slice(), [Field::SelectColor(HatchColorSlot::Fill)]),
+            "{picked:?}"
+        );
+        let picked = fields(click_all(&fill, &["ByLayer"]));
+        assert!(
+            matches!(picked.as_slice(), [Field::Color(HatchColor::Color(Color::ByLayer))]),
+            "{picked:?}"
+        );
+        // The gradient's colours: true colours only.
+        for (slot, ctor) in [
+            (HatchColorSlot::Gradient1, (|f: &Field| matches!(f, Field::GradientColor1(c) if *c == Color::Index(5)))
+                as fn(&Field) -> bool),
+            (HatchColorSlot::Gradient2, |f: &Field| {
+                matches!(f, Field::GradientColor2(c) if *c == Color::Index(5))
+            }),
+        ] {
+            let mut gradient = gradient_state();
+            gradient.apply(Field::ColorList(Some(slot)));
+            let shown = texts(&gradient);
+            assert_eq!(count(&shown, "ByLayer"), 0, "{slot:?}");
+            assert_eq!(count(&shown, "ByBlock"), 0, "{slot:?}");
+            assert_eq!(count(&shown, "Select Color..."), 1, "{slot:?}: one list open");
+            let picked = fields(click_all(&gradient, &["Blue"]));
+            assert!(picked.len() == 1 && ctor(&picked[0]), "{slot:?}: {picked:?}");
+            let picked = fields(click_all(&gradient, &["Select Color..."]));
+            assert!(
+                matches!(picked.as_slice(), [Field::SelectColor(s)] if *s == slot),
+                "{slot:?}: {picked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn use_current_is_a_button_while_creating_only() {
+        use codec::types::Color;
+        let layer_and_transparency = 2; // the greyed "Use Current" of Options
+        // On "Use Current": the head says so, the button is off.
+        let state = state();
+        assert_eq!(count(&texts(&state), "Use Current"), 2 + layer_and_transparency);
+        assert!(click_nth(&state, "Use Current", 1, 0.0).is_empty(), "the button is off");
+        // On a chosen colour: the head names it, the button goes back.
+        let mut chosen = self::state();
+        chosen.apply(Field::Color(HatchColor::Color(Color::Index(1))));
+        let shown = texts(&chosen);
+        assert_eq!(count(&shown, "Red"), 1);
+        assert_eq!(count(&shown, "Use Current"), 1 + layer_and_transparency);
+        let picked = click_nth(&chosen, "Use Current", 0, 0.0);
+        assert!(
+            matches!(picked.as_slice(), [Field::Color(HatchColor::UseCurrent)]),
+            "{picked:?}"
+        );
+        // Editing: the hatch's own colour and no button.
+        let edit = edit_state(true, "ANSI31");
+        let shown = texts(&edit);
+        assert_eq!(count(&shown, "Use Current"), layer_and_transparency);
+        assert_eq!(count(&shown, "ByLayer"), 1, "the hatch's own colour");
+    }
+
+    #[test]
+    fn the_gradient_controls_publish_their_fields() {
+        // The checkbox sits 6 px left of its label and is 14 px wide.
+        let picked = click_nth(&gradient_state(), "Centered", 0, -13.0);
+        assert!(
+            matches!(picked.as_slice(), [Field::GradientCentered(false)]),
+            "{picked:?}"
+        );
+        // The gradient's angle field holds its own text.
+        let mut state = gradient_state();
+        state.apply(Field::Angle("45".into()));
+        state.apply(Field::GradientAngle("30".into()));
+        let mut ui = iced_test::simulator(view_window(
+            &state,
+            codec::types::Color::ByLayer,
+            ModalSizing::FILL,
+        ));
+        assert!(ui.find("30").is_ok(), "the gradient's angle");
+        assert!(ui.find("45").is_err(), "not the pattern's");
+        ui.click("30").expect("the field");
+        let _ = ui.typewrite("5");
+        let picked = fields(ui.into_messages().collect());
+        assert!(
+            picked.iter().any(|f| matches!(f, Field::GradientAngle(text) if text.contains('5'))),
+            "{picked:?}"
+        );
+        assert!(!picked.iter().any(|f| matches!(f, Field::Angle(_))), "{picked:?}");
+    }
+
+    /// The bottom of OK and of the window's content as the app sizes the
+    /// window (`sized_flow` with the window's caps), on the headless renderer.
+    fn laid_out(state: &State) -> (f32, f32) {
+        let element = crate::ui::modal::intrinsic(
+            view_window(state, codec::types::Color::ByLayer, ModalSizing::INTRINSIC),
+            view_window(state, codec::types::Color::ByLayer, ModalSizing::FILL),
+            iced::Size::new(f32::from(MAX_WIDTH), f32::from(MAX_HEIGHT)),
+            iced::Vector::ZERO,
+        );
+        let mut ui = iced_test::simulator(element);
+        let ok = ui.find("OK").expect("OK").bounds();
+        let cancel = ui.find("Cancel").expect("Cancel").bounds();
+        (ok.y + ok.height, cancel.y + cancel.height)
+    }
+
+    #[test]
+    fn the_window_fits_and_keeps_its_size_on_both_tabs() {
+        use codec::types::Color;
+        // The tallest Hatch tab: every message shown.
+        let mut hatch = state();
+        hatch.apply(Field::Pattern("NO_SUCH_PATTERN".into()));
+        hatch.apply(Field::Angle("a".into()));
+        hatch.apply(Field::Scale("0".into()));
+        hatch.apply(Field::Color(HatchColor::Color(Color::Index(1))));
+        let (hatch_ok, _) = laid_out(&hatch);
+        // Text bottom + the button's 6 px + the window's 10 px padding.
+        assert!(hatch_ok + 16.0 <= f32::from(MAX_HEIGHT), "Hatch tab: OK at {hatch_ok}");
+        for one_color in [false, true] {
+            let mut gradient = state();
+            gradient.apply(Field::Tab(FillTab::Gradient));
+            gradient.apply(Field::GradientOneColor(one_color));
+            gradient.apply(Field::GradientAngle("x".into()));
+            let (ok, _) = laid_out(&gradient);
+            assert!(ok + 16.0 <= f32::from(MAX_HEIGHT), "Gradient tab: OK at {ok}");
+            // Same state on the other tab: the window does not move.
+            let mut back = gradient;
+            back.apply(Field::Tab(FillTab::Hatch));
+            let (hatch_ok, _) = laid_out(&back);
+            assert!(
+                (ok - hatch_ok).abs() < 0.5,
+                "one colour {one_color}: OK at {ok} on Gradient, {hatch_ok} on Hatch"
+            );
+        }
+    }
+
     // ── The real widgets, through the iced simulator ───────────────────────
 
     use super::super::hatch_palette::{Palette, PaletteAction, PatternCategory};
 
     /// Messages the real window publishes for the given interactions.
     fn click_all(state: &State, labels: &[&str]) -> Vec<Message> {
-        let element = view_window(state, crate::ui::modal::ModalSizing::FILL);
+        let element = view_window(state, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL);
         let mut ui = iced_test::simulator(element);
         for label in labels {
             ui.click(*label).unwrap_or_else(|_| panic!("{label} is on screen"));
@@ -1130,6 +1850,7 @@ mod tests {
         );
         let mut ui = iced_test::simulator(view_window(
             &state,
+            codec::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         for hidden in ["Preview", "Add: Pick points", "Click to set new origin", "Islands"] {
@@ -1154,12 +1875,14 @@ mod tests {
         let state = with_palette("zzzz-no-such-pattern", None);
         let mut ui = iced_test::simulator(view_window(
             &state,
+            codec::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         assert!(ui.find("No patterns found").is_ok());
         let state = with_palette("brick", None);
         let mut ui = iced_test::simulator(view_window(
             &state,
+            codec::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         assert!(ui.find("No patterns found").is_err());
@@ -1176,6 +1899,7 @@ mod tests {
         assert!(entries.len() > 40, "more cards than one screen of the grid shows");
         let mut ui = iced_test::simulator(view_window(
             &state,
+            codec::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         for entry in &entries {

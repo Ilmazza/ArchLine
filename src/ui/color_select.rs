@@ -162,6 +162,22 @@ pub fn color_selector_with_name<'a>(
     )
 }
 
+/// Like [`color_selector_with_name`] but the head can read any text (e.g.
+/// "Use Current") while still showing `current`'s swatch.
+pub fn color_selector_labelled<'a>(
+    current: AcadColor,
+    label: Option<String>,
+    open: bool,
+    extras: ColorExtras,
+    on_select: impl Fn(AcadColor) -> Message + 'a,
+    on_toggle: Message,
+    on_more: Message,
+) -> Element<'a, Message> {
+    let (bg, _) = acad_color_display(current);
+    let name = label.unwrap_or_else(|| color_display_name(current));
+    color_selector_with_indicator(swatch(bg), name, open, extras, on_select, on_toggle, on_more)
+}
+
 /// Build the shared colour selector for a mixed selection.
 pub fn color_selector_varies<'a>(
     open: bool,

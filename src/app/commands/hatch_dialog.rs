@@ -494,6 +494,9 @@ impl OpenCADStudio {
                 return Task::none();
             }
             state.palette = Some(Palette::open(&state.settings.pattern));
+            // The palette covers the colour controls: nothing of theirs stays open.
+            state.color_list = None;
+            self.hatch_close_color_window();
             return iced::widget::operation::focus(iced::widget::Id::new(PALETTE_SEARCH_ID));
         }
         let Some(palette) = state.palette.as_mut() else {
@@ -662,7 +665,7 @@ impl OpenCADStudio {
             };
         }
         self.hatch_last = settings;
-        self.active_modal = None;
+        self.hatch_hide_window();
         self.command_line.push_info(&command.prompt());
         self.tabs[i].active_cmd = Some(Box::new(command));
         Task::none()
@@ -696,7 +699,7 @@ impl OpenCADStudio {
             return Task::none();
         }
         state.flow = Flow::Origin;
-        self.active_modal = None;
+        self.hatch_hide_window();
         let command = HatchOriginPickCommand;
         self.command_line.push_info(&command.prompt());
         self.tabs[i].active_cmd = Some(Box::new(command));
@@ -735,7 +738,7 @@ impl OpenCADStudio {
         if let Some(state) = self.hatch_dialog.as_mut() {
             state.flow = Flow::Preview;
         }
-        self.active_modal = None;
+        self.hatch_hide_window();
         let preview = HatchPreviewCommand::new(models);
         self.command_line.push_info(&preview.prompt());
         self.tabs[i].active_cmd = Some(Box::new(preview));

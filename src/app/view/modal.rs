@@ -519,11 +519,15 @@ impl OpenCADStudio {
                 })
             }
             super::super::ModalKind::Hatch => {
+                use crate::ui::window::hatch_dialog;
                 let state = self.hatch_dialog.as_ref()?;
-                // 560 tagliava la riga Preview/OK/Cancel: le tre colonne più
-                // schede e pulsanti superano quell'altezza.
-                sized_flow(ex, 940, 760, |flow| {
-                    crate::ui::window::hatch_dialog::view_window(state, flow)
+                // "Use Current" is drawn with the owner drawing's current colour.
+                let current = self.hatch_dialog_current_color();
+                // 940 x 760: 560 cut off Preview/OK/Cancel (three columns plus
+                // tabs and buttons are taller). The Gradient tab is lower than
+                // the Hatch tab and the window measures it as the Hatch tab.
+                sized_flow(ex, hatch_dialog::MAX_WIDTH, hatch_dialog::MAX_HEIGHT, |flow| {
+                    hatch_dialog::view_window(state, current, flow)
                 })
             }
             super::super::ModalKind::BlockDefinition => {

@@ -56,6 +56,17 @@ impl OpenCADStudio {
         }
     }
 
+    /// Add, Preview and "Click to set new origin" hide the window for a step
+    /// on the drawing: its colour list and colour window go with it (the list
+    /// would come back open, the colour window would float over the drawing).
+    pub(in crate::app) fn hatch_hide_window(&mut self) {
+        if let Some(state) = self.hatch_dialog.as_mut() {
+            state.color_list = None;
+        }
+        self.hatch_close_color_window();
+        self.active_modal = None;
+    }
+
     /// Esc with the HATCH window up: an overlay above it closes first (the
     /// colour window, then an open colour list). `None` when there is none,
     /// and Esc goes on to the window itself (palette, then window).
@@ -98,6 +109,16 @@ impl OpenCADStudio {
     /// keeps its preselected boundaries selected until OK).
     pub(in crate::app) fn hatch_current_color(&self, i: usize) -> Color {
         self.tabs[i].scene.document.header.current_entity_color
+    }
+
+    /// The colour the window draws "Use Current" with: the current colour of
+    /// the owner tab's drawing (`ByLayer` once that tab is gone, when the
+    /// window is about to be dropped anyway).
+    pub(in crate::app) fn hatch_dialog_current_color(&self) -> Color {
+        self.hatch_dialog
+            .as_ref()
+            .and_then(|state| self.tabs.iter().position(|tab| tab.id == state.owner_tab_id))
+            .map_or(Color::ByLayer, |owner| self.hatch_current_color(owner))
     }
 
     /// The colour and transparency a hatch made by the window gets in tab
@@ -1577,5 +1598,81 @@ mod tests {
         assert_eq!(colours(&app), before, "Enter picked nothing");
         let _ = app.update(Message::CommandEscape);
         assert_ne!(app.active_modal, Some(ModalKind::Layers), "Esc went to the window");
+    }
+
+    // ── what the view is given, and the list when the window hides ────────
+
+    // Controller's decision (replaces the plan's `ribbon.active_color`): the
+    // window draws "Use Current" with the owner drawing's current colour.
+    #[test]
+    fn the_window_is_drawn_with_the_owner_drawings_current_colour() {
+        let mut app = app_with_rectangle();
+        set_current_colour(&mut app, Color::Index(6), Color::Index(2));
+        open_with(&mut app, "HATCH", &[]);
+        assert_eq!(app.hatch_dialog_current_color(), Color::Index(6), "CECOLOR, not the ribbon");
+        // A preselection moves the ribbon, not the window's current colour.
+        let mut app = app_with_selected_rectangle(Color::Index(1));
+        let i = app.active_tab;
+        app.tabs[i].scene.document.header.current_entity_color = Color::Index(3);
+        let _ = app.dispatch_command("HATCH");
+        assert_eq!(app.ribbon.active_color, Color::Index(1));
+        assert_eq!(app.hatch_dialog_current_color(), Color::Index(3));
+        // The owner tab's drawing, whichever tab is active.
+        let mut app = app_with_rectangle();
+        let (first, second) = open_second_tab(&mut app);
+        let _ = app.update(Message::TabSwitch(first));
+        app.tabs[first].scene.document.header.current_entity_color = Color::Index(4);
+        app.tabs[second].scene.document.header.current_entity_color = Color::Index(5);
+        open_with(&mut app, "HATCH", &[]);
+        app.active_tab = second;
+        assert_eq!(app.hatch_dialog_current_color(), Color::Index(4));
+    }
+
+    #[test]
+    fn hiding_the_window_closes_its_colour_list_and_colour_window() {
+        use crate::modules::draw::draw::hatch_settings::OriginMode;
+        let cases: [(&str, &str, fn() -> Message); 6] = [
+            ("HATCH", "pick points", || Message::HatchDialogAdd(AddKind::Points)),
+            ("HATCH", "select objects", || Message::HatchDialogAdd(AddKind::Objects)),
+            ("HATCH", "preview", || Message::HatchDialogPreview),
+            ("HATCH", "origin", || Message::HatchDialogPickOrigin),
+            ("GRADIENT", "pick points", || Message::HatchDialogAdd(AddKind::Points)),
+            ("GRADIENT", "preview", || Message::HatchDialogPreview),
+        ];
+        for (command, case, hide) in cases {
+            let (slot, other) = match command {
+                "HATCH" => (HatchColorSlot::Fill, HatchColorSlot::Fill),
+                _ => (HatchColorSlot::Gradient1, HatchColorSlot::Gradient2),
+            };
+            let mut app = app_with_rectangle();
+            open_with(&mut app, command, &[Field::OriginMode(OriginMode::Specified)]);
+            // A colour window of the window left open, and a list open.
+            open_picker(&mut app, slot);
+            let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(other))));
+            assert_eq!(app.hatch_dialog.as_ref().unwrap().color_list, Some(other));
+            let _ = app.update(hide());
+            assert!(app.active_modal.is_none(), "{command} {case}: the window is hidden");
+            let state = app.hatch_dialog.as_ref().expect("the state stays");
+            assert_eq!(state.color_list, None, "{command} {case}: the list does not come back");
+            assert!(
+                app.color_pick_target.is_none(),
+                "{command} {case}: no colour window over the drawing"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_the_pattern_palette_closes_the_colour_list() {
+        use crate::ui::window::hatch_palette::PaletteAction;
+        let mut app = app_with_rectangle();
+        open_with(&mut app, "HATCH", &[]);
+        open_picker(&mut app, HatchColorSlot::Fill);
+        let _ = app.update(Message::HatchDialogField(Field::ColorList(Some(HatchColorSlot::Fill))));
+        let _ = app.update(Message::HatchDialogPalette(PaletteAction::Open));
+        let state = app.hatch_dialog.as_ref().unwrap();
+        assert!(state.palette.is_some(), "the palette is open");
+        assert_eq!(state.color_list, None, "the list does not wait under it");
+        assert!(app.color_pick_target.is_none(), "nor the colour window above it");
+        assert!(window_open(&app));
     }
 }
