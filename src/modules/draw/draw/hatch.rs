@@ -3077,9 +3077,18 @@ mod tests {
         let mut settings = gradient_settings(|_| {});
         settings.island_detection = false; // Ignore
         let model = committed(gradient_command(&settings).on_enter());
+        assert!(matches!(model.pattern, HatchPattern::Gradient { .. }));
         assert_eq!(model.style, codec::entities::HatchStyleType::Ignore);
         assert!(model.boundary_paths.is_some() && model.fill_plane.is_some());
         assert_eq!(model.boundary_exterior.as_deref().map(|e| e.len()), Some(1));
+        // The one ring in world coordinates (a flat buffer: no separator).
+        assert_eq!(model.boundary_wcs.as_deref(), Some(&rect(0.0, 0.0, 10.0, 10.0)));
+        // `sources_for` makes one source per ring: the ring keeps its link.
+        let sources = model.boundary_sources.as_deref().expect("sources");
+        assert_eq!(sources.iter().map(Vec::len).sum::<usize>(), 1);
+        let paths = model.boundary_paths.as_deref().expect("paths");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].boundary_handles.len(), 1);
     }
 
     #[test]

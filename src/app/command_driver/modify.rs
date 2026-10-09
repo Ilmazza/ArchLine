@@ -467,6 +467,9 @@ impl OpenCADStudio {
                             }
                         }
                     }
+                    // The scene draws from the cached fill model: rebuild it from
+                    // the updated entity (name, scale and angle may have changed).
+                    self.tabs[i].scene.refresh_fill_model(handle);
                     self.tabs[i]
                         .scene
                         .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);

@@ -243,7 +243,9 @@ pub fn apply_gradient(hatch: &mut Hatch, spec: &GradientSpec) {
         hatch.pattern = codec::entities::hatch::HatchPattern::solid();
     }
     hatch.is_solid = true;
-    hatch.pattern_angle = spec.angle_rad;
+    // A tint or angle that is not a finite number is never stored.
+    let angle = if spec.angle_rad.is_finite() { spec.angle_rad } else { 0.0 };
+    hatch.pattern_angle = angle;
     let (first, second) = (spec.color1, spec.effective_color2());
     // Linear has no INV name in the standard set: an inverted linear is
     // persisted by swapping the stops instead.
@@ -255,10 +257,10 @@ pub fn apply_gradient(hatch: &mut Hatch, spec: &GradientSpec) {
     let g = &mut hatch.gradient_color;
     g.enabled = true;
     g.name = spec.kind.dxf_name(spec.invert).to_string();
-    g.angle = spec.angle_rad;
+    g.angle = angle;
     g.shift = if spec.centered { 0.0 } else { 1.0 };
     g.is_single_color = spec.one_color;
-    g.color_tint = spec.tint.clamp(0.0, 1.0);
+    g.color_tint = if spec.tint.is_finite() { spec.tint.clamp(0.0, 1.0) } else { 1.0 };
     g.colors = vec![stop_entry(0.0, first), stop_entry(1.0, second)];
 }
 
@@ -268,7 +270,10 @@ pub fn apply_gradient_patch(hatch: &mut Hatch, patch: &GradientPatch) {
     if !hatch.gradient_color.enabled {
         return;
     }
-    if let Some(angle) = patch.angle_rad {
+    // A tint or angle that is not a finite number is ignored, never stored.
+    let angle_rad = patch.angle_rad.filter(|a| a.is_finite());
+    let tint = patch.tint.filter(|t| t.is_finite());
+    if let Some(angle) = angle_rad {
         hatch.pattern_angle = angle;
     }
     let g = &mut hatch.gradient_color;
@@ -276,12 +281,12 @@ pub fn apply_gradient_patch(hatch: &mut Hatch, patch: &GradientPatch) {
         g.name = kind.dxf_name(invert).to_string();
     }
     if let Some(one_color) = patch.one_color {
-        if one_color && !g.is_single_color && patch.tint.is_none() {
+        if one_color && !g.is_single_color && tint.is_none() {
             g.color_tint = 1.0;
         }
         g.is_single_color = one_color;
     }
-    if let Some(tint) = patch.tint {
+    if let Some(tint) = tint {
         g.color_tint = tint.clamp(0.0, 1.0);
     }
     for (index, color) in [(0usize, patch.color1), (1usize, patch.color2)] {
@@ -292,7 +297,7 @@ pub fn apply_gradient_patch(hatch: &mut Hatch, patch: &GradientPatch) {
         }
         g.colors[index].color = color;
     }
-    if let Some(angle) = patch.angle_rad {
+    if let Some(angle) = angle_rad {
         g.angle = angle;
     }
     if let Some(centered) = patch.centered {
@@ -862,6 +867,32 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    #[test]
+    fn a_patch_with_a_tint_or_angle_that_is_not_a_number_changes_nothing() {
+        let patches = [
+            GradientPatch { tint: Some(f64::NAN), ..Default::default() },
+            GradientPatch { angle_rad: Some(f64::NAN), ..Default::default() },
+            GradientPatch { angle_rad: Some(f64::INFINITY), ..Default::default() },
+        ];
+        for patch in patches {
+            let (before, after) = patched(patch.clone());
+            assert_eq!(after, before, "{patch:?}");
+        }
+    }
+
+    #[test]
+    fn apply_gradient_with_a_tint_or_angle_that_is_not_a_number_writes_the_defaults() {
+        let mut hatch = Hatch::solid();
+        apply_gradient(&mut hatch, &GradientSpec { tint: f64::NAN, ..spec() });
+        assert_eq!(hatch.gradient_color.color_tint, 1.0);
+        for angle in [f64::INFINITY, f64::NAN] {
+            let mut hatch = Hatch::solid();
+            apply_gradient(&mut hatch, &GradientSpec { angle_rad: angle, ..spec() });
+            assert_eq!(hatch.gradient_color.angle, 0.0, "{angle}");
+            assert_eq!(hatch.pattern_angle, 0.0, "{angle}");
+        }
+    }
+
     // ── set_catalog_pattern / apply_pattern_update ─────────────────────────
 
     use crate::scene::model::hatch_patterns;
@@ -927,12 +958,26 @@ mod tests {
     }
 
     #[test]
+    fn an_angle_change_rotates_the_lines_about_the_origin() {
+        // Same name, only the angle: the stored lines turn by the difference.
+        let mut hatch = ansi31_hatch(1.0, 0.0);
+        let before = hatch.pattern.lines[0].angle;
+        apply_pattern_update(&mut hatch, "ANSI31", 1.0, 90.0, None, false, None);
+        assert!((hatch.pattern_angle - std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
+        let now = hatch.pattern.lines[0].angle;
+        assert!((now - (before + std::f64::consts::FRAC_PI_2)).abs() < 1.0e-9, "{now} vs {before}");
+    }
+
+    #[test]
     fn a_name_change_converts_a_solid_to_a_pattern_and_back() {
         let mut hatch = Hatch::solid();
         apply_pattern_update(&mut hatch, "ANSI31", 1.0, 0.0, None, false, None);
         assert_eq!(FillKind::of(&hatch), FillKind::Pattern);
+        assert_eq!(hatch.pattern.name, "ANSI31");
+        assert!(!hatch.pattern.lines.is_empty() && !hatch.is_solid);
         apply_pattern_update(&mut hatch, "SOLID", 1.0, 0.0, None, false, None);
         assert_eq!(FillKind::of(&hatch), FillKind::Solid);
+        assert!(hatch.pattern.lines.is_empty() && hatch.is_solid);
     }
 
     #[test]

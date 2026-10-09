@@ -175,7 +175,12 @@ impl State {
             }
         }
         match field {
-            Field::Tab(tab) => self.settings.tab = tab,
+            // The list's field may be hidden by the switch: close it, or it
+            // would reopen when that field comes back.
+            Field::Tab(tab) => {
+                self.settings.tab = tab;
+                self.color_list = None;
+            }
             Field::Color(color) => {
                 self.settings.color = color;
                 self.color_list = None;
@@ -183,7 +188,10 @@ impl State {
             Field::GradientShape(index) => {
                 self.settings.gradient.shape = index.min(GradientKind::CHOICES.len() - 1)
             }
-            Field::GradientOneColor(on) => self.settings.gradient.one_color = on,
+            Field::GradientOneColor(on) => {
+                self.settings.gradient.one_color = on;
+                self.color_list = None;
+            }
             Field::GradientColor1(color) => {
                 self.settings.gradient.color1 = color;
                 self.color_list = None;
@@ -1214,6 +1222,16 @@ mod tests {
         state.apply(Field::SelectColor(HatchColorSlot::Gradient2));
         assert_eq!(state.color_list, None, "Select Color closes the list");
         assert_eq!(state.settings.gradient.color2, Color::Index(4), "and changes nothing itself");
+        // Switching mode or tab closes it too: it would reopen when the
+        // field comes back.
+        state.apply(Field::ColorList(Some(HatchColorSlot::Gradient2)));
+        state.apply(Field::GradientOneColor(true));
+        assert_eq!(state.color_list, None, "One color closes the list");
+        assert!(state.settings.gradient.one_color);
+        state.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
+        state.apply(Field::Tab(FillTab::Gradient));
+        assert_eq!(state.color_list, None, "a tab change closes the list");
+        assert_eq!(state.settings.tab, FillTab::Gradient);
     }
 
     #[test]
@@ -1520,8 +1538,6 @@ mod tests {
             "Click to set new origin",
         ];
         let gradient_only = [
-            "One color",
-            "Two colors",
             "Color 1",
             "Color 2",
             "Gradient pattern",
@@ -1535,8 +1551,8 @@ mod tests {
         for label in gradient_only {
             assert_eq!(count(&hatch, label), 0, "{label} not on the Hatch tab");
         }
-        // Radio labels are not texts of their own: the Gradient tab's own
-        // texts are checked where they are texts.
+        // Radio labels are not texts of their own (the mode radios are tested
+        // by clicking them): the Gradient tab's own texts are checked here.
         for label in ["Color 1", "Color 2", "Gradient pattern", "Orientation", "Centered"] {
             assert_eq!(count(&gradient, label), 1, "{label} on the Gradient tab");
         }
@@ -1552,6 +1568,56 @@ mod tests {
         for label in ["Islands", "Boundary retention", "Inherit options", "OK", "Cancel"] {
             assert_eq!(count(&gradient, label), 1, "{label}");
         }
+    }
+
+    /// The two mode radios sit above "Color 1": clicking down that strip from
+    /// the top meets One color first, then Two colors, and nothing else.
+    #[test]
+    fn the_mode_radios_publish_one_or_two_colours() {
+        let state = gradient_state();
+        assert!(!state.settings.gradient.one_color, "starts with two colours");
+        let bounds = {
+            let mut ui = iced_test::simulator(view_window(
+                &state,
+                codec::types::Color::ByLayer,
+                ModalSizing::FILL,
+            ));
+            let mut found = Vec::new();
+            let _ = ui.find(|candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
+                if let iced_test::selector::Candidate::Text { content, bounds, .. } = candidate {
+                    if content == "Color 1" {
+                        found.push(bounds);
+                    }
+                }
+                None
+            });
+            assert_eq!(found.len(), 1, "Color 1 is on screen once");
+            found[0]
+        };
+        // (y, field) for every click that published something, top first.
+        let mut hits: Vec<(f32, Field)> = Vec::new();
+        let mut y = bounds.y - 60.0;
+        while y <= bounds.y - 4.0 {
+            let mut ui = iced_test::simulator(view_window(
+                &state,
+                codec::types::Color::ByLayer,
+                ModalSizing::FILL,
+            ));
+            ui.point_at(iced::Point::new(bounds.x + 8.0, y));
+            let _ = ui.simulate(iced_test::simulator::click());
+            hits.extend(fields(ui.into_messages().collect()).into_iter().map(|f| (y, f)));
+            y += 4.0;
+        }
+        let modes: Vec<bool> = hits
+            .iter()
+            .map(|(y, field)| match field {
+                Field::GradientOneColor(on) => *on,
+                other => panic!("only the mode radios publish here, got {other:?} at y {y}"),
+            })
+            .collect();
+        assert!(modes.contains(&true) && modes.contains(&false), "{hits:?}");
+        assert_eq!(modes.first(), Some(&true), "One color is the upper radio: {hits:?}");
+        assert_eq!(modes.last(), Some(&false), "Two colors is the lower one: {hits:?}");
     }
 
     #[test]

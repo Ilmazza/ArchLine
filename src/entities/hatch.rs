@@ -1180,6 +1180,8 @@ mod gradient_property_tests {
         assert_eq!(after("gradient_tint", "5").gradient_color.color_tint, 1.0);
         assert_eq!(after("gradient_tint", "-2").gradient_color.color_tint, 0.0);
         assert_eq!(after("gradient_tint", "0.3").gradient_color.color_tint, 0.3);
+        // Not a number: the tint is left as it was.
+        assert_eq!(after("gradient_tint", "nan").gradient_color.color_tint, 0.25);
     }
 
     #[test]

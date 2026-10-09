@@ -2789,7 +2789,7 @@ mod tests {
     #[test]
     fn all_six_conversions_are_one_undo_each() {
         use crate::entities::hatch_fill::{read_gradient, FillKind};
-        use crate::modules::draw::draw::hatch_settings::{FillTab, HatchColor};
+        use crate::modules::draw::draw::hatch_settings::{FillTab, GradientSettings, HatchColor};
         use crate::scene::model::hatch_model::GradientKind;
         let red = || Field::Color(HatchColor::Color(codec::types::Color::Index(1)));
         let outer = || Field::IslandStyle(HatchStyleType::Outer);
@@ -2805,10 +2805,14 @@ mod tests {
         );
         assert_eq!(after.common.color, codec::types::Color::Index(1));
         assert_eq!(after.style, HatchStyleType::Outer);
+        assert!(after.is_solid && after.pattern.lines.is_empty());
+        assert_eq!(after.pattern.name, "SOLID");
         let after = convert(&mut app, hatch, &[Field::Tab(FillTab::Gradient), outer()], FillKind::Gradient);
         assert_eq!(after.is_associative, before.is_associative);
         assert_eq!(after.style, HatchStyleType::Outer);
         assert_eq!(after.common.color, before.common.color, "the Gradient tab has no entity colour");
+        assert_eq!(read_gradient(&after), GradientSettings::default().spec().unwrap());
+        assert!(after.is_solid && after.pattern.lines.is_empty(), "the pattern lines are gone");
 
         // solid -> pattern, solid -> gradient
         let mut app = app_with_rectangle();
@@ -2822,12 +2826,19 @@ mod tests {
         assert_eq!(after.pattern.name, "ANSI31");
         assert_eq!(after.common.color, codec::types::Color::Index(1));
         assert!(!after.pattern.lines.is_empty(), "real pattern lines");
-        convert(&mut app, solid, &[Field::Tab(FillTab::Gradient)], FillKind::Gradient);
+        let after = convert(
+            &mut app,
+            solid,
+            &[Field::Tab(FillTab::Gradient), Field::GradientShape(3), outer()],
+            FillKind::Gradient,
+        );
+        assert_eq!(read_gradient(&after).kind, GradientKind::Spherical);
+        assert_eq!(after.style, HatchStyleType::Outer);
+        assert_eq!(after.gradient_color.colors.len(), 2);
 
         // gradient -> pattern, gradient -> solid (same stored name "SOLID")
         let mut app = app_with_rectangle();
         let gradient = gradient_made(&mut app, &[Field::GradientShape(4)]);
-        let before = stored(&app, gradient);
         let after = convert(
             &mut app,
             gradient,
@@ -2837,8 +2848,9 @@ mod tests {
         assert!(!after.gradient_color.enabled);
         assert_eq!(after.common.color, codec::types::Color::Index(1));
         assert_eq!(after.style, HatchStyleType::Outer);
-        assert_eq!(read_gradient(&stored(&app, gradient)).kind, GradientKind::CHOICES[4].0);
-        assert_eq!(stored(&app, gradient), before);
+        assert_eq!(after.pattern.name, "ANSI31");
+        assert!(!after.pattern.lines.is_empty());
+        assert_eq!(after.pattern_scale, 1.0);
         let after = convert(
             &mut app,
             gradient,
@@ -2847,23 +2859,52 @@ mod tests {
         );
         assert!(!after.gradient_color.enabled && after.is_solid);
         assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert!(after.pattern.lines.is_empty());
+        assert_eq!(after.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
     }
 
     #[test]
     fn converting_an_associative_hatch_with_islands_leaves_its_structure_alone() {
         // Review focus: several paths, links to source objects, island style.
+        use crate::entities::hatch_fill::FillKind;
+        use crate::modules::draw::draw::hatch_settings::FillTab;
         let mut app = app_with_rectangle();
-        let hatch = hatch_made_with(&mut app, &[Field::IslandStyle(HatchStyleType::Outer)]);
-        let before = stored(&app, hatch);
-        assert!(before.is_associative);
-        let _ = app.hatch_dialog_open_edit(hatch);
-        field(&mut app, Field::Tab(crate::modules::draw::draw::hatch_settings::FillTab::Gradient));
+        // The rectangle's lines bound the outer ring; the island is a ring of
+        // its own, inside it.
+        open_dialog(&mut app);
+        app.hatch_dialog.as_mut().unwrap().regions.push((
+            HatchRegion {
+                rings: vec![
+                    vec![[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]],
+                    vec![[5.0, 2.0], [15.0, 2.0], [15.0, 8.0], [5.0, 8.0]],
+                ],
+            },
+            RegionOrigin::Points,
+        ));
+        field(&mut app, Field::IslandStyle(HatchStyleType::Outer));
         let _ = app.update(Message::HatchDialogOk);
-        let after = stored(&app, hatch);
-        assert_eq!(after.paths, before.paths);
-        assert_eq!(after.is_associative, before.is_associative);
-        assert_eq!(after.style, before.style);
-        assert_eq!(after.common, before.common);
+        let i = app.active_tab;
+        assert_eq!(app.tabs[i].scene.hatches.len(), 1, "one hatch made");
+        app.hatch_last = HatchSettings::default();
+        let hatch = *app.tabs[i].scene.hatches.keys().next().unwrap();
+        let before = stored(&app, hatch);
+        assert_eq!(before.paths.len(), 2, "outer boundary and island");
+        assert!(before.is_associative);
+        assert!(before.paths.iter().map(|p| p.boundary_handles.len()).sum::<usize>() >= 4);
+        assert_eq!(before.style, HatchStyleType::Outer);
+
+        // Pattern -> gradient (`convert` compares the paths and the undo).
+        let g = convert(&mut app, hatch, &[Field::Tab(FillTab::Gradient)], FillKind::Gradient);
+        assert_eq!(g.style, HatchStyleType::Outer);
+        assert!(g.is_associative);
+        assert_eq!(g.common, before.common);
+        // `convert` leaves the conversion undone: redo it, then back.
+        let _ = app.update(Message::Redo);
+        assert_eq!(stored(&app, hatch), g);
+        let p = convert(&mut app, hatch, &[Field::Tab(FillTab::Hatch)], FillKind::Pattern);
+        assert_eq!(p.paths, before.paths);
+        assert_eq!(p.style, HatchStyleType::Outer);
+        assert!(p.is_associative);
     }
 
     /// A hatch read from a file can carry a zero or non-finite scale or
@@ -3086,6 +3127,27 @@ mod tests {
         assert_eq!(after.pattern_scale, 0.1);
         assert_eq!(after.pattern_angle, 0.1);
         assert_eq!(after.pattern, before.pattern, "pattern lines untouched");
+    }
+
+    #[test]
+    fn dash_hatchedit_scale_change_rebuilds_the_fill_model() {
+        // The scene draws the hatch from its cached fill model: a scale change
+        // from the command line must rebuild it, not only edit the entity.
+        use crate::scene::model::hatch_model::HatchPattern;
+        let (mut app, hatch) = app_with_hatch();
+        let spacing = |app: &OpenCADStudio| match &app.tabs[app.active_tab].scene.hatches[&hatch].pattern {
+            HatchPattern::Pattern(f) => (f[0].dx.powi(2) + f[0].dy.powi(2)).sqrt(),
+            other => panic!("{other:?}"),
+        };
+        let before = spacing(&app);
+        select_only(&mut app, hatch);
+        let _ = app.dispatch_command("-HATCHEDIT");
+        for text in ["P", "ANSI31", "2", "0"] {
+            let _ = app.feed_command(StepInput::Text(text.into()));
+        }
+        assert_eq!(stored(&app, hatch).pattern_scale, 2.0);
+        let after = spacing(&app);
+        assert!((after / before - 2.0).abs() < 1e-4, "spacing {before} -> {after}");
     }
 
     #[test]
@@ -3675,6 +3737,11 @@ mod tests {
         frame(&mut app);
         double_click(&mut app, 4.0, 3.0);
         assert_eq!(edit_handle(&app), Some(solid));
+        {
+            let settings = &app.hatch_dialog.as_ref().unwrap().settings;
+            assert_eq!(settings.tab, crate::modules::draw::draw::hatch_settings::FillTab::Hatch);
+            assert_eq!(settings.pattern, "SOLID");
+        }
 
         let mut app = app_with_rectangle();
         let gradient = gradient_made(&mut app, &[]);

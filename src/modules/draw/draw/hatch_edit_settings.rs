@@ -39,7 +39,13 @@ pub fn gradient_settings_from(spec: &GradientSpec) -> GradientSettings {
             1.0
         },
         centered: spec.centered,
-        angle: format_number(spec.angle_rad.to_degrees()),
+        // An angle that is not a number shows as 0, like the Hatch tab; it is
+        // not written back unless the user changes the field.
+        angle: format_number(if spec.angle_rad.is_finite() {
+            spec.angle_rad.to_degrees()
+        } else {
+            0.0
+        }),
     }
 }
 
@@ -738,6 +744,29 @@ mod tests {
     }
 
     #[test]
+    fn a_gradient_with_an_angle_that_is_not_a_number_opens_at_zero_and_does_not_rewrite_it() {
+        let mut hatch = gradient_hatch(&gradient_spec());
+        hatch.gradient_color.angle = f64::NAN;
+        hatch.pattern_angle = f64::NAN;
+        let target = EditTarget::from_hatch(Handle::new(1), &hatch);
+        assert_eq!(target.initial.gradient.angle, "0");
+        let nothing = target.changes(&target.initial, None).expect("the fields are usable");
+        assert!(nothing.is_empty(), "{nothing:?}");
+        // Another field alone: only that field, the angle is not written.
+        let shape = edit(&target, |s| s.gradient.shape = 5).unwrap();
+        assert_eq!(
+            shape.fill,
+            Some(FillEdit::Gradient(GradientPatch {
+                kind: Some(GradientKind::CHOICES[5]),
+                ..Default::default()
+            }))
+        );
+        let mut after = hatch.clone();
+        apply_window_edit(&mut after, &shape);
+        assert!(after.gradient_color.angle.is_nan(), "the stored angle is left as it was");
+    }
+
+    #[test]
     fn a_linear_gradient_stored_with_swapped_stops_is_not_rewritten() {
         // One colour, inverted Linear: written with the stops swapped. And a
         // two-colour Linear whose stops another program stored the other way
@@ -908,6 +937,13 @@ mod tests {
         );
         // And back on the Hatch tab: nothing to do.
         assert!(edit(&pattern, |s| s.tab = FillTab::Hatch).unwrap().is_empty());
+        // Gradient fields touched while the Hatch tab is active: no conversion.
+        assert!(edit(&pattern, |s| {
+            s.gradient.shape = 5;
+            s.gradient.color1 = Color::Index(1);
+        })
+        .unwrap()
+        .is_empty());
         // Gradient -> Hatch tab: the default pattern; SOLID if chosen.
         let gradient = gradient_target();
         let to_pattern = edit(&gradient, |s| s.tab = FillTab::Hatch).unwrap();
