@@ -127,6 +127,34 @@ impl HatchPatternPreview {
         self
     }
 
+    /// The plan of a gradient swatch; `None` for other fills and for a gradient
+    /// without a colour (which keeps the flat fill of before).
+    fn gradient_plan(&self, width: f32, height: f32) -> Option<SwatchGradient> {
+        use crate::scene::model::hatch_model::HatchPattern;
+        let HatchPattern::Gradient {
+            angle_deg,
+            color2,
+            kind,
+            invert,
+            shift,
+            ..
+        } = &self.pattern
+        else {
+            return None;
+        };
+        let color = self.usable_color()?;
+        Some(swatch_gradient(
+            *kind,
+            *invert,
+            *angle_deg,
+            *shift,
+            [color.r, color.g, color.b, color.a],
+            *color2,
+            width,
+            height,
+        ))
+    }
+
     /// The given colour, unless a component is NaN, infinite or outside 0..=1:
     /// such a colour is ignored and the swatch keeps the theme's colours.
     fn usable_color(&self) -> Option<Color> {
@@ -385,13 +413,69 @@ fn rgba_color(c: [f32; 4]) -> Color {
     Color { r, g, b, a }
 }
 
-/// Paints a gradient swatch plan into `sample`.
+/// One drawing operation of the clipped part of a radial swatch.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SwatchOp {
+    /// The opaque background of the sample (the theme colour).
+    Background,
+    /// Colour 1 over the whole sample, so it is never bare if a ring is lost.
+    Base([f32; 4]),
+    /// A filled circle of `fraction` of the radius.
+    Ring { fraction: f32, color: [f32; 4] },
+}
+
+/// How a gradient swatch is composed between the parent frame and a clipped
+/// child frame.
+///
+/// The wgpu backend puts a child frame meshes (`Frame::paste`) BEFORE
+/// everything the parent frame has accumulated (the parent buffers are only
+/// appended in `into_geometry`), and draws them in that order without a depth
+/// test. Any opaque fill left in the parent therefore covers the rings of the
+/// child. A radial swatch so draws its background, base fill and rings all in
+/// the clipped child, in this order, and leaves only the border (drawn after,
+/// as for every swatch) to the parent.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SwatchLayers {
+    /// The parent frame fills the background of the sample before the plan is
+    /// painted (every plan but the radial one).
+    pub(crate) parent_background: bool,
+    /// What the clipped child frame draws, first to last.
+    pub(crate) clipped: Vec<SwatchOp>,
+}
+
+pub(crate) fn swatch_layers(plan: &SwatchGradient) -> SwatchLayers {
+    match plan {
+        SwatchGradient::Rings { rings, .. } => {
+            let mut clipped = vec![SwatchOp::Background];
+            if let Some((_, outer)) = rings.first() {
+                clipped.push(SwatchOp::Base(*outer));
+            }
+            clipped.extend(
+                rings
+                    .iter()
+                    .map(|&(fraction, color)| SwatchOp::Ring { fraction, color }),
+            );
+            SwatchLayers {
+                parent_background: false,
+                clipped,
+            }
+        }
+        _ => SwatchLayers {
+            parent_background: true,
+            clipped: Vec::new(),
+        },
+    }
+}
+
+/// Paints a gradient swatch plan into `sample`. The parent frame already holds
+/// the background fill, except for a radial plan (see [`SwatchLayers`]).
 fn paint_swatch_gradient(
     frame: &mut canvas::Frame,
     sample: &canvas::Path,
     sample_rect: Rectangle,
     plan: &SwatchGradient,
     tint: Color,
+    background: Color,
 ) {
     match plan {
         SwatchGradient::Tint => frame.fill(sample, tint),
@@ -409,21 +493,19 @@ fn paint_swatch_gradient(
                 },
             );
         }
-        SwatchGradient::Rings {
-            center,
-            radius,
-            rings,
-        } => {
-            // Colour 1 first, in case a ring is lost: the sample is never bare.
-            if let Some((_, outer)) = rings.first() {
-                frame.fill(sample, rgba_color(*outer));
-            }
+        SwatchGradient::Rings { center, radius, .. } => {
+            // Everything opaque goes in the clipped child, in order; nothing
+            // is left in the parent under or over it.
             frame.with_clip(sample_rect, |clipped| {
-                for (fraction, c) in rings {
-                    clipped.fill(
-                        &canvas::Path::circle(*center, fraction * radius),
-                        rgba_color(*c),
-                    );
+                for op in swatch_layers(plan).clipped {
+                    match op {
+                        SwatchOp::Background => clipped.fill(sample, background),
+                        SwatchOp::Base(c) => clipped.fill(sample, rgba_color(c)),
+                        SwatchOp::Ring { fraction, color } => clipped.fill(
+                            &canvas::Path::circle(*center, fraction * radius),
+                            rgba_color(color),
+                        ),
+                    }
                 }
             });
         }
@@ -453,7 +535,15 @@ impl canvas::Program<Message> for HatchPatternPreview {
                 (bounds.height - pad * 2.0).max(0.0),
             ),
         );
-        frame.fill(&sample, palette.background.base.color);
+        // The gradient plan is worked out first: a radial one draws its own
+        // background inside the clipped frame (see `SwatchLayers`).
+        let gradient_plan = self.gradient_plan(bounds.width, bounds.height);
+        let parent_background = gradient_plan
+            .as_ref()
+            .is_none_or(|plan| swatch_layers(plan).parent_background);
+        if parent_background {
+            frame.fill(&sample, palette.background.base.color);
+        }
 
         match &self.pattern {
             HatchPattern::Solid => {
@@ -463,19 +553,12 @@ impl canvas::Program<Message> for HatchPatternPreview {
                         .unwrap_or(palette.background.base.text.scale_alpha(0.72)),
                 );
             }
-            HatchPattern::Gradient {
-                angle_deg,
-                color2,
-                kind,
-                invert,
-                shift,
-                ..
-            } => {
+            HatchPattern::Gradient { .. } => {
                 let tint = palette.primary.weak.color;
-                match self.usable_color() {
+                match &gradient_plan {
                     // No colour given: the flat fill of before.
                     None => frame.fill(&sample, tint),
-                    Some(color) => {
+                    Some(plan) => {
                         let sample_rect = Rectangle::new(
                             Point::new(pad, pad),
                             Size::new(
@@ -483,17 +566,14 @@ impl canvas::Program<Message> for HatchPatternPreview {
                                 (bounds.height - pad * 2.0).max(0.0),
                             ),
                         );
-                        let plan = swatch_gradient(
-                            *kind,
-                            *invert,
-                            *angle_deg,
-                            *shift,
-                            [color.r, color.g, color.b, color.a],
-                            *color2,
-                            bounds.width,
-                            bounds.height,
+                        paint_swatch_gradient(
+                            &mut frame,
+                            &sample,
+                            sample_rect,
+                            plan,
+                            tint,
+                            palette.background.base.color,
                         );
-                        paint_swatch_gradient(&mut frame, &sample, sample_rect, &plan, tint);
                     }
                 }
             }
@@ -2951,6 +3031,75 @@ mod swatch_color_tests {
                 "{kind:?}"
             );
         }
+    }
+
+    // Composition of the radial swatch (see `SwatchLayers`).
+
+    #[test]
+    fn a_radial_swatch_draws_everything_opaque_inside_the_clipped_frame() {
+        let rings_plan = plan(GradientKind::Spherical, false, 0.0, 0.0, 108.0, 58.0);
+        let layers = swatch_layers(&rings_plan);
+        // Nothing opaque left in the parent: it would cover the child on wgpu.
+        assert!(!layers.parent_background);
+        // Background, then the base fill, then the rings outermost first.
+        assert_eq!(layers.clipped.len(), 2 + SWATCH_RINGS);
+        assert_eq!(layers.clipped[0], SwatchOp::Background);
+        // The base is the outermost ring colour (a hair off colour 1).
+        let SwatchOp::Base(base) = layers.clipped[1] else {
+            panic!("expected the base fill");
+        };
+        assert_eq!(layers.clipped[2], SwatchOp::Ring { fraction: 1.0, color: base });
+        assert!(base[0] > 0.9 && base[2] < 0.1, "{base:?}");
+        let fractions: Vec<f32> = layers.clipped[2..]
+            .iter()
+            .map(|op| match op {
+                SwatchOp::Ring { fraction, .. } => *fraction,
+                other => panic!("an opaque fill after the rings began: {other:?}"),
+            })
+            .collect();
+        assert!(fractions.windows(2).all(|w| w[0] > w[1]));
+        // The last ring carries colour 2: the centre.
+        let SwatchOp::Ring { color, .. } = layers.clipped[1 + SWATCH_RINGS] else {
+            panic!("expected a ring");
+        };
+        assert!(color[2] > 0.9, "{color:?}");
+    }
+
+    #[test]
+    fn the_other_plans_keep_their_background_in_the_parent() {
+        for p in [
+            plan(GradientKind::Linear, false, 0.0, 0.0, 108.0, 58.0),
+            plan(GradientKind::Linear, false, f32::NAN, 0.0, 108.0, 58.0),
+            plan(GradientKind::Linear, false, 0.0, 0.0, 0.0, 0.0),
+        ] {
+            let layers = swatch_layers(&p);
+            assert!(layers.parent_background, "{p:?}");
+            assert!(layers.clipped.is_empty(), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_coloured_gradient_has_a_plan() {
+        use crate::scene::model::hatch_model::HatchPattern;
+        let gradient = HatchPattern::Gradient {
+            angle_deg: 0.0,
+            color2: C2,
+            kind: GradientKind::Spherical,
+            invert: false,
+            shift: 0.0,
+            one_color: false,
+            tint: 0.0,
+        };
+        let preview = HatchPatternPreview::new(gradient);
+        // No colour: the flat fill of before, background in the parent.
+        assert!(preview.gradient_plan(108.0, 58.0).is_none());
+        let plan = preview
+            .with_color(iced::Color::from_rgb(1.0, 0.0, 0.0))
+            .gradient_plan(108.0, 58.0);
+        assert!(matches!(plan, Some(SwatchGradient::Rings { .. })));
+        let solid = HatchPatternPreview::new(HatchPattern::Solid)
+            .with_color(iced::Color::from_rgb(1.0, 0.0, 0.0));
+        assert!(solid.gradient_plan(108.0, 58.0).is_none());
     }
 
     #[test]
