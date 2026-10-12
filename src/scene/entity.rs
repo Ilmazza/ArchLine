@@ -101,6 +101,36 @@ fn family_from_stored_line(
     }
 }
 
+/// Preserve the selected hue while moving its HSL lightness towards the
+/// persisted one-colour tint/shade target (0 = black, 1 = white).
+pub(crate) fn gradient_tint_color(base: [f32; 4], target: f32) -> [f32; 4] {
+    let max = base[0].max(base[1]).max(base[2]);
+    let min = base[0].min(base[1]).min(base[2]);
+    let lightness = (max + min) * 0.5;
+    let target = target.clamp(0.0, 1.0);
+    let mut result = base;
+    if target <= lightness {
+        let factor = if lightness > 1.0e-6 {
+            target / lightness
+        } else {
+            0.0
+        };
+        for channel in &mut result[..3] {
+            *channel *= factor;
+        }
+    } else {
+        let factor = if lightness < 1.0 - 1.0e-6 {
+            (target - lightness) / (1.0 - lightness)
+        } else {
+            1.0
+        };
+        for channel in &mut result[..3] {
+            *channel += (1.0 - *channel) * factor;
+        }
+    }
+    result
+}
+
 impl Scene {
     // ── Entity management ─────────────────────────────────────────────────
 
@@ -292,7 +322,8 @@ impl Scene {
         let facet_res = self.document.header.facet_resolution;
         let chordal_deflection =
             crate::entities::solid3d::display_deflection(&self.document.header, facet_res);
-        let isolines = crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
+        let isolines =
+            crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_)
@@ -576,7 +607,8 @@ impl Scene {
         let facet_res = self.document.header.facet_resolution;
         let chordal_deflection =
             crate::entities::solid3d::display_deflection(&self.document.header, facet_res);
-        let isolines = crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
+        let isolines =
+            crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
         let mesh_seed = if matches!(
             &entity,
             EntityType::Solid3D(_)
@@ -726,11 +758,12 @@ impl Scene {
             .iter()
             .filter(|handle| !self.solid_models.contains_key(handle))
             .filter_map(|&handle| {
-                let from_history = self
-                    .document
-                    .solid_history_operations(handle)
-                    .and_then(|operations| kernel::acis::rebuild_history(&operations).ok());
-                let body = from_history.or_else(|| match self.document.get_entity(handle) {
+                let tree = self.document.solid_history_tree(handle);
+                let rebuilt = || {
+                    tree.as_ref()
+                        .and_then(|tree| kernel::acis::rebuild_history_tree(tree).ok())
+                };
+                let stored = || match self.document.get_entity(handle) {
                     Some(EntityType::Solid3D(solid)) => {
                         crate::scene::convert::solid3d_tess::kernel_body(solid)
                     }
@@ -741,7 +774,14 @@ impl Scene {
                         crate::scene::convert::solid3d_tess::kernel_surface_body(surface)
                     }
                     _ => None,
-                })?;
+                };
+                // A composite's saved body is what its booleans produced;
+                // replaying them is for edits, not for reading the file.
+                let body = if tree.as_ref().is_some_and(|tree| tree.has_boolean()) {
+                    stored().or_else(rebuilt)
+                } else {
+                    rebuilt().or_else(stored)
+                }?;
                 Some((handle, body))
             })
             .collect();
@@ -805,7 +845,8 @@ impl Scene {
         let facet_res = self.document.header.facet_resolution;
         let chordal_deflection =
             crate::entities::solid3d::display_deflection(&self.document.header, facet_res);
-        let isolines = crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
+        let isolines =
+            crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
         use crate::par::prelude::*;
         let built: Vec<(Handle, MeshLodSet, bool)> = entries
             .into_par_iter()
@@ -906,6 +947,14 @@ impl Scene {
         &mut self,
         options: CreateBlockOptions,
     ) -> Result<Handle, String> {
+        // Base-point contract: the contents are stored *relative to the picked
+        // base* because `world_to_block` already subtracts it, so the
+        // definition's own `Block.base_point` stays ZERO and the picked base
+        // becomes the block origin (inserting at a point puts that point where
+        // the base was). Callers must not also store the picked base in the
+        // definition — that would subtract it twice. Imported definitions,
+        // whose geometry arrives relative to their own base point, keep that
+        // base point and are never rewritten here.
         let name = options.name.trim();
         if name.is_empty() {
             return Err("Block name cannot be empty.".into());
@@ -947,6 +996,11 @@ impl Scene {
             // Update existing Block entity fields
             if let Some(EntityType::Block(b)) = self.document.get_entity_mut(existing_blk_h) {
                 b.description = options.description.clone();
+                // The new contents are baked relative to the picked base (see
+                // the contract above), so the definition's base point has to
+                // go back to ZERO. Leaving an imported definition's non-zero
+                // base point here would subtract the picked base twice.
+                b.base_point = codec::types::Vector3::ZERO;
             }
             if options.annotative {
                 let annotative_vals = vec![codec::xdata::XDataValue::Integer16(1)];
@@ -1353,10 +1407,12 @@ impl Scene {
                     style.0 = crate::scene::view::render::adapt_to_bg(style.0, hatch_bg);
                     m.aci = style.4;
                     m.line_weight_px = style.3;
-                    // A gradient's colour is its first stop (already baked into
-                    // the cached model); only solid / pattern fills take the
-                    // entity's resolved colour.
-                    if !matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
+                    // Gradient RGB comes from its own colour stops, while
+                    // transparency remains an entity property shared by both
+                    // stops. Solid/pattern fills take the complete style.
+                    if matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
+                        m.set_alpha(style.0[3]);
+                    } else {
                         m.color = style.0;
                     }
                     if let EntityType::Hatch(dxf) = e {
@@ -1420,6 +1476,10 @@ impl Scene {
                             | model::hatch_model::HatchPattern::Solid => {}
                         }
                     }
+                }
+                m.color = self.count_color(handle, m.color, self.current_bg());
+                if let Some(b) = &mut backdrop {
+                    b.color = self.count_color(handle, b.color, self.current_bg());
                 }
                 if tint_selected && self.selected.contains(&handle) {
                     m.color = [0.15, 0.55, 1.00, m.color[3]];
@@ -1722,6 +1782,7 @@ impl Scene {
                         )
                     });
                 }
+                model.color = self.count_color(context.root_handle, model.color, hatch_bg);
                 if tint_selected && self.selected.contains(&context.root_handle) {
                     model.color = [0.15, 0.55, 1.00, model.color[3]];
                 }
@@ -1924,9 +1985,7 @@ impl Scene {
     /// Compute the 2D (XY) boundary polygon for a Wipeout entity.
     /// Wipeout fill boundary as small f32 offsets from the returned world_origin
     /// (the insertion point, kept in f64).
-    pub(super) fn wipeout_boundary_2d(
-        wo: &codec::entities::Wipeout,
-    ) -> ([f64; 2], Vec<[f32; 2]>) {
+    pub(super) fn wipeout_boundary_2d(wo: &codec::entities::Wipeout) -> ([f64; 2], Vec<[f32; 2]>) {
         let origin = [wo.insertion_point.x, wo.insertion_point.y];
         let plane = kernel::space::Plane::from_axes(
             [
@@ -2112,9 +2171,11 @@ impl Scene {
             let range = boundary.len()..boundary.len() + ring.len();
             boundary.extend(ring);
             local_boundary.extend(local_ring.iter().map(|&[x, y]| [x as f32, y as f32]));
-            if path.edges.iter().any(|edge| {
-                matches!(edge, codec::entities::BoundaryEdge::Spline(_))
-            }) {
+            if path
+                .edges
+                .iter()
+                .any(|edge| matches!(edge, codec::entities::BoundaryEdge::Spline(_)))
+            {
                 spline_paths.push((path, local_ring, range));
             }
             boundary_exterior.push(depth == 0);
@@ -2159,10 +2220,12 @@ impl Scene {
         let mut gradient_color1: Option<[f32; 4]> = None;
         let mut pattern = if dxf.gradient_color.is_enabled() {
             // The stops in colour 1 / colour 2 order (an inverted Linear
-            // one-colour gradient is stored swapped).
+            // one-colour gradient is stored swapped). Their alpha follows the
+            // hatch's own (its transparency), as for the other fills.
             let stops = crate::entities::hatch_fill::read_stops(dxf);
             let stop = |c: Option<codec::types::Color>| {
                 c.and_then(crate::entities::hatch_fill::rgba_of)
+                    .map(|rgba| [rgba[0], rgba[1], rgba[2], color[3]])
             };
             gradient_color1 = stop(stops.color1);
             let color1 = gradient_color1.unwrap_or(color);
@@ -2172,6 +2235,7 @@ impl Scene {
                 crate::entities::hatch_fill::rgba_of(
                     crate::entities::hatch_fill::tinted_second_color(color1, tint),
                 )
+                .map(|rgba| [rgba[0], rgba[1], rgba[2], color1[3]])
                 .unwrap_or(color1)
             } else {
                 stop(stops.color2).unwrap_or(color)
@@ -2327,21 +2391,30 @@ impl Scene {
         }
         let project = |point: [f64; 2]| {
             let [x, y] = to_xy(point[0], point[1]);
-            [(x - world_origin[0]) as f32 as f64, (y - world_origin[1]) as f32 as f64]
+            [
+                (x - world_origin[0]) as f32 as f64,
+                (y - world_origin[1]) as f32 as f64,
+            ]
         };
         for (path, ring, range) in spline_paths.into_iter().rev() {
             if range.end > boundary.len() {
                 continue;
             }
-            let curves = || path.edges.iter().filter_map(crate::entities::hatch::edge_curve).collect();
-            if let Some(refined) =
-                kernel::geom2d::refine_spline_boundary(&ring, curves, &project)
-            {
+            let curves = || {
+                path.edges
+                    .iter()
+                    .filter_map(crate::entities::hatch::edge_curve)
+                    .collect()
+            };
+            if let Some(refined) = kernel::geom2d::refine_spline_boundary(&ring, curves, &project) {
                 if boundary.len() - range.len() + refined.len() > MAX_HATCH_MODEL_VERTS {
                     continue;
                 }
                 boundary.splice(range.clone(), refined.iter().map(|p| to_xy(p[0], p[1])));
-                local_boundary.splice(range, refined.into_iter().map(|[x, y]| [x as f32, y as f32]));
+                local_boundary.splice(
+                    range,
+                    refined.into_iter().map(|[x, y]| [x as f32, y as f32]),
+                );
             }
         }
 
@@ -2399,6 +2472,29 @@ impl Scene {
     pub fn populate_images_from_document(&mut self) {
         self.populate_images_from_document_unbumped();
         self.bump_geometry();
+    }
+
+    /// Web drop flow: `names` are raster files whose bytes were just
+    /// registered (name-keyed). When this drawing references one of them by
+    /// name but carries no model for it — the reference pointed at the
+    /// author's machine and was unresolvable at open time — rebuild the image
+    /// models so the entity finally renders. Returns whether a rebuild ran.
+    pub fn resolve_registered_image_names(&mut self, names: &[String]) -> bool {
+        let matches_name = |img: &codec::entities::RasterImage| {
+            names
+                .iter()
+                .any(|name| crate::scene::model::image_model::same_file_name(&img.file_path, name))
+        };
+        let unresolved = self.document.entities().any(|entity| match entity {
+            EntityType::RasterImage(img) => {
+                matches_name(img) && !self.images.contains_key(&img.common.handle)
+            }
+            _ => false,
+        });
+        if unresolved {
+            self.populate_images_from_document();
+        }
+        unresolved
     }
 
     fn populate_images_from_document_unbumped(&mut self) {
@@ -2551,7 +2647,8 @@ impl Scene {
                 Some(codec::objects::ObjectType::UnderlayDefinition(def)) => {
                     // A paper-space underlay adjusts to the sheet, not the canvas.
                     let owner = u.common.owner_handle;
-                    let background = if owner.is_null() || owner == self.model_space_block_handle() {
+                    let background = if owner.is_null() || owner == self.model_space_block_handle()
+                    {
                         self.bg_color
                     } else {
                         self.paper_bg_color
@@ -2586,6 +2683,10 @@ impl Scene {
         if !incremental {
             self.meshes.clear();
             self.block_meshes.clear();
+            // The B-rep cache follows the entities too: an undo that rebuilds
+            // everything left the undone fillet's body here, and the next
+            // edge operation brought it back (#1107). Restored on demand.
+            self.solid_models.clear();
         }
         // BLOCK-entity handles of the layout (model + paper) blocks. A solid
         // owned by one of these is top-level; anything else lives in a block
@@ -2637,7 +2738,8 @@ impl Scene {
         let facet_res = self.document.header.facet_resolution;
         let chordal_deflection =
             crate::entities::solid3d::display_deflection(&self.document.header, facet_res);
-        let isolines = crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
+        let isolines =
+            crate::entities::solid3d::clamp_header_isolines(self.document.header.isolines);
         // Top-level solids: offset into the render frame, drawn flat.
         // Block-definition solids: keep block-local coords for per-INSERT
         // instancing (no offset applied here).
@@ -3014,6 +3116,8 @@ impl Scene {
     /// standard linetypes and a compatible page setup on every paper layout.
     pub fn populate_new_drawing_defaults(&mut self) {
         crate::io::linetypes::populate_document(&mut self.document);
+        // The visual styles of the reference's new drawing.
+        crate::io::visual_styles::populate_document(&mut self.document);
         // A new drawing is metric, as the reference's new drawing: metre
         // insertion units, metric measurement, and the ISO-25 dimension style
         // current. Standard stays available for imperial work.
@@ -3077,7 +3181,14 @@ mod gradient_fill_tests {
     #[test]
     fn a_one_colour_gradient_persists_the_flag_the_tint_and_the_tinted_stop() {
         let base = model();
-        let HatchPattern::Gradient { angle_deg, kind, invert, shift, .. } = base.pattern.clone() else {
+        let HatchPattern::Gradient {
+            angle_deg,
+            kind,
+            invert,
+            shift,
+            ..
+        } = base.pattern.clone()
+        else {
             panic!("a gradient")
         };
         // The model's first colour is a whole-byte colour, as a stored stop is.
@@ -3107,24 +3218,46 @@ mod gradient_fill_tests {
         assert_eq!(h.gradient_color.colors[1].color, tinted);
         // The rebuilt model agrees.
         let rebuilt = scene.hatches.get(&handle).expect("model");
-        let HatchPattern::Gradient { one_color, tint, color2, .. } = &rebuilt.pattern else {
+        let HatchPattern::Gradient {
+            one_color,
+            tint,
+            color2,
+            ..
+        } = &rebuilt.pattern
+        else {
             panic!("rebuilt as a gradient")
         };
         assert!(*one_color);
         assert_eq!(*tint, 0.25);
-        assert_eq!(*color2, rgba_of(tinted).unwrap(), "the same second colour, to the bit");
+        assert_eq!(
+            *color2,
+            rgba_of(tinted).unwrap(),
+            "the same second colour, to the bit"
+        );
     }
 
     #[test]
     fn the_kind_and_inversion_survive_the_round_trip() {
         let base = model();
-        let HatchPattern::Gradient { angle_deg, color2, shift, one_color, tint, .. } = base.pattern.clone() else {
+        let HatchPattern::Gradient {
+            angle_deg,
+            color2,
+            shift,
+            one_color,
+            tint,
+            ..
+        } = base.pattern.clone()
+        else {
             panic!("a gradient")
         };
         let inverted = with_pattern(
             base,
             HatchPattern::Gradient {
-                angle_deg, color2, shift, one_color, tint,
+                angle_deg,
+                color2,
+                shift,
+                one_color,
+                tint,
                 kind: GradientKind::Cylinder,
                 invert: true,
             },
@@ -3134,8 +3267,17 @@ mod gradient_fill_tests {
         assert_eq!(stored(&scene, handle).gradient_color.name, "INVCYLINDER");
     }
 
-    fn linear(model: HatchModel, color1: [f32; 4], color2: [f32; 4], one_color: bool, tint: f32) -> HatchModel {
-        let HatchPattern::Gradient { angle_deg, shift, .. } = model.pattern.clone() else {
+    fn linear(
+        model: HatchModel,
+        color1: [f32; 4],
+        color2: [f32; 4],
+        one_color: bool,
+        tint: f32,
+    ) -> HatchModel {
+        let HatchPattern::Gradient {
+            angle_deg, shift, ..
+        } = model.pattern.clone()
+        else {
             panic!("a gradient")
         };
         let mut m = with_pattern(
@@ -3161,7 +3303,15 @@ mod gradient_fill_tests {
         let mut scene = Scene::new();
         let handle = scene.add_hatch(linear(model(), color1, tinted, true, 0.25), None, None);
         let rebuilt = scene.hatches.get(&handle).expect("model");
-        let HatchPattern::Gradient { one_color, tint, color2, invert, kind, .. } = &rebuilt.pattern else {
+        let HatchPattern::Gradient {
+            one_color,
+            tint,
+            color2,
+            invert,
+            kind,
+            ..
+        } = &rebuilt.pattern
+        else {
             panic!("rebuilt as a gradient")
         };
         assert_eq!(rebuilt.color, color1);
@@ -3178,7 +3328,10 @@ mod gradient_fill_tests {
         let mut scene = Scene::new();
         let handle = scene.add_hatch(linear(model(), c1, c2, false, 1.0), None, None);
         let rebuilt = scene.hatches.get(&handle).expect("model");
-        let HatchPattern::Gradient { color2, one_color, .. } = &rebuilt.pattern else {
+        let HatchPattern::Gradient {
+            color2, one_color, ..
+        } = &rebuilt.pattern
+        else {
             panic!("rebuilt as a gradient")
         };
         assert!(!*one_color);
@@ -3193,18 +3346,31 @@ mod gradient_fill_tests {
         let mut scene = Scene::new();
         let handle = scene.add_hatch(model(), None, None);
         let mut dxf = stored(&scene, handle);
-        let stop0 = codec::types::Color::Rgb { r: 10, g: 20, b: 30 };
+        let stop0 = codec::types::Color::Rgb {
+            r: 10,
+            g: 20,
+            b: 30,
+        };
         let stop1 = codec::types::Color::Rgb { r: 200, g: 0, b: 0 };
         dxf.gradient_color.is_single_color = true;
         dxf.gradient_color.color_tint = 0.25;
         dxf.gradient_color.colors[0].color = stop0;
         dxf.gradient_color.colors[1].color = stop1;
         let rebuilt = Scene::hatch_model_from_dxf(&dxf, [1.0; 4]).expect("model");
-        let HatchPattern::Gradient { color2, invert, one_color, .. } = &rebuilt.pattern else {
+        let HatchPattern::Gradient {
+            color2,
+            invert,
+            one_color,
+            ..
+        } = &rebuilt.pattern
+        else {
             panic!("a gradient")
         };
         assert_eq!(rebuilt.color, rgba_of(stop0).unwrap());
         assert!(!*invert && *one_color);
-        assert_eq!(*color2, rgba_of(tinted_second_color(rgba_of(stop0).unwrap(), 0.25)).unwrap());
+        assert_eq!(
+            *color2,
+            rgba_of(tinted_second_color(rgba_of(stop0).unwrap(), 0.25)).unwrap()
+        );
     }
 }

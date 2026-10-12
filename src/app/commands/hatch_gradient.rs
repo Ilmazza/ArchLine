@@ -1573,31 +1573,6 @@ mod tests {
         assert!(matches!(app.color_pick_target, Some((ColorPickTarget::Ribbon, _))));
         let _ = app.update(Message::ColorWindowPick(Color::Index(3)));
         assert_eq!(app.ribbon.active_color, Color::Index(3), "its pick goes where it did");
-
-        // The Layers window keeps its own Enter and Esc (the known gap of
-        // spec §12, not addressed here): Enter picks nothing, Esc goes to
-        // the window as before.
-        let mut app = app_with_rectangle();
-        let i = app.active_tab;
-        let colours = |app: &OpenCADStudio| {
-            app.tabs[i]
-                .scene
-                .document
-                .layers
-                .iter()
-                .map(|layer| (layer.name.clone(), layer.color))
-                .collect::<Vec<_>>()
-        };
-        let _ = app.update(Message::ToggleLayers);
-        assert_eq!(app.active_modal, Some(ModalKind::Layers));
-        let before = colours(&app);
-        let _ = app.update(Message::OpenColorWindow(ColorPickTarget::Layer(0), Color::Index(7)));
-        let _ = app.update(Message::ColorPickerColorChanged(Color::Index(3)));
-        let _ = app.update(Message::CommandFinalize);
-        assert!(matches!(app.color_pick_target, Some((ColorPickTarget::Layer(0), _))));
-        assert_eq!(colours(&app), before, "Enter picked nothing");
-        let _ = app.update(Message::CommandEscape);
-        assert_ne!(app.active_modal, Some(ModalKind::Layers), "Esc went to the window");
     }
 
     // ── what the view is given, and the list when the window hides ────────

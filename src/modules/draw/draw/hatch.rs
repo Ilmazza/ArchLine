@@ -1,17 +1,17 @@
 // Hatch, gradient, and boundary commands.
 
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
+use crate::modules::draw::draw::hatch_settings::{
+    add_region, HatchRegion, RegionOrigin, ResolvedFill, ResolvedSettings,
+};
 use crate::modules::IconKind;
 use crate::scene::model::hatch_model::{HatchModel, HatchPattern, PatFamily};
 use crate::scene::model::wire_model::WireModel;
+use crate::t;
 use codec::Handle;
+use glam::DVec3;
 use kernel::geom2d::{
     bounded_faces, contains, ring_nesting_depths, signed_area, Circle, Curve, Line, Tolerance,
-};
-use glam::DVec3;
-use crate::t;
-use crate::modules::draw::draw::hatch_settings::{
-    add_region, HatchRegion, RegionOrigin, ResolvedFill, ResolvedSettings,
 };
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -105,10 +105,7 @@ fn polygon_contains_polygon(outer: &[[f64; 2]], inner: &[[f64; 2]]) -> bool {
 }
 
 /// Resolve the innermost clicked ring and its direct holes.
-fn resolve_hatch_rings(
-    outlines: &[Vec<[f64; 2]>],
-    p: [f64; 2],
-) -> Option<Vec<Vec<[f64; 2]>>> {
+fn resolve_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Vec<[f64; 2]>>> {
     let mut containing: Vec<(usize, f64)> = outlines
         .iter()
         .enumerate()
@@ -238,9 +235,7 @@ fn retain_rings(buffer: &[[f32; 2]], keep: &[bool]) -> Vec<[f32; 2]> {
 fn filter_rendered_rings(model: &mut HatchModel, depths: &[usize]) {
     let keep: Vec<bool> = depths
         .iter()
-        .map(|&depth| {
-            crate::scene::model::hatch_model::island_ring_kept(model.style, depth)
-        })
+        .map(|&depth| crate::scene::model::hatch_model::island_ring_kept(model.style, depth))
         .collect();
     if keep.iter().all(|&kept| kept) {
         return;
@@ -282,11 +277,7 @@ pub struct HatchCommand {
     associative: bool,
     separate_hatches: bool,
     island_style: codec::entities::HatchStyleType,
-    inherited: Option<(
-        HatchModel,
-        codec::types::Color,
-        codec::types::Transparency,
-    )>,
+    inherited: Option<(HatchModel, codec::types::Color, codec::types::Transparency)>,
     plane: WorkingPlane,
     /// The HATCH dialog's collector: Enter hands the regions back instead of
     /// committing a hatch, and the settings keywords belong to the dialog.
@@ -306,11 +297,7 @@ impl HatchCommand {
         outlines: Vec<Vec<[f64; 2]>>,
         boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
         selected_objects: Vec<Handle>,
-        inherited: Option<(
-            HatchModel,
-            codec::types::Color,
-            codec::types::Transparency,
-        )>,
+        inherited: Option<(HatchModel, codec::types::Color, codec::types::Transparency)>,
         plane: WorkingPlane,
     ) -> Self {
         let selected_objects: Vec<_> = selected_objects
@@ -356,7 +343,19 @@ impl HatchCommand {
         command
     }
 
-    pub fn with_origin(mut self, origin: [f64; 2]) -> Self { self.default_origin = origin; self }
+    pub fn with_origin(mut self, origin: [f64; 2]) -> Self {
+        self.default_origin = origin;
+        self
+    }
+
+    pub fn with_pattern(mut self, name: impl Into<String>, pattern: HatchPattern) -> Self {
+        self.pattern_override = Some((name.into(), pattern));
+        self
+    }
+
+    pub fn finish_selected(mut self) -> CmdResult {
+        self.on_enter()
+    }
 
     /// The colour and transparency the hatch is made with (the app resolves
     /// "Use Current"). `None`: as always, the entity takes the defaults.
@@ -399,7 +398,12 @@ impl HatchCommand {
     /// `P`, `A`, `L`, `N`, `D`, `B` and `Y`.
     pub fn with_settings(mut self, settings: &ResolvedSettings) -> Self {
         match &settings.fill {
-            ResolvedFill::Hatch { pattern, angle_rad, scale, .. } => {
+            ResolvedFill::Hatch {
+                pattern,
+                angle_rad,
+                scale,
+                ..
+            } => {
                 let entry = crate::scene::model::hatch_patterns::find(pattern);
                 self.pattern_override = entry.map(|entry| (entry.name.clone(), entry.gpu.clone()));
                 self.angle_override = Some(*angle_rad);
@@ -607,12 +611,8 @@ impl HatchCommand {
             .iter()
             .map(|ring| crate::scene::ring_source_handles(ring, &self.boundary_sources))
             .collect();
-        let mut boundary_paths = crate::scene::exact_hatch_paths(
-            &rings,
-            &exterior,
-            &self.boundary_sources,
-            1.0e-6,
-        );
+        let mut boundary_paths =
+            crate::scene::exact_hatch_paths(&rings, &exterior, &self.boundary_sources, 1.0e-6);
         if !self.associative {
             for handles in &mut boundary_sources {
                 handles.clear();
@@ -657,12 +657,10 @@ impl HatchCommand {
                 let (sin, cos) = angle.sin_cos();
                 for family in families {
                     let base_x = source.world_origin[0]
-                        + (family.x0 as f64 * cos as f64
-                            - family.y0 as f64 * sin as f64)
+                        + (family.x0 as f64 * cos as f64 - family.y0 as f64 * sin as f64)
                             * scale as f64;
                     let base_y = source.world_origin[1]
-                        + (family.x0 as f64 * sin as f64
-                            + family.y0 as f64 * cos as f64)
+                        + (family.x0 as f64 * sin as f64 + family.y0 as f64 * cos as f64)
                             * scale as f64;
                     let dx = base_x - origin[0];
                     let dy = base_y - origin[1];
@@ -720,7 +718,9 @@ impl HatchCommand {
             .unwrap_or_else(|| (pat_name.to_string(), default_pattern));
         let angle = self.angle_override.unwrap_or(0.0);
         let scale = self.scale_override.unwrap_or(1.0).max(1.0e-6);
-        if let (HatchPattern::Pattern(families), Some(anchor)) = (&mut pattern, local_boundary.first()) {
+        if let (HatchPattern::Pattern(families), Some(anchor)) =
+            (&mut pattern, local_boundary.first())
+        {
             let (sin, cos) = (angle as f64).sin_cos();
             let dx = self.default_origin[0] - anchor[0] as f64;
             let dy = self.default_origin[1] - anchor[1] as f64;
@@ -893,11 +893,19 @@ impl CadCommand for HatchCommand {
                         "B",
                     ),
                     CmdOption::new(
-                        if self.associative { "Associative: on" } else { "Associative: off" },
+                        if self.associative {
+                            "Associative: on"
+                        } else {
+                            "Associative: off"
+                        },
                         "N",
                     ),
                     CmdOption::new(
-                        if self.separate_hatches { "Separate hatches: on" } else { "Separate hatches: off" },
+                        if self.separate_hatches {
+                            "Separate hatches: on"
+                        } else {
+                            "Separate hatches: off"
+                        },
                         "D",
                     ),
                     CmdOption::new(
@@ -923,11 +931,19 @@ impl CadCommand for HatchCommand {
                         "B",
                     ),
                     CmdOption::new(
-                        if self.associative { "Associative: on" } else { "Associative: off" },
+                        if self.associative {
+                            "Associative: on"
+                        } else {
+                            "Associative: off"
+                        },
                         "N",
                     ),
                     CmdOption::new(
-                        if self.separate_hatches { "Separate hatches: on" } else { "Separate hatches: off" },
+                        if self.separate_hatches {
+                            "Separate hatches: on"
+                        } else {
+                            "Separate hatches: off"
+                        },
                         "D",
                     ),
                     CmdOption::new(
@@ -941,12 +957,10 @@ impl CadCommand for HatchCommand {
                 options
             }
             HatchMode::Manual => {
-                let mut options = vec![
-                    CmdOption::new(
-                        if self.manual_arc_mode { "Line" } else { "Arc" },
-                        if self.manual_arc_mode { "L" } else { "A" },
-                    ),
-                ];
+                let mut options = vec![CmdOption::new(
+                    if self.manual_arc_mode { "Line" } else { "Arc" },
+                    if self.manual_arc_mode { "L" } else { "A" },
+                )];
                 if self.manual_pts.len() >= 3 {
                     options.push(CmdOption::new("Close", "C"));
                     options.push(CmdOption::enter(t!("Accept").as_ref()));
@@ -1195,7 +1209,8 @@ impl CadCommand for HatchCommand {
         }
     }
 
-    fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> { let pt = pt.as_vec3();
+    fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
+        let pt = pt.as_vec3();
         if let HatchMode::Manual = &self.mode {
             if self.manual_pts.is_empty() {
                 return None;
@@ -1258,12 +1273,8 @@ impl GradientCommand {
             .iter()
             .map(|ring| crate::scene::ring_source_handles(ring, &self.boundary_sources))
             .collect();
-        let boundary_paths = crate::scene::exact_hatch_paths(
-            &rings,
-            &exterior,
-            &self.boundary_sources,
-            1.0e-6,
-        );
+        let boundary_paths =
+            crate::scene::exact_hatch_paths(&rings, &exterior, &self.boundary_sources, 1.0e-6);
         HatchModel {
             pattern_origin: None,
             render_instance: None,
@@ -1332,9 +1343,7 @@ impl CadCommand for GradientCommand {
         match &self.mode {
             Mode::PickInside => {
                 let mut opts = vec![CmdOption::new("Draw manually", "S")];
-                for (kind, inverted) in
-                    crate::scene::model::hatch_model::GradientKind::CHOICES
-                {
+                for (kind, inverted) in crate::scene::model::hatch_model::GradientKind::CHOICES {
                     if kind != self.kind || inverted != self.invert {
                         let label = kind.choice_label(inverted);
                         opts.push(CmdOption::new(label, label));
@@ -1414,7 +1423,8 @@ impl CadCommand for GradientCommand {
         None
     }
 
-    fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> { let pt = pt.as_vec3();
+    fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
+        let pt = pt.as_vec3();
         if let Mode::Manual = &self.mode {
             if self.manual_pts.is_empty() {
                 return None;
@@ -1505,7 +1515,12 @@ impl BoundaryCommand {
         let restrict_sources = !handles.is_empty();
         let selected_sources: rustc_hash::FxHashMap<_, _> = handles
             .iter()
-            .filter_map(|handle| self.sources.get(handle).cloned().map(|source| (*handle, source)))
+            .filter_map(|handle| {
+                self.sources
+                    .get(handle)
+                    .cloned()
+                    .map(|source| (*handle, source))
+            })
             .collect();
         self.active_sources = selected_sources;
         self.restrict_sources = restrict_sources;
@@ -1577,8 +1592,7 @@ impl BoundaryCommand {
             {
                 continue;
             }
-            if self.island_style == BoundaryIslandStyle::Outer
-                && candidate_depth != outer_depth + 1
+            if self.island_style == BoundaryIslandStyle::Outer && candidate_depth != outer_depth + 1
             {
                 continue;
             }
@@ -1588,7 +1602,11 @@ impl BoundaryCommand {
     }
 
     fn add_point_region(&mut self, region: Vec<Vec<[f64; 2]>>) {
-        if !self.point_regions.iter().any(|existing| existing == &region) {
+        if !self
+            .point_regions
+            .iter()
+            .any(|existing| existing == &region)
+        {
             self.point_regions.push(region);
         }
     }
@@ -1600,13 +1618,15 @@ impl BoundaryCommand {
             &self.sources
         };
         if self.output_region {
-            return self.point_regions.iter().filter_map(|rings| {
-                crate::scene::model::presspull_model::boundary_region(
-                    sources,
-                    rings,
-                    self.plane,
-                )
-            }).collect();
+            return self
+                .point_regions
+                .iter()
+                .filter_map(|rings| {
+                    crate::scene::model::presspull_model::boundary_region(
+                        sources, rings, self.plane,
+                    )
+                })
+                .collect();
         }
         crate::scene::boundary_polyline_entities(
             &self.point_regions,
@@ -1632,23 +1652,35 @@ impl CadCommand for BoundaryCommand {
             BoundaryMode::PickInside => {
                 format!("BOUNDARY  Specify internal point or [Advanced options]:{miss}")
             }
-            BoundaryMode::Advanced=>"BOUNDARY  Enter an option [Object type]:".into(),
-            BoundaryMode::ObjectType=>format!("BOUNDARY  Enter type of boundary object [Region/Polyline] <{}>:",if self.output_region{"Region"}else{"Polyline"}),
+            BoundaryMode::Advanced => "BOUNDARY  Enter an option [Object type]:".into(),
+            BoundaryMode::ObjectType => format!(
+                "BOUNDARY  Enter type of boundary object [Region/Polyline] <{}>:",
+                if self.output_region {
+                    "Region"
+                } else {
+                    "Polyline"
+                }
+            ),
             BoundaryMode::SelectObjects => {
                 t!("%{cmd}  Select objects:", cmd = self.name()).into_owned()
             }
-            BoundaryMode::GapTolerance { .. } => format!(
-                "BOUNDARY  {} <{}>:",
-                t!("Tolerance"),
-                self.gap_tolerance
-            ),
+            BoundaryMode::GapTolerance { .. } => {
+                format!("BOUNDARY  {} <{}>:", t!("Tolerance"), self.gap_tolerance)
+            }
         }
     }
 
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
-        if self.mode==BoundaryMode::Advanced {return vec![CmdOption::new("Object type","O")];}
-        if self.mode==BoundaryMode::ObjectType {return vec![CmdOption::new("Region","R"),CmdOption::new("Polyline","P")];}
+        if self.mode == BoundaryMode::Advanced {
+            return vec![CmdOption::new("Object type", "O")];
+        }
+        if self.mode == BoundaryMode::ObjectType {
+            return vec![
+                CmdOption::new("Region", "R"),
+                CmdOption::new("Polyline", "P"),
+            ];
+        }
         if matches!(self.mode, BoundaryMode::GapTolerance { .. }) {
             return Vec::new();
         }
@@ -1687,9 +1719,18 @@ impl CadCommand for BoundaryCommand {
     }
 
     fn on_enter(&mut self) -> CmdResult {
-        if self.mode==BoundaryMode::ObjectType {self.mode=BoundaryMode::Advanced;return CmdResult::NeedPoint;}
-        if self.mode==BoundaryMode::Advanced {self.mode=BoundaryMode::PickInside;return CmdResult::NeedPoint;}
-        if let BoundaryMode::GapTolerance { return_to_selection } = self.mode {
+        if self.mode == BoundaryMode::ObjectType {
+            self.mode = BoundaryMode::Advanced;
+            return CmdResult::NeedPoint;
+        }
+        if self.mode == BoundaryMode::Advanced {
+            self.mode = BoundaryMode::PickInside;
+            return CmdResult::NeedPoint;
+        }
+        if let BoundaryMode::GapTolerance {
+            return_to_selection,
+        } = self.mode
+        {
             self.mode = if return_to_selection {
                 BoundaryMode::SelectObjects
             } else {
@@ -1730,19 +1771,28 @@ impl CadCommand for BoundaryCommand {
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
-        if self.mode==BoundaryMode::Advanced {
-            if matches!(text.trim().to_ascii_uppercase().as_str(),"O"|"OBJECT"|"OBJECT TYPE") {self.mode=BoundaryMode::ObjectType;}
+        if self.mode == BoundaryMode::Advanced {
+            if matches!(
+                text.trim().to_ascii_uppercase().as_str(),
+                "O" | "OBJECT" | "OBJECT TYPE"
+            ) {
+                self.mode = BoundaryMode::ObjectType;
+            }
             return Some(CmdResult::NeedPoint);
         }
-        if self.mode==BoundaryMode::ObjectType {
-            match text.trim().to_ascii_uppercase().as_str(){
-                "R"|"REGION"=>self.output_region=true,
-                "P"|"POLYLINE"=>self.output_region=false,
-                _=>return Some(CmdResult::NeedPoint),
+        if self.mode == BoundaryMode::ObjectType {
+            match text.trim().to_ascii_uppercase().as_str() {
+                "R" | "REGION" => self.output_region = true,
+                "P" | "POLYLINE" => self.output_region = false,
+                _ => return Some(CmdResult::NeedPoint),
             }
-            self.mode=BoundaryMode::Advanced;return Some(CmdResult::NeedPoint);
+            self.mode = BoundaryMode::Advanced;
+            return Some(CmdResult::NeedPoint);
         }
-        if let BoundaryMode::GapTolerance { return_to_selection } = self.mode {
+        if let BoundaryMode::GapTolerance {
+            return_to_selection,
+        } = self.mode
+        {
             if let Ok(value) = text.trim().parse::<f64>() {
                 if value.is_finite() && value > 0.0 {
                     self.gap_tolerance = value;
@@ -1757,7 +1807,7 @@ impl CadCommand for BoundaryCommand {
             return Some(CmdResult::NeedPoint);
         }
         match text.trim().to_ascii_uppercase().as_str() {
-            "A"|"ADVANCED"=>self.mode=BoundaryMode::Advanced,
+            "A" | "ADVANCED" => self.mode = BoundaryMode::Advanced,
             "O" | "OBJECT" | "OBJECTS" => {
                 self.mode = BoundaryMode::SelectObjects;
                 self.missed = false;
@@ -1866,9 +1916,15 @@ impl CadCommand for BoundaryCommand {
 }
 
 // ── Autocomplete registry ─────────────────────────────────
-inventory::submit!(crate::command::CommandRegistration { names: &["BOUNDARY"] });  // BoundaryCommand
-inventory::submit!(crate::command::CommandRegistration { names: &["GRADIENT", "-GRADIENT"] });  // GradientCommand
-inventory::submit!(crate::command::CommandRegistration { names: &["HATCH", "-HATCH"] });  // HatchCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["BOUNDARY"]
+}); // BoundaryCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["GRADIENT", "-GRADIENT"]
+}); // GradientCommand
+inventory::submit!(crate::command::CommandRegistration {
+    names: &["HATCH", "-HATCH"]
+}); // HatchCommand
 
 #[cfg(test)]
 mod tests {
@@ -1944,21 +2000,33 @@ mod tests {
         let rings = resolve_hatch_rings(&[a, b, c], [20.0, 0.0]).unwrap();
         assert_eq!(rings.len(), 2, "outer band = a with b as its only hole");
         assert!((rings[0][0][0] - (-30.0)).abs() < 1e-9, "outer ring is a");
-        assert!((rings[1][0][0] - (-15.0)).abs() < 1e-9, "hole is direct child b");
+        assert!(
+            (rings[1][0][0] - (-15.0)).abs() < 1e-9,
+            "hole is direct child b"
+        );
     }
 
     #[test]
     fn boundary_region_keeps_a_selected_hole_in_one_entity() {
         let rings = vec![rect(-10.0, -10.0, 10.0, 10.0), rect(-2.0, -2.0, 2.0, 2.0)];
-        let segments: Vec<Line> = rings.iter().flat_map(|ring| {
-            ring.iter().copied().zip(ring.iter().copied().cycle().skip(1))
-                .take(ring.len()).map(|(start, end)| Line { start, end })
-        }).collect();
+        let segments: Vec<Line> = rings
+            .iter()
+            .flat_map(|ring| {
+                ring.iter()
+                    .copied()
+                    .zip(ring.iter().copied().cycle().skip(1))
+                    .take(ring.len())
+                    .map(|(start, end)| Line { start, end })
+            })
+            .collect();
         let mut sources = rustc_hash::FxHashMap::default();
-        sources.insert(Handle::new(1), crate::scene::BoundarySource {
-            curves: segments.iter().cloned().map(Curve::Line).collect(),
-            segments,
-        });
+        sources.insert(
+            Handle::new(1),
+            crate::scene::BoundarySource {
+                curves: segments.iter().cloned().map(Curve::Line).collect(),
+                segments,
+            },
+        );
         let mut command = BoundaryCommand::new(sources, Vec::new(), WorkingPlane::default());
         command.point_regions = vec![rings];
         command.output_region = true;
@@ -2017,7 +2085,13 @@ mod tests {
     #[test]
     fn with_settings_follows_the_tab_and_never_mixes_the_two_fills() {
         let command = || {
-            HatchCommand::new(Vec::new(), Default::default(), Vec::new(), None, WorkingPlane::default())
+            HatchCommand::new(
+                Vec::new(),
+                Default::default(),
+                Vec::new(),
+                None,
+                WorkingPlane::default(),
+            )
         };
         let mut gradient_settings = HatchSettings {
             tab: FillTab::Gradient,
@@ -2036,7 +2110,13 @@ mod tests {
 
         let by_pattern = command().with_settings(&hatch_resolved);
         assert!(by_pattern.gradient.is_none());
-        assert_eq!(by_pattern.pattern_override.as_ref().map(|(n, _)| n.as_str()), Some("ANSI31"));
+        assert_eq!(
+            by_pattern
+                .pattern_override
+                .as_ref()
+                .map(|(n, _)| n.as_str()),
+            Some("ANSI31")
+        );
         assert_eq!(by_pattern.angle_override, Some(0.0));
         assert_eq!(by_pattern.scale_override, Some(1.0));
 
@@ -2077,15 +2157,10 @@ mod tests {
         let region = HatchRegion {
             rings: resolve_hatch_rings(&rings, [0.0, 0.0]).unwrap(),
         };
-        let mut dialog = HatchCommand::new(
-            rings,
-            sources,
-            Vec::new(),
-            None,
-            WorkingPlane::default(),
-        )
-        .with_settings(&resolved)
-        .with_regions(vec![region]);
+        let mut dialog =
+            HatchCommand::new(rings, sources, Vec::new(), None, WorkingPlane::default())
+                .with_settings(&resolved)
+                .with_regions(vec![region]);
         let got = committed(dialog.on_enter());
 
         assert_eq!(got.name, expected.name);
@@ -2101,10 +2176,7 @@ mod tests {
 
     #[test]
     fn separate_setting_commits_one_hatch_per_region() {
-        let rings = vec![
-            rect(0.0, 0.0, 10.0, 10.0),
-            rect(30.0, 0.0, 40.0, 10.0),
-        ];
+        let rings = vec![rect(0.0, 0.0, 10.0, 10.0), rect(30.0, 0.0, 40.0, 10.0)];
         let resolved = {
             let mut settings = HatchSettings::default();
             settings.set_separate(true);
@@ -2241,8 +2313,7 @@ mod tests {
         let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
         let sources = sources_for(&rings);
         let handle = *sources.keys().next().unwrap();
-        let mut command =
-            HatchCommand::collecting(rings, sources, WorkingPlane::default(), true);
+        let mut command = HatchCommand::collecting(rings, sources, WorkingPlane::default(), true);
         let _ = command.on_selection_complete(vec![handle]);
         match command.on_enter() {
             CmdResult::HatchBoundariesPicked { regions, objects } => {
@@ -2398,11 +2469,7 @@ mod tests {
     /// Half-sizes of the three nested squares, in the orders they are given
     /// (the second and third put the outer square somewhere other than first,
     /// so a filter that just keeps "the first N" is caught).
-    const NESTING_ORDERS: [[f64; 3]; 3] = [
-        [30.0, 15.0, 5.0],
-        [15.0, 30.0, 5.0],
-        [5.0, 15.0, 30.0],
-    ];
+    const NESTING_ORDERS: [[f64; 3]; 3] = [[30.0, 15.0, 5.0], [15.0, 30.0, 5.0], [5.0, 15.0, 30.0]];
 
     /// The rings of a NaN-separated buffer, one vector each.
     fn split_rings(buffer: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {
@@ -2490,12 +2557,15 @@ mod tests {
             .collect();
         let expected_local: Vec<Vec<[f32; 2]>> = kept
             .iter()
-            .map(|&i| rings[i].iter().map(|&[x, y]| [x as f32, y as f32]).collect())
+            .map(|&i| {
+                rings[i]
+                    .iter()
+                    .map(|&[x, y]| [x as f32, y as f32])
+                    .collect()
+            })
             .collect();
-        let expected_exterior: Vec<bool> = kept
-            .iter()
-            .map(|&i| square_depth(halves[i]) == 0)
-            .collect();
+        let expected_exterior: Vec<bool> =
+            kept.iter().map(|&i| square_depth(halves[i]) == 0).collect();
         // Outer must leave two rings, Ignore one, Normal all three.
         let survivors = match style {
             HatchStyleType::Normal => 3,
@@ -2505,7 +2575,11 @@ mod tests {
         assert_eq!(kept.len(), survivors, "{label}");
 
         let local_buffer = model.fill_plane_boundary.as_ref().unwrap();
-        assert_eq!(split_rings(&model.boundary), expected_world, "boundary {label}");
+        assert_eq!(
+            split_rings(&model.boundary),
+            expected_world,
+            "boundary {label}"
+        );
         assert_eq!(
             split_rings(local_buffer),
             expected_local,
@@ -2569,11 +2643,7 @@ mod tests {
         assert_eq!(segments, reference.pattern_segments(), "pattern {label}");
         let (mut core, mut band) = (false, false);
         for [a, b] in &segments {
-            let middle = plane.to_local(DVec3::new(
-                (a[0] + b[0]) / 2.0,
-                (a[1] + b[1]) / 2.0,
-                0.0,
-            ));
+            let middle = plane.to_local(DVec3::new((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, 0.0));
             let reach = middle.x.abs().max(middle.y.abs());
             core |= reach < 5.0;
             band |= reach > 5.0 && reach < 15.0;
@@ -2583,7 +2653,11 @@ mod tests {
             HatchStyleType::Outer => (false, false),
             HatchStyleType::Ignore => (true, true),
         };
-        assert_eq!((core, band), (want_core, want_band), "pattern islands {label}");
+        assert_eq!(
+            (core, band),
+            (want_core, want_band),
+            "pattern islands {label}"
+        );
     }
 
     #[test]
@@ -2662,7 +2736,10 @@ mod tests {
                 for (a, b) in from_preview.iter().zip(&from_entity) {
                     assert_close(*a, *b, &format!("ring box {label}"));
                 }
-                assert_eq!(preview.boundary_exterior, entity.boundary_exterior, "{label}");
+                assert_eq!(
+                    preview.boundary_exterior, entity.boundary_exterior,
+                    "{label}"
+                );
                 assert_eq!(
                     split_rings(preview.fill_plane_boundary.as_ref().unwrap()).len(),
                     split_rings(entity.fill_plane_boundary.as_ref().unwrap()).len(),
@@ -2763,7 +2840,11 @@ mod tests {
         )
         .with_settings(&settings.resolve().unwrap())
         .with_regions(regions);
-        assert_eq!(command.preview_models().len(), 2, "two regions, two hatches");
+        assert_eq!(
+            command.preview_models().len(),
+            2,
+            "two regions, two hatches"
+        );
         assert!(command.on_text_input("S").is_some());
         for point in [[60.0, 0.0], [70.0, 0.0], [70.0, 10.0]] {
             let _ = command.on_point(DVec3::new(point[0], point[1], 0.0));
@@ -2891,7 +2972,11 @@ mod tests {
                         let label = format!(
                             "assoc={associative} {shape} {island:?} detection={detection} plane={plane:?}"
                         );
-                        let effective = if detection { island } else { HatchStyleType::Ignore };
+                        let effective = if detection {
+                            island
+                        } else {
+                            HatchStyleType::Ignore
+                        };
 
                         // The command line, with the keywords a user types.
                         let mut interactive = HatchCommand::new(
@@ -3040,7 +3125,15 @@ mod tests {
             g.centered = false;
         });
         let model = committed(gradient_command(&settings).on_enter());
-        let HatchPattern::Gradient { angle_deg, kind, invert, shift, one_color, .. } = model.pattern else {
+        let HatchPattern::Gradient {
+            angle_deg,
+            kind,
+            invert,
+            shift,
+            one_color,
+            ..
+        } = model.pattern
+        else {
             panic!("a gradient model")
         };
         assert_eq!(kind, crate::scene::model::hatch_model::GradientKind::Curved);
@@ -3057,13 +3150,28 @@ mod tests {
         let settings = gradient_settings(|g| {
             g.one_color = true;
             g.tint = 0.25;
-            g.color1 = codec::types::Color::Rgb { r: 200, g: 100, b: 50 };
+            g.color1 = codec::types::Color::Rgb {
+                r: 200,
+                g: 100,
+                b: 50,
+            };
             g.color2 = codec::types::Color::Rgb { r: 1, g: 2, b: 3 }; // hidden
         });
         let model = committed(gradient_command(&settings).on_enter());
-        let base = rgba_of(codec::types::Color::Rgb { r: 200, g: 100, b: 50 }).unwrap();
+        let base = rgba_of(codec::types::Color::Rgb {
+            r: 200,
+            g: 100,
+            b: 50,
+        })
+        .unwrap();
         let expected = rgba_of(tinted_second_color(base, 0.25)).unwrap();
-        let HatchPattern::Gradient { color2, one_color, tint, .. } = model.pattern else {
+        let HatchPattern::Gradient {
+            color2,
+            one_color,
+            tint,
+            ..
+        } = model.pattern
+        else {
             panic!("a gradient model")
         };
         assert!(one_color);
@@ -3082,7 +3190,10 @@ mod tests {
         assert!(model.boundary_paths.is_some() && model.fill_plane.is_some());
         assert_eq!(model.boundary_exterior.as_deref().map(|e| e.len()), Some(1));
         // The one ring in world coordinates (a flat buffer: no separator).
-        assert_eq!(model.boundary_wcs.as_deref(), Some(&rect(0.0, 0.0, 10.0, 10.0)));
+        assert_eq!(
+            model.boundary_wcs.as_deref(),
+            Some(&rect(0.0, 0.0, 10.0, 10.0))
+        );
         // `sources_for` makes one source per ring: the ring keeps its link.
         let sources = model.boundary_sources.as_deref().expect("sources");
         assert_eq!(sources.iter().map(Vec::len).sum::<usize>(), 1);
@@ -3101,7 +3212,11 @@ mod tests {
             .with_settings(&settings.resolve().unwrap())
             .with_creation_style(Some(style.clone()));
         match one.on_enter() {
-            CmdResult::CommitStyledHatch { color, transparency, .. } => {
+            CmdResult::CommitStyledHatch {
+                color,
+                transparency,
+                ..
+            } => {
                 assert_eq!((color, transparency), style)
             }
             _ => panic!("a styled hatch"),
@@ -3113,7 +3228,10 @@ mod tests {
             .with_settings(&separate.resolve().unwrap())
             .with_creation_style(Some(style.clone()));
         match command.on_enter() {
-            CmdResult::CommitHatches { hatches, entity_style } => {
+            CmdResult::CommitHatches {
+                hatches,
+                entity_style,
+            } => {
                 assert_eq!(hatches.len(), 1);
                 assert_eq!(entity_style, Some(style.clone()));
             }
@@ -3150,7 +3268,11 @@ mod tests {
             command.manual_pts.push(DVec3::new(point.0, point.1, 0.0));
         }
         match command.on_enter() {
-            CmdResult::CommitStyledHatch { color, transparency, .. } => {
+            CmdResult::CommitStyledHatch {
+                color,
+                transparency,
+                ..
+            } => {
                 assert_eq!((color, transparency), style)
             }
             _ => panic!("a styled manual hatch"),
@@ -3159,7 +3281,8 @@ mod tests {
 
     #[test]
     fn without_a_creation_style_the_commit_is_what_it_always_was() {
-        let mut command = square_command().with_settings(&HatchSettings::default().resolve().unwrap());
+        let mut command =
+            square_command().with_settings(&HatchSettings::default().resolve().unwrap());
         assert!(matches!(command.on_enter(), CmdResult::CommitHatch(_)));
     }
 
@@ -3209,19 +3332,36 @@ mod tests {
             let settings = gradient_settings(|g| {
                 g.one_color = true;
                 g.tint = 0.25;
-                g.color1 = codec::types::Color::Rgb { r: 200, g: 100, b: 50 };
+                g.color1 = codec::types::Color::Rgb {
+                    r: 200,
+                    g: 100,
+                    b: 50,
+                };
                 g.color2 = color2;
             });
             gradient_command(&settings).preview_models().remove(0)
         };
         let a = preview(codec::types::Color::Rgb { r: 1, g: 2, b: 3 });
-        let b = preview(codec::types::Color::Rgb { r: 250, g: 250, b: 250 });
+        let b = preview(codec::types::Color::Rgb {
+            r: 250,
+            g: 250,
+            b: 250,
+        });
         let colour2 = |m: &HatchModel| match &m.pattern {
             HatchPattern::Gradient { color2, .. } => *color2,
             _ => panic!("gradient"),
         };
-        assert_eq!(colour2(&a), colour2(&b), "the hidden Color 2 changes nothing");
-        let base = rgba_of(codec::types::Color::Rgb { r: 200, g: 100, b: 50 }).unwrap();
+        assert_eq!(
+            colour2(&a),
+            colour2(&b),
+            "the hidden Color 2 changes nothing"
+        );
+        let base = rgba_of(codec::types::Color::Rgb {
+            r: 200,
+            g: 100,
+            b: 50,
+        })
+        .unwrap();
         let mut expected = rgba_of(tinted_second_color(base, 0.25)).unwrap();
         expected[3] = 0.75;
         assert_eq!(colour2(&a), expected);
@@ -3242,14 +3382,20 @@ mod tests {
             WorkingPlane::default(),
         )
         .with_regions(vec![
-            HatchRegion { rings: vec![ring_a] },
-            HatchRegion { rings: vec![ring_b] },
+            HatchRegion {
+                rings: vec![ring_a],
+            },
+            HatchRegion {
+                rings: vec![ring_b],
+            },
         ])
         .with_settings(&settings.resolve().unwrap());
         match command.on_enter() {
             CmdResult::CommitHatches { hatches, .. } => {
                 assert_eq!(hatches.len(), 2);
-                assert!(hatches.iter().all(|h| matches!(h.pattern, HatchPattern::Gradient { .. })));
+                assert!(hatches
+                    .iter()
+                    .all(|h| matches!(h.pattern, HatchPattern::Gradient { .. })));
             }
             _ => panic!("separate hatches"),
         }

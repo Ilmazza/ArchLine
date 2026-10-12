@@ -43,16 +43,10 @@ impl OpenCADStudio {
                     return Some(glam::DVec3::new(line.end.x, line.end.y, line.end.z));
                 }
                 codec::EntityType::Arc(_) => Some(2),
-                codec::EntityType::LwPolyline(polyline) => {
-                    polyline.vertices.len().checked_sub(1)
-                }
+                codec::EntityType::LwPolyline(polyline) => polyline.vertices.len().checked_sub(1),
                 codec::EntityType::Polyline(polyline) => polyline.vertices.len().checked_sub(1),
-                codec::EntityType::Polyline2D(polyline) => {
-                    polyline.vertices.len().checked_sub(1)
-                }
-                codec::EntityType::Polyline3D(polyline) => {
-                    polyline.vertices.len().checked_sub(1)
-                }
+                codec::EntityType::Polyline2D(polyline) => polyline.vertices.len().checked_sub(1),
+                codec::EntityType::Polyline3D(polyline) => polyline.vertices.len().checked_sub(1),
                 _ => None,
             }?;
             crate::scene::view::dispatch::grips(entity)
@@ -127,10 +121,16 @@ impl OpenCADStudio {
     ) {
         let touched: Vec<_> = grip.targets.iter().map(|target| target.handle).collect();
         let connected = self.tabs[i].scene.parametric_connected_handles(
-            self.tabs[i].current_parametric_scope(), &touched, true,
+            self.tabs[i].current_parametric_scope(),
+            &touched,
+            true,
         );
         for handle in connected {
-            if !self.grip_originals.iter().any(|(original, _)| *original == handle) {
+            if !self
+                .grip_originals
+                .iter()
+                .any(|(original, _)| *original == handle)
+            {
                 if let Some(entity) = self.tabs[i].scene.document.get_entity(handle).cloned() {
                     self.grip_originals.push((handle, entity));
                 }
@@ -142,15 +142,29 @@ impl OpenCADStudio {
                 }
             }
         }
-        let driven_refs: Vec<_> = grip.targets.iter().flat_map(|target| {
-            self.tabs[i].scene.document.get_entity(target.handle)
-                .map(|entity| crate::scene::parametric_constraints::grip_solve_anchor_refs(
-                    entity, target.handle, target.grip_id,
-                )).unwrap_or_default()
-        }).collect();
+        let driven_refs: Vec<_> = grip
+            .targets
+            .iter()
+            .flat_map(|target| {
+                self.tabs[i]
+                    .scene
+                    .document
+                    .get_entity(target.handle)
+                    .map(|entity| {
+                        crate::scene::parametric_constraints::grip_solve_anchor_refs(
+                            entity,
+                            target.handle,
+                            target.grip_id,
+                        )
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
         let retain_size = self.constraint_solve_mode
             && !driven_refs.is_empty()
-            && driven_refs.iter().all(|reference| reference.marker.is_some());
+            && driven_refs
+                .iter()
+                .all(|reference| reference.marker.is_some());
         let solved = self.tabs[i].scene.solve_parametric_constraints_preview(
             &touched,
             &driven_refs,
@@ -267,7 +281,9 @@ impl OpenCADStudio {
             .into_iter()
             .map(|handle| (handle, crate::scene::ChangeKind::Modified))
             .collect();
-        self.tabs[i].scene.bump_entities_after_parametric_solve(&changes);
+        self.tabs[i]
+            .scene
+            .bump_entities_after_parametric_solve(&changes);
         if let Some(dirty_before) = self.grip_dirty_before.take() {
             self.tabs[i].dirty = dirty_before;
         }
@@ -364,7 +380,7 @@ impl OpenCADStudio {
             .is_some_and(|command| command.wants_point_pick_context())
         {
             let scene = &self.tabs[i].scene;
-            let size = scene.selection.borrow().vp_size;
+            let size = scene.selection.borrow().view.vp_size;
             let edit = scene.viewport_edit_frame(size);
             let tile = edit
                 .as_ref()
@@ -535,7 +551,10 @@ impl OpenCADStudio {
     /// Only a `Text` token can come back unclaimed (`on_text_input` returning
     /// `None`), which is what lets the caller read it as something else — a
     /// typed distance, say — instead of guessing beforehand.
-    pub(in crate::app) fn feed_command_consumed(&mut self, input: StepInput) -> (Task<Message>, bool) {
+    pub(in crate::app) fn feed_command_consumed(
+        &mut self,
+        input: StepInput,
+    ) -> (Task<Message>, bool) {
         // A command that takes associative dimensions only keeps just those:
         // the rest leave the selection and the count of what went is reported,
         // as the reference does while gathering.
@@ -583,6 +602,7 @@ impl OpenCADStudio {
             if !self.record_accepted_snap(i, None, None, *point) {
                 return (Task::none(), true);
             }
+            self.snapper.clear_override();
         }
         if default_start {
             let StepInput::Point(point) = &input else {
@@ -677,6 +697,7 @@ impl OpenCADStudio {
             None
         };
         let is_escape = matches!(&input, StepInput::Escape);
+        let keyed = matches!(&input, StepInput::Text(_) | StepInput::Enter);
         let result: Option<CmdResult> = {
             let Some(cmd) = self.tabs[i].active_cmd.as_mut() else {
                 return (Task::none(), false);
@@ -703,7 +724,15 @@ impl OpenCADStudio {
             self.tabs[i].pending_pause_tokens = None;
         }
         match result {
-            Some(r) => (self.apply_cmd_result(r), true),
+            Some(r) => {
+                let task = self.apply_cmd_result(r);
+                // A keyword can move the step without the cursor moving
+                // (PEDIT Next vertex): redraw its preview now (#1628).
+                if keyed && self.active_tab == i {
+                    self.refresh_active_cmd_preview(i);
+                }
+                (task, true)
+            }
             None => (Task::none(), false),
         }
     }
@@ -760,7 +789,11 @@ impl OpenCADStudio {
     /// false: the line is one instalment and the tool stays at its next prompt
     /// for the following one. Only a plugin streaming a command feeds it that
     /// way; the command line and the automation feeder always finish.
-    pub(in crate::app) fn run_command_line_streaming(&mut self, cmd: &str, finish: bool) -> Task<Message> {
+    pub(in crate::app) fn run_command_line_streaming(
+        &mut self,
+        cmd: &str,
+        finish: bool,
+    ) -> Task<Message> {
         let i = self.active_tab;
         self.command_line.unconsumed.clear();
         let tokens: Vec<&str> = cmd.split_whitespace().collect();
@@ -784,12 +817,19 @@ impl OpenCADStudio {
         if tokens[0].eq_ignore_ascii_case("BACKGROUND")
             || tokens[0].eq_ignore_ascii_case("COLORSCHEME")
             || tokens[0].eq_ignore_ascii_case("XREF")
+            // `VIEW WINDOW <name> <x1,y1> <x2,y2>` takes its arguments in one line.
+            || tokens[0].eq_ignore_ascii_case("VIEW")
         {
             return self.dispatch_command(cmd);
         }
+        // Close an earlier step first so only what the probe opens is dropped below.
+        self.finish_pending_history(i);
         let start_task = self.dispatch_command(tokens[0]);
         if self.tabs[i].active_cmd.is_none() {
             // Not an interactive tool — an inline-argument command (`PDMODE 3`).
+            // The bare word only probed it: a step it kept without changing
+            // anything is not an undo step of its own.
+            self.drop_unchanged_pending_history(i);
             return self.dispatch_command(cmd);
         }
         let toks: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
@@ -812,7 +852,11 @@ impl OpenCADStudio {
     ///   silently dropped and `TEXT 0,0 5 0 hi` created nothing at all.
     /// * Anything still left over was never claimed by any prompt; it is
     ///   recorded in [`CommandLine::unconsumed`] instead of vanishing.
-    pub(in crate::app) fn finish_active_command(&mut self, tokens: &[String], finish: bool) -> Task<Message> {
+    pub(in crate::app) fn finish_active_command(
+        &mut self,
+        tokens: &[String],
+        finish: bool,
+    ) -> Task<Message> {
         let i = self.active_tab;
         if self.tabs[i].active_cmd.is_none() {
             return Task::none();
@@ -908,8 +952,8 @@ impl OpenCADStudio {
             let crossing = matches!(kw.as_str(), "C" | "CROSSING");
             {
                 let mut selection = self.tabs[i].scene.selection.borrow_mut();
-                selection.box_crossing = crossing;
-                selection.box_crossing_locked = true;
+                selection.gesture.box_crossing = crossing;
+                selection.gesture.box_crossing_locked = true;
             }
             let hint = if crossing {
                 crate::t!("Crossing: specify first corner.")
@@ -1078,6 +1122,10 @@ impl OpenCADStudio {
             self.start_point_modifier(i, modifier);
             return Task::none();
         }
+        if let Some(kind) = self.typed_snap_override(i, token) {
+            self.apply_snap_override(kind);
+            return Task::none();
+        }
         if let Some((coord, kind)) = crate::app::helpers::parse_coord(token) {
             // Match the GUI command line: typed coordinates are in the active
             // UCS (relative offsets are rotated by the UCS axes), so a multi-
@@ -1158,7 +1206,14 @@ impl OpenCADStudio {
 
         // 2. Blank line submits Enter to the active command (or repeats last).
         if trimmed.is_empty() {
-            return self.feed_command(StepInput::Enter);
+            if self.tabs[i].active_cmd.is_some() {
+                return self.feed_command(StepInput::Enter);
+            }
+            // Same repeat the command line's empty Enter gives.
+            if let Some(cmd) = self.tabs[i].last_cmd.clone() {
+                return self.dispatch_command(&cmd);
+            }
+            return Task::none();
         }
 
         // 3. A command is currently active: route to its prompt handlers.

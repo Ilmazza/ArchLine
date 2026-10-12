@@ -439,9 +439,7 @@ impl OpenCADStudio {
                     .document
                     .entities()
                     .filter_map(|entity| match entity {
-                        codec::EntityType::Face3D(face) => {
-                            Some((face.common.handle, face.clone()))
-                        }
+                        codec::EntityType::Face3D(face) => Some((face.common.handle, face.clone())),
                         _ => None,
                     })
                     .collect();
@@ -1031,9 +1029,8 @@ impl OpenCADStudio {
                         false,
                         true,
                     );
-                    self.command_line.push_output(
-                        format!("{} constraint bar(s) reset.", count).as_str(),
-                    );
+                    self.command_line
+                        .push_output(format!("{} constraint bar(s) reset.", count).as_str());
                 }
             }
 
@@ -1146,20 +1143,15 @@ impl OpenCADStudio {
                     self.tabs[i].active_cmd = Some(Box::new(sel));
                 } else {
                     let scope = self.tabs[i].current_parametric_scope();
-                    let inferred = self.tabs[i]
-                        .scene
-                        .inferred_parametric_constraints(
-                            scope,
-                            &handles,
-                            &self.auto_constrain_settings,
-                        );
+                    let inferred = self.tabs[i].scene.inferred_parametric_constraints(
+                        scope,
+                        &handles,
+                        &self.auto_constrain_settings,
+                    );
                     if inferred.is_empty() {
                         self.command_line.push_output(
-                            format!(
-                                "0 constraint(s) applied to {} object(s).",
-                                handles.len()
-                            )
-                            .as_str(),
+                            format!("0 constraint(s) applied to {} object(s).", handles.len())
+                                .as_str(),
                         );
                         self.tabs[i].scene.deselect_all();
                         self.refresh_selected_grips();
@@ -1282,8 +1274,7 @@ impl OpenCADStudio {
                 use crate::scene::named_parameters::DrivingValue;
                 use crate::scene::parametric_constraints::{
                     dynamic_dimension_text, next_angular_parameter_name,
-                    next_dimensional_parameter_name, next_radial_parameter_name,
-                    ConstraintKind,
+                    next_dimensional_parameter_name, next_radial_parameter_name, ConstraintKind,
                 };
 
                 let scope = self.tabs[i].current_parametric_scope();
@@ -1323,7 +1314,11 @@ impl OpenCADStudio {
                     };
                     if self.tabs[i]
                         .scene
-                        .validate_parametric_constraint(kind, &refs, Some(&DrivingValue::Literal(measured)))
+                        .validate_parametric_constraint(
+                            kind,
+                            &refs,
+                            Some(&DrivingValue::Literal(measured)),
+                        )
                         .is_err()
                     {
                         refused += 1;
@@ -1452,10 +1447,12 @@ impl OpenCADStudio {
                 self.tabs[i].scene.deselect_all();
                 self.tabs[i].dirty = true;
                 self.refresh_properties();
-                self.command_line
-                    .push_output(crate::tf!("{converted} associative dimensions converted").as_ref());
                 self.command_line.push_output(
-                    crate::tf!("{refused} associative dimension(s) could not be converted").as_ref(),
+                    crate::tf!("{converted} associative dimensions converted").as_ref(),
+                );
+                self.command_line.push_output(
+                    crate::tf!("{refused} associative dimension(s) could not be converted")
+                        .as_ref(),
                 );
                 if let Some(pd) = pending {
                     self.commit_undo_delta(i, pd);
@@ -1473,7 +1470,11 @@ impl OpenCADStudio {
                 let (kind, axis, label) = if vertical {
                     (ConstraintKind::Vertical, "Vertical", "Vertical constraint")
                 } else {
-                    (ConstraintKind::Horizontal, "Horizontal", "Horizontal constraint")
+                    (
+                        ConstraintKind::Horizontal,
+                        "Horizontal",
+                        "Horizontal constraint",
+                    )
                 };
                 let new_command = || {
                     if vertical {
@@ -1492,13 +1493,14 @@ impl OpenCADStudio {
                         .push_error(&format!("{axis}: select exactly one compatible object."));
                 } else {
                     let handle = handles[0];
-                    let reference = self.tabs[i]
-                        .scene
-                        .document
-                        .get_entity(handle)
-                        .and_then(|entity| {
-                            HorizontalConstraintCommand::preselected_reference(entity, handle)
-                        });
+                    let reference =
+                        self.tabs[i]
+                            .scene
+                            .document
+                            .get_entity(handle)
+                            .and_then(|entity| {
+                                HorizontalConstraintCommand::preselected_reference(entity, handle)
+                            });
                     if let Some(reference) = reference {
                         let plane = self.tabs[i].ucs_xform().working_plane();
                         let direction = if vertical { plane.y } else { plane.x };
@@ -1533,13 +1535,14 @@ impl OpenCADStudio {
                 // the reference's own point-or-object prompt.
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if let [handle] = handles.as_slice() {
-                    let reference = self.tabs[i]
-                        .scene
-                        .document
-                        .get_entity(*handle)
-                        .and_then(|entity| {
-                            FixConstraintCommand::preselected_reference(entity, *handle)
-                        });
+                    let reference =
+                        self.tabs[i]
+                            .scene
+                            .document
+                            .get_entity(*handle)
+                            .and_then(|entity| {
+                                FixConstraintCommand::preselected_reference(entity, *handle)
+                            });
                     if let Some(reference) = reference {
                         return Some(self.apply_cmd_result(CmdResult::AddParametricConstraint {
                             kind: ConstraintKind::Fixed,
@@ -1719,13 +1722,15 @@ impl OpenCADStudio {
                         })
                         .collect::<Vec<_>>();
                     if picks.len() == 2 && picks[0].reference != picks[1].reference {
-                        return Some(self.apply_cmd_result(CmdResult::AddPerpendicularConstraint {
-                            first: picks[0].reference,
-                            second: picks[1].reference,
-                            first_fixed: picks[0].fixed_reference,
-                            second_start: picks[1].start_reference,
-                            label: "Perpendicular constraint",
-                        }));
+                        return Some(self.apply_cmd_result(
+                            CmdResult::AddPerpendicularConstraint {
+                                first: picks[0].reference,
+                                second: picks[1].reference,
+                                first_fixed: picks[0].fixed_reference,
+                                second_start: picks[1].start_reference,
+                                label: "Perpendicular constraint",
+                            },
+                        ));
                     }
                     self.tabs[i].scene.deselect_all();
                     self.command_line.push_error(
@@ -1861,21 +1866,21 @@ impl OpenCADStudio {
                     self.command_line.push_info(&command.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(command));
                 } else {
-                    use crate::command::{
-                        CmdResult, SymmetricConstraintSelection,
-                    };
+                    use crate::command::{CmdResult, SymmetricConstraintSelection};
                     use crate::modules::parametric::SymmetricConstraintCommand;
 
-                    let refs = (handles.len() == 3).then(|| {
-                        let first = self.tabs[i].scene.document.get_entity(handles[0])?;
-                        let second = self.tabs[i].scene.document.get_entity(handles[1])?;
-                        let axis = self.tabs[i].scene.document.get_entity(handles[2])?;
-                        SymmetricConstraintCommand::preselected_refs(
-                            (first, handles[0]),
-                            (second, handles[1]),
-                            (axis, handles[2]),
-                        )
-                    }).flatten();
+                    let refs = (handles.len() == 3)
+                        .then(|| {
+                            let first = self.tabs[i].scene.document.get_entity(handles[0])?;
+                            let second = self.tabs[i].scene.document.get_entity(handles[1])?;
+                            let axis = self.tabs[i].scene.document.get_entity(handles[2])?;
+                            SymmetricConstraintCommand::preselected_refs(
+                                (first, handles[0]),
+                                (second, handles[1]),
+                                (axis, handles[2]),
+                            )
+                        })
+                        .flatten();
                     if let Some([first, second, axis]) = refs {
                         return Some(self.apply_cmd_result(CmdResult::AddSymmetricConstraint {
                             selection: SymmetricConstraintSelection::Objects(first, second),
@@ -1963,10 +1968,8 @@ impl OpenCADStudio {
                 // asked for this command.
                 // The reference asks for the circle itself, whatever is
                 // selected, so a pick-first set is left alone.
-                let name = next_radial_parameter_name(
-                    self.tabs[i].scene.named_parameters(),
-                    diameter,
-                );
+                let name =
+                    next_radial_parameter_name(self.tabs[i].scene.named_parameters(), diameter);
                 let command = DimConstraintCommand::new(
                     if diameter {
                         DimConstraintAxis::Diameter
@@ -2485,21 +2488,26 @@ impl OpenCADStudio {
             }
 
             // 3DROTATE [X|Y|Z] <angle> — rotate the selected solid about an axis.
+            // 3DROTATE — any objects about an axis through a base point.
             "3DROTATE" | "ROTATE3D" => {
-                use crate::command::SelectThenKeywordCommand;
-                let has_sel = !self.tabs[i].scene.selected_entities().is_empty();
-                let c = SelectThenKeywordCommand::new(
-                    "3DROTATE",
-                    "3DROTATE  rotation axis  [X / Y / Z]:",
-                    vec![
-                        ("X", "X", Some("3DROTATE  angle in degrees:")),
-                        ("Y", "Y", Some("3DROTATE  angle in degrees:")),
-                        ("Z", "Z", Some("3DROTATE  angle in degrees:")),
-                    ],
-                    has_sel,
-                );
-                self.command_line.push_info(&c.prompt());
-                self.tabs[i].active_cmd = Some(Box::new(c));
+                let handles: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .map(|(h, _)| h)
+                    .collect();
+                if handles.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("3DROTATE");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                } else {
+                    use crate::modules::draw::modify::rotate::RotateCommand;
+                    let wires = self.tabs[i].scene.wire_models_for(&handles);
+                    let new_cmd = RotateCommand::new_3d(handles, wires);
+                    self.command_line.push_info(&new_cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+                }
             }
             cmd if cmd.starts_with("3DROTATE ") || cmd.starts_with("ROTATE3D ") => {
                 let parts: Vec<String> = cmd
@@ -2533,10 +2541,7 @@ impl OpenCADStudio {
                         .filter(|handle| {
                             matches!(
                                 scene.document.get_entity(*handle),
-                                Some(
-                                    codec::EntityType::Solid3D(_)
-                                        | codec::EntityType::Surface(_)
-                                )
+                                Some(codec::EntityType::Solid3D(_) | codec::EntityType::Surface(_))
                             )
                         })
                         .collect::<Vec<_>>();

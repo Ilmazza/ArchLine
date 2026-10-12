@@ -9,11 +9,11 @@ use crate::t;
 use crate::ui::wrap_bar::DensitySwap;
 use crate::ui::wrap_bar::WrapFlow;
 use iced::widget::{
-    button, canvas, column, container, mouse_area, pane_grid, responsive, row, scrollable, shader,
-    stack, text, Row, Space,
+    button, column, container, mouse_area, pane_grid, responsive, row, scrollable, shader, stack,
+    text, Row, Space,
 };
 use iced::window;
-use iced::{keyboard, Background, Border, Color, Element, Fill, Length, Subscription, Task, Theme};
+use iced::{keyboard, Background, Border, Color, Element, Fill, Subscription, Task, Theme};
 use iced_aw::ContextMenu;
 use std::sync::Arc;
 
@@ -203,6 +203,7 @@ impl OpenCADStudio {
                 crate::perf_record!("[perf] view {:>7.1}ms", elapsed_ms);
             }
         }
+        crate::perf::note_view_finish();
         element
     }
 
@@ -264,13 +265,13 @@ impl OpenCADStudio {
             tab.scene
                 .active_viewport
                 .and_then(|h| {
-                    let (cw, ch) = tab.scene.selection.borrow().vp_size;
+                    let (cw, ch) = tab.scene.selection.borrow().view.vp_size;
                     tab.scene.viewport_screen_rect(h, (cw, ch))
                 })
                 .map(|r| r.width)
                 .unwrap_or(f32::INFINITY)
         } else {
-            let (vw, vh) = tab.scene.selection.borrow().vp_size;
+            let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
             tab.scene.active_model_tile_bounds(vw, vh).width
         };
         let viewcube_visible = self.show_viewcube
@@ -353,7 +354,7 @@ impl OpenCADStudio {
             let size_probe: Element<'_, Message> = responsive(move |size| {
                 {
                     let mut sel = scene.selection.borrow_mut();
-                    sel.vp_size = (size.width, size.height);
+                    sel.view.vp_size = (size.width, size.height);
                 }
                 scene.sync_tiles_from_panes(size.width, size.height);
                 Space::new().width(Fill).height(Fill)
@@ -408,7 +409,7 @@ impl OpenCADStudio {
         let grid_overlay = if self.layout_settling || tab.is_start {
             Space::new().into()
         } else {
-            let (vw, vh) = tab.scene.selection.borrow().vp_size;
+            let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
             let model_basis = {
                 let (o, ux, uy, uz) = tab.ucs_xform().axes();
                 let (ux, uy, uz) = super::helpers::drafting_axes(
@@ -529,7 +530,7 @@ bg={bg_ms:.1}ms n={view_count}"
             let grips: Vec<crate::ui::overlay::GripMarker> = if show_grips
                 && !tab.selected_grips.is_empty()
             {
-                let (vw, vh) = sel_ref.vp_size;
+                let (vw, vh) = sel_ref.view.vp_size;
                 // Overlays project through the active tile's camera, so
                 // they must use the active tile's screen rectangle (with
                 // its canvas offset) — not the whole canvas — or they
@@ -626,7 +627,10 @@ bg={bg_ms:.1}ms n={view_count}"
             let control_polygon = tab.selected_handle.and_then(|handle| {
                 let spline = match tab.scene.document.get_entity(handle) {
                     Some(codec::EntityType::Spline(spline))
-                        if crate::entities::spline::shows_control_vertices(spline) => spline,
+                        if crate::entities::spline::shows_control_vertices(spline) =>
+                    {
+                        spline
+                    }
                     _ => return None,
                 };
                 if tab
@@ -647,7 +651,7 @@ bg={bg_ms:.1}ms n={view_count}"
             let grip_clip = if grips.is_empty() {
                 None
             } else {
-                let (vw, vh) = sel_ref.vp_size;
+                let (vw, vh) = sel_ref.view.vp_size;
                 Some(
                     tab.scene
                         .viewport_edit_frame((vw, vh))
@@ -656,7 +660,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 )
             };
 
-            let (vw, vh) = sel_ref.vp_size;
+            let (vw, vh) = sel_ref.view.vp_size;
             // Active tile rectangle (canvas-offset included) so grid / UCS
             // icon / crosshair project through the active pane's camera at
             // the correct place and scale.
@@ -798,7 +802,7 @@ bg={bg_ms:.1}ms n={view_count}"
                                 && b.y.is_finite()
                                 && a.x.is_finite()
                                 && a.y.is_finite())
-                                .then_some((b, a))
+                            .then_some((b, a))
                         })
                         .collect()
                 }
@@ -816,7 +820,7 @@ bg={bg_ms:.1}ms n={view_count}"
 
             // Model-space pane dividers (none in paper / single-pane layouts).
             let dividers = if !is_paper {
-                let (vw, vh) = sel_ref.vp_size;
+                let (vw, vh) = sel_ref.view.vp_size;
                 tab.scene.model_pane_dividers(vw, vh)
             } else {
                 vec![]
@@ -826,8 +830,8 @@ bg={bg_ms:.1}ms n={view_count}"
             // target pane under the cursor.
             let (pane_move_rect, pane_drop_rect) = match self.pane_move_from {
                 Some(from) if !is_paper => {
-                    let (vw, vh) = sel_ref.vp_size;
-                    let cursor = sel_ref.last_move_pos;
+                    let (vw, vh) = sel_ref.view.vp_size;
+                    let cursor = sel_ref.input.last_move_pos;
                     let tiles = tab.scene.model_tiles.borrow();
                     let px = |t: &crate::scene::ModelTile| iced::Rectangle {
                         x: t.rect.x * vw,
@@ -884,7 +888,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 let scope = tab.current_parametric_scope();
                 tab.scene.cached_glyph_placements(
                     scope,
-                    sel_ref.vp_size,
+                    sel_ref.view.vp_size,
                     self.show_constraint_values,
                     self.constraint_bar_display,
                     self.constraint_bar_mode,
@@ -927,6 +931,16 @@ bg={bg_ms:.1}ms n={view_count}"
                     iso_plane: self.iso_plane,
                     snap_angle_deg: self.snap_angle_deg,
                     pick_pending: self.pending_pick_label().is_some(),
+                    // An infinite-line preview runs along the arms; drop them
+                    // so the preview stays visible (#1437). A command asking
+                    // for objects shows the pickbox alone, so picking reads
+                    // apart from both idle and point input (#1661).
+                    hide_arms: tab.active_cmd.as_ref().is_some_and(|c| {
+                        matches!(c.name(), "XLINE" | "RAY")
+                            || c.needs_entity_pick()
+                            || c.is_selection_gathering()
+                    }),
+                    snap_color: self.snap_marker_color,
                 },
                 crate::ui::overlay::SelectionVisualOptions {
                     area: self.model_space.selection_area,
@@ -1004,7 +1018,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 .as_ref()
                 .and_then(|command| command.dyn_label_point(w))
                 .and_then(|world| {
-                    let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                    let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
                     let (camera, bounds) =
                         tab.scene.viewport_edit_frame((vw, vh)).unwrap_or_else(|| {
                             (
@@ -1080,7 +1094,7 @@ bg={bg_ms:.1}ms n={view_count}"
                         opposite + width_axis * width + height_axis * (height * 0.5);
                     let rectangle_center =
                         opposite + width_axis * (width * 0.5) + height_axis * (height * 0.5);
-                    let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                    let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
                     let (camera, bounds) =
                         tab.scene.viewport_edit_frame((vw, vh)).unwrap_or_else(|| {
                             (
@@ -1122,8 +1136,12 @@ bg={bg_ms:.1}ms n={view_count}"
                         (None, _) if rectangle_values.is_some() => {
                             let (width, height) = rectangle_values.unwrap();
                             match f.role {
-                                crate::command::DynRole::Width => crate::entities::common::format_length(width),
-                                crate::command::DynRole::Height => crate::entities::common::format_length(height),
+                                crate::command::DynRole::Width => {
+                                    crate::entities::common::format_length(width)
+                                }
+                                crate::command::DynRole::Height => {
+                                    crate::entities::common::format_length(height)
+                                }
                                 _ => String::new(),
                             }
                         }
@@ -1277,7 +1295,7 @@ bg={bg_ms:.1}ms n={view_count}"
             // viewport drawing / selection is unaffected. In a paper layout
             // the active viewport gets its own picker (below) instead.
             if !is_paper && !tab.is_start {
-                let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
                 let rect = tab.scene.active_model_tile_bounds(vw, vh);
                 // Unified control chip: split buttons + render-mode picker +
                 // grid / grid-snap toggles, for the active Model tile.
@@ -1323,7 +1341,7 @@ bg={bg_ms:.1}ms n={view_count}"
             let active_vp_rect: Option<(codec::Handle, iced::Rectangle)> =
                 if is_paper && !tab.is_start {
                     tab.scene.active_viewport.and_then(|h| {
-                        let (cw, ch) = tab.scene.selection.borrow().vp_size;
+                        let (cw, ch) = tab.scene.selection.borrow().view.vp_size;
                         tab.scene
                             .viewport_screen_rect(h, (cw, ch))
                             .map(|rect| (h, rect))
@@ -1337,7 +1355,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 // outline inward when the viewport ran off the top/left edge, so
                 // its drawn border no longer matched the real viewport — clicks
                 // that looked outside landed in (and activated) another viewport.
-                let (cw, ch) = tab.scene.selection.borrow().vp_size;
+                let (cw, ch) = tab.scene.selection.borrow().view.vp_size;
                 let x = rect.x.max(0.0);
                 let y = rect.y.max(0.0);
                 let vw = ((rect.x + rect.width).min(cw) - x).max(1.0);
@@ -1411,14 +1429,9 @@ bg={bg_ms:.1}ms n={view_count}"
                         .as_ref()
                         .map(|u| u.name.clone())
                         .unwrap_or_default();
-                    let ucs_names: Vec<String> = tab
-                        .scene
-                        .document
-                        .ucss
-                        .iter()
-                        .map(|u| u.name.clone())
-                        .filter(|n| !n.is_empty())
-                        .collect();
+                    // Epoch-memoised (#34): Arc clone per frame, rebuilt only
+                    // after a UCS-table bump.
+                    let ucs_names = tab.scene.cached_ucs_names();
                     let picker = iced::widget::pin(iced::widget::opaque(viewcube_ucs_picker(
                         ucs_current,
                         ucs_names,
@@ -1435,7 +1448,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 // Place the ViewCube hit area in the active model tile's top-right
                 // corner so it tracks the active panel in a tiled layout. The hit
                 // test in update.rs already maps clicks through the active tile.
-                let (vw, vh) = tab.scene.selection.borrow().vp_size;
+                let (vw, vh) = tab.scene.selection.borrow().view.vp_size;
                 let rect = tab.scene.active_model_tile_bounds(vw, vh);
                 let cube_x = (rect.x + rect.width - VIEWCUBE_HIT_SIZE - VIEWCUBE_PAD).max(0.0);
                 let cube_y = (rect.y + VIEWCUBE_PAD).max(0.0);
@@ -1451,14 +1464,9 @@ bg={bg_ms:.1}ms n={view_count}"
                     .as_ref()
                     .map(|u| u.name.clone())
                     .unwrap_or_default();
-                let ucs_names: Vec<String> = tab
-                    .scene
-                    .document
-                    .ucss
-                    .iter()
-                    .map(|u| u.name.clone())
-                    .filter(|n| !n.is_empty())
-                    .collect();
+                // Epoch-memoised (#34): Arc clone per frame, rebuilt only
+                // after a UCS-table bump.
+                let ucs_names = tab.scene.cached_ucs_names();
                 let picker = iced::widget::pin(iced::widget::opaque(viewcube_ucs_picker(
                     ucs_current,
                     ucs_names,
@@ -1671,6 +1679,15 @@ bg={bg_ms:.1}ms n={view_count}"
                 }
             }
 
+            // Count mode: a blue frame round the drawing and the count toolbar.
+            if let (Some(mode), false) = (tab.count.as_ref(), tab.is_start) {
+                viewport_stack = viewport_stack.push(crate::ui::window::count_palette::border());
+                viewport_stack = viewport_stack.push(crate::ui::window::count_palette::toolbar(
+                    mode,
+                    &tab.scene.document,
+                ));
+            }
+
             // Reserve the overlaid command line when placing cursor-anchored panels.
             mark("chrome");
             let command_line_inset = if self.command_line.history_open {
@@ -1830,7 +1847,7 @@ bg={bg_ms:.1}ms n={view_count}"
             if !tab.is_start {
                 let (ctx_pos, highlighted) = {
                     let sel = tab.scene.selection.borrow();
-                    (sel.context_menu, sel.context_menu_ui.highlighted)
+                    (sel.menu.open_at, sel.menu.ui.highlighted)
                 };
                 if let Some(p) = ctx_pos {
                     let menu = self.current_context_menu();
@@ -1846,7 +1863,7 @@ bg={bg_ms:.1}ms n={view_count}"
             // In-place MText editor (toolbar + text area), anchored at the
             // insertion-point click.
             if !tab.is_start {
-                let canvas = tab.scene.selection.borrow().vp_size;
+                let canvas = tab.scene.selection.borrow().view.vp_size;
                 if let Some(ed) = &self.mtext_editor {
                     let styles: Vec<String> = tab
                         .scene
@@ -1874,39 +1891,10 @@ bg={bg_ms:.1}ms n={view_count}"
             viewport_stack = viewport_stack.push(tab.graph.view(sections));
         }
 
-        // Docked side panels (Properties, block palette, future palettes) live
-        // in an ordered vertical stack on the left/right edge of the drawing
-        // view. Auto-collapsing (pinned) panels that aren't being hovered
-        // reduce to a rail sharing 1/N of the edge column's height; the
-        // hovered or unpinned panel expands to the full column height on top.
-        let visible_panel = |id: crate::ui::dock::PanelId| -> bool {
-            if tab.is_start || self.clean_screen {
-                return false;
-            }
-            match id {
-                crate::ui::dock::PanelId::Properties => self.show_properties,
-                crate::ui::dock::PanelId::BlockPalette => self.show_block_palette,
-                crate::ui::dock::PanelId::ExternalReferences => self.show_external_references,
-                crate::ui::dock::PanelId::Browser => self.show_browser,
-                crate::ui::dock::PanelId::NodeGraph => self.show_node_graph,
-                crate::ui::dock::PanelId::PointCloudManager => self.pc_manager.show,
-            }
-        };
-        let edge_stack = |side: crate::app::config::DockSide| -> Option<Element<'_, Message>> {
-            let ids: Vec<crate::ui::dock::PanelId> = match side {
-                crate::app::config::DockSide::Left => self.dock.left.clone(),
-                crate::app::config::DockSide::Right => self.dock.right.clone(),
-            }
-            .into_iter()
-            .filter(|id| visible_panel(*id))
-            .collect();
-            if ids.is_empty() {
-                return None;
-            }
-            Some(self.build_edge_stack(side, &ids, tab))
-        };
-        let left_edge = edge_stack(crate::app::config::DockSide::Left);
-        let right_edge = edge_stack(crate::app::config::DockSide::Right);
+        // Docked pallets: each edge's icon strip and shown group (see
+        // `app::dock`).
+        let left_edge = self.build_edge_stack(crate::app::config::DockSide::Left, tab);
+        let right_edge = self.build_edge_stack(crate::app::config::DockSide::Right, tab);
 
         // Command-line sits as a bottom-centre overlay on top of the
         // viewport stack rather than as a separate row in the main
@@ -1916,7 +1904,8 @@ bg={bg_ms:.1}ms n={view_count}"
         // collecting its own input. A pending Lengthen / Radius / Arc Length
         // value is numeric input, not the prefix of a new command (for example,
         // `3` must not open the 3DALIGN / 3DARRAY suggestions).
-        let allow_autocomplete = tab.active_cmd.is_none() && self.grip_pending.is_none();
+        let allow_autocomplete = self.grip_pending.is_none()
+            && (tab.active_cmd.is_none() || self.command_line.has_contextual_suggestions());
         // Dynamic input captures keystrokes when its fields are showing,
         // so the command-line field must release focus / its on_input.
         // The MText preview also captures keystrokes (typing edits it), so the
@@ -1951,158 +1940,7 @@ bg={bg_ms:.1}ms n={view_count}"
         }
         let workspace: Element<'_, Message> = row(parts).width(Fill).height(Fill).into();
 
-        let any_dragging = self.dock_dragging.is_some();
-        let any_resizing =
-            self.dock_resizing.is_some() || self.xref_col_drag.is_some() || self.xref_split_drag;
-        let workspace = if any_dragging {
-            let id = self.dock_dragging.expect("guarded by any_dragging");
-            let side = self.dock_drag_target.map(|(s, _)| s).unwrap_or(
-                self.dock
-                    .location(id)
-                    .map(|(s, _)| s)
-                    .unwrap_or(crate::app::config::DockSide::Right),
-            );
-            // Dropping onto an edge joins that edge's stack, whose column is as
-            // wide as its widest currently-shown panel (the dragged panel
-            // included). Hidden (closed) panels don't render, so they can't
-            // widen the column being previewed.
-            let preview_width = {
-                let mut widths: Vec<f32> = match side {
-                    crate::app::config::DockSide::Left => &self.dock.left,
-                    crate::app::config::DockSide::Right => &self.dock.right,
-                }
-                .iter()
-                .copied()
-                .filter(|&pid| self.dock_panel_visible(pid))
-                .map(|pid| self.dock.width(pid, self.win_size.0))
-                .collect();
-                widths.push(self.dock.width(id, self.win_size.0));
-                widths.into_iter().fold(0.0, f32::max)
-            };
-            // Faint tint over the whole edge column so the target edge reads
-            // even before the panel-sized ghost snaps to a slot.
-            let edge_tint = container(Space::new())
-                .width(Length::Fixed(preview_width))
-                .height(Fill)
-                .style(|theme: &Theme| {
-                    let palette = theme.palette();
-                    container::Style {
-                        background: Some(Background::Color(
-                            palette.primary.weak.color.scale_alpha(0.35),
-                        )),
-                        ..Default::default()
-                    }
-                });
-            // The ghost is the dragged panel at its real size: its own saved
-            // width and its 1/N share of the edge (N = number of panels shown
-            // on the edge after the drop), with a header naming which panel is
-            // being moved. Only visibly-docked panels share the column height:
-            // a hidden (closed) panel keeps its stack slot but no screen space,
-            // so it must not split the preview.
-            let was_here = self.dock.location(id).map(|(s, _)| s) == Some(side);
-            let visible = self.dock_visible_len(side);
-            let final_count = if was_here {
-                std::cmp::max(visible, 1)
-            } else {
-                visible + 1
-            };
-            let edge_h = tab.scene.selection.borrow().vp_size.1;
-            let slot_h = edge_h / final_count as f32;
-            let index = self.dock_drag_target.map(|(_, i)| i).unwrap_or(0);
-            let slot = index.min(final_count.saturating_sub(1));
-            let ghost_top = slot as f32 * slot_h;
-            let ghost_header = container(text(id.title()).size(12))
-                .width(Fill)
-                .padding(iced::Padding {
-                    top: 5.0,
-                    right: 8.0,
-                    bottom: 5.0,
-                    left: 8.0,
-                })
-                .style(|theme: &Theme| {
-                    let palette = theme.palette();
-                    container::Style {
-                        background: Some(Background::Color(palette.primary.base.color)),
-                        text_color: Some(palette.primary.base.text),
-                        ..Default::default()
-                    }
-                });
-            let ghost_panel = container(column![ghost_header, Space::new()])
-                .width(Length::Fixed(self.dock.width(id, self.win_size.0)))
-                .height(Length::Fixed(slot_h))
-                .style(|theme: &Theme| {
-                    let palette = theme.palette();
-                    container::Style {
-                        background: Some(Background::Color(palette.background.base.color)),
-                        border: Border {
-                            color: palette.primary.base.color,
-                            width: 2.0,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    }
-                });
-            // Position the ghost at its drop slot, flush against the edge.
-            let ghost = container(ghost_panel)
-                .width(Fill)
-                .height(Fill)
-                .align_x(match side {
-                    crate::app::config::DockSide::Left => iced::alignment::Horizontal::Left,
-                    crate::app::config::DockSide::Right => iced::alignment::Horizontal::Right,
-                })
-                .align_y(iced::alignment::Vertical::Top)
-                .padding(iced::Padding {
-                    top: ghost_top,
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: 0.0,
-                });
-            // Thin line across the column at the drop slot's top boundary.
-            let drop_line = container(
-                container(Space::new())
-                    .width(Fill)
-                    .height(Length::Fixed(3.0))
-                    .style(|theme: &Theme| container::Style {
-                        background: Some(Background::Color(theme.palette().primary.base.color)),
-                        ..Default::default()
-                    }),
-            )
-            .width(Fill)
-            .height(Fill)
-            .align_y(iced::alignment::Vertical::Top)
-            .padding(iced::Padding {
-                top: ghost_top,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0,
-            });
-            let preview = iced::widget::stack![edge_tint, ghost, drop_line]
-                .width(Length::Fixed(preview_width))
-                .height(Fill);
-            let preview = container(preview)
-                .width(Fill)
-                .height(Fill)
-                .align_x(match side {
-                    crate::app::config::DockSide::Left => iced::alignment::Horizontal::Left,
-                    crate::app::config::DockSide::Right => iced::alignment::Horizontal::Right,
-                });
-            stack![workspace, preview].width(Fill).height(Fill).into()
-        } else {
-            workspace
-        };
-        let workspace: Element<'_, Message> = if any_dragging || any_resizing {
-            mouse_area(workspace)
-                .on_move(move |p| Message::Dock(crate::ui::dock::DockMsg::DragMove(p)))
-                .on_release(Message::Dock(crate::ui::dock::DockMsg::DragRelease))
-                .interaction(if any_resizing {
-                    iced::mouse::Interaction::ResizingHorizontally
-                } else {
-                    iced::mouse::Interaction::Grabbing
-                })
-                .into()
-        } else {
-            workspace
-        };
+        let workspace = self.dock_overlay(workspace, tab);
         let command_line = self.command_line.view(
             allow_autocomplete,
             dyn_capturing,
@@ -2347,18 +2185,18 @@ bg={bg_ms:.1}ms n={view_count}"
         // otherwise an empty slice short-circuits the overlay gate
         // (`dropdown_overlay` returns `None` for empty labels anyway).
         let open_dropdown = self.ribbon.open_dropdown.as_deref();
-        let undo_labels: Vec<String> =
-            if open_dropdown == Some(crate::ui::ribbon::UNDO_HISTORY_ID) {
-                history_dropdown_labels(&self.tabs[self.active_tab].history.undo_stack)
-            } else {
-                Vec::new()
-            };
-        let redo_labels: Vec<String> =
-            if open_dropdown == Some(crate::ui::ribbon::REDO_HISTORY_ID) {
-                history_dropdown_labels(&self.tabs[self.active_tab].history.redo_stack)
-            } else {
-                Vec::new()
-            };
+        let undo_labels: Vec<String> = if open_dropdown == Some(crate::ui::ribbon::UNDO_HISTORY_ID)
+        {
+            history_dropdown_labels(&self.tabs[self.active_tab].history.undo_stack)
+        } else {
+            Vec::new()
+        };
+        let redo_labels: Vec<String> = if open_dropdown == Some(crate::ui::ribbon::REDO_HISTORY_ID)
+        {
+            history_dropdown_labels(&self.tabs[self.active_tab].history.redo_stack)
+        } else {
+            Vec::new()
+        };
         let gallery_open = open_dropdown == Some(crate::modules::insert::insert_block::GALLERY_ID)
             && !self.tabs[self.active_tab].is_start;
         let dropdown_layer: Element<'_, Message> = if gallery_open {
@@ -2369,17 +2207,22 @@ bg={bg_ms:.1}ms n={view_count}"
                 self.win_size.0,
             )
         } else {
-            self
-            .ribbon
-            .dropdown_overlay(
-                &undo_labels,
-                &redo_labels,
-                self.win_size,
-                self.tabs[self.active_tab].is_start,
-                &self.recent_colors,
-            )
-            .or_else(|| crate::ui::classic_toolbar::flyout_overlay(&self.ribbon, self.win_size.0, self.win_size.1))
-            .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into())
+            self.ribbon
+                .dropdown_overlay(
+                    &undo_labels,
+                    &redo_labels,
+                    self.win_size,
+                    self.tabs[self.active_tab].is_start,
+                    &self.recent_colors,
+                )
+                .or_else(|| {
+                    crate::ui::classic_toolbar::flyout_overlay(
+                        &self.ribbon,
+                        self.win_size.0,
+                        self.win_size.1,
+                    )
+                })
+                .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into())
         };
 
         let snap_override_layer: Element<'_, Message> = if let Some(pos) = self.snap_override_popup
@@ -2572,11 +2415,10 @@ impl OpenCADStudio {
             Subscription::none()
         };
         // While the command-line overlay is still displaying any
-        // recently-pushed history entry, re-render every frame so the
+        // recently-pushed history entry that is expiring, re-render every frame so the
         // entry disappears at the moment its visible window expires.
-        // The subscription auto-stops once no entry is fresh enough
-        // (typically within a few seconds of the last command).
-        let history_tick = if self.command_line.has_visible_history() {
+        // The subscription auto-stops once no entry is expiring.
+        let history_tick = if self.command_line.has_expiring_history() {
             window::frames().map(Message::Tick)
         } else {
             Subscription::none()
@@ -2635,6 +2477,18 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
+        // C11: park a `capture` request until the window draws another frame;
+        // a timer fallback prevents a request from hanging when no redraw is
+        // pending.
+        let capture_frame = if self.control.capture_frame_pending {
+            Subscription::batch([
+                window::frames().map(|_| Message::ControlCaptureFrame { redrew: true }),
+                iced::time::every(std::time::Duration::from_millis(50))
+                    .map(|_| Message::ControlCaptureFrame { redrew: false }),
+            ])
+        } else {
+            Subscription::none()
+        };
         // Blink the MText preview caret while the editor is open.
         let caret_blink = if self.mtext_editor.is_some() {
             iced::time::every(std::time::Duration::from_millis(530))
@@ -2658,9 +2512,9 @@ impl OpenCADStudio {
             iced::time::every(std::time::Duration::from_millis(300)).map(|_| Message::PollWebFonts);
         #[cfg(not(target_arch = "wasm32"))]
         let web_fonts = Subscription::none();
-        // Periodic autosave to a `.sv$` recovery file (native only). SAVETIME is
-        // the interval in minutes; 0 disables it.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Periodic autosave (SAVETIME): a `.sv$` recovery copy beside the file
+        // on native, an OPFS snapshot on web. SAVETIME is the interval in
+        // minutes; 0 disables it.
         let autosave = if self.savetime_min > 0 {
             iced::time::every(std::time::Duration::from_secs(
                 self.savetime_min as u64 * 60,
@@ -2669,8 +2523,6 @@ impl OpenCADStudio {
         } else {
             Subscription::none()
         };
-        #[cfg(target_arch = "wasm32")]
-        let autosave = Subscription::none();
         // Drawings handed over by a second launch (single instance). Inert in a
         // process that lost the port election, so it costs nothing there.
         #[cfg(not(target_arch = "wasm32"))]
@@ -2689,6 +2541,17 @@ impl OpenCADStudio {
         };
         #[cfg(target_arch = "wasm32")]
         let plugin_drain = Subscription::none();
+        // While a sheet set is open: it reloads when its .dst changes on disk,
+        // and its sheets' .dwl lock files follow the open tabs.
+        #[cfg(not(target_arch = "wasm32"))]
+        let sheet_set_poll = if self.sheet_set.sets.is_empty() {
+            Subscription::none()
+        } else {
+            iced::time::every(std::time::Duration::from_secs(1))
+                .map(|_| Message::SheetSet(crate::ui::window::sheet_set::SheetSetMsg::Poll))
+        };
+        #[cfg(target_arch = "wasm32")]
+        let sheet_set_poll = Subscription::none();
         let hatch_pattern_keys = if self.tabs[self.active_tab]
             .properties
             .hatch_pattern_picker_open
@@ -2753,10 +2616,9 @@ impl OpenCADStudio {
                             && modifiers.alt()
                             && !modifiers.control()
                             && !modifiers.logo();
-                        let shortcut_modifier = (modifiers.control()
-                            || modifiers.alt()
-                            || modifiers.logo())
-                            && !(types_glyph && (altgr || mac_option));
+                        let shortcut_modifier =
+                            (modifiers.control() || modifiers.alt() || modifiers.logo())
+                                && !(types_glyph && (altgr || mac_option));
                         // Any key that produces a printable glyph types it,
                         // even when its logical key resolves to navigation
                         // (NumLock-on Numpad8 / Numpad2 arrive as
@@ -2843,9 +2705,20 @@ impl OpenCADStudio {
                             }
                         }
                         let shortcut = shortcut_key_name(&key, modifiers)?;
-                        (status == Status::Ignored
-                            || crate::app::shortcuts::is_global_key(&shortcut))
-                        .then_some(Message::ShortcutPressed(shortcut))
+                        if status == Status::Ignored
+                            || crate::app::shortcuts::is_global_key(&shortcut)
+                        {
+                            return Some(Message::ShortcutPressed(shortcut));
+                        }
+                        // A text field captured the key. SPACE rebound away from
+                        // COMMANDSPACE still fires from the command line, but
+                        // only there: other fields keep typing spaces. This
+                        // closure is a plain fn, so the binding is read from a
+                        // flag and the focus is asked for in update. (#1710)
+                        (shortcut == "SPACE"
+                            && crate::app::shortcuts::SPACE_REBOUND_OFF_COMMANDSPACE
+                                .load(std::sync::atomic::Ordering::Relaxed))
+                        .then_some(Message::CommandLineSpaceProbe)
                     }
                     _ => None,
                 }
@@ -2866,7 +2739,9 @@ impl OpenCADStudio {
             } else {
                 Subscription::none()
             },
-            self.spacemouse.subscription().map(|_| Message::SpaceMouseWake),
+            self.spacemouse
+                .subscription()
+                .map(|_| Message::SpaceMouseWake),
             crate::input::trackpad::subscription().map(Message::TrackpadPinch),
             event::listen_with(|event, _, id| match event {
                 iced::Event::Window(window::Event::Focused) => {
@@ -2886,11 +2761,13 @@ impl OpenCADStudio {
             nav_settle,
             gpu_probe,
             thumbnail_capture,
+            capture_frame,
             caret_blink,
             tool_hold_tick,
             web_fonts,
             autosave,
             plugin_drain,
+            sheet_set_poll,
             single_instance,
             hatch_pattern_keys,
             keyboard_events,
@@ -2903,186 +2780,6 @@ impl OpenCADStudio {
 
     pub(super) fn unfocus_widgets(&self) -> Task<Message> {
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
-    }
-
-    /// Build one edge: a narrow tab strip at the very edge plus the expanded
-    /// panels sliding out beside it. Auto-collapsing (pinned) panels are always
-    /// visible as equal-height 1/N tabs in the strip (via `Fill` distribution);
-    /// hovering a tab raises its panel to full column height beside the strip,
-    /// so switching between stacked panels is a direct tab-to-tab hover with no
-    /// width-jumping collapse dance. Unpinned panels are always expanded. The
-    /// whole edge is one hover region: leaving it collapses any auto-collapsing
-    /// panel, but moving between the tabs and the expanded panel does not.
-    fn build_edge_stack<'a>(
-        &'a self,
-        side: crate::app::config::DockSide,
-        ids: &[crate::ui::dock::PanelId],
-        tab: &'a DocumentTab,
-    ) -> Element<'a, Message> {
-        let pinned: Vec<crate::ui::dock::PanelId> = ids
-            .iter()
-            .copied()
-            .filter(|id| self.dock.auto_collapse(*id))
-            .collect();
-        // Expanded = unpinned panels (always open) in stack order, then the
-        // hovered auto-collapsing one last so it floats on top.
-        let mut expanded: Vec<crate::ui::dock::PanelId> = ids
-            .iter()
-            .copied()
-            .filter(|id| !self.dock.auto_collapse(*id))
-            .collect();
-        if let Some(id) = self.dock_expanded {
-            if ids.contains(&id) && self.dock.auto_collapse(id) {
-                expanded.push(id);
-            }
-        }
-        // Each expanded panel renders at its own saved width; the column is as
-        // wide as the widest one currently showing.
-        let col_w = expanded
-            .iter()
-            .map(|id| self.dock.width(*id, self.win_size.0))
-            .fold(0.0, f32::max);
-
-        let tab_strip = (!pinned.is_empty()).then(|| {
-            let tabs: Vec<Element<'_, Message>> = pinned
-                .iter()
-                .map(|id| {
-                    self.rail_slice(
-                        *id,
-                        side,
-                        self.dock_expanded == Some(*id),
-                        self.dock_dragging == Some(*id),
-                    )
-                })
-                .collect();
-            column(tabs).width(DOCK_RAIL_W).height(Fill).into()
-        });
-        let expanded_stack = (!expanded.is_empty()).then(|| {
-            // Multiple simultaneously-expanded panels (e.g. two unpinned panels
-            // on the same edge) stack one below the other, each taking 1/N of
-            // the column height via equal `Fill` shares — never overlapping.
-            let layers: Vec<Element<'_, Message>> = expanded
-                .iter()
-                .map(|id| self.expanded_panel(*id, side, col_w, tab))
-                .collect();
-            column(layers).height(Fill).into()
-        });
-
-        let mut children: Vec<Element<'_, Message>> = Vec::new();
-        match side {
-            crate::app::config::DockSide::Left => {
-                if let Some(t) = tab_strip {
-                    children.push(t);
-                }
-                if let Some(e) = expanded_stack {
-                    children.push(e);
-                }
-            }
-            crate::app::config::DockSide::Right => {
-                if let Some(e) = expanded_stack {
-                    children.push(e);
-                }
-                if let Some(t) = tab_strip {
-                    children.push(t);
-                }
-            }
-        }
-        mouse_area(row(children).height(Fill))
-            .on_exit(Message::Dock(crate::ui::dock::DockMsg::HoverExit))
-            .into()
-    }
-
-    /// One narrow tab in the edge strip. Equal `Fill` heights across the tabs
-    /// give each 1/N of the strip; hovering or clicking it raises its panel.
-    fn rail_slice(
-        &self,
-        id: crate::ui::dock::PanelId,
-        side: crate::app::config::DockSide,
-        is_active: bool,
-        is_dragging: bool,
-    ) -> Element<'_, Message> {
-        let label = canvas(VBarLabel {
-            text: id.title().to_string(),
-            clockwise: side == crate::app::config::DockSide::Left,
-        })
-        .width(Fill)
-        .height(Fill);
-        let bg = move |theme: &Theme| {
-            let palette = theme.palette();
-            if is_active {
-                palette.primary.weak.color
-            } else if is_dragging {
-                palette.primary.weak.color.scale_alpha(0.55)
-            } else {
-                palette.background.base.color
-            }
-        };
-        let tab = container(label)
-            .width(Length::Fixed(DOCK_RAIL_W))
-            .height(Fill)
-            .style(move |theme: &Theme| container::Style {
-                background: Some(Background::Color(bg(theme))),
-                border: Border {
-                    color: if is_active {
-                        theme.palette().primary.base.color
-                    } else {
-                        theme.palette().background.neutral.color
-                    },
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            });
-        mouse_area(tab)
-            .interaction(iced::mouse::Interaction::Pointer)
-            .on_press(Message::Dock(crate::ui::dock::DockMsg::DockGrab(id)))
-            .on_enter(Message::Dock(crate::ui::dock::DockMsg::Hover(id)))
-            .into()
-    }
-
-    /// A panel expanded to the full edge column: the panel body plus a
-    /// grabbable divider against the viewport. Hovering is handled by the
-    /// enclosing edge region (see `build_edge_stack`), so the body stays fully
-    /// interactive without fighting the region's hover tracking.
-    fn expanded_panel<'a>(
-        &'a self,
-        id: crate::ui::dock::PanelId,
-        side: crate::app::config::DockSide,
-        width: f32,
-        tab: &'a DocumentTab,
-    ) -> Element<'a, Message> {
-        let auto_collapse = self.dock.auto_collapse(id);
-        let panel: Element<'_, Message> = match id {
-            crate::ui::dock::PanelId::Properties => tab.properties.view(width, auto_collapse),
-            crate::ui::dock::PanelId::BlockPalette => {
-                crate::ui::window::block_palette::view(&self.block_palette, width, auto_collapse)
-            }
-            crate::ui::dock::PanelId::ExternalReferences => self.xref_manager.view(
-                width,
-                auto_collapse,
-                tab.xref_missing,
-                &tab.scene.document,
-            ),
-            crate::ui::dock::PanelId::Browser => crate::ui::window::browser::view(
-                &tab.scene.document,
-                tab.sketch_session.as_ref().map(|session| session.name.as_str()),
-                width,
-                auto_collapse,
-            ),
-            crate::ui::dock::PanelId::NodeGraph => tab.graph.panel(width, auto_collapse),
-            crate::ui::dock::PanelId::PointCloudManager => crate::ui::window::pc_manager::view(
-                &self.pc_manager,
-                &tab.scene.document,
-                &tab.scene.selected_handles_in_order(),
-                width,
-                auto_collapse,
-            ),
-        };
-        let divider = dock_divider(id);
-        match side {
-            crate::app::config::DockSide::Left => row![panel, divider].height(Fill).into(),
-            crate::app::config::DockSide::Right => row![divider, panel].height(Fill).into(),
-        }
     }
 }
 
@@ -3412,68 +3109,6 @@ fn pane_mouse_area<'a>(idx: usize) -> Element<'a, Message> {
         .into()
 }
 
-/// Canvas that draws a label rotated 90° (for a collapsed panel's bar).
-struct VBarLabel {
-    text: String,
-    clockwise: bool,
-}
-
-impl canvas::Program<Message> for VBarLabel {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        theme: &Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::advanced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.with_save(|frame| {
-            frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
-            frame.rotate(iced::Radians(if self.clockwise {
-                std::f32::consts::FRAC_PI_2
-            } else {
-                -std::f32::consts::FRAC_PI_2
-            }));
-            frame.fill_text(canvas::Text {
-                content: self.text.clone(),
-                position: iced::Point::ORIGIN,
-                color: theme.palette().background.base.text.scale_alpha(0.72),
-                size: iced::Pixels(13.0),
-                align_x: iced::advanced::text::Alignment::Center,
-                align_y: iced::alignment::Vertical::Center,
-                shaping: iced::advanced::text::Shaping::Advanced,
-                ..Default::default()
-            });
-        });
-        vec![frame.into_geometry()]
-    }
-}
-
-/// Width of a collapsed (auto-collapsing) panel's tab in the edge strip.
-const DOCK_RAIL_W: f32 = 28.0;
-
-/// Grabbable separator for a docked panel managed by the general dock. Same
-/// visual as the previous per-panel divider but emits generic dock messages.
-fn dock_divider(id: crate::ui::dock::PanelId) -> Element<'static, Message> {
-    let line = container(Space::new())
-        .width(Length::Fixed(5.0))
-        .height(Fill)
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(theme.palette().background.neutral.color)),
-            ..Default::default()
-        });
-    let grab = Message::Dock(crate::ui::dock::DockMsg::ResizeGrab(id));
-    let reset = Message::Dock(crate::ui::dock::DockMsg::WidthReset(id));
-    mouse_area(line)
-        .on_press(grab)
-        .on_double_click(reset)
-        .interaction(iced::mouse::Interaction::ResizingHorizontally)
-        .into()
-}
-
 const START_ACTION_RADIUS: f32 = 6.0;
 
 fn start_action_shape(mut style: button::Style) -> button::Style {
@@ -3501,8 +3136,17 @@ pub(super) fn start_page_view<'a>(
         // page remains for a narrow window and for `ARCHLINE_WORKSPACE=ribbon`.
         if crate::workspace::is_classic() && size.width >= crate::ui::classic_start::MIN_WIDTH {
             return classic_start_page(
-                patrons, videos, videos_loading, video_thumbs, discussions, discussions_loading,
-                recents, thumbs, recent_limit, recent_limit_input, start_ui,
+                patrons,
+                videos,
+                videos_loading,
+                video_thumbs,
+                discussions,
+                discussions_loading,
+                recents,
+                thumbs,
+                recent_limit,
+                recent_limit_input,
+                start_ui,
             );
         }
         start_page_content(
@@ -3626,9 +3270,9 @@ fn start_page_content<'a>(
         primary_items.push(donate_btn.into());
     }
     let primary_row = WrapFlow::new(primary_items)
-    .spacing_x(12.0)
-    .row_h(48.0)
-    .report_natural_width(action_width_out.clone());
+        .spacing_x(12.0)
+        .row_h(48.0)
+        .report_natural_width(action_width_out.clone());
 
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut secondary_items: Vec<Element<'a, Message>> = Vec::new();
@@ -4199,10 +3843,10 @@ fn start_page_content<'a>(
                 );
             }
             let tab_bar = Row::with_children(tabs)
-            .spacing(6.0)
-            .align_y(iced::Center)
-            .wrap()
-            .vertical_spacing(0.0);
+                .spacing(6.0)
+                .align_y(iced::Center)
+                .wrap()
+                .vertical_spacing(0.0);
             let section_body: Element<'a, Message> = match active {
                 super::StartSection::Recent => container(recent)
                     .width(Fill)

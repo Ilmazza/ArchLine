@@ -9,25 +9,24 @@ pub(crate) mod config;
 pub use automation::{export_headless, serve};
 mod annotation_data;
 mod command_driver;
-pub(crate) use command_driver::{copy_to_clipboard_kernel, paste_entities_kernel};
+pub(crate) use command_driver::{copy_to_clipboard_kernel, paste_entities_kernel, PasteSpace};
 pub(crate) mod commands;
 pub(crate) mod dim_viewport;
 #[cfg(test)]
-mod viewport_dimension_tests;
-#[cfg(test)]
 mod dimension_preview_tests;
+mod dock;
 mod document;
 mod drafting_settings;
 pub(crate) mod expr_eval;
-mod options_session;
 mod find_replace;
 pub(crate) mod helpers;
 mod history;
 mod layers;
 mod model_ops;
+mod mtext_editor;
 mod navigation;
 mod node_graph;
-mod mtext_editor;
+mod options_session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_host;
 mod presspull_ops;
@@ -42,6 +41,8 @@ mod text_inline;
 mod tolerance_dialog;
 mod update;
 mod view;
+#[cfg(test)]
+mod viewport_dimension_tests;
 mod visibility;
 
 pub use style_ops::StyleKind;
@@ -428,10 +429,6 @@ pub(super) struct OpenCADStudio {
     discussions: Vec<crate::discussions::DiscussionEntry>,
     /// True while the boot-time Discussions refresh is still in flight.
     discussions_loading: bool,
-    /// Block references whose properties panel shows per-axis Scale X/Y/Z even
-    /// though the three factors are currently equal — the user unchecked the
-    /// "Uniform scale" box for them (#427). Keyed by entity handle.
-    props_asym_scale: std::collections::HashSet<u64>,
     /// Collapsed Properties-panel section titles. This belongs to the app,
     /// rather than an individual document tab, so the same view preference is
     /// used by every currently open drawing/project.
@@ -579,6 +576,10 @@ pub(super) struct OpenCADStudio {
     polar_increment_deg: f32,
     /// Reverse the mouse-wheel zoom direction when true (ZOOMWHEEL = 1).
     zoom_wheel_reversed: bool,
+    /// Scroll pans and Ctrl+scroll zooms (touchpads); see `scroll_intent`.
+    touchpad_pan: bool,
+    /// Interface scale in percent, applied through the window scale factor.
+    ui_scale_percent: u16,
     /// Mouse-wheel zoom sensitivity (ZOOMFACTOR), held inside
     /// `settings::ZOOM_FACTOR_MIN..=settings::ZOOM_FACTOR_MAX`. `SETVAR`
     /// only sets the range the system variable itself has; the Options
@@ -610,6 +611,14 @@ pub(super) struct OpenCADStudio {
     crosshair_color: Option<[u8; 3]>,
     /// Editable Options buffer for the crosshair colour.
     crosshair_color_input: String,
+    /// Explicit object-snap marker colour; `None` keeps the automatic one.
+    snap_marker_color: Option<[u8; 3]>,
+    /// Explicit command-line text colour; `None` keeps the theme's.
+    command_text_color: Option<[u8; 3]>,
+    /// Editable Options buffer for the command-line text colour.
+    command_text_color_input: String,
+    /// Editable Options buffer for the snap marker colour.
+    snap_marker_color_input: String,
     /// Defer the ISOLINES mesh rebuild until the slider is released.
     isolines_awaiting_regen: bool,
     /// Edit buffer for the SNAPANG field on the Options Drafting page. Kept
@@ -639,6 +648,10 @@ pub(super) struct OpenCADStudio {
     dyn_mode: i16,
     /// Currently visible page in the application Options dialog.
     options_tab: crate::ui::window::options::OptionsTab,
+    /// Saved graphics options (backend, compat renderer); read at launch, so
+    /// edits here only take effect after a restart.
+    #[cfg(not(target_arch = "wasm32"))]
+    graphics_prefs: crate::gpu_backend::GraphicsPrefs,
     /// The Options window's commit point (see `options_session`).
     options_saved: Option<options_session::OptionsSnapshot>,
     /// Close was pressed with unapplied changes; the discard guard is up.
@@ -822,6 +835,11 @@ pub(super) struct OpenCADStudio {
     render_mode_preview: Option<codec::entities::ViewportRenderMode>,
     /// Whether the Properties panel is shown on the left (PROPERTIES).
     show_properties: bool,
+    /// The Layer Manager pallet (LAYERS) is open.
+    pub(crate) show_layers: bool,
+    /// Whether the Graphic Attributes palette is shown (GRAPHICATTRIBUTES).
+    show_graphic_attributes: bool,
+    graphic_attributes: crate::ui::window::graphic_attributes::GraphicAttributesState,
     /// Docked Insert Block panel visibility.
     pub(crate) show_block_palette: bool,
     /// Node graph overlay over the viewport.
@@ -838,6 +856,14 @@ pub(super) struct OpenCADStudio {
     pub(crate) show_browser: bool,
     /// Point Cloud Manager palette (POINTCLOUDMANAGER).
     pub(crate) pc_manager: crate::ui::window::pc_manager::PcManager,
+    pub(crate) count_palette: crate::ui::window::count_palette::CountPalette,
+    /// Sheet Set Manager palette, the open sheet sets and their dialogs.
+    pub(crate) sheet_set: crate::ui::window::sheet_set::SheetSetManager,
+    /// A sheet opened from the manager: its drawing (path key) and layout,
+    /// switched to once the drawing has loaded.
+    pub(crate) sheet_set_pending_layout: Option<(String, String)>,
+    /// The subset / set Import Layout as Sheet adds to, while its file picker is open.
+    pub(crate) sheet_set_import_parent: Option<String>,
     /// Which viewport background the colour wheel is editing, or `None` when
     /// it is closed. One slot, because only one wheel can be open at a time.
     pub(crate) bg_picker: Option<BgTarget>,
@@ -852,17 +878,33 @@ pub(super) struct OpenCADStudio {
     pub(crate) tool_hold: Option<ToolHold>,
     /// Sort, search, view and section of the classic Start page.
     pub(crate) start_ui: crate::ui::classic_start::StartUi,
-    /// Which panel is currently floated at full height (hovered, or a pinned
-    /// panel on top).
-    pub(crate) dock_expanded: Option<crate::ui::dock::PanelId>,
-    /// Panel currently being dragged between sides / reordered.
-    pub(crate) dock_dragging: Option<crate::ui::dock::PanelId>,
-    /// Panel currently being width-resized.
-    pub(crate) dock_resizing: Option<crate::ui::dock::PanelId>,
-    /// Last pointer position during a drag / resize.
+    /// Pallet revealed although it auto-hides (its edge's group, or its
+    /// floating frame): hovered, being dragged, or just opened. Cleared when
+    /// the pointer leaves.
+    pub(crate) dock_peek: Option<crate::ui::dock::PanelId>,
+    /// Reveal or hide waiting out the hover delay, with the generation its
+    /// timer carries; any newer hover supersedes it.
+    pub(crate) dock_hover_pending: Option<crate::ui::dock::HoverPending>,
+    pub(crate) dock_hover_gen: u64,
+    /// What the pointer is dragging in the dock (pallet, group, width,
+    /// splitter, floating size, Layer Manager column).
+    pub(crate) dock_drag: Option<crate::ui::dock::DockDrag>,
+    /// Pallet whose strip icon (or floating frame) the pointer is over.
+    pub(crate) dock_icon_hover: Option<crate::ui::dock::PanelId>,
+    /// Last pointer position during a dock drag.
     pub(crate) dock_drag_last: Option<iced::Point>,
-    /// Live drag target (side + index), shown as a highlight while dragging.
-    pub(crate) dock_drag_target: Option<(crate::app::config::DockSide, usize)>,
+    /// Docked panel whose title bar the pointer is over (shows pin / close).
+    pub(crate) dock_title_hover: Option<crate::ui::dock::PanelId>,
+    /// Edge whose icon-strip pallet menu (+) is open.
+    pub(crate) dock_edge_menu: Option<crate::app::config::DockSide>,
+    /// Floating pallet whose title-bar right-click menu is open.
+    pub(crate) dock_float_menu: Option<crate::ui::dock::PanelId>,
+    /// Pointer position over a floating title bar (bar-local), and where
+    /// its open menu was asked for.
+    pub(crate) dock_float_pointer: iced::Point,
+    pub(crate) dock_float_menu_at: iced::Point,
+    /// Group whose edge band (group grip) the pointer is over.
+    pub(crate) dock_grip_hover: Option<(crate::app::config::DockSide, usize)>,
     /// Reference-table column currently being width-resized (column index),
     /// with the last pointer position. Mirrors the Layers Name-column drag.
     pub(crate) xref_col_drag: Option<usize>,
@@ -902,6 +944,56 @@ pub(super) struct OpenCADStudio {
     pending_native_thumbnail_save: Option<PendingNativeThumbnailSave>,
     #[cfg(target_arch = "wasm32")]
     pending_web_thumbnail_save: Option<PendingWebThumbnailSave>,
+    /// Web: whether the save in flight came from a plain Save
+    /// (Save/QSAVE or the save-before-close flow), so the tab's retained
+    /// File System Access handle (see io::fs_access) may be written
+    /// through directly; Save As opens the dialog modal and must re-pick.
+    /// Set true by `save_with_default_format`, false by
+    /// `open_save_dialog_window`.
+    #[cfg(target_arch = "wasm32")]
+    save_plain_reuse_fs_handle: bool,
+    /// One web autosave round is running; ticks that fire while it lasts are
+    /// dropped instead of queued (the next interval retries).
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_in_flight: bool,
+    /// Web autosave storage already reported a failure — stay quiet until a
+    /// round succeeds again, so a full quota does not spam every tick.
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_warned: bool,
+    /// Crash-recovery snapshots found at boot (newest first) that the restore
+    /// prompt still has to offer, one at a time.
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_pending: Vec<crate::io::web_autosave::WebAutosaveEntry>,
+    /// Snapshots a "Restore all" click still expects to settle (opened,
+    /// failed, cancelled, unreadable, or rejected by the open queue). Each
+    /// settle funnels through `queue_next_web_autosave_prompt`, which counts
+    /// this down; reaching zero arms `web_session_focus_pending`.
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_restore_all_remaining: usize,
+    /// A Restore-all batch finished settling — apply the remembered
+    /// session's active tab at the next message boundary, after the last
+    /// restored open has actually inserted its tab (`web_autosave_opened`
+    /// runs before that insertion, so applying there would pick against a
+    /// tab list still missing the last restore).
+    #[cfg(target_arch = "wasm32")]
+    web_session_focus_pending: bool,
+    /// The tab list the previous session remembered (localStorage), loaded
+    /// after the boot autosave scan. Advisory only: it feeds the restore
+    /// modal's session line and the post-restore tab selection — nothing is
+    /// ever auto-opened from it.
+    #[cfg(target_arch = "wasm32")]
+    web_session: Option<crate::io::web_session::WebSession>,
+    /// The snapshot whose recovered open is in flight: `(autosave key,
+    /// open id)`. The OPFS copy is the only one, so it is deleted only
+    /// once the open with exactly that id succeeds — identity, never the
+    /// display name (same-named files share one stored copy on web).
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_consumed: Option<(String, u64)>,
+    /// Autosave keys a web save wanted to remove while a snapshot round was
+    /// still writing (the round's late write would resurrect the snapshot
+    /// with a fresh mtime); the removes run when the round finishes.
+    #[cfg(target_arch = "wasm32")]
+    web_autosave_clear_after: Vec<String>,
     // ── Floating panel windows ────────────────────────────────────────────
     /// Active `iced_aw` colour picker: destination plus its initial colour.
     color_pick_target: Option<(ColorPickTarget, AcadColor)>,
@@ -951,9 +1043,6 @@ pub(super) struct OpenCADStudio {
     modal_drag_last: Option<Point>,
     /// True while the modal title bar is held (a drag is in progress).
     modal_dragging: bool,
-    /// Layer Manager: dragging the Name-column divider (width follows the
-    /// shared ModalDragMove flow).
-    layer_col_dragging: bool,
     /// Layer Manager Name column width in px, adjusted by the divider drag.
     layer_name_col_w: f32,
     /// How far the user has dragged the modal's corner resize grip from the
@@ -1041,6 +1130,8 @@ pub(super) struct OpenCADStudio {
     check_missing_fonts: bool,
     /// Custom font source base URL; empty selects the community repository.
     font_source_url: String,
+    /// Template a new drawing starts from (QNEW); empty = blank.
+    qnew_template: String,
     /// Editable copy of `font_source_url` shown in the missing-fonts prompt.
     font_source_input: String,
     donation_prompt_version: String,
@@ -1112,6 +1203,14 @@ pub(super) struct OpenCADStudio {
     /// Snapshot of the dialog's settings taken when it opened, restored by the
     /// `<previous>` list entry.
     plot_prev: Option<crate::ui::window::plot::PlotDialogState>,
+    /// Tab/layout that last owned the Plot dialog. Reopening Plot in the same
+    /// context keeps the user's last paper, scale, CTB and output choices
+    /// instead of reapplying the layout page setup over them.
+    plot_prev_context: Option<(usize, String)>,
+    /// Printer whose capability reply is allowed to reconcile the current
+    /// sheet. Set only after an explicit printer/page-setup choice; merely
+    /// opening Plot must never replace the drawing's stored paper size.
+    plot_reconcile_printer_media: Option<String>,
     /// Full source settings behind the fields currently shown in Plot.
     plot_setup_template: Option<codec::objects::PlotSettings>,
     /// Paper layouts shown by Print All, in tab order with their selection.
@@ -1564,6 +1663,25 @@ pub(super) struct PendingExternalChange {
     set_current_path: bool,
 }
 
+/// One tab's slot in a web SAVEALL round (`saveall_web`): the tab identity,
+/// download name and race-guard markers snapshot when serialization started,
+/// plus the writer result — the future fills `result` in before the
+/// completion message is built. The web counterpart of native's
+/// `SaveOutcome`, minus the path/continuation bookkeeping SAVEALL never had.
+#[derive(Debug, Clone)]
+#[cfg(target_arch = "wasm32")]
+pub struct WebSaveallEntry {
+    tab_id: u64,
+    path: PathBuf,
+    filename: String,
+    ext: String,
+    version: codec::DxfVersion,
+    geometry_epoch: u64,
+    edit_revision: u64,
+    camera_generation: u64,
+    result: Result<Vec<u8>, String>,
+}
+
 #[derive(Debug, Clone)]
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SaveOutcome {
@@ -1599,6 +1717,9 @@ pub enum ColorPickerTab {
 /// Where a colour chosen in the standalone palette window should be applied.
 #[derive(Debug, Clone)]
 pub enum ColorPickTarget {
+    Gradient(u8),
+    GraphicAttributesLine,
+    GraphicAttributesSolid,
     DimStyle(DsField),
     MLeader(&'static str),
     Table(u8, &'static str),
@@ -1612,8 +1733,8 @@ pub enum ColorPickTarget {
     PropertiesField(String),
     /// Current creation colour (ribbon).
     Ribbon,
-    /// A layer's colour, by panel row index.
-    Layer(usize),
+    /// A layer's colour, by layer name.
+    Layer(String),
     /// A saved layer-state layer's colour, by editor row index.
     LayerState(usize),
     /// The MText editor's selection (or global) colour.
@@ -1741,8 +1862,7 @@ impl ClipboardDeps {
                 if !objects.is_empty() {
                     let mut annotation_scales = Vec::new();
                     for (_, object) in &objects {
-                        let codec::objects::ObjectType::ObjectContextData(context) = object
-                        else {
+                        let codec::objects::ObjectType::ObjectContextData(context) = object else {
                             continue;
                         };
                         if annotation_scales
@@ -1873,10 +1993,7 @@ impl ClipboardDeps {
     /// Snapshot every block definition the `entities` reference through an
     /// INSERT, walking nested INSERTs transitively. Model/paper space and
     /// xref blocks are skipped — those aren't portable definitions.
-    fn capture_blocks(
-        doc: &codec::CadDocument,
-        entities: &[codec::EntityType],
-    ) -> Vec<BlockDef> {
+    fn capture_blocks(doc: &codec::CadDocument, entities: &[codec::EntityType]) -> Vec<BlockDef> {
         use codec::EntityType;
         use rustc_hash::FxHashSet;
         let mut seen: FxHashSet<String> = FxHashSet::default();
@@ -1956,7 +2073,6 @@ pub enum ModalKind {
     PluginManager,
     UpdateNotice,
     DonationPrompt,
-    Layers,
     LayerStateManager,
     LayerTranslator,
     DrawingUnits,
@@ -1974,6 +2090,7 @@ pub enum ModalKind {
     GeometricTolerance,
     AttDef,
     AttDefEdit,
+    CountInvalidArea,
     Field,
     DraftingSettings,
     AutoConstrainSettings,
@@ -2022,6 +2139,13 @@ pub enum ModalKind {
     GpuWarning,
     /// Reference Manager help window (toolbar Help button).
     XrefHelp,
+    /// Sheet set wizard, properties and sheet / subset forms.
+    SheetSet,
+    /// Web: a crash-recovery autosave snapshot newer than the drawing's last
+    /// save awaits a restore/discard decision. Distinct from the corrupt-file
+    /// `RecoveryPrompt` — nothing is wrong with the drawing itself.
+    #[cfg(target_arch = "wasm32")]
+    AutosaveRestore,
 }
 
 /// A property group controlled by a layer state's restore mask.
@@ -2143,6 +2267,7 @@ pub enum PasteFocus {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    GraphicAttributes(crate::ui::window::graphic_attributes::GraphicAttributesMsg),
     SpaceMouseWake,
     SpaceMouseFrame(iced::time::Instant),
     SpaceMouseFocus(iced::window::Id, bool),
@@ -2161,6 +2286,10 @@ pub enum Message {
     ControlStep(String, Box<Message>),
     ControlTaskDone(String),
     ControlScreenshot(String, Option<iced::window::Screenshot>),
+    /// A frame has been drawn (or the anti-hang timer expired) for a parked
+    /// `capture` request: take the screenshot now, so it shows the latest
+    /// state instead of the previous frame (C11).
+    ControlCaptureFrame { redrew: bool },
     ControlToggle,
     /// Node graph overlay interaction.
     Graph(crate::ui::node_graph::GraphMsg),
@@ -2188,6 +2317,12 @@ pub enum Message {
     PasteShortcutResolved(PasteFocus),
     /// Completion of a system text clipboard read requested by PASTECLIP.
     SystemClipboardPaste(SystemClipboardText),
+    /// Web: completion of the clipboard-image read the paste fallback starts
+    /// when no text was found — `Some((name, bytes))` attaches the image,
+    /// `None` reports the usual unsupported-content error. Native never
+    /// constructs it.
+    #[cfg(target_arch = "wasm32")]
+    SystemClipboardPasteImage(Option<(String, Vec<u8>)>),
     /// Ctrl/Cmd+A — select all layer rows when the Layer Manager is open, or all
     /// drawing objects otherwise (#236).
     SelectAllShortcut,
@@ -2208,6 +2343,12 @@ pub enum Message {
     OpenPathPicked(Option<(PathBuf, u64)>),
     /// A file was dragged from the desktop and dropped on the window (#344).
     FileDropped(PathBuf),
+    /// Web only: a drawing dragged onto the page — the DOM drop listener has
+    /// already read the bytes; this opens through the web-picker flow (#344).
+    /// The third field tags an autosave-restore file with its snapshot key so
+    /// the snapshot is deleted only when this exact open succeeds.
+    #[cfg(target_arch = "wasm32")]
+    WebFileDropped(String, Vec<u8>, Option<String>),
     /// Web only: Ctrl+V captured by a focused text field, whose iced-internal
     /// paste is inert there — read the async clipboard instead (#346).
     WebFieldPaste,
@@ -2271,6 +2412,39 @@ pub enum Message {
     /// Web: an asynchronous OPFS copy written after Save is ready for recents.
     #[cfg(target_arch = "wasm32")]
     WebRecentStored(Result<PathBuf, String>),
+    /// Web: the `?file=` boot deep link settled — its bytes entered the
+    /// guarded open queue, or a notice/error text for the command line
+    /// (recent copy missing, refused or failed fetch).
+    #[cfg(target_arch = "wasm32")]
+    WebLinkSettled(crate::io::web_link::LinkOutcome),
+    /// Web: the boot scan finished — these autosave snapshots are newer than
+    /// the drawings' last saved copies (newest first).
+    #[cfg(target_arch = "wasm32")]
+    WebAutosavesScanned(Result<Vec<crate::io::web_autosave::WebAutosaveEntry>, String>),
+    /// Web: restore the offered autosave snapshot into a recovered tab.
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveRestore,
+    /// Web: restore EVERY pending autosave snapshot — each is read and
+    /// enqueued through the guarded open queue with its own key (the poll
+    /// opens them sequentially); a snapshot is still consumed only after its
+    /// own open succeeds.
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveRestoreAll,
+    /// Web: delete the offered autosave snapshot (and offer the next, if any).
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveDiscard,
+    /// Web: close the restore prompt WITHOUT deleting the offered snapshot
+    /// (Escape/✕): it is simply re-offered on the next boot. Only the
+    /// Discard button deletes.
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveDefer,
+    /// Web: the offered snapshot's bytes are in; queue them for the guarded
+    /// open poll. The OPFS copy is consumed only once that open succeeds.
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveBytes(String, String, Result<Vec<u8>, String>),
+    /// Web: one autosave round finished for all dirty tabs (serially).
+    #[cfg(target_arch = "wasm32")]
+    WebAutosaveSnapshotFinished(Result<(), String>),
     SaveFile,
     SaveAs,
     // ── Custom Save-As dialog ─────────────────────────────────────────────
@@ -2284,6 +2458,15 @@ pub enum Message {
     OptionsOpen,
     /// Switch the visible page in Options.
     OptionsTabChanged(crate::ui::window::options::OptionsTab),
+    /// Options > Graphics: pin a backend (applies at next launch).
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsBackendChanged(crate::gpu_backend::BackendChoice),
+    /// Options > Graphics: force the packed compatibility renderer.
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsCompatToggled(bool),
+    /// Options > Graphics: prefer OpenGL on older GPUs.
+    #[cfg(not(target_arch = "wasm32"))]
+    GraphicsLegacyGlToggled(bool),
     /// Set CURSORSIZE from the Display-page slider.
     CursorSizeChanged(i32),
     /// Set PICKBOX from the Selection-page slider.
@@ -2298,6 +2481,13 @@ pub enum Message {
     LineweightDisplayScaleChanged(i32),
     /// Edit the optional crosshair RGB value; blank restores automatic contrast.
     CrosshairColorChanged(String),
+    SnapMarkerColorChanged(String),
+    CommandTextColorChanged(String),
+    /// Options → Files: the default template for new drawings.
+    QnewTemplateChanged(String),
+    QnewTemplateBrowse,
+    /// NEW: the picked template a new drawing starts from (`None` = cancelled).
+    NewFromTemplate(Option<std::path::PathBuf>),
     /// Set the default type/version used when first saving a new drawing.
     DefaultSaveFormatChanged(String),
     /// Select one of Iced's built-in themes or the editable Custom theme.
@@ -2367,6 +2557,9 @@ pub enum Message {
     CommandLineFadeChanged(i32),
     /// Toggle reversing the mouse-wheel zoom direction (ZOOMWHEEL).
     ZoomWheelReversedChanged(bool),
+    TouchpadPanChanged(bool),
+    /// Interface scale in percent (Options > Display).
+    UiScaleChanged(u16),
     /// Change how far one wheel notch zooms, from the Options slider
     /// (ZOOMFACTOR).
     ZoomFactorChanged(i32),
@@ -2435,6 +2628,19 @@ pub enum Message {
     LayerTranslatorLoad,
     /// A target set was read from `path`.
     LayerTranslatorLoaded(std::path::PathBuf),
+    /// Web: a standards drawing picked and parsed in the browser, with the
+    /// target layers already extracted — a name-only path has nothing behind
+    /// it for `load_targets` to read. `Ok(None)` = cancelled.
+    #[cfg(target_arch = "wasm32")]
+    LayerTranslatorLoadedWeb(
+        Result<
+            Option<(
+                String,
+                Vec<crate::modules::draw::layers::laytrans::TargetLayer>,
+            )>,
+            String,
+        >,
+    ),
     LayerTranslatorSelectFrom(String),
     LayerTranslatorSelectTo(String),
     /// Pair the two selected layers.
@@ -2540,6 +2746,89 @@ pub enum Message {
         bounds: Option<iced::Rectangle>,
         screenshot: Option<iced::window::Screenshot>,
     },
+    /// Web SAVE: the serializer worker (or the inline fallback) produced the
+    /// drawing bytes; download them and finish the save bookkeeping. The
+    /// epoch/revision/camera markers snapshot the tab when serialization
+    /// started — the web counterpart of native's `snapshot_is_current`, so a
+    /// save that raced user edits does not wipe the newer dirty flag.
+    #[cfg(target_arch = "wasm32")]
+    WebSaveSerialized {
+        tab_id: u64,
+        filename: String,
+        autosave_key: String,
+        version: codec::DxfVersion,
+        geometry_epoch: u64,
+        edit_revision: u64,
+        camera_generation: u64,
+        result: Result<Vec<u8>, String>,
+    },
+    /// Web SAVE with the File System Access API: the showSaveFilePicker
+    /// promise settled. The picker ran in the save-confirm handler — the
+    /// user-gesture moment — because the serialization that follows may
+    /// outlast the transient-activation window; the retained handle (kept
+    /// in io::fs_access's tab-keyed registry, since a JsValue handle cannot
+    /// ride in a Send Message) is written to later without needing a
+    /// gesture. `Ok(Some(name))` = destination chosen (`name` is its real,
+    /// possibly renamed name); `Ok(None)` = the user dismissed the picker
+    /// (cancel the save, like desktop); `Err` = the picker itself failed
+    /// (fall back to the legacy download).
+    #[cfg(target_arch = "wasm32")]
+    WebSaveHandlePicked {
+        tab_id: u64,
+        filename: String,
+        ext: String,
+        version: codec::DxfVersion,
+        picked: Result<Option<String>, String>,
+    },
+    /// Web SAVE in-place completion: the retained FS Access handle's
+    /// createWritable write settled (on failure the task already fell back
+    /// to a download); run the shared save bookkeeping, including the OPFS
+    /// recent-copy store the download path performs. Same race-guard
+    /// markers as `WebSaveSerialized`.
+    #[cfg(target_arch = "wasm32")]
+    WebSaveWritten {
+        tab_id: u64,
+        filename: String,
+        autosave_key: String,
+        version: codec::DxfVersion,
+        geometry_epoch: u64,
+        edit_revision: u64,
+        camera_generation: u64,
+        result: Result<(), String>,
+        bytes: Vec<u8>,
+    },
+    /// Web WBLOCK: the serializer worker (or the inline fallback) produced
+    /// the block document bytes; download them under `filename`, then run
+    /// the same command-line bookkeeping as `WblockWriteFinished`.
+    #[cfg(target_arch = "wasm32")]
+    WebWblockSerialized {
+        block_name: String,
+        path: std::path::PathBuf,
+        filename: String,
+        result: Result<Vec<u8>, String>,
+    },
+    /// Web SAVEALL round completion: one entry per tab serialized on the
+    /// worker (or the inline fallback). Downloads fire per entry; dirty
+    /// flags clear only for tabs whose serialized snapshot is still current
+    /// (the same race guard a single web Save uses).
+    #[cfg(target_arch = "wasm32")]
+    WebSaveallSerialized {
+        skipped: usize,
+        results: Vec<WebSaveallEntry>,
+    },
+    /// Web ARCHIVE/ETRANSMIT completion: the serializer worker (or the
+    /// inline fallback) produced the drawing bytes; assemble the transmittal
+    /// ZIP from the dependencies collected at command time, download it and
+    /// report — including the skipped-dependency lines.
+    #[cfg(target_arch = "wasm32")]
+    WebArchiveSerialized {
+        cmd: String,
+        zip_name: String,
+        filename: String,
+        deps: Vec<(String, Vec<u8>)>,
+        skipped: Vec<String>,
+        result: Result<Vec<u8>, String>,
+    },
     /// Retry the failed save after the other application releases the file.
     #[cfg(not(target_arch = "wasm32"))]
     SaveFileInUseRetry,
@@ -2569,6 +2858,19 @@ pub enum Message {
     /// dispatch, this accepts an interactive verb and all of its arguments on
     /// the same line (`BOX 0,0,0 10,10,0 10`).
     ScriptLine(String),
+    /// Web SCRIPT: the picked .scr file's name and text. `None` = the
+    /// browser dialog was cancelled.
+    #[cfg(target_arch = "wasm32")]
+    ScriptFilePicked(Option<(String, String)>),
+    /// Web CENTERLTYPEFILE: the picked .lin/.dnl file's name and text.
+    /// `None` = cancelled.
+    #[cfg(target_arch = "wasm32")]
+    CenterlineLinetypeFilePicked(Option<(String, String)>),
+    /// Web DATALINK: the picked .csv file's name and raw bytes — registered
+    /// in the picked-source registry, then fed to the same table-insert path
+    /// the native typed-path command uses. `None` = cancelled.
+    #[cfg(target_arch = "wasm32")]
+    DataLinkCsvPicked(Option<(String, Vec<u8>)>),
     /// Append one typed character to the command-line input from the
     /// global key-press subscription. Used when the text-input widget
     /// itself isn't focused (focus parked on viewport / button / etc.)
@@ -2577,8 +2879,11 @@ pub enum Message {
     /// Pop the trailing character off the command-line input — backspace
     /// counterpart to `CommandAppendChar`.
     CommandBackspace,
-    /// TAB pressed: move focus to the next dynamic-input field (wraps).
+    /// TAB pressed: move focus to the next dynamic-input field or
+    /// autocomplete suggestion.
     DynTabNext,
+    /// Shift+TAB: move to the previous contextual autocomplete suggestion.
+    DynTabPrev,
     /// Split the active Model viewport in two. `true` → horizontal divider
     /// (top / bottom); `false` → vertical divider (left / right).
     SplitModelViewport(bool),
@@ -2596,6 +2901,12 @@ pub enum Message {
         shortcut: String,
         extend_selection: bool,
     },
+    /// A text field captured SPACE while it is rebound away from
+    /// COMMANDSPACE; run the binding only if the command input has focus.
+    CommandLineSpaceProbe,
+    /// The command input has focus: drop the space it just typed and run the
+    /// SPACE binding.
+    CommandLineSpaceResolved,
     /// A widget captured Up/Down; resolve it only if the command input owns
     /// keyboard focus.
     CommandLineArrowProbe {
@@ -2649,11 +2960,11 @@ pub enum Message {
     ToggleXrefManager,
     /// Rescan the active drawing's references into the palette.
     XrefManagerRefresh,
-    /// Toggle one palette row (entry index) in the multi-selection set.
-    XrefManagerSelect(usize),
+    /// Toggle one palette row (stable row id) in the multi-selection set.
+    XrefManagerSelect(crate::ui::window::xref_manager::XrefRowId),
     /// Right-click on a palette row: single-select it when outside the
     /// selection (the context menu then acts on the selection).
-    XrefRowRightClick(usize),
+    XrefRowRightClick(crate::ui::window::xref_manager::XrefRowId),
     /// Flip the palette's list/tree presentation.
     XrefManagerToggleTree,
     /// Start a reference-table column divider drag (column index).
@@ -2690,40 +3001,43 @@ pub enum Message {
     XrefManagerToggleExpand(u64),
     /// Selection-scoped palette operation (detach/unload/reload/overlay/pathtype).
     XrefManagerOp(crate::ui::window::xref_manager::XrefPaletteOp),
-    /// Row-scoped palette operation: selects row `index`, then applies the
-    /// operation to it.
-    XrefRowOp(usize, crate::ui::window::xref_manager::XrefPaletteOp),
+    /// Row-scoped palette operation: selects the row by stable id, then
+    /// applies the operation to it.
+    XrefRowOp(
+        crate::ui::window::xref_manager::XrefRowId,
+        crate::ui::window::xref_manager::XrefPaletteOp,
+    ),
     /// Prefill the command line for Find & Replace across references
     /// (`XREF Path Find <old> <new>`); the CLI parses and runs it.
     XrefFindReplacePrompt,
-    /// Pick a new path for a specific row index.
-    XrefRowPathPick(usize),
-    /// Prefill the command line for Find & Replace for a specific row index.
-    XrefRowFindReplacePrompt(usize),
+    /// Pick a new path for a specific row (stable id).
+    XrefRowPathPick(crate::ui::window::xref_manager::XrefRowId),
+    /// Prefill the command line for Find & Replace for a specific row id.
+    XrefRowFindReplacePrompt(crate::ui::window::xref_manager::XrefRowId),
     XrefRowChangePathEnter,
     XrefRowChangePathLeave,
-    LayerToggleVisible(usize),
-    LayerToggleLock(usize),
-    LayerToggleFreeze(usize),
-    LayerTogglePlot(usize),
+    LayerToggleVisible(String),
+    LayerToggleLock(String),
+    LayerToggleFreeze(String),
+    LayerTogglePlot(String),
     /// Sort the Layer Manager table by a clicked column header.
     LayerSort(crate::ui::window::layers::LayerSortCol),
-    /// Toggle per-viewport freeze: (layer_index, vp_col_index)
-    LayerToggleVpFreeze(usize, usize),
+    /// Toggle per-viewport freeze: (layer_name, vp_col_index)
+    LayerToggleVpFreeze(String, usize),
     LayerNew,
     LayerDelete,
     /// Confirm deleting a non-empty layer (erases its objects too).
     LayerDeleteConfirm,
     LayerSetCurrent,
-    LayerSelect(usize),
-    LayerRenameStart(usize),
+    LayerSelect(String),
+    LayerRenameStart(String),
     LayerRenameEdit(String),
-    LayerColorPickerToggle(usize),
+    LayerColorPickerToggle(String),
     LayerColorMorePalette,
     LayerColorSet(codec::types::Color),
     LayerLinetypeSet(String),
     LayerLineweightSet(LineWeight),
-    LayerTransparencyEdit(usize, String),
+    LayerTransparencyEdit(String, String),
     LayerRenameCommit,
     // ── Layer State Manager ─────────────────────────────────────────────
     LayerStateManagerOpen,
@@ -2846,6 +3160,8 @@ pub enum Message {
     ToggleViewCube,
     /// Toggle the Properties panel visibility (PROPERTIES).
     ToggleProperties,
+    /// Toggle the Graphic Attributes panel visibility (GRAPHICATTRIBUTES).
+    ToggleGraphicAttributes,
     /// Toggle the document file tabs at the top (FILETAB).
     ToggleFileTabs,
     /// Toggle the layout tabs at the bottom (LAYOUTTAB).
@@ -3669,6 +3985,8 @@ pub enum Message {
     /// Send current layout to the system printer (via lp / lpr).
     PrintToPrinter,
     /// Callback from the async printer job.
+    /// Web never constructs it — printing opens the PDF preview instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     PrintResult(Result<String, String>),
     /// Open the full Plot / Print dialog (seeds state from the layout).
     PlotDialogOpen,
@@ -3703,6 +4021,8 @@ pub enum Message {
     // ── Plot Style Table ─────────────────────────────────────────────────
     /// Open file dialog to load a CTB/STB plot style table.
     PlotStyleLoad,
+    /// LINETYPE Load: the picked `.lin` file's text, `None` when cancelled.
+    LinetypeLoaded(Option<String>),
     /// Callback when the user picks (or cancels) a CTB/STB file.
     /// The Load… picker finished: a table, nothing (cancelled), or why the
     /// file could not be read.
@@ -3948,6 +4268,8 @@ pub enum Message {
     FieldDialog(crate::ui::window::field_dialog::FieldDialogMsg),
     /// A click or search in the Point Cloud Manager.
     PcManager(crate::ui::window::pc_manager::PcManagerMsg),
+    Count(crate::ui::window::count_palette::CountMsg),
+    SheetSet(crate::ui::window::sheet_set::SheetSetMsg),
     PdfImportPickResult(Result<(std::path::PathBuf, std::sync::Arc<Vec<u8>>), String>),
     /// Result of the PDFATTACH file picker.
     PdfAttachPickResult(Result<(std::path::PathBuf, std::sync::Arc<Vec<u8>>), String>),
@@ -4005,7 +4327,9 @@ pub enum Message {
     DataExtractionBrowseSettings,
     DataExtractionBrowseSettingsResult(Option<std::path::PathBuf>),
     DataExtractionAddDrawings,
-    DataExtractionAddDrawingsResult(Vec<std::path::PathBuf>),
+    /// Picked source drawings — `Err` carries a pick/parse failure (web
+    /// parses each file on the worker at pick time).
+    DataExtractionAddDrawingsResult(Result<Vec<std::path::PathBuf>, String>),
     DataExtractionAddFolder,
     DataExtractionAddFolderResult(Option<std::path::PathBuf>),
     DataExtractionClearSources,
@@ -4032,6 +4356,8 @@ pub enum Message {
     /// Trigger OBJ import: show open-file dialog.
     ObjImport,
     /// Callback after the user picks (or cancels) the OBJ file path.
+    /// Web never constructs it — the browser handle's bytes are read directly.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     ObjImportPath(Option<std::path::PathBuf>),
     ObjImportFinished(
         u64,
@@ -4096,7 +4422,6 @@ impl OpenCADStudio {
             videos_loading: false,
             discussions: Vec::new(),
             discussions_loading: false,
-            props_asym_scale: std::collections::HashSet::new(),
             collapsed_property_sections: rustc_hash::FxHashSet::default(),
             start_section: StartSection::default(),
             start_action_w: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -4164,6 +4489,8 @@ impl OpenCADStudio {
             polar_mode: false,
             polar_increment_deg: 45.0,
             zoom_wheel_reversed: false,
+            touchpad_pan: false,
+            ui_scale_percent: 100,
             zoom_factor: 60,
             zoom_factor_input: 60.to_string(),
             cursor_size: 5,
@@ -4177,6 +4504,10 @@ impl OpenCADStudio {
             cursor_type: settings::CursorType::Crosshair,
             crosshair_color: None,
             crosshair_color_input: String::new(),
+            snap_marker_color: None,
+            snap_marker_color_input: String::new(),
+            command_text_color: None,
+            command_text_color_input: String::new(),
             isolines_awaiting_regen: false,
             snap_angle_input: "0".to_string(),
             lineweight_display_scale: 100,
@@ -4192,6 +4523,8 @@ impl OpenCADStudio {
             dyn_input: true,
             dyn_mode: 3,
             options_tab: crate::ui::window::options::OptionsTab::General,
+            #[cfg(not(target_arch = "wasm32"))]
+            graphics_prefs: crate::gpu_backend::load_prefs(),
             options_saved: None,
             options_close_confirm: false,
             spacemouse: {
@@ -4270,6 +4603,9 @@ impl OpenCADStudio {
             render_mode_menu_open: false,
             render_mode_preview: None,
             show_properties: true,
+            show_layers: false,
+            show_graphic_attributes: false,
+            graphic_attributes: Default::default(),
             show_block_palette: false,
             show_node_graph: false,
             property_target_override: None,
@@ -4277,6 +4613,10 @@ impl OpenCADStudio {
             show_external_references: false,
             show_browser: false,
             pc_manager: Default::default(),
+            count_palette: Default::default(),
+            sheet_set: Default::default(),
+            sheet_set_pending_layout: None,
+            sheet_set_import_parent: None,
             bg_picker: None,
             block_palette: Default::default(),
             xref_manager: Default::default(),
@@ -4285,11 +4625,18 @@ impl OpenCADStudio {
             toolbar_drag: None,
             tool_hold: None,
             start_ui: Default::default(),
-            dock_expanded: None,
-            dock_dragging: None,
-            dock_resizing: None,
+            dock_peek: None,
+            dock_hover_pending: None,
+            dock_hover_gen: 0,
+            dock_float_menu: None,
+            dock_float_pointer: iced::Point::ORIGIN,
+            dock_float_menu_at: iced::Point::ORIGIN,
+            dock_drag: None,
             dock_drag_last: None,
-            dock_drag_target: None,
+            dock_title_hover: None,
+            dock_edge_menu: None,
+            dock_grip_hover: None,
+            dock_icon_hover: None,
             xref_col_drag: None,
             xref_col_last: None,
             xref_split_drag: false,
@@ -4305,6 +4652,24 @@ impl OpenCADStudio {
             pending_native_thumbnail_save: None,
             #[cfg(target_arch = "wasm32")]
             pending_web_thumbnail_save: None,
+            #[cfg(target_arch = "wasm32")]
+            save_plain_reuse_fs_handle: false,
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_in_flight: false,
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_warned: false,
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_pending: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_restore_all_remaining: 0,
+            #[cfg(target_arch = "wasm32")]
+            web_session_focus_pending: false,
+            #[cfg(target_arch = "wasm32")]
+            web_session: None,
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_consumed: None,
+            #[cfg(target_arch = "wasm32")]
+            web_autosave_clear_after: Vec::new(),
             color_pick_target: None,
             color_picker_tab: ColorPickerTab::Index,
             recent_colors: Vec::new(),
@@ -4326,7 +4691,6 @@ impl OpenCADStudio {
             modal_offset: iced::Vector::ZERO,
             modal_drag_last: None,
             modal_dragging: false,
-            layer_col_dragging: false,
             layer_name_col_w: 130.0,
             modal_resize: iced::Vector::ZERO,
             modal_content_size: None,
@@ -4362,6 +4726,7 @@ impl OpenCADStudio {
             default_assoc_prompted: false,
             check_missing_fonts: true,
             font_source_url: String::new(),
+            qnew_template: String::new(),
             font_source_input: String::new(),
             donation_prompt_version: String::new(),
             read_only: false,
@@ -4391,6 +4756,8 @@ impl OpenCADStudio {
             plot_orientation: crate::io::paper_catalog::Orientation::Landscape,
             plot_dialog: crate::ui::window::plot::PlotDialogState::default(),
             plot_prev: None,
+            plot_prev_context: None,
+            plot_reconcile_printer_media: None,
             plot_setup_template: None,
             print_all_layouts: Vec::new(),
             print_all_options: false,
@@ -4872,6 +5239,16 @@ impl OpenCADStudio {
     fn boot_web() -> (Self, Task<Message>) {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut s = Self::new();
+        // A web host that intends to automate can opt in before the first
+        // control request by setting `opencadstudio.automation` to "1" in
+        // localStorage (the same pre-load mechanism the settings use): the
+        // startup donation prompt then never queues (#1349).
+        if web_sys::window().and_then(|window| window.local_storage().ok().flatten()).and_then(
+            |storage| storage.get_item("opencadstudio.automation").ok().flatten(),
+        ) == Some("1".to_string())
+        {
+            s.control.automation_seen = true;
+        }
         s.queue_startup_prompts();
         let focus = s.focus_cmd_input();
         let primary_font =
@@ -4891,9 +5268,64 @@ impl OpenCADStudio {
             Message::DiscussionsFetched,
         );
         let thumbs_fetch = s.refresh_recent_thumbs();
+        // Crash-recovery scan: OPFS snapshots newer than a drawing's last
+        // saved copy come back as a restore prompt (stale ones are deleted).
+        let autosave_scan = Task::perform(
+            crate::io::web_autosave::scan(),
+            Message::WebAutosavesScanned,
+        );
+        // URL deep link (`?file=…`): a shareable/embeddable link that opens a
+        // drawing at boot. An http(s) URL is fetched with the same capped
+        // streaming reader the remote-image fetch uses and handed to the
+        // guarded drop-open queue; a bare name reads the OPFS recent copy the
+        // same way `open_recent_web` does. Everything else (other schemes,
+        // non-.dwg/.dxf URL tails) is refused with a console warning — the
+        // same scheme gate the image fetch applies. Pure parsing/validation
+        // lives in `io::web_link` and is unit-tested there.
+        let deep_link: Task<Message> = {
+            let search = web_sys::window()
+                .and_then(|window| window.location().search().ok())
+                .unwrap_or_default();
+            match crate::io::web_link::parse_link(&search) {
+                crate::io::web_link::ParsedLink::Target(target) => {
+                    // Opening a URL from the query string is an implicit trust
+                    // decision: name the origin before the fetch starts (info
+                    // only — the bytes still go through the parse + recovery
+                    // machinery like any other open). Same-origin links stay
+                    // quiet: that drawing already comes from this site.
+                    if let crate::io::web_link::LinkTarget::Url { url, name } = &target {
+                        if !crate::io::web_link::same_origin(url) {
+                            let origin = crate::io::web_link::display_origin(url)
+                                .unwrap_or_else(|| url.clone());
+                            s.command_line
+                                .push_info(&format!("Opening {name} from {origin}…"));
+                        }
+                    }
+                    Task::perform(crate::io::web_link::open_link(target), |outcome| {
+                        Message::WebLinkSettled(outcome)
+                    })
+                }
+                crate::io::web_link::ParsedLink::Ignored(refusal, value) => {
+                    web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(
+                        &crate::io::web_link::refusal_warning(refusal, &value),
+                    ));
+                    Task::none()
+                }
+                crate::io::web_link::ParsedLink::Absent => Task::none(),
+            }
+        };
         (
             s,
-            Task::batch([focus, fonts, patrons, videos, discussions, thumbs_fetch]),
+            Task::batch([
+                focus,
+                fonts,
+                patrons,
+                videos,
+                discussions,
+                thumbs_fetch,
+                autosave_scan,
+                deep_link,
+            ]),
         )
     }
 }
@@ -4912,6 +5344,7 @@ pub fn run() -> iced::Result {
         ..iced::Settings::default()
     })
     .subscription(OpenCADStudio::subscription)
+    .scale_factor(|state: &OpenCADStudio, _| f32::from(state.ui_scale_percent) / 100.0)
     .title(|state: &OpenCADStudio, window_id: window::Id| {
         let _ = window_id; // all dialogs are in-canvas modals now
         if let Some(tab) = state.tabs.get(state.active_tab) {
@@ -4951,6 +5384,19 @@ impl Drop for OpenCADStudio {
 /// unavailable for now (see issue #45). Native keeps the multi-window `run`.
 #[cfg(target_arch = "wasm32")]
 pub fn run_web() -> iced::Result {
+    // winit never emits DroppedFile on the web, so the document drag & drop
+    // listeners are installed here and feed the control poll (#344).
+    crate::io::web_drop::install();
+    // Best-effort, fire-and-forget: ask the browser not to evict the origin's
+    // storage under pressure — settings (localStorage) and the OPFS recent
+    // copies / autosave snapshots live there. A denial changes nothing.
+    wasm_bindgen_futures::spawn_local(async {
+        if let Some(window) = web_sys::window() {
+            if let Ok(promise) = window.navigator().storage().persist() {
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            }
+        }
+    });
     iced::application(
         OpenCADStudio::boot_web,
         OpenCADStudio::update,

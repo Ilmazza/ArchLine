@@ -84,12 +84,7 @@ impl Default for AutoConstrainSettings {
 impl AutoConstrainSettings {
     pub fn sanitize(&mut self) {
         let mut priority = Vec::with_capacity(AutoConstraintKind::ALL.len());
-        for kind in self
-            .priority
-            .iter()
-            .copied()
-            .chain(AutoConstraintKind::ALL)
-        {
+        for kind in self.priority.iter().copied().chain(AutoConstraintKind::ALL) {
             if !priority.contains(&kind) {
                 priority.push(kind);
             }
@@ -171,13 +166,11 @@ pub fn clamp_right_click_hold_ms(v: i32) -> i32 {
 
 /// ZOOMFACTOR bounds.
 ///
-/// `ZOOM_FACTOR_SYSVAR_MAX` is the range the system variable has: `SETVAR
-/// ZOOMFACTOR` accepts 3 to 100 and nothing else, so a drawing session set
-/// up on the command line stays within the range the variable has everywhere
-/// else. The Options window is the app's own surface and reaches
-/// `ZOOM_FACTOR_MAX` for anyone who wants a faster wheel than the variable
-/// can express; that value lives only in this application's own
-/// configuration file, so it is nobody else's to read.
+/// `ZOOM_FACTOR_SYSVAR_MAX` is where the Options slider stops: the range the
+/// variable has elsewhere. Both the Options field and `SETVAR ZOOMFACTOR`
+/// reach `ZOOM_FACTOR_MAX` for anyone who wants a faster wheel; the value
+/// lives only in this application's own configuration file, so it is nobody
+/// else's to read.
 pub const ZOOM_FACTOR_MIN: i32 = 3;
 pub const ZOOM_FACTOR_SYSVAR_MAX: i32 = 100;
 pub const ZOOM_FACTOR_MAX: i32 = 500;
@@ -185,6 +178,11 @@ pub const ZOOM_FACTOR_MAX: i32 = 500;
 /// Hold a ZOOMFACTOR inside the range the application can store, wherever it
 /// arrives from — the slider, the Options field, or a configuration file
 /// written by hand or by an older build.
+/// Interface scale in percent, kept to the range the Options slider offers.
+pub fn clamp_ui_scale(percent: u16) -> u16 {
+    percent.clamp(75, 200)
+}
+
 pub fn clamp_zoom_factor(v: i32) -> i32 {
     v.clamp(ZOOM_FACTOR_MIN, ZOOM_FACTOR_MAX)
 }
@@ -251,6 +249,7 @@ const SNAP_ORDER: &[SnapType] = &[
     SnapType::Endpoint,
     SnapType::Midpoint,
     SnapType::Center,
+    SnapType::GeometricCenter,
     SnapType::Node,
     SnapType::Quadrant,
     SnapType::Intersection,
@@ -276,6 +275,7 @@ fn snap_bit(s: SnapType) -> Option<i32> {
         SnapType::Midpoint => 2,
         SnapType::Center => 4,
         SnapType::Node => 8,
+        SnapType::GeometricCenter => 1024,
         SnapType::Quadrant => 16,
         SnapType::Intersection => 32,
         SnapType::Insertion => 64,
@@ -347,6 +347,7 @@ where
         "modeling" => OptionsTab::Modeling,
         "selection" => OptionsTab::Selection,
         "user-preferences" => OptionsTab::UserPreferences,
+        "graphics" => OptionsTab::Graphics,
         _ => OptionsTab::General,
     })
 }
@@ -387,6 +388,11 @@ pub struct UserSettings {
     pub polar: bool,
     pub polar_increment_deg: f32,
     pub zoom_wheel_reversed: bool,
+    /// Scrolling pans and Ctrl+scroll (a touchpad pinch) zooms, for a
+    /// touchpad that reports two-finger drags as wheel scrolls.
+    pub touchpad_pan: bool,
+    /// Interface scale in percent, on top of the display's own scale.
+    pub ui_scale_percent: u16,
     pub zoom_factor: i32,
     /// CURSORSIZE: normalized crosshair reach; 5 retains the original 60 px arms.
     pub cursor_size: i32,
@@ -411,6 +417,12 @@ pub struct UserSettings {
     pub attdef_on_screen: bool,
     /// FIELDDISPLAY: fields show on a gray background.
     pub field_display: bool,
+    /// SURFACEASSOCIATIVITY: new surfaces stay associative to their sources.
+    pub surface_associativity: bool,
+    /// UCSORTHO: an orthographic view preset also sets its orthographic UCS.
+    pub ucs_ortho: bool,
+    /// UCSVIEW: a saved named view keeps the current UCS.
+    pub ucs_view: bool,
     /// Nested-copy symbol handling: false inserts, true binds.
     pub ncopy_bind: bool,
     /// Last Options page; unknown saved names fall back without rejecting the config.
@@ -429,6 +441,10 @@ pub struct UserSettings {
     pub cursor_type: CursorType,
     /// Explicit crosshair RGB. `None` keeps automatic background contrast.
     pub crosshair_color: Option<[u8; 3]>,
+    /// Explicit object-snap marker RGB. `None` keeps the automatic colour.
+    pub snap_marker_color: Option<[u8; 3]>,
+    /// Explicit command-line text RGB. `None` keeps the theme's.
+    pub command_text_color: Option<[u8; 3]>,
     /// Model-space lineweight preview scale as a percentage.
     pub lineweight_display_scale: i32,
     /// Isometric drafting changes the grid and crosshair to the active axis
@@ -458,6 +474,9 @@ pub struct UserSettings {
     /// so an intranet folder or a private GitHub raw folder both work.
     #[serde(default)]
     pub font_source_url: String,
+    /// Drawing new tabs start from (QNEW template); empty = a blank drawing.
+    #[serde(default)]
+    pub qnew_template: String,
     /// App version whose donation prompt has been displayed.
     pub donation_prompt_version: String,
     /// The graphics verdict (`GpuStatus::identity()`) whose warning popup the
@@ -551,7 +570,10 @@ pub struct UserSettings {
     pub language: crate::i18n::Language,
     /// CLIPROMPTLINES: how many temporary prompt lines for a single command
     /// are displayed above the command window (0–50, Registry, default 3).
-    #[serde(default = "default_clipromptlines", deserialize_with = "deserialize_clipromptlines")]
+    #[serde(
+        default = "default_clipromptlines",
+        deserialize_with = "deserialize_clipromptlines"
+    )]
     pub cliprompt_lines: i32,
     /// COMMANDLINEFADETIME: how long command-line overlay history lines stay
     /// visible, in milliseconds (0–60000, default 3000). 0 skips transient lines.
@@ -613,6 +635,21 @@ pub struct UserSettings {
     /// BLOCKNAVIGATE (default ".").
     #[serde(default = "default_block_navigate")]
     pub block_navigate: String,
+    /// COUNTCOLOR (default 3).
+    #[serde(default = "default_count_color")]
+    pub count_color: i16,
+    /// COUNTERRORCOLOR (default 1).
+    #[serde(default = "default_count_error_color")]
+    pub count_error_color: i16,
+    /// COUNTSERVICE (default on).
+    #[serde(default = "default_true")]
+    pub count_service: bool,
+    /// Count - Invalid Area: 0 ask, 1 undo, 2 count all of model space.
+    #[serde(default)]
+    pub count_invalid_area: u8,
+    /// SSMAUTOOPEN, SSLOCATE, SSMPOLLTIME, SSMSHEETSTATUS.
+    #[serde(default)]
+    pub sheet_set: crate::ui::window::sheet_set::SheetSetSettings,
 }
 
 /// A block the Blocks palette lists from outside the current drawing (a
@@ -673,6 +710,14 @@ fn default_block_mru_list() -> u8 {
 }
 
 fn default_one_u8() -> u8 {
+    1
+}
+
+fn default_count_color() -> i16 {
+    3
+}
+
+fn default_count_error_color() -> i16 {
     1
 }
 
@@ -776,6 +821,8 @@ impl Default for UserSettings {
             polar: false,
             polar_increment_deg: 45.0,
             zoom_wheel_reversed: false,
+            touchpad_pan: false,
+            ui_scale_percent: 100,
             zoom_factor: 60,
             cursor_size: 5,
             pick_box: 3,
@@ -792,9 +839,14 @@ impl Default for UserSettings {
             image_frame: 1,
             attdef_on_screen: true,
             field_display: true,
+            surface_associativity: true,
+            ucs_ortho: true,
+            ucs_view: true,
             ncopy_bind: false,
             cursor_type: CursorType::Crosshair,
             crosshair_color: None,
+            snap_marker_color: None,
+            command_text_color: None,
             lineweight_display_scale: 100,
             isometric_drafting: false,
             iso_plane: IsoPlane::Left,
@@ -803,6 +855,7 @@ impl Default for UserSettings {
             default_assoc_prompted: false,
             check_missing_fonts: true,
             font_source_url: String::new(),
+            qnew_template: String::new(),
             donation_prompt_version: String::new(),
             gpu_warning_silenced: String::new(),
             disabled_plugins: Vec::new(),
@@ -853,6 +906,11 @@ impl Default for UserSettings {
             block_mru_list: 50,
             block_redefine_mode: 1,
             block_navigate: ".".to_string(),
+            count_color: 3,
+            count_error_color: 1,
+            count_service: true,
+            count_invalid_area: 0,
+            sheet_set: Default::default(),
         }
     }
 }
@@ -913,7 +971,10 @@ mod tests {
             SnapType::Center,
             SnapType::Intersection,
         ] {
-            assert!(modes.contains(&expected), "{expected:?} is not in the default set");
+            assert!(
+                modes.contains(&expected),
+                "{expected:?} is not in the default set"
+            );
         }
 
         // The Snapper and the persisted default have to agree, or the running
@@ -924,12 +985,19 @@ mod tests {
     #[test]
     fn osmode_encodes_bits_and_suppress() {
         // Endpoint(1) + Midpoint(2) + Intersection(32) = 35, master on.
-        let on = [SnapType::Endpoint, SnapType::Midpoint, SnapType::Intersection];
+        let on = [
+            SnapType::Endpoint,
+            SnapType::Midpoint,
+            SnapType::Intersection,
+        ];
         assert_eq!(osmode_from_snaps(on.iter(), true), 35);
         // Master off sets the suppress bit (16384).
         assert_eq!(osmode_from_snaps(on.iter(), false), 35 | 16384);
         // OCS-only snaps carry no bit and are dropped.
-        assert_eq!(osmode_from_snaps([SnapType::Grid, SnapType::ObjectPick].iter(), true), 0);
+        assert_eq!(
+            osmode_from_snaps([SnapType::Grid, SnapType::ObjectPick].iter(), true),
+            0
+        );
     }
 
     #[test]
@@ -981,7 +1049,10 @@ mod tests {
     fn script_commands_default_on_and_survive_a_round_trip() {
         let missing: crate::app::config::AppConfig =
             serde_json::from_str(r#"{"settings": {"pick_add": false}}"#).unwrap();
-        assert!(missing.settings.script_commands, "an old config keeps scripts allowed");
+        assert!(
+            missing.settings.script_commands,
+            "an old config keeps scripts allowed"
+        );
         let off: crate::app::config::AppConfig =
             serde_json::from_str(r#"{"settings": {"script_commands": false}}"#).unwrap();
         assert!(!off.settings.script_commands);

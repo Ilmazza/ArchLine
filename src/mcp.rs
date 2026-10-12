@@ -3,10 +3,12 @@
 //! `OpenCADStudio --mcp` speaks MCP over stdio. All drawing work is forwarded
 //! to the authenticated GUI control bridge; this module contains no geometry.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+#[cfg(any(windows, target_os = "macos"))]
+use std::collections::HashSet;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
@@ -18,8 +20,6 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime},
 };
-#[cfg(any(windows, target_os = "macos"))]
-use std::collections::HashSet;
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -28,8 +28,10 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// The `tool_schema_digest_is_pinned` test fails whenever the MCP tool surface
 /// changes, so schema drift (new params, renamed tools) is always a conscious,
 /// reviewed edit — and clients can detect a stale bridge by comparing digests.
+///
+/// `block_delete` gained its optional `force` parameter.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "bb2640277721f23e08cf17085bd9204753f810ece27abf31402be876e2c4683d";
+const TOOL_SCHEMA_DIGEST: &str = "634a75872d56ae4445dbd9f27479b3ff3d8c8e88c72db69a699fafa3d9f29b72";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -52,10 +54,12 @@ const READ_OPS: &[&str] = &[
     "properties",
     "measure",
     "snap",
+    "grips",
     "history",
     "commands",
     "events",
     "operation",
+    "batch_result",
     "xdata_get",
     "audit",
     "text_search",
@@ -75,6 +79,8 @@ const EXECUTE_OPS: &[&str] = &[
     "redo",
     "select",
     "property",
+    "grip_drag",
+    "click",
     "set_properties",
     "action",
     "embed_image",
@@ -117,6 +123,8 @@ const BATCH_STEP_OPS: &[&str] = &[
     "redo",
     "select",
     "property",
+    "grip_drag",
+    "click",
     "set_properties",
     "action",
     "embed_image",
@@ -377,6 +385,7 @@ struct BatchExecution {
     steps: Vec<Value>,
     next: usize,
     active: Option<String>,
+    pending: Option<Value>,
     results: Vec<Value>,
     changes: Vec<Value>,
     state: Option<Value>,
@@ -531,7 +540,8 @@ impl ResourceStore {
 
     fn insert_pyramid_manifest(&mut self, session_id: &str, manifest: Value) -> String {
         let uri = format!("cad://session/{session_id}/pyramid/manifest.json");
-        self.pyramid_manifests.insert(session_id.to_string(), manifest);
+        self.pyramid_manifests
+            .insert(session_id.to_string(), manifest);
         uri
     }
 
@@ -723,7 +733,11 @@ impl CallError {
     }
 }
 
-fn exchange(descriptor: &Descriptor, request: Value, timeout: Duration) -> Result<Value, CallError> {
+fn exchange(
+    descriptor: &Descriptor,
+    request: Value,
+    timeout: Duration,
+) -> Result<Value, CallError> {
     let mut object = request
         .as_object()
         .cloned()
@@ -734,8 +748,7 @@ fn exchange(descriptor: &Descriptor, request: Value, timeout: Duration) -> Resul
         Value::String(descriptor.session_id.clone()),
     );
     object.insert("protocol".into(), Value::from(1));
-    let mut wire = serde_json::to_vec(&Value::Object(object))
-        .map_err(CallError::infra)?;
+    let mut wire = serde_json::to_vec(&Value::Object(object)).map_err(CallError::infra)?;
     wire.push(b'\n');
     if wire.len() > MAX_REQUEST {
         // Caller-caused (batch too big): model-actionable, stays Tool.
@@ -816,16 +829,10 @@ fn descriptors() -> Result<Vec<(Descriptor, Value)>, String> {
                 {
                     match &live_pids {
                         None => false,
-                        Some(set) => {
-                            stale_snapshot_may_delete(!set.contains(&pid), file_age)
-                        }
+                        Some(set) => stale_snapshot_may_delete(!set.contains(&pid), file_age),
                     }
                 }
-                #[cfg(not(any(
-                    target_os = "linux",
-                    windows,
-                    target_os = "macos"
-                )))]
+                #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
                 {
                     let _ = pid;
                     false
@@ -889,10 +896,7 @@ fn write_startup_lock_at(directory: &Path, pid: u64, started: u64) -> Result<(),
 fn read_startup_lock_at(directory: &Path) -> Option<(u64, u64)> {
     let text = std::fs::read_to_string(startup_lock_path_for(directory)).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
-    Some((
-        value.get("pid")?.as_u64()?,
-        value.get("started")?.as_u64()?,
-    ))
+    Some((value.get("pid")?.as_u64()?, value.get("started")?.as_u64()?))
 }
 
 fn claim_pid_alive(pid: u64) -> bool {
@@ -945,8 +949,8 @@ fn start_gui() -> Result<Child, String> {
 }
 
 fn automation_dir() -> Result<PathBuf, String> {
-    let base = crate::config::config_dir()
-        .ok_or_else(|| "No user configuration directory".to_string())?;
+    let base =
+        crate::config::config_dir().ok_or_else(|| "No user configuration directory".to_string())?;
     Ok(base.join("automation"))
 }
 
@@ -1095,7 +1099,17 @@ impl GuiClient {
                 );
             }
             insert_default(&mut object, "revision", self.state["revision"].clone());
-            if ["input", "property", "run", "action", "save", "save_verified", "undo", "redo"].contains(&op.as_str())
+            if [
+                "input",
+                "property",
+                "run",
+                "action",
+                "save",
+                "save_verified",
+                "undo",
+                "redo",
+            ]
+            .contains(&op.as_str())
             {
                 insert_default(&mut object, "selection", self.state["selection"].clone());
             }
@@ -1116,7 +1130,10 @@ impl GuiClient {
             Value::Object(object),
             Duration::from_secs(15),
         )?;
-        let gui_id = request_id.as_ref().and_then(Value::as_str).map(str::to_string);
+        let gui_id = request_id
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let mkey = mcp_id.map(mcp_key);
         // Track the GUI op while it stays pending so an idle-arriving
         // cancel can find and dismiss it. Terminal outcomes remove the
@@ -1215,6 +1232,7 @@ impl GuiClient {
                 steps,
                 next: 0,
                 active: None,
+                pending: None,
                 results: Vec::new(),
                 changes: Vec::new(),
                 state: None,
@@ -1315,8 +1333,19 @@ impl GuiClient {
                 }
             };
 
+            // Keep the latest command/prompt state even while a step is running.
+            if let Some(state) = response.get("state") {
+                batch.state = Some(state.clone());
+            }
             if matches!(response["status"].as_str(), Some("accepted" | "running")) {
                 batch.active = Some(step_id);
+                let mut pending = response.clone();
+                if let Some(object) = pending.as_object_mut() {
+                    object.remove("state");
+                    object.insert("step".into(), Value::from(batch.next));
+                    object.insert("op".into(), batch.steps[batch.next]["op"].clone());
+                }
+                batch.pending = Some(pending);
                 let result = batch_result(&batch, "running", true);
                 self.batches.push_back(batch);
                 trim_batches(&mut self.batches);
@@ -1324,9 +1353,7 @@ impl GuiClient {
             }
 
             batch.active = None;
-            if let Some(state) = response.get("state") {
-                batch.state = Some(state.clone());
-            }
+            batch.pending = None;
             if let Some(changes) = response["changes"].as_array() {
                 batch
                     .changes
@@ -1388,7 +1415,7 @@ fn batch_step_id(id: &str, step: usize) -> String {
 }
 
 fn batch_result(batch: &BatchExecution, status: &str, ok: bool) -> Value {
-    json!({
+    let mut result = json!({
         "ok":ok,
         "status":status,
         "request_id":batch.id,
@@ -1398,7 +1425,85 @@ fn batch_result(batch: &BatchExecution, status: &str, ok: bool) -> Value {
         "results":batch.results,
         "changes":batch.changes,
         "state":batch.state
-    })
+    });
+    if let Some(pending) = &batch.pending {
+        result["active_step"] = pending.clone();
+    }
+    result
+}
+
+/// Project only the outgoing response; retained batch results stay lossless.
+fn summarize_batch_response(mut response: Value, session_id: &str) -> Value {
+    let mut attention = Vec::new();
+    let mut failed_steps = 0;
+    if let Some(results) = response["results"].as_array() {
+        for (index, step) in results.iter().enumerate() {
+            let failed = step["ok"].as_bool() == Some(false)
+                || matches!(step["status"].as_str(), Some("failed" | "cancelled"));
+            if failed {
+                failed_steps += 1;
+            }
+            let awaiting_input = response["status"] == "waiting_input"
+                && index + 1 == results.len()
+                && step["status"] == "waiting_input";
+            if failed || awaiting_input {
+                // Error and interactive payloads may carry recovery guidance.
+                attention.push(step.clone());
+            } else if step
+                .get("warnings")
+                .is_some_and(|v| !v.is_null() && v != &json!([]))
+            {
+                attention.push(json!({
+                    "step":step["step"], "op":step["op"],
+                    "status":step["status"], "warnings":step["warnings"]
+                }));
+            }
+        }
+    }
+    let change_count = response["changes"].as_array().map_or(0, Vec::len);
+    let request_id = response["request_id"].clone();
+    if let Some(object) = response.as_object_mut() {
+        object.remove("results");
+        object.remove("changes");
+        object.insert("change_count".into(), json!(change_count));
+        object.insert("failed_steps".into(), json!(failed_steps));
+        object.insert("attention".into(), json!(attention));
+        object.insert(
+            "details".into(),
+            json!({
+                "tool":"ocs_read", "arguments":{
+                    "ocs_session_id":session_id, "op":"batch_result",
+                    "parameters":{"request_id":request_id}
+                }
+            }),
+        );
+        if let Some(state) = object.get_mut("state") {
+            *state = compact_state(state);
+        }
+    }
+    response
+}
+
+fn cached_batch_result(
+    clients: &HashMap<String, GuiClient>,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Value, CallError> {
+    // Do not connect, poll, resume or recreate a batch on this read-only path.
+    let batch = clients.get(session_id)
+        .and_then(|gui| gui.batches.iter().find(|batch| batch.id == request_id))
+        .ok_or_else(|| CallError::Tool(
+            "Batch result absent or expired in this MCP connection; do not replay a mutation to retrieve it".into()
+        ))?;
+    let mut result = batch
+        .terminal
+        .clone()
+        .unwrap_or_else(|| batch_result(batch, "running", true));
+    let validation = validate_execute_request(&batch.request, "batch")?;
+    if !validation.warnings.is_empty() {
+        result["warnings"] = json!(validation.warnings);
+    }
+    Ok(result)
 }
 
 fn trim_batches(batches: &mut VecDeque<BatchExecution>) {
@@ -1474,6 +1579,7 @@ fn compact_state(state: &Value) -> Value {
         "geometry_revision",
         "camera_revision",
         "selection",
+        "selection_revision",
         "command",
         "modal",
         "event_cursor",
@@ -1617,8 +1723,7 @@ fn read_resource(
                 let manifest = crate::app::control::vision::compute_pyramid_manifest(
                     session_id, &unit, bounds, 4, 512,
                 );
-                let manifest_val =
-                    serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
+                let manifest_val = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
                 resources.insert_pyramid_manifest(session_id, manifest_val.clone());
                 let text = serde_json::to_string_pretty(&manifest_val)
                     .unwrap_or_else(|_| manifest_val.to_string());
@@ -1690,7 +1795,10 @@ fn read_resource(
                             }
                         }
                         let tile_bounds = crate::app::control::vision::compute_tile_bounds(
-                            base_bounds, level, x, y,
+                            base_bounds,
+                            level,
+                            x,
+                            y,
                         )?;
                         let path = std::env::temp_dir()
                             .join(format!("ocs-tile-{session_id}-{level}-{x}-{y}.png"));
@@ -1707,14 +1815,13 @@ fn read_resource(
                         if result["ok"].as_bool() != Some(true)
                             || result["status"].as_str() != Some("completed")
                         {
-                return Err(result.to_string().into());
+                            return Err(result.to_string().into());
                         }
                         let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
                         let _ = std::fs::remove_file(path);
                         let b64 = BASE64.encode(&bytes);
                         let bytes_len = bytes.len();
-                        let mut meta =
-                            result.get("result").cloned().unwrap_or_else(|| json!({}));
+                        let mut meta = result.get("result").cloned().unwrap_or_else(|| json!({}));
                         if let Some(obj) = meta.as_object_mut() {
                             obj.remove("path");
                             obj.insert(
@@ -1770,8 +1877,7 @@ fn read_resource(
                     "scope": "viewport",
                     "max_dimension": 1600,
                 });
-                let result = client(clients, session_id)?
-                    .request(req, 15.0, pump, mcp_id)?;
+                let result = client(clients, session_id)?.request(req, 15.0, pump, mcp_id)?;
                 if result["ok"].as_bool() != Some(true)
                     || result["status"].as_str() != Some("completed")
                 {
@@ -1837,6 +1943,10 @@ fn call_tool(
             if !READ_OPS.contains(&op) {
                 return Err("Use ocs_execute for mutations".to_string().into());
             }
+            if op == "batch_result" {
+                let request_id = required_string(&arguments["parameters"], "request_id")?;
+                return cached_batch_result(clients, session_id, request_id);
+            }
             if op == "capture" {
                 // The GUI capture op needs a file path and lives behind the
                 // ocs_capture tool; agents hitting the bare read op get
@@ -1885,10 +1995,11 @@ fn call_tool(
                 return Err("request_id must not exceed 128 bytes".to_string().into());
             }
             let val_res = validate_execute_request(&request, op)?;
+            let is_batch = op == "batch";
             let wait = arguments["wait_seconds"].as_f64().unwrap_or(30.0);
             let detail = arguments["response_detail"].as_str().unwrap_or("compact");
             let gui = client(clients, session_id)?;
-            let mut response = if op == "batch" {
+            let mut response = if is_batch {
                 gui.execute_batch(request, wait, pump, mcp_id)?
             } else {
                 gui.request(request, wait, pump, mcp_id)?
@@ -1901,7 +2012,11 @@ fn call_tool(
                     );
                 }
             }
-            shape_execute_response(response, detail, gui, pump).map_err(CallError::from)
+            if is_batch && detail == "summary" {
+                Ok(summarize_batch_response(response, session_id))
+            } else {
+                shape_execute_response(response, detail, gui, pump).map_err(CallError::from)
+            }
         }
         "ocs_capture" => {
             let session_id = required_string(arguments, "ocs_session_id")?;
@@ -2015,8 +2130,7 @@ fn call_tool(
             if let Some(annotate) = arguments.get("annotate").and_then(Value::as_bool) {
                 req["annotate"] = json!(annotate);
             }
-            let result = client(clients, session_id)?
-                .request(req, 30.0, pump, mcp_id)?;
+            let result = client(clients, session_id)?.request(req, 30.0, pump, mcp_id)?;
             if result["ok"].as_bool() != Some(true)
                 || result["status"].as_str() != Some("completed")
             {
@@ -2055,7 +2169,11 @@ fn call_tool(
                 }
 
                 if let Some((prev_img, prev_hash)) = resources.last_captures.get(session_id) {
-                    let diff_res = crate::app::control::vision::compute_visual_diff(prev_img, &current_img, &p2w);
+                    let diff_res = crate::app::control::vision::compute_visual_diff(
+                        prev_img,
+                        &current_img,
+                        &p2w,
+                    );
                     let diff_info = json!({
                         "is_baseline": false,
                         "baseline_hash": prev_hash,
@@ -2075,11 +2193,14 @@ fn call_tool(
                         match diff_mode {
                             "crop" => {
                                 if let Some(crop) = &diff_res.cropped_patch {
-                                    final_bytes = crate::app::control::vision::encode_image_png(crop)?;
+                                    final_bytes =
+                                        crate::app::control::vision::encode_image_png(crop)?;
                                 }
                             }
                             "highlight" => {
-                                final_bytes = crate::app::control::vision::encode_image_png(&diff_res.diff_overlay)?;
+                                final_bytes = crate::app::control::vision::encode_image_png(
+                                    &diff_res.diff_overlay,
+                                )?;
                             }
                             _ => {}
                         }
@@ -2102,7 +2223,9 @@ fn call_tool(
                 let full_png = crate::app::control::vision::encode_image_png(&current_img)?;
                 base_hasher.update(&full_png);
                 let current_full_hash = format!("{:x}", base_hasher.finalize());
-                resources.last_captures.insert(session_id.to_string(), (current_img, current_full_hash));
+                resources
+                    .last_captures
+                    .insert(session_id.to_string(), (current_img, current_full_hash));
             }
 
             let mut hasher = Sha256::new();
@@ -2114,7 +2237,10 @@ fn call_tool(
             let uri = resources.insert(session_id, &hash, b64.clone(), bytes_len, meta.clone());
             if let Some(obj) = meta.as_object_mut() {
                 obj.insert("uri".into(), Value::String(uri.clone()));
-                obj.insert("latest_uri".into(), Value::String(format!("cad://session/{session_id}/snapshot/latest.png")));
+                obj.insert(
+                    "latest_uri".into(),
+                    Value::String(format!("cad://session/{session_id}/snapshot/latest.png")),
+                );
                 obj.insert("hash".into(), Value::String(hash.clone()));
                 obj.insert("bytes".into(), Value::from(bytes_len));
             }
@@ -2225,6 +2351,17 @@ fn execute_request_schema() -> Value {
     crate::mcp_ops::execute_request_schema()
 }
 
+// Local references resolve from the tool input schema root, not from request.
+fn execute_input_schema() -> Value {
+    let mut schema = json!({"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"request":execute_request_schema(),"wait_seconds":{"type":"number","minimum":0,"maximum":60,"default":30,"description":"Total time to wait for completion before returning."},"response_detail":{"type":"string","enum":["compact","summary","changed_entities","full"],"default":"compact","description":"compact returns only state needed for the next edit; summary also replaces batch step results and changes with counts, attention items and a read-only details request (non-batch operations use compact); changed_entities also returns current geometry for changed handles; full preserves the complete editor state."}},"required":["ocs_session_id","request"],"additionalProperties":false});
+    let request = schema["properties"]["request"].as_object_mut().unwrap();
+    let defs = request.remove("$defs").unwrap();
+    let dialect = request.remove("$schema").unwrap();
+    schema["$defs"] = defs;
+    schema["$schema"] = dialect;
+    schema
+}
+
 fn read_output_schema() -> Value {
     json!({
         "type":"object",
@@ -2262,7 +2399,7 @@ pub(crate) fn tool_definitions() -> Value {
         },
         {
             "name":"ocs_read",
-            "description":"Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session.",
+            "description":"Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
             "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"name":{"type":"string","description":"Command name or record name."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"required":["ocs_session_id"],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "title":"Read OCS state","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
@@ -2270,7 +2407,7 @@ pub(crate) fn tool_definitions() -> Value {
         {
             "name":"ocs_execute",
             "description":"Execute semantic OCS actions, batch drafting, and mutations. Supports batch creation (entities_create), reference image underlays (embed_image), block definitions (block_define), and block reference insertions (INSERT). MANDATORY: For architectural drafting, all doors and windows must be inserted as CAD blocks (type: INSERT), never loose lines.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"request":execute_request_schema(),"wait_seconds":{"type":"number","minimum":0,"maximum":60,"default":30,"description":"Total time to wait for completion before returning."},"response_detail":{"type":"string","enum":["compact","changed_entities","full"],"default":"compact","description":"compact returns only state needed for the next edit; changed_entities also returns current geometry for changed handles; full preserves the complete editor state."}},"required":["ocs_session_id","request"],"additionalProperties":false},
+            "inputSchema":execute_input_schema(),
             "outputSchema":execute_output_schema(),
             "title":"Execute OCS action","annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}
         },
@@ -2306,6 +2443,16 @@ pub(crate) fn tool_definitions() -> Value {
 
 fn tool_result(value: Value) -> Value {
     if value.get("$resource").is_some() || value.get("$image").is_some() {
+        // A baseline also reports changed=false, but the client has not seen
+        // that image yet. Only omit media after an actual unchanged comparison.
+        // Keep the capture metadata (hash, URI, spatial data and request id)
+        // so clients can still fetch the stored image explicitly if needed.
+        let meta = &value["metadata"];
+        if meta["diff"]["is_baseline"].as_bool() == Some(false)
+            && meta["diff"]["changed"].as_bool() == Some(false)
+        {
+            return tool_result(meta.clone());
+        }
         let mut content = Vec::new();
         if let Some(res) = value.get("$resource") {
             let uri = res["uri"].as_str().unwrap_or("");
@@ -2394,9 +2541,7 @@ fn bridge_identity() -> Value {
 /// through untouched; an existing `bridge` key (GUI-provided) is kept.
 fn with_bridge_identity(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
-        object
-            .entry("bridge")
-            .or_insert_with(bridge_identity);
+        object.entry("bridge").or_insert_with(bridge_identity);
     }
     value
 }
@@ -2543,7 +2688,11 @@ fn handle_message(
     // not hang waiting for a response that will never come. Id-less
     // *objects* stay silent (notifications).
     if !message.is_object() {
-        return Some(rpc_error(Value::Null, -32600, "Invalid request: expected a JSON-RPC object"));
+        return Some(rpc_error(
+            Value::Null,
+            -32600,
+            "Invalid request: expected a JSON-RPC object",
+        ));
     }
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str)?;
@@ -2637,7 +2786,9 @@ fn handle_message(
                 return Some(rpc_error(id, -32602, "Missing resource uri"));
             };
             match read_resource(uri, clients, resources, pump, Some(&id)) {
-                Ok(contents) => response(id, protocol_result(contents, modern, Some(RESOURCE_TTL_MS))),
+                Ok(contents) => {
+                    response(id, protocol_result(contents, modern, Some(RESOURCE_TTL_MS)))
+                }
                 // -32002 was THE not-found code in 2025-11-25 and earlier;
                 // 2026-07-28 says MUST NOT emit it, so modern gets -32602.
                 Err(err) => rpc_error(id, if modern { -32602 } else { -32002 }, err),
@@ -2666,7 +2817,11 @@ fn handle_message(
         ),
         "tools/list" => response(
             id,
-            protocol_result(json!({"tools":tool_definitions()}), modern, Some(CACHE_TTL_MS)),
+            protocol_result(
+                json!({"tools":tool_definitions()}),
+                modern,
+                Some(CACHE_TTL_MS),
+            ),
         ),
         "tools/call" => {
             let Some(name) = params["name"].as_str() else {
@@ -2742,7 +2897,10 @@ fn handle_message(
             let Some(task) = tasks.get_mut(task_id) else {
                 return Some(rpc_error(id, -32602, "Unknown or expired taskId"));
             };
-            response(id, protocol_result(poll_task(task, clients, resources, pump), true, None))
+            response(
+                id,
+                protocol_result(poll_task(task, clients, resources, pump), true, None),
+            )
         }
         "tasks/update" if modern && supports_tasks(&params) => {
             let Some(task_id) = params["taskId"].as_str() else {
@@ -2822,10 +2980,7 @@ pub fn sync_agent_tool_schemas() -> bool {
 /// dismiss it now, so the next poll answers `cancelled`. Unknown ids are
 /// ignored (spec: fire-and-forget, races expected).
 fn idle_cancel(clients: &mut HashMap<String, GuiClient>, params: &Value) {
-    let Some(key) = params
-        .get("requestId")
-        .map(|id| id.to_string())
-    else {
+    let Some(key) = params.get("requestId").map(|id| id.to_string()) else {
         return;
     };
     for gui in clients.values_mut() {
@@ -2859,10 +3014,9 @@ pub fn run() {
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     let stdin = io::stdin();
     thread::spawn(move || {
-        for line in crate::io::line_read::lines_capped(
-            stdin.lock(),
-            crate::io::line_read::MAX_LINE_BYTES,
-        ) {
+        for line in
+            crate::io::line_read::lines_capped(stdin.lock(), crate::io::line_read::MAX_LINE_BYTES)
+        {
             if tx.send(line.map_err(|error| error.to_string())).is_err() {
                 break;
             }
@@ -2892,13 +3046,7 @@ pub fn run() {
                         idle_cancel(&mut clients, &message["params"]);
                         None
                     } else {
-                        handle_message(
-                            message,
-                            &mut clients,
-                            &mut tasks,
-                            &mut resources,
-                            &mut pump,
-                        )
+                        handle_message(message, &mut clients, &mut tasks, &mut resources, &mut pump)
                     }
                 }
                 Err(error) => Some(rpc_error(Value::Null, -32700, error)),
@@ -2957,17 +3105,13 @@ mod tests {
         );
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         for tool in [&tools[1], &tools[2], &tools[3]] {
-            assert!(
-                tool["inputSchema"]["properties"]
-                    .get("session_id")
-                    .is_none()
-            );
-            assert!(
-                tool["inputSchema"]["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("ocs_session_id"))
-            );
+            assert!(tool["inputSchema"]["properties"]
+                .get("session_id")
+                .is_none());
+            assert!(tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ocs_session_id")));
         }
         assert_eq!(
             tools[2]["inputSchema"]["properties"]["request"]["required"],
@@ -2996,6 +3140,11 @@ mod tests {
         let find_variant = |op_name: &str| {
             request_variants
                 .iter()
+                .map(|v| {
+                    tools[2]["inputSchema"]
+                        .pointer(v["$ref"].as_str().unwrap().strip_prefix('#').unwrap())
+                        .expect("operation reference resolves")
+                })
                 .find(|v| v["properties"]["op"]["enum"][0] == op_name)
                 .cloned()
                 .unwrap_or_else(|| panic!("variant for {op_name} exists"))
@@ -3013,13 +3162,10 @@ mod tests {
         assert!(EXECUTE_OPS.contains(&"text_replace"));
         assert!(BATCH_STEP_OPS.contains(&"text_replace"));
         let save_var = find_variant("save_verified");
+        assert_eq!(save_var["properties"]["target_version"]["enum"][0], "R14");
         assert_eq!(
-            save_var["properties"]["target_version"]["enum"][0],
-            "R14"
-        );
-        assert_eq!(
-            tools[1]["inputSchema"]["properties"]["parameters"]["properties"]["where"]["items"]["properties"]
-                ["op"]["enum"],
+            tools[1]["inputSchema"]["properties"]["parameters"]["properties"]["where"]["items"]
+                ["properties"]["op"]["enum"],
             json!([
                 "eq",
                 "ne",
@@ -3061,12 +3207,10 @@ mod tests {
             initialized["result"]["capabilities"]["resources"]["subscribe"],
             false
         );
-        assert!(
-            initialized["result"]["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("geometry kernel")
-        );
+        assert!(initialized["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("geometry kernel"));
 
         let listed = handle_message(
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
@@ -3101,10 +3245,9 @@ mod tests {
         assert_eq!(discovered["result"]["cacheScope"], "public");
         assert_eq!(discovered["result"]["supportedVersions"][0], "2026-07-28");
         assert!(discovered["result"]["capabilities"]["resources"].is_object());
-        assert!(
-            discovered["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"]
-                .is_object()
-        );
+        assert!(discovered["result"]["capabilities"]["extensions"]
+            ["io.modelcontextprotocol/tasks"]
+            .is_object());
         assert_eq!(
             discovered["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
             "OpenCADStudio"
@@ -3351,14 +3494,12 @@ mod tests {
             )
             .unwrap();
             let templates = listed["result"]["resourceTemplates"].as_array().unwrap();
-            assert!(templates.iter().any(|t| t["uriTemplate"]
-                .as_str()
-                .unwrap()
-                .contains("{level}")));
-            assert!(templates.iter().any(|t| t["uriTemplate"]
-                .as_str()
-                .unwrap()
-                .contains("{hash}")));
+            assert!(templates
+                .iter()
+                .any(|t| t["uriTemplate"].as_str().unwrap().contains("{level}")));
+            assert!(templates
+                .iter()
+                .any(|t| t["uriTemplate"].as_str().unwrap().contains("{hash}")));
             assert_eq!(listed["result"]["ttlMs"], RESOURCE_TTL_MS);
             assert_eq!(listed["result"]["cacheScope"], "public");
         }
@@ -3374,8 +3515,13 @@ mod tests {
             let annotations = tool["annotations"].as_object().unwrap();
             for key in annotations.keys() {
                 assert!(
-                    ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
-                        .contains(&key.as_str()),
+                    [
+                        "readOnlyHint",
+                        "destructiveHint",
+                        "idempotentHint",
+                        "openWorldHint"
+                    ]
+                    .contains(&key.as_str()),
                     "unexpected annotation key: {key}"
                 );
             }
@@ -3463,8 +3609,7 @@ mod tests {
     fn task_envelope_errors_use_public_codes() {
         // The legacy -32000 range is grandfathered, not for new use.
         let mut task = stub_task("t-fail");
-        task.arguments =
-            json!({"ocs_session_id":"00000000","op":"state","wait_seconds":0});
+        task.arguments = json!({"ocs_session_id":"00000000","op":"state","wait_seconds":0});
         let failed = poll_task(
             &mut task,
             &mut HashMap::new(),
@@ -3509,12 +3654,10 @@ mod tests {
             .unwrap();
         let prop = &capture["inputSchema"]["properties"]["request_id"];
         assert_eq!(prop["type"], "string");
-        assert!(
-            !capture["inputSchema"]["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("request_id"))
-        );
+        assert!(!capture["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("request_id")));
     }
 
     #[test]
@@ -3531,10 +3674,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(guided["ok"], false);
-        assert!(guided["error"]
-            .as_str()
-            .unwrap()
-            .contains("ocs_capture"));
+        assert!(guided["error"].as_str().unwrap().contains("ocs_capture"));
     }
 
     #[test]
@@ -3614,12 +3754,10 @@ mod tests {
         .unwrap();
         assert_eq!(called["result"]["isError"], true);
         assert!(called["result"].get("structuredContent").is_none());
-        assert!(
-            called["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("request_id")
-        );
+        assert!(called["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("request_id"));
     }
 
     #[test]
@@ -3668,7 +3806,9 @@ mod tests {
         .unwrap();
         let res_arr = listed["result"]["resources"].as_array().unwrap();
         assert!(res_arr.iter().any(|r| r["uri"] == uri));
-        assert!(res_arr.iter().any(|r| r["uri"] == "cad://session/sess1/snapshot/latest.png"));
+        assert!(res_arr
+            .iter()
+            .any(|r| r["uri"] == "cad://session/sess1/snapshot/latest.png"));
 
         // Test resources/read with png
         let read_png = handle_message(
@@ -3743,16 +3883,25 @@ mod tests {
         let res_res = tool_result(res_value);
         assert_eq!(res_res["isError"], false);
         assert_eq!(res_res["structuredContent"]["_spatial"]["crs"], "CAD_WCS");
-        assert_eq!(res_res["structuredContent"]["_spatial"]["unit"], "Millimeters");
+        assert_eq!(
+            res_res["structuredContent"]["_spatial"]["unit"],
+            "Millimeters"
+        );
         assert_eq!(
             res_res["structuredContent"]["_spatial"]["pixel_to_world_matrix"],
             json!([0.05, 0.0, 0.0, -0.05, -20.0, 15.0])
         );
         let content = res_res["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().contains("cad://session/s1/snapshot/hash123.png"));
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cad://session/s1/snapshot/hash123.png"));
         assert_eq!(content[1]["type"], "resource");
-        assert_eq!(content[1]["resource"]["uri"], "cad://session/s1/snapshot/hash123.png");
+        assert_eq!(
+            content[1]["resource"]["uri"],
+            "cad://session/s1/snapshot/hash123.png"
+        );
         // Ensure no image block was sent
         assert!(!content.iter().any(|c| c["type"] == "image"));
 
@@ -3771,6 +3920,63 @@ mod tests {
         let both_content = both_res["content"].as_array().unwrap();
         assert!(both_content.iter().any(|c| c["type"] == "resource"));
         assert!(both_content.iter().any(|c| c["type"] == "image"));
+    }
+
+    #[test]
+    fn unchanged_capture_omits_media_but_preserves_metadata() {
+        let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
+        let diff = crate::app::control::vision::compute_visual_diff(
+            &image,
+            &image,
+            &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        );
+        assert!(!diff.changed);
+        for delivery in ["inline", "resource", "both"] {
+            let metadata = json!({
+                "hash":"unchanged-hash", "uri":"cad://session/s/snapshot/unchanged-hash.png",
+                "request_id":"capture-2", "revision":12,
+                "_spatial":{"crs":"CAD_WCS"},
+                "diff":{"is_baseline":false,"changed":diff.changed}
+            });
+            let mut capture = json!({"metadata":metadata});
+            if delivery != "resource" {
+                capture["$image"] = json!("image-bytes-must-not-be-returned");
+            }
+            if delivery != "inline" {
+                capture["$resource"] = json!({"uri":metadata["uri"],"mimeType":"image/png"});
+            }
+            let result = tool_result(capture);
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"], metadata);
+            let content = result["content"].as_array().unwrap();
+            assert_eq!(content.len(), 1);
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(
+                serde_json::from_str::<Value>(content[0]["text"].as_str().unwrap()).unwrap(),
+                metadata
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_changed_and_non_diff_captures_keep_images() {
+        for diff in [
+            json!({"is_baseline":true,"changed":false}),
+            json!({"is_baseline":false,"changed":true}),
+            Value::Null,
+        ] {
+            let result = tool_result(json!({
+                "$image":"baseline-or-changed-png",
+                "metadata":{"diff":diff}
+            }));
+            assert!(result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |block| block["type"] == "image" && block["data"] == "baseline-or-changed-png"
+                ));
+        }
     }
 
     #[test]
@@ -3838,7 +4044,10 @@ mod tests {
             structured["structuredContent"]["diff"]["dirty_world_bounds"],
             json!([-15.0, -2.5, -5.0, 7.5])
         );
-        assert_eq!(structured["structuredContent"]["_spatial"]["crs"], "CAD_WCS");
+        assert_eq!(
+            structured["structuredContent"]["_spatial"]["crs"],
+            "CAD_WCS"
+        );
 
         let content = structured["content"].as_array().unwrap();
         let text_block = content.iter().find(|c| {
@@ -3848,7 +4057,10 @@ mod tests {
                     .unwrap_or("")
                     .contains("\"dirty_pixel_bounds\"")
         });
-        assert!(text_block.is_some(), "Metadata text block must format diff parameters");
+        assert!(
+            text_block.is_some(),
+            "Metadata text block must format diff parameters"
+        );
     }
 
     #[test]
@@ -3928,7 +4140,10 @@ mod tests {
         .unwrap();
         let man_contents = read_man["result"]["contents"].as_array().unwrap();
         assert_eq!(man_contents[0]["mimeType"], "application/json");
-        assert!(man_contents[0]["text"].as_str().unwrap().contains("cad://session/sess1/tile/{level}/{x}/{y}.png"));
+        assert!(man_contents[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cad://session/sess1/tile/{level}/{x}/{y}.png"));
 
         // 5. Test resources/read with tile png
         let read_tile = handle_message(
@@ -3969,7 +4184,10 @@ mod tests {
         assert_eq!(structured["structuredContent"]["pyramid"]["level"], 1);
         assert_eq!(structured["structuredContent"]["pyramid"]["x"], 0);
         assert_eq!(structured["structuredContent"]["pyramid"]["y"], 1);
-        assert_eq!(structured["structuredContent"]["pyramid"]["tile_uri"], tile_uri);
+        assert_eq!(
+            structured["structuredContent"]["pyramid"]["tile_uri"],
+            tile_uri
+        );
     }
 
     #[test]
@@ -3985,11 +4203,9 @@ mod tests {
             "request_id":"draw",
             "steps":[{"op":"run","request_id":"nested","cmd":"LINE 0,0 10,0"}]
         });
-        assert!(
-            validate_execute_request(&invalid, "batch")
-                .unwrap_err()
-                .contains("omit request_id")
-        );
+        assert!(validate_execute_request(&invalid, "batch")
+            .unwrap_err()
+            .contains("omit request_id"));
 
         let compact = compact_state(&json!({
             "session_id":"s","document_id":3,"revision":4,"geometry_revision":5,
@@ -4120,7 +4336,8 @@ mod tests {
         });
         let batch_res = validate_execute_request(&batch, "batch").expect("batch passes");
         assert_eq!(batch_res.warnings.len(), 1);
-        assert!(batch_res.warnings[0].contains("batch step 0: unknown parameter 'stray' ignored for op 'run'"));
+        assert!(batch_res.warnings[0]
+            .contains("batch step 0: unknown parameter 'stray' ignored for op 'run'"));
     }
 
     #[test]
@@ -4128,7 +4345,10 @@ mod tests {
         // Missing required field
         let missing_cmd = json!({"op": "run", "request_id": "r1"});
         let err = crate::mcp_ops::validate_request(&missing_cmd, false).unwrap_err();
-        assert!(err.contains("Missing cmd for run. Example request:"), "{err}");
+        assert!(
+            err.contains("Missing cmd for run. Example request:"),
+            "{err}"
+        );
 
         // Required-when rule (scale requires factor)
         let scale_missing_factor = json!({
@@ -4138,7 +4358,10 @@ mod tests {
             "action": "scale"
         });
         let err2 = crate::mcp_ops::validate_request(&scale_missing_factor, false).unwrap_err();
-        assert!(err2.contains("Missing factor for entities_transform. Example request:"), "{err2}");
+        assert!(
+            err2.contains("Missing factor for entities_transform. Example request:"),
+            "{err2}"
+        );
 
         // Hex handle enforcement
         let invalid_handle = json!({
@@ -4152,20 +4375,275 @@ mod tests {
         // Non-batchable op rejected in batch
         let stop_in_batch = json!({"op": "stop"});
         let err4 = crate::mcp_ops::validate_request(&stop_in_batch, true).unwrap_err();
-        assert!(err4.contains("operation 'stop' cannot be used in a batch step"), "{err4}");
+        assert!(
+            err4.contains("operation 'stop' cannot be used in a batch step"),
+            "{err4}"
+        );
+    }
+
+    #[test]
+    fn execute_schema_shares_operations_and_resolves_local_references() {
+        fn check_refs(value: &Value, root: &Value) {
+            match value {
+                Value::Object(object) => {
+                    if let Some(reference) = object.get("$ref") {
+                        let pointer = reference.as_str().unwrap().strip_prefix('#').unwrap();
+                        assert!(root.pointer(pointer).is_some(), "unresolved {reference}");
+                    }
+                    for child in object.values() {
+                        check_refs(child, root);
+                    }
+                }
+                Value::Array(array) => {
+                    for child in array {
+                        check_refs(child, root);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let schema = execute_input_schema();
+        check_refs(&schema, &schema);
+        let standalone = execute_request_schema();
+        check_refs(&standalone, &standalone);
+        assert!(schema["properties"]["request"].get("$defs").is_none());
+        let variants = schema["properties"]["request"]["anyOf"].as_array().unwrap();
+        let batch = schema["$defs"]["batch_step"]["anyOf"].as_array().unwrap();
+        for (op, variant) in crate::mcp_ops::OPS.iter().zip(variants) {
+            assert_eq!(variant, &json!({"$ref":format!("#/$defs/op_{}", op.name)}));
+            assert_eq!(batch.contains(variant), op.batchable);
+            assert_eq!(
+                schema["$defs"][format!("op_{}", op.name)],
+                crate::mcp_ops::op_schema(op)
+            );
+        }
+
+        // Reconstruct the old duplicated layout using the same operation
+        // definitions, so the size comparison stays meaningful as ops evolve.
+        let mut old = standalone.clone();
+        old["anyOf"] = json!(crate::mcp_ops::OPS
+            .iter()
+            .map(|op| crate::mcp_ops::op_schema(op))
+            .collect::<Vec<_>>());
+        old["$defs"]["batch_step"]["anyOf"] = json!(crate::mcp_ops::OPS
+            .iter()
+            .filter(|op| op.batchable)
+            .map(|op| crate::mcp_ops::op_schema(op))
+            .collect::<Vec<_>>());
+        old["$defs"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("op_"));
+        let before = old.to_string().len();
+        let after = standalone.to_string().len();
+        eprintln!("Execute request schema: {before} -> {after} bytes");
+        assert!(after * 100 < before * 70, "expected at least 30% reduction");
+    }
+
+    #[test]
+    fn batch_summary_is_small_and_keeps_actionable_information() {
+        let full = json!({
+            "ok":true,"status":"completed","request_id":"b1",
+            "completed_steps":64,"total_steps":64,"next_step":null,
+            "results":(0..64).map(|i| json!({
+                "step":i,"op":"run","ok":true,"status":"completed",
+                "result":{"payload":"x".repeat(1000)}
+            })).collect::<Vec<_>>(),
+            "changes":(0..64).map(|i| json!({"step":i,"handle":format!("{i:X}")})).collect::<Vec<_>>(),
+            "warnings":["top-level warning"],
+            "state":{"document_id":7,"revision":65,"selection":[],"command":null,"documents":[{"large":"payload"}]}
+        });
+        let summary = summarize_batch_response(full.clone(), "s1");
+        assert!(summary.get("results").is_none());
+        assert!(summary.get("changes").is_none());
+        assert_eq!(summary["change_count"], 64);
+        assert_eq!(summary["failed_steps"], 0);
+        assert_eq!(summary["completed_steps"], 64);
+        assert_eq!(summary["warnings"], full["warnings"]);
+        assert_eq!(summary["state"]["revision"], 65);
+        assert!(summary.to_string().len() * 10 < full.to_string().len());
+        assert_eq!(
+            summary["details"]["arguments"]["parameters"]["request_id"],
+            "b1"
+        );
+        let mut resolved = full.clone();
+        resolved["results"] = json!([
+            {"step":0,"status":"waiting_input"},
+            {"step":1,"status":"completed"}
+        ]);
+        assert_eq!(
+            summarize_batch_response(resolved, "s1")["attention"],
+            json!([])
+        );
+        let early = summarize_batch_response(
+            json!({
+                "ok":true,"status":"running","request_id":"early","state":null
+            }),
+            "s1",
+        );
+        assert!(tool_result(early)["structuredContent"]["state"].is_object());
+
+        for status in ["failed", "cancelled", "waiting_input"] {
+            let step = json!({"step":1,"op":"run","status":status,
+                "ok":status == "waiting_input", "code":"needs_attention",
+                "error":"reason", "result":{"input_example":"10,20"}});
+            let state = json!({"revision":3,"command":{"accepts":["point"],"input_example":"10,20"},"modal":{"title":"Input"}});
+            let mut detailed = full.clone();
+            detailed["status"] = json!(status);
+            detailed["ok"] = json!(status == "waiting_input");
+            detailed["state"] = state.clone();
+            detailed["results"] = json!([
+                {"step":0,"op":"run","ok":true,"status":"completed","warnings":["approximation"],"result":{"big":"x".repeat(1000)}},
+                step.clone()
+            ]);
+            let summary = summarize_batch_response(detailed.clone(), "s1");
+            assert_eq!(summary["ok"], detailed["ok"]);
+            assert_eq!(summary["status"], status);
+            assert_eq!(
+                summary["failed_steps"],
+                if status == "waiting_input" { 0 } else { 1 }
+            );
+            assert_eq!(
+                summary["attention"][0]["warnings"],
+                json!(["approximation"])
+            );
+            assert!(summary["attention"][0].get("result").is_none());
+            assert_eq!(summary["attention"][1], step);
+            assert_eq!(summary["state"], state);
+        }
+    }
+
+    #[test]
+    fn batch_details_are_read_only_session_scoped_and_expire() {
+        let batch = BatchExecution {
+            id: "b1".into(),
+            request: json!({"op":"batch","request_id":"b1","steps":[{"op":"run","cmd":"LINE 0,0 1,1"}]}),
+            steps: vec![json!({"op":"run","cmd":"LINE 0,0 1,1"})],
+            next: 0,
+            active: Some("step1".into()),
+            pending: Some(
+                json!({"step":0,"op":"run","status":"running","result":{"prompt":"Pick point"},"warnings":["notice"]}),
+            ),
+            results: vec![],
+            changes: vec![],
+            state: Some(json!({"revision":4,"command":{"accepts":["point"]}})),
+            terminal: None,
+        };
+        let running = batch_result(&batch, "running", true);
+        let summary = summarize_batch_response(running.clone(), "s1");
+        assert_eq!(summary["active_step"], running["active_step"]);
+        assert_eq!(summary["state"]["command"]["accepts"], json!(["point"]));
+        let mut clients = HashMap::new();
+        clients.insert(
+            "s1".into(),
+            GuiClient {
+                descriptor: Descriptor {
+                    session_id: "s1".into(),
+                    port: 0,
+                    token: String::new(),
+                    pid: None,
+                },
+                state: json!({}),
+                client_id: "test".into(),
+                batches: VecDeque::new(),
+                inflight: HashMap::new(),
+                dismissed: VecDeque::new(),
+            },
+        );
+        clients.get_mut("s1").unwrap().batches.push_back(batch);
+        assert_eq!(cached_batch_result(&clients, "s1", "b1").unwrap(), running);
+        assert_eq!(clients["s1"].batches[0].next, 0);
+        let mut batch = clients.get_mut("s1").unwrap().batches.pop_front().unwrap();
+        batch.next = 1;
+        batch.active = None;
+        batch.pending = None;
+        batch.results = vec![
+            json!({"step":0,"op":"run","ok":true,"status":"completed","result":{"handles":["A"]}}),
+        ];
+        let full = batch_result(&batch, "completed", true);
+        for detail in ["compact", "full"] {
+            let response = shape_execute_response(
+                full.clone(),
+                detail,
+                clients.get_mut("s1").unwrap(),
+                &mut detached_pump(),
+            )
+            .unwrap();
+            assert_eq!(response["results"], full["results"]);
+            assert_eq!(response["changes"], full["changes"]);
+        }
+        batch.terminal = Some(full.clone());
+        clients.get_mut("s1").unwrap().batches.push_back(batch);
+        let summary = summarize_batch_response(full.clone(), "s1");
+        let read = |clients: &mut HashMap<String, GuiClient>, args: &Value| {
+            call_tool(
+                "ocs_read",
+                args,
+                clients,
+                &mut ResourceStore::default(),
+                &mut detached_pump(),
+                None,
+            )
+        };
+        assert_eq!(
+            read(&mut clients, &summary["details"]["arguments"]).unwrap(),
+            full
+        );
+        assert_eq!(clients["s1"].batches[0].terminal, Some(full.clone()));
+        let mut wrong_session = summary["details"]["arguments"].clone();
+        wrong_session["ocs_session_id"] = json!("s2");
+        assert!(read(&mut clients, &wrong_session).is_err());
+        assert_eq!(clients.len(), 1);
+        // Idempotent replay still returns the complete cached result.
+        let request = clients["s1"].batches[0].request.clone();
+        assert_eq!(
+            clients
+                .get_mut("s1")
+                .unwrap()
+                .execute_batch(request, 0.0, &mut detached_pump(), None)
+                .unwrap(),
+            full
+        );
+        for i in 0..64 {
+            clients
+                .get_mut("s1")
+                .unwrap()
+                .batches
+                .push_back(BatchExecution {
+                    id: format!("other-{i}"),
+                    request: json!({}),
+                    steps: vec![],
+                    next: 0,
+                    active: None,
+                    pending: None,
+                    results: vec![],
+                    changes: vec![],
+                    state: None,
+                    terminal: None,
+                });
+        }
+        trim_batches(&mut clients.get_mut("s1").unwrap().batches);
+        assert!(read(&mut clients, &summary["details"]["arguments"]).is_err());
     }
 
     #[test]
     fn schema_size_and_defs_structure() {
         let schema = execute_request_schema();
-        assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
         assert!(schema["$defs"]["handle"].is_object());
         assert!(schema["$defs"]["point"].is_object());
         assert!(schema["$defs"]["window"].is_object());
         assert!(schema["$defs"]["batch_step"].is_object());
         let json_str = schema.to_string();
         // Generates cleanly without exponential blowup: compact ~15KB to 45KB
-        assert!(json_str.len() < 45_000, "schema size is {} bytes", json_str.len());
+        assert!(
+            json_str.len() < 45_000,
+            "schema size is {} bytes",
+            json_str.len()
+        );
     }
 
     #[test]
@@ -4180,7 +4658,10 @@ mod tests {
             .join("mcp")
             .join("opencadstudio");
         if base_dir.exists() {
-            assert!(synced, "sync_agent_tool_schemas must succeed when directory exists");
+            assert!(
+                synced,
+                "sync_agent_tool_schemas must succeed when directory exists"
+            );
             assert!(base_dir.join("ocs_capture.json").exists());
             assert!(base_dir.join("ocs_execute.json").exists());
             assert!(base_dir.join("ocs_read.json").exists());
@@ -4190,7 +4671,8 @@ mod tests {
     }
 
     #[test]
-    fn read_op_tools_returns_current_schemas_and_instructions() {        let mut clients = HashMap::new();
+    fn read_op_tools_returns_current_schemas_and_instructions() {
+        let mut clients = HashMap::new();
         let mut resources = ResourceStore::default();
         let req = json!({
             "name": "ocs_read",
@@ -4206,7 +4688,8 @@ mod tests {
             &mut resources,
             &mut detached_pump(),
             None,
-        ).expect("ocs_read op: tools must succeed");
+        )
+        .expect("ocs_read op: tools must succeed");
         assert_eq!(result["ok"], true);
         assert!(result["tools"].is_array());
         assert!(result["instructions"].is_string());
