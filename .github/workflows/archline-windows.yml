@@ -25,13 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (release)
-        run: cargo build --locked --release --bin OpenCADStudio
+        run: cargo build --locked --release --bin ArchLine
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\OpenCADStudio.exe dist\OpenCADStudio.exe
+          Copy-Item target\release\ArchLine.exe dist\ArchLine.exe
           $info = "ArchLine build`ncommit: ${{ github.sha }}`nbranch: ${{ github.ref_name }}`n"
           Set-Content -Path dist\BUILD.txt -Value $info
 
@@ -53,7 +53,7 @@ jobs:
       - name: Conformance, misura (ezdxf come oracolo)
         continue-on-error: true
         shell: pwsh
-        run: python tests/conformance/run.py target\release\OpenCADStudio.exe --out dist\conformance-report.md
+        run: python tests/conformance/run.py target\release\ArchLine.exe --out dist\conformance-report.md
 
       - uses: actions/upload-artifact@v4
         with:

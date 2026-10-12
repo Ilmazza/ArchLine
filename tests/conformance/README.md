@@ -1,6 +1,6 @@
 # Banco di conformita DXF/DWG
 
-Misura quanto fedelmente `OpenCADStudio --export` legge e scrive DXF/DWG, con **ezdxf come oracolo
+Misura quanto fedelmente `ArchLine --export` legge e scrive DXF/DWG, con **ezdxf come oracolo
 indipendente**. Misura e riferisce: non blocca nulla (salvo `--strict`). Spec:
 `docs/superpowers/specs/2026-10-07-banco-conformita-design.md`.
 
@@ -8,9 +8,9 @@ indipendente**. Misura e riferisce: non blocca nulla (salvo `--strict`). Spec:
 
 ```
 pip install ezdxf
-python tests/conformance/run.py target\release\OpenCADStudio.exe
-python tests/conformance/run.py target\release\OpenCADStudio.exe --out report.md --strict
-python tests/conformance/run.py target\release\OpenCADStudio.exe --case text_accents --keep C:\tmp\conf
+python tests/conformance/run.py target\release\ArchLine.exe
+python tests/conformance/run.py target\release\ArchLine.exe --out report.md --strict
+python tests/conformance/run.py target\release\ArchLine.exe --case text_accents --keep C:\tmp\conf
 ```
 
 Opzioni: `--out FILE` (report Markdown), `--strict` (exit 1 se c'e' una regressione), `--case NOME`

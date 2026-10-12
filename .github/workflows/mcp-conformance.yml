@@ -51,7 +51,7 @@ jobs:
 
       - name: Inspector config
         run: |
-          printf '{"mcpServers":{"ocs":{"command":"%s/target/release/OpenCADStudio","args":["--mcp"]}}}' \
+          printf '{"mcpServers":{"ocs":{"command":"%s/target/release/ArchLine","args":["--mcp"]}}}' \
             "${{ github.workspace }}" > "${{ runner.temp }}/mcp-inspector.json"
 
       - name: initialize (pure serverInfo, experimental build)

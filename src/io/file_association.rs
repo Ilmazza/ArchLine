@@ -244,6 +244,7 @@ mod windows_impl {
     /// (they point at now-deleted ProgIDs, which Windows simply ignores).
     pub(super) fn unregister_handler() -> Result<(), String> {
         for key in [
+            r"Software\Classes\Applications\ArchLine.exe",
             r"Software\Classes\Applications\OpenCADStudio.exe",
             r"Software\Classes\OpenCADStudio.DWG",
             r"Software\Classes\OpenCADStudio.DXF",
@@ -359,7 +360,7 @@ mod windows_impl {
 
     /// Register the running .exe (per-user, HKCU) so the portable build matches
     /// what the MSI provides machine-wide:
-    ///   * an `Applications\OpenCADStudio.exe` entry → listed under "Open with";
+    ///   * an `Applications\ArchLine.exe` entry → listed under "Open with";
     ///   * ProgIDs + a Capabilities / RegisteredApplications block → the app is
     ///     a default-app candidate, so the in-app "set as default" prompt's OS
     ///     dialog (LaunchAdvancedAssociationUI "Open CAD Studio") finds it.
@@ -368,7 +369,7 @@ mod windows_impl {
         let exe = exe.to_string_lossy().to_string();
 
         // ── "Open with" exe listing ─────────────────────────────────────────
-        const APP_BASE: &str = r"Software\Classes\Applications\OpenCADStudio.exe";
+        const APP_BASE: &str = r"Software\Classes\Applications\ArchLine.exe";
         set_string(
             &format!(r"{APP_BASE}\shell\open\command"),
             None,

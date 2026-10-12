@@ -95,10 +95,10 @@ Poi:
 ```bash
 git clone https://github.com/Ilmazza/ArchLine.git
 cd ArchLine
-cargo build --release --bin OpenCADStudio
+cargo build --release --bin ArchLine
 ```
 
-L'eseguibile è `target/release/OpenCADStudio` (`OpenCADStudio.exe` su Windows). Il nome del binario e del package Cargo resta quello di upstream di proposito, per non rompere il merge periodico.
+L'eseguibile è `target/release/ArchLine` (`ArchLine.exe` su Windows). Solo il binario è rinominato (`[[bin]]` in `Cargo.toml`); il nome del package Cargo resta `OpenCADStudio`, come in upstream, per non rompere il merge periodico.
 
 > Non rimuovere `RUST_MIN_STACK` da [.cargo/config.toml](.cargo/config.toml) (64 MiB): senza, `rustc` va in stack overflow su Windows in release.
 
@@ -119,12 +119,12 @@ cargo test --locked --lib classic_toolbar     # altri filtri: start, i18n
 
 ### Banco di conformità DXF/DWG
 
-Misura `OpenCADStudio --export` su 9 casi sintetici × R2000/R2018 × DXF→DXF e DXF→DWG→DXF, confrontando il risultato con [ezdxf](https://ezdxf.mozman.at), che fa da oracolo indipendente. Le divergenze note sono registrate (con nota) in `tests/conformance/expected.json`.
+Misura `ArchLine --export` su 9 casi sintetici × R2000/R2018 × DXF→DXF e DXF→DWG→DXF, confrontando il risultato con [ezdxf](https://ezdxf.mozman.at), che fa da oracolo indipendente. Le divergenze note sono registrate (con nota) in `tests/conformance/expected.json`.
 
 ```bash
 python -m pip install ezdxf
 python -m unittest discover -s tests/conformance -p "test_*.py"
-python tests/conformance/run.py target/release/OpenCADStudio.exe
+python tests/conformance/run.py target/release/ArchLine.exe
 ```
 
 Limiti dichiarati: ezdxf non legge DWG, quindi il DWG è verificato solo in modo indiretto; i casi sono disegni sintetici; il caso `colors` viene eseguito ma nessun controllo ne verifica ancora colori e layer. Uso e dettagli in [tests/conformance/README.md](tests/conformance/README.md).
@@ -134,10 +134,10 @@ Limiti dichiarati: ezdxf non legge DWG, quindi il DWG è verificato solo in modo
 Il binario desktop eredita da upstream l'esportazione da riga di comando, un server headless e un endpoint MCP:
 
 ```bash
-OpenCADStudio --export input.dwg output.dxf
-OpenCADStudio --export input-r12.dxf output.dwg --target-version R14
-OpenCADStudio --serve
-OpenCADStudio --mcp
+ArchLine --export input.dwg output.dxf
+ArchLine --export input-r12.dxf output.dwg --target-version R14
+ArchLine --serve
+ArchLine --mcp
 ```
 
 Dettagli nella [guida all'automazione](docs/automation/README.md). I plugin nativi girano in processi separati: vedi [architettura dei plugin](docs/plugin-architecture.md).

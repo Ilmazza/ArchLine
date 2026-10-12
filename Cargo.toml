@@ -3,8 +3,12 @@ name = "OpenCADStudio"
 version = "2026.40.1"
 edition = "2021"
 build = "build.rs"
-default-run = "OpenCADStudio"
+default-run = "ArchLine"
 autotests = false
+
+[[bin]]
+name = "ArchLine"
+path = "src/main.rs"
 
 [workspace]
 members = [

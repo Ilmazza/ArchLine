@@ -36,11 +36,11 @@ jobs:
           - name: linux
             os: ubuntu-22.04
             library: libopencad_python.so
-            exe: OpenCADStudio
+            exe: ArchLine
           - name: windows
             os: windows-latest
             library: opencad_python.dll
-            exe: OpenCADStudio.exe
+            exe: ArchLine.exe
     defaults:
       run:
         shell: bash
@@ -73,7 +73,7 @@ jobs:
         run: bash plugins/opencad-python/tools/stage-bundled.sh "$PWD/work/plugin" --debug
 
       - name: Build the application (the plugin runner)
-        run: cargo build --locked --bin OpenCADStudio
+        run: cargo build --locked --bin ArchLine
 
       - name: Plugin crate tests
         working-directory: plugins/opencad-python

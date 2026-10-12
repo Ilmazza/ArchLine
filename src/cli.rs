@@ -19,7 +19,7 @@ use clap::Parser;
 /// Open CAD Studio command-line options.
 #[derive(Parser, Debug, Default)]
 #[command(
-    name = "OpenCADStudio",
+    name = "ArchLine",
     version = env!("OCS_FULL_VERSION"),
     long_version = concat!(
         env!("OCS_FULL_VERSION"),
