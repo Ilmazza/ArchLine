@@ -13255,7 +13255,7 @@ mod journal_tests {
         assert_eq!(s.images.get(&image).unwrap().width, 4, "stale until reloaded");
 
         let epoch = s.geometry_epoch;
-        s.reload_image_definitions(&[def]);
+        s.reload_image_definitions(&[def], None);
         assert_eq!(s.images.get(&image).expect("still there").width, 8);
         assert!(s.geometry_epoch > epoch, "the redraw needs a geometry bump");
         let _ = std::fs::remove_file(&path);
@@ -13270,7 +13270,7 @@ mod journal_tests {
         assert!(s.images.get(&image).is_none(), "a missing file draws no picture");
 
         image::RgbaImage::new(5, 3).save(&missing).unwrap();
-        s.reload_image_definitions(&[def]);
+        s.reload_image_definitions(&[def], None);
         let model = s.images.get(&image).expect("the file exists now");
         assert_eq!((model.width, model.height), (5, 3));
         let _ = std::fs::remove_file(&missing);
@@ -13287,7 +13287,7 @@ mod journal_tests {
 
         // What XREF Path does: it edits the definition only.
         crate::io::xref::set_ref_path(&mut s.document, def.value(), &new_key).unwrap();
-        s.reload_image_definitions(&[def]);
+        s.reload_image_definitions(&[def], None);
 
         assert_eq!(s.images.get(&image).expect("resolves").width, 6);
         match s.document.get_entity(image) {
@@ -13302,6 +13302,46 @@ mod journal_tests {
         let _ = std::fs::remove_file(&new);
     }
 
+    /// The defect seen on a real drawing: at open the entity's path is made absolute while the
+    /// definition keeps the stored relative one (`..\pics\p.png`). Reload must resolve that against
+    /// the drawing's folder instead of copying the raw relative path onto the entity, which then
+    /// resolves against nothing and the picture disappears.
+    #[test]
+    fn reload_image_definitions_resolves_a_relative_definition_path_against_the_drawing_folder() {
+        use codec::objects::ObjectType;
+        let root = std::env::temp_dir().join(format!("archline_reload_rel_{}", std::process::id()));
+        let (drawings, pics) = (root.join("drawings"), root.join("pics"));
+        std::fs::create_dir_all(&drawings).unwrap();
+        std::fs::create_dir_all(&pics).unwrap();
+        let file = pics.join("p.png");
+        image::RgbaImage::new(4, 4).save(&file).unwrap();
+
+        // As after opening: the entity holds the resolved absolute path, the definition the stored one.
+        let (mut s, def, image) = scene_with_linked_image(&file.to_string_lossy());
+        if let Some(ObjectType::ImageDefinition(d)) = s.document.objects.get_mut(&def) {
+            d.file_name = "../pics/p.png".to_string();
+        }
+        assert_eq!(s.images.get(&image).expect("resolves at open").width, 4);
+
+        image::RgbaImage::new(8, 8).save(&file).unwrap();
+        s.reload_image_definitions(&[def], Some(drawings.as_path()));
+
+        assert_eq!(
+            s.images.get(&image).expect("the picture is still there after Reload").width,
+            8,
+            "the changed file is shown"
+        );
+        match s.document.get_entity(image) {
+            Some(EntityType::RasterImage(img)) => assert!(
+                std::path::Path::new(&img.file_path).is_file(),
+                "the entity keeps a usable path, got {:?}",
+                img.file_path
+            ),
+            other => panic!("expected the raster image, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn reload_image_definitions_leaves_other_definitions_alone() {
         let path_a = reload_png("a", 4, 4);
@@ -13311,7 +13351,7 @@ mod journal_tests {
         image::RgbaImage::new(9, 9).save(&path_a).unwrap();
         image::RgbaImage::new(9, 9).save(&path_b).unwrap();
 
-        s.reload_image_definitions(&[def_a]);
+        s.reload_image_definitions(&[def_a], None);
         assert_eq!(s.images.get(&image_a).unwrap().width, 9, "the reloaded definition updates");
         assert_eq!(
             s.images.get(&image_b).unwrap().width,

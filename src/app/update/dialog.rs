@@ -1201,7 +1201,14 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
             self.tabs[i].xref_unloaded.remove(key);
             self.tabs[i].xref_stat_cache.remove(key);
         }
-        self.tabs[i].scene.reload_image_definitions(&handles);
+        let base_dir = self.tabs[i]
+            .current_path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.to_path_buf());
+        self.tabs[i]
+            .scene
+            .reload_image_definitions(&handles, base_dir.as_deref());
         for (_, name) in images {
             self.command_line
                 .push_output(crate::tf!("XREF  Reloaded \"{}\"", name).as_ref());
