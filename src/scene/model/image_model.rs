@@ -855,17 +855,78 @@ fn tier_for_native(
     }
     // The downsample holds the decoded RGBA, the resize's vertical-pass
     // intermediate (width × new height in RGBA f32, 16 B/px) and the output
-    // at once, so that sum must fit the budget too.
-    let (target_w, target_h) = downsample_to_cap(width, height, max_display_pixels);
-    let resize_peak = pixels
-        .saturating_mul(4)
-        .saturating_add((width as u64).saturating_mul(target_h as u64).saturating_mul(16))
-        .saturating_add(target_w as u64 * target_h as u64 * 4);
-    if resize_peak > max_decode_bytes {
-        DecodeTier::OverBudget
-    } else {
-        DecodeTier::Downsample
+    // at once, so that sum must fit the budget too — if it does not, a first
+    // integer box reduction (see `prereduce_factor`) brings it back inside.
+    match prereduce_factor(width, height, max_display_pixels, max_decode_bytes) {
+        Some(_) => DecodeTier::Downsample,
+        None => DecodeTier::OverBudget,
     }
+}
+
+/// Peak bytes of the Lanczos resize `width × height` → `target`: the decoded RGBA, the vertical
+/// pass intermediate (`width × target height` in RGBA f32, 16 B/px) and the output.
+fn resize_peak_bytes(width: u32, height: u32, target: (u32, u32)) -> u64 {
+    if target == (width, height) {
+        return 0;
+    }
+    (width as u64 * height as u64)
+        .saturating_mul(4)
+        .saturating_add((width as u64).saturating_mul(target.1 as u64).saturating_mul(16))
+        .saturating_add(target.0 as u64 * target.1 as u64 * 4)
+}
+
+/// Smallest integer factor by which a decoded RGBA image must first be box-averaged so that the
+/// Lanczos resize down to `cap` pixels fits `budget`. `Some(1)`: the resize fits as it is (or
+/// none is needed). `None`: not even a reduction fits. A 139 Mpx scanned map needs its resize
+/// transient (~2.4 GB) cut: halved first (34.8 Mpx, within the cap) it needs no resize at all.
+fn prereduce_factor(width: u32, height: u32, cap: u64, budget: u64) -> Option<u32> {
+    let pixels = width as u64 * height as u64;
+    for k in 1..=64u32 {
+        let (w, h) = (width.div_ceil(k), height.div_ceil(k));
+        // The reduction itself holds the input and its (k² times smaller) output.
+        if k > 1 && pixels.saturating_mul(4).saturating_add(w as u64 * h as u64 * 4) > budget {
+            return None;
+        }
+        if resize_peak_bytes(w, h, downsample_to_cap(w, h, cap)) <= budget {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Average every `k × k` block of `image` (edge blocks are smaller): a cheap, memory-light
+/// reduction that needs no intermediate buffer.
+fn box_reduce(image: &image::RgbaImage, k: u32) -> image::RgbaImage {
+    if k <= 1 {
+        return image.clone();
+    }
+    let (width, height) = image.dimensions();
+    let (out_w, out_h) = (width.div_ceil(k), height.div_ceil(k));
+    let source = image.as_raw();
+    let mut out = image::RgbaImage::new(out_w, out_h);
+    for oy in 0..out_h {
+        let (y0, y1) = (oy * k, ((oy + 1) * k).min(height));
+        for ox in 0..out_w {
+            let (x0, x1) = (ox * k, ((ox + 1) * k).min(width));
+            let mut sum = [0u32; 4];
+            for y in y0..y1 {
+                let row = (y as usize * width as usize + x0 as usize) * 4;
+                for pixel in source[row..row + (x1 - x0) as usize * 4].chunks_exact(4) {
+                    for channel in 0..4 {
+                        sum[channel] += pixel[channel] as u32;
+                    }
+                }
+            }
+            let count = (y1 - y0) * (x1 - x0);
+            let average = |value: u32| ((value + count / 2) / count) as u8;
+            out.put_pixel(
+                ox,
+                oy,
+                image::Rgba([average(sum[0]), average(sum[1]), average(sum[2]), average(sum[3])]),
+            );
+        }
+    }
+    out
 }
 
 /// Largest dimensions that keep `width × height` within `cap` while
@@ -990,6 +1051,12 @@ fn decode_with_budgets<R: std::io::BufRead + std::io::Seek>(
     };
 
     let rgba = img.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    // A resize that would overflow the budget (a huge scan) is preceded by a box reduction.
+    let rgba = match prereduce_factor(width, height, max_display_pixels, max_decode_bytes) {
+        Some(k) if k > 1 => box_reduce(&rgba, k),
+        _ => rgba,
+    };
     let (width, height) = rgba.dimensions();
     // Display cap: an OverBudget decode that succeeded (native headroom) is
     // necessarily over the cap too — the budgets' invariant guarantees it —
@@ -1633,9 +1700,11 @@ mod tests {
         // Pixels over the display cap while RGBA stays within the decode
         // budget: decode, then downsample before storing.
         assert_eq!(tier_for(400, 400, 2_000_000, 10_000), DecodeTier::Downsample);
-        // …unless the resize transient (decoded + f32 intermediate + output)
-        // is what overflows the budget.
-        assert_eq!(tier_for(400, 400, 1_000_000, 10_000), DecodeTier::OverBudget);
+        // The resize transient (decoded + f32 intermediate + output) overflows the budget here,
+        // but a box reduction before the resize brings it back inside: still decodable.
+        assert_eq!(tier_for(400, 400, 1_000_000, 10_000), DecodeTier::Downsample);
+        // Not even the reduction (input + output RGBA) fits: refused.
+        assert_eq!(tier_for(400, 400, 700_000, 10_000), DecodeTier::OverBudget);
         // RGBA over the decode budget.
         assert_eq!(tier_for(2_000, 2_000, 1_000_000, 10_000), DecodeTier::OverBudget);
         // Exact boundary counts stay in the lower tier (limits are ">").
@@ -1650,6 +1719,62 @@ mod tests {
             tier_for(u32::MAX, u32::MAX, MAX_DECODE_BYTES, MAX_DISPLAY_PIXELS),
             DecodeTier::OverBudget
         );
+    }
+
+    /// A huge scan (a 139 Mpx cadastral map) used to be refused only because the Lanczos resize
+    /// transient (~2.4 GB) overflowed the 2 GiB budget; a first integer box reduction fits.
+    #[test]
+    fn a_huge_map_is_reduced_first_instead_of_refused() {
+        assert_eq!(prereduce_factor(9917, 14034, MAX_DISPLAY_PIXELS, MAX_DECODE_BYTES), Some(2));
+        assert_eq!(
+            tier_for_native(9917, 14034, 7, 1, MAX_DECODE_BYTES, MAX_DISPLAY_PIXELS),
+            DecodeTier::Downsample
+        );
+        // Within the cap, or a resize that fits as is: no reduction.
+        assert_eq!(prereduce_factor(1000, 1000, MAX_DISPLAY_PIXELS, MAX_DECODE_BYTES), Some(1));
+        assert_eq!(prereduce_factor(400, 400, 10_000, 2_000_000), Some(1));
+    }
+
+    #[test]
+    fn box_reduce_averages_blocks_and_keeps_odd_edges() {
+        // 3x2 image reduced by 2: one full block (2x2) and one 1x2 edge block.
+        let mut img = image::RgbaImage::new(3, 2);
+        for (x, y, value) in [(0, 0, 0u8), (1, 0, 100), (0, 1, 100), (1, 1, 200), (2, 0, 40), (2, 1, 80)] {
+            img.put_pixel(x, y, image::Rgba([value, value, value, 255]));
+        }
+        let reduced = box_reduce(&img, 2);
+        assert_eq!(reduced.dimensions(), (2, 1));
+        assert_eq!(reduced.get_pixel(0, 0).0, [100, 100, 100, 255]);
+        assert_eq!(reduced.get_pixel(1, 0).0, [60, 60, 60, 255]);
+    }
+
+    /// End to end with small budgets: the resize transient does not fit, the reduction does.
+    #[test]
+    fn a_decode_whose_resize_does_not_fit_is_reduced_not_refused() {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(400, 400, image::Rgba([10, 20, 30, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let attempt = decode_with_budgets(
+            || Ok(image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))),
+            2_000_000, // decode budget: RGBA (640 kB) fits, the f32 resize transient (1.3 MB) too...
+            10_000,
+        );
+        assert!(matches!(attempt, DecodeAttempt::Decoded(_)), "baseline: fits as is");
+
+        let attempt = decode_with_budgets(
+            || Ok(image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))),
+            1_000_000, // ...here the resize transient does not
+            10_000,
+        );
+        match attempt {
+            DecodeAttempt::Decoded(image) => {
+                assert!(u64::from(image.width) * u64::from(image.height) <= 10_000);
+                assert_eq!((image.source_width, image.source_height), (400, 400), "sizing truth kept");
+                assert_eq!(&image.pixels[0..3], &[10, 20, 30], "colour survives the reduction");
+            }
+            _ => panic!("expected a reduced decode, not a refusal"),
+        }
     }
 
     /// The per-target constants keep their invariant: the decode budget can
