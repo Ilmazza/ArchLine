@@ -273,6 +273,7 @@ impl StorageHatchBatch {
                     kind,
                     invert,
                     shift,
+                    ..
                 } => {
                     grad_kind = kind.shader_kind() | if *invert { 16 } else { 0 };
                     let frame = h.gradient_frame(*angle_deg, *shift);

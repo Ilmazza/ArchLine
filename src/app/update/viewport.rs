@@ -3474,6 +3474,8 @@ impl OpenCADStudio {
         // normal box/lasso state or trigger another viewport control; the
         // release path below will commit the grip.
         if self.tabs[i].active_grip.is_some() {
+            // The second click of a double-click on a hot hatch grip opens Hatch Edit.
+            if let Some(task) = self.hatch_double_click_on_hot_grip(i, p) { return task; }
             self.tabs[i]
                 .scene
                 .selection
@@ -3666,6 +3668,8 @@ impl OpenCADStudio {
                         self.grip_popup = None;
                         return Task::none();
                     }
+                    // The second click of a double-click on a pattern hatch opens Hatch Edit.
+                    if let Some(task) = self.hatch_double_click_on_grip(i, handle, p) { return task; }
                     let mut edit = self.grip_edit_for_hit(i, handle, grip_id, is_translate, world);
                     if edit.gizmo {
                         // Where the gizmo part was grabbed: the drag keeps
@@ -3825,6 +3829,7 @@ impl OpenCADStudio {
             let moved = grip.last_world != grip.origin_world;
             if is_click && !moved {
                 // Engaging click — stay hot, wait for the placement click.
+                self.hatch_note_hot_grip_click(i, p);
                 return Task::none();
             }
             return self.commit_active_grip_edit();
@@ -5396,7 +5401,9 @@ properties={:.1}ms picked={}",
                         candidate_handles.as_ref(),
                         crate::ui::overlay::pick_box_aperture_px(self.pick_box),
                     )
-                });
+                })
+                // A hatch has no wire: its fill is hit-tested on its own.
+                .or_else(|| self.hatch_double_click_hit(i, p, view_rot, eye, bounds, candidate_handles.as_ref()));
                 if let Some(handle) = hit {
                     // Locked layer: double-click must not open any editor
                     // (text / attribute / in-place block edit).
@@ -5428,6 +5435,8 @@ properties={:.1}ms picked={}",
                         self.tabs[i].active_cmd = Some(Box::new(prompt));
                         return Task::none();
                     }
+                    // A hatch opens the Hatch Edit window.
+                    if let Some(task) = self.hatch_double_click(handle) { return task; }
                     // Any text-bearing entity opens its in-place editor
                     // (plain box or rich MText editor, per type). A
                     // Leader resolves to the entity it annotates.

@@ -805,7 +805,9 @@ impl OpenCADStudio {
             cancelled: false,
         });
         self.control.routing = true;
+        let previous = std::mem::replace(&mut self.scripted_dispatch, true);
         let action = self.control_action(&req);
+        self.scripted_dispatch = previous;
         self.control.routing = false;
         let task = match action {
             Ok(t) => t,
@@ -1181,7 +1183,9 @@ impl OpenCADStudio {
             self.active_tab = i;
         }
         self.control.routing = true;
+        let was_scripted = std::mem::replace(&mut self.scripted_dispatch, true);
         let task = self.update(msg);
+        self.scripted_dispatch = was_scripted;
         self.control.routing = false;
         if let Some(pending) = self.control.pending.as_mut() {
             if pending.document_id.is_none()
@@ -1525,6 +1529,39 @@ mod tests {
             r
         }
     }
+
+    #[test]
+    fn control_run_hatch_has_no_dialog() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(request(&mut app, json!({"op":"new"}))["status"], "completed");
+        let result = request(&mut app, json!({"op":"run","cmd":"HATCH"}));
+        assert_ne!(result["ok"], json!(false), "{result}");
+        let i = app.active_tab;
+        assert!(app.active_modal.is_none());
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(
+            app.tabs[i].active_cmd.as_ref().map(|command| command.name()),
+            Some("HATCH")
+        );
+        assert!(!app.scripted_dispatch, "the flag is restored");
+    }
+
+    #[test]
+    fn control_start_hatch_has_no_dialog() {
+        let mut app = OpenCADStudio::new_for_test();
+        assert_eq!(request(&mut app, json!({"op":"new"}))["status"], "completed");
+        let result = request(&mut app, json!({"op":"start","cmd":"HATCH"}));
+        assert_ne!(result["ok"], json!(false), "{result}");
+        let i = app.active_tab;
+        assert!(app.active_modal.is_none());
+        assert!(app.hatch_dialog.is_none());
+        assert_eq!(
+            app.tabs[i].active_cmd.as_ref().map(|command| command.name()),
+            Some("HATCH")
+        );
+        assert!(!app.scripted_dispatch, "the flag is restored");
+    }
+
     #[test]
     fn control_stepwise_drawing_undo_and_properties() {
         let mut app = OpenCADStudio::new_for_test();

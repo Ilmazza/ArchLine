@@ -1,7 +1,7 @@
 # Finestra "Hatch and Gradient" (HATCH come in AutoCAD)
 
-Stato: design approvato dall'utente in chat il 2026-10-08; spec rivista dopo la revisione tecnica del 2026-10-08 (quattro
-punti bloccanti verificati nel codice e recepiti); in attesa di nuova revisione. Branch `lavoro`.
+Stato: implementata secondo il piano docs/superpowers/plans/2026-10-08-finestra-hatch.md; verifica visiva da parte
+dell'utente su Windows ancora da fare.
 
 ## 1. Scopo
 

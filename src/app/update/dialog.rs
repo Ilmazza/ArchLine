@@ -191,6 +191,8 @@ pub(super) fn on_ribbon_tool_click(&mut self, tool_id: String, event: ModuleEven
                         let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
                             return Task::batch([close_win, self.continue_tab_close_queue()]);
                         };
+                        // A HATCH dialog flow owned by the discarded tab can never finish.
+                        self.hatch_dialog_abandon_for_tab(tab_id);
                         // Discarded — drop this tab's autosave recovery copy.
                         #[cfg(not(target_arch = "wasm32"))]
                         let _ = std::fs::remove_file(self.autosave_target(idx));

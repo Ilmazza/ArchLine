@@ -913,8 +913,12 @@ impl OpenCADStudio {
     /// command line uses too so both process `UCS Z 90` / `LINE 0,0 10,10` /
     /// `PDMODE 3` identically.
     fn run_headless(&mut self, cmd: &str) -> Result<(), String> {
+        // `--serve` (stdin/TCP) has nobody to answer a dialog: run as scripted.
+        let previous = std::mem::replace(&mut self.scripted_dispatch, true);
         let task = self.run_command_line(cmd);
-        self.drive_headless_task(task)
+        let result = self.drive_headless_task(task);
+        self.scripted_dispatch = previous;
+        result
     }
 
     pub(super) fn drive_headless_task(

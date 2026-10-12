@@ -167,6 +167,15 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 // editor holds a document-local handle into one tab, so drop it
                 // now rather than risk it applying to a different tab's document.
                 self.cancel_attr_editor();
+                // A HATCH dialog flow owned by the closing tab can never finish.
+                if self
+                    .hatch_dialog
+                    .as_ref()
+                    .zip(self.tabs.get(idx))
+                    .is_some_and(|(state, tab)| state.owner_tab_id == tab.id)
+                {
+                    self.hatch_dialog_cancel();
+                }
                 if self.tabs.get(idx).map_or(false, |t| t.dirty) {
                     self.pending_close =
                         Some(crate::app::PendingClose::Tab(self.tabs[idx].id));
@@ -2304,29 +2313,10 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                             if let Some(codec::EntityType::Hatch(dxf)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
-                                let mut pattern = hatch_patterns::build_dxf_pattern(entry);
-                                // Stored pattern lines are final world-space
-                                // geometry. Preserve the selected hatch's scale,
-                                // angle and origin when replacing the catalog
-                                // pattern.
-                                crate::entities::hatch::scale_pattern_geometry(
-                                    &mut pattern,
-                                    dxf.pattern_scale,
+                                let (scale, angle) = (dxf.pattern_scale, dxf.pattern_angle);
+                                crate::entities::hatch_fill::set_catalog_pattern(
+                                    dxf, entry, scale, angle,
                                 );
-                                crate::entities::hatch::rotate_pattern_geometry(
-                                    &mut pattern,
-                                    dxf.pattern_angle,
-                                );
-                                let origin = dxf.pattern_origin();
-                                crate::entities::hatch::translate_pattern_geometry(&mut pattern, origin.x, origin.y);
-                                dxf.pattern = pattern;
-                                dxf.is_solid = matches!(
-                                    entry.gpu,
-                                    crate::scene::model::hatch_model::HatchPattern::Solid
-                                );
-                                dxf.pattern_type =
-                                    codec::entities::HatchPatternType::Predefined;
-                                dxf.gradient_color.enabled = false;
                             }
                             if let Some(model) = self.tabs[i].scene.hatches.get_mut(&handle) {
                                 model.pattern = entry.gpu.clone();

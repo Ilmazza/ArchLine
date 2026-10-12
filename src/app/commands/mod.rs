@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 mod attdef;
 mod field;
+mod hatch_dialog;
+mod hatch_gradient;
 mod blocks;
 mod xref_attach;
 mod dim;
@@ -197,6 +199,7 @@ impl OpenCADStudio {
         }
         // Cancel any running command before starting a new one.
         if self.tabs[i].active_cmd.is_some() {
+            self.hatch_dialog_abandon_for_new_command(i);
             self.tabs[i].scene.clear_preview_wire();
             self.tabs[i].active_cmd = None;
             // Interrupting an ADDSELECTED draw with another command reverts its
@@ -322,6 +325,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_field(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_hatch_dialog(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_draw(cmd, i) {
@@ -525,6 +531,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "BLOCKSPALETTE",
         "BLOCKSPALETTECLOSE",
         "-INSERT",
+        "-HATCH",
+        "-GRADIENT",
+        "-HATCHEDIT",
         "BLOCKMRULIST",
         "BLOCKREDEFINEMODE",
         "BLOCKNAVIGATE",
