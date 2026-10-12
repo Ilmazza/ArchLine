@@ -94,7 +94,7 @@ fn main() {
     if std::env::var("TARGET").ok().as_deref() == Some("x86_64-pc-windows-msvc")
         && profile == "debug"
     {
-        println!("cargo:rustc-link-arg-bin=OpenCADStudio=/STACK:16777216");
+        println!("cargo:rustc-link-arg-bin=ArchLine=/STACK:16777216");
     }
     let mut features: Vec<String> = std::env::vars()
         .filter_map(|(name, value)| {
