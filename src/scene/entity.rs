@@ -2518,21 +2518,30 @@ impl Scene {
     }
 
     /// Re-read the pixels of the raster images linked to the image definitions `keys`
-    /// (XREF Reload on an image row). The definition is the authority for the file name: it is
+    /// (XREF Reload on an image row). `base_dir` is the drawing's folder, against which a
+    /// relative or foreign definition path is resolved (`None` when the drawing is unsaved). The definition is the authority for the file name: it is
     /// what XREF Path edits and what files store, while rendering reads the entity's own
     /// `file_path`, so that is brought in line first. Then the old and the new path leave the
     /// image cache (a changed file, or one that appears after being missing, must show up) and
     /// the image models are rebuilt with a geometry bump. Images of other definitions keep
     /// their cached pixels.
-    pub fn reload_image_definitions(&mut self, keys: &[Handle]) {
+    pub fn reload_image_definitions(&mut self, keys: &[Handle], base_dir: Option<&std::path::Path>) {
         use crate::scene::model::image_model::invalidate_image;
+        // A definition often stores a path relative to the drawing (or one from another machine).
+        // Opening resolved it onto the entity; do the same here, or the raw path replaces a
+        // working one and the picture is lost.
+        let resolve = |raw: &str| {
+            crate::io::resolve_image_file(raw, base_dir).unwrap_or_else(|| raw.to_string())
+        };
         let mut def_paths: Vec<(Handle, String)> = Vec::new();
         for key in keys {
             if let Some(codec::objects::ObjectType::ImageDefinition(def)) =
                 self.document.objects.get(key)
             {
                 invalidate_image(&def.file_name);
-                def_paths.push((*key, def.file_name.clone()));
+                let resolved = resolve(&def.file_name);
+                invalidate_image(&resolved);
+                def_paths.push((*key, resolved));
             }
         }
         let linked: Vec<(Handle, String)> = self
