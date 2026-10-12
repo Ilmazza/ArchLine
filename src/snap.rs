@@ -8,8 +8,8 @@ use glam::{DVec3, Mat4, Vec3};
 use iced::time::Instant;
 use iced::{Point, Rectangle};
 
-use kernel::geom2d::Curve;
 use codec::types::Handle;
+use kernel::geom2d::Curve;
 
 use crate::command::{DimensionAssociationSource, TangentObject};
 use crate::scene::model::wire_model::{SnapHint, TangentGeom, WireModel};
@@ -30,6 +30,8 @@ pub enum SnapType {
     Endpoint,
     Midpoint,
     Center,
+    /// Area centroid of a closed polyline (#1369).
+    GeometricCenter,
     Node,
     Quadrant,
     Intersection,
@@ -83,6 +85,7 @@ pub const ALL_SNAP_MODES: &[(SnapType, &str, &str)] = &[
     (SnapType::Endpoint, "◻", "Endpoint"),
     (SnapType::Midpoint, "△", "Midpoint"),
     (SnapType::Center, "◯", "Center"),
+    (SnapType::GeometricCenter, "⊙", "Geometric Center"),
     (SnapType::Node, "◆", "Node"),
     (SnapType::Quadrant, "◇", "Quadrant"),
     (SnapType::Intersection, "✕", "Intersection"),
@@ -120,6 +123,76 @@ pub fn snap_label(t: SnapType) -> &'static str {
         .find(|(m, _, _)| *m == t)
         .map(|(_, _, label)| *label)
         .unwrap_or("Snap")
+}
+
+/// Transparent object snap override kind (single-pick override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapOverrideKind {
+    Mode(SnapType),
+    None,
+}
+
+/// Parses a transparent object snap override keyword (e.g. `MID`, `END`, `CEN`, `NON`).
+///
+/// Requires at least 3 letters matching a supported snap mode or alias.
+/// Leading underscores (e.g. `_MID`) and case variations are permitted.
+pub fn parse_snap_override(input: &str) -> Option<SnapOverrideKind> {
+    let s = input.trim().trim_start_matches('_').to_ascii_lowercase();
+    if s.len() < 3 {
+        return None;
+    }
+    if s.starts_with("end") && "endpoint".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Endpoint));
+    }
+    if s.starts_with("mid") && "midpoint".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Midpoint));
+    }
+    if s.starts_with("cen") && ("center".starts_with(&s) || "centre".starts_with(&s)) {
+        return Some(SnapOverrideKind::Mode(SnapType::Center));
+    }
+    if (s.starts_with("gce") && "gcen".starts_with(&s))
+        || (s.starts_with("geo") && ("geocenter".starts_with(&s) || "geometriccenter".starts_with(&s)))
+    {
+        return Some(SnapOverrideKind::Mode(SnapType::GeometricCenter));
+    }
+    if s.starts_with("nod") && "node".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Node));
+    }
+    if s.starts_with("qua") && "quadrant".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Quadrant));
+    }
+    if s.starts_with("int") && "intersection".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Intersection));
+    }
+    if s.starts_with("ext") && "extension".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Extension));
+    }
+    if s.starts_with("ins") && ("insertion".starts_with(&s) || "insert".starts_with(&s)) {
+        return Some(SnapOverrideKind::Mode(SnapType::Insertion));
+    }
+    if s.starts_with("per") && "perpendicular".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Perpendicular));
+    }
+    if s.starts_with("tan") && "tangent".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Tangent));
+    }
+    if s.starts_with("nea") && "nearest".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Nearest));
+    }
+    if s.starts_with("app")
+        && ("apparent".starts_with(&s)
+            || "apparentintersection".starts_with(&s)
+            || "appint".starts_with(&s))
+    {
+        return Some(SnapOverrideKind::Mode(SnapType::ApparentIntersection));
+    }
+    if s.starts_with("par") && "parallel".starts_with(&s) {
+        return Some(SnapOverrideKind::Mode(SnapType::Parallel));
+    }
+    if s.starts_with("non") && "none".starts_with(&s) {
+        return Some(SnapOverrideKind::None);
+    }
+    None
 }
 
 // ── Snap result ───────────────────────────────────────────────────────────
@@ -244,6 +317,11 @@ pub struct Snapper {
     /// consumed by Extension snap and extended-intersection logic. These rays
     /// belong only to OTRACK when Perpendicular OSNAP is enabled. (#695)
     pub tracking_perp_dirs: Vec<Vec<DVec3>>,
+    /// Perpendicular direction carried from a point placed by typed distance
+    /// along an Extension/OTRACK ray. It survives only until the next point
+    /// commit, so the source ray can still drive a perpendicular construction
+    /// through the newly placed point.
+    post_distance_perp_dir: Option<DVec3>,
     /// Last snap world position (for dwell detection).
     pub last_snap_world: Option<DVec3>,
     /// When the cursor first rested near `last_snap_world`.
@@ -318,6 +396,7 @@ impl Default for Snapper {
             tracking_points: Vec::new(),
             tracking_dirs: Vec::new(),
             tracking_perp_dirs: Vec::new(),
+            post_distance_perp_dir: None,
             last_snap_world: None,
             dwell_since: None,
             dwell_acquired: false,
@@ -606,13 +685,7 @@ impl Snapper {
             None => {
                 // Leaving all geometry: capture the point we were dwelling on if
                 // it qualified, before the reset loses it.
-                self.acquire_on_leave(
-                    now,
-                    DWELL_MS,
-                    MIN_OBSERVATIONS,
-                    wires,
-                    endpoints_only,
-                );
+                self.acquire_on_leave(now, DWELL_MS, MIN_OBSERVATIONS, wires, endpoints_only);
                 self.last_snap_world = None;
                 self.dwell_since = None;
                 self.dwell_acquired = false;
@@ -664,13 +737,7 @@ impl Snapper {
                     // Moved to a different snap point: capture the previous one
                     // first if it was dwelt on long enough, so a pause-then-drag
                     // gesture reliably acquires it even without in-place events.
-                    self.acquire_on_leave(
-                        now,
-                        DWELL_MS,
-                        MIN_OBSERVATIONS,
-                        wires,
-                        endpoints_only,
-                    );
+                    self.acquire_on_leave(now, DWELL_MS, MIN_OBSERVATIONS, wires, endpoints_only);
                     self.last_snap_world = Some(p);
                     self.dwell_since = Some(now);
                     self.dwell_acquired = false;
@@ -687,11 +754,7 @@ impl Snapper {
     ///
     /// `wires` must be the frozen pre-drag geometry. It is used only here to
     /// capture directions; it is never added to normal OSNAP candidates.
-    pub fn acquire_grip_tracking_point<W: WireSource + ?Sized>(
-        &mut self,
-        p: DVec3,
-        wires: &W,
-    ) {
+    pub fn acquire_grip_tracking_point<W: WireSource + ?Sized>(&mut self, p: DVec3, wires: &W) {
         if !self.tracking_active() {
             return;
         }
@@ -787,7 +850,16 @@ impl Snapper {
         ucs_x: DVec3,
         ucs_y: DVec3,
     ) -> Option<OtrackHit> {
-        if !self.otrack_enabled || self.tracking_points.is_empty() {
+        // A point created by typed distance along Extension/OTRACK carries
+        // that source direction for exactly one following point. Perpendicular
+        // OSNAP may use it even when F11 tracking itself is off.
+        let carried_perp = if self.is_on(SnapType::Perpendicular) {
+            self.post_distance_perp_dir.zip(last_point)
+        } else {
+            None
+        };
+
+        if (!self.otrack_enabled || self.tracking_points.is_empty()) && carried_perp.is_none() {
             return None;
         }
 
@@ -897,6 +969,18 @@ impl Snapper {
                 }
             }
         }
+        // Typed distance along an Extension/OTRACK ray creates a new point
+        // that still knows the direction it came from. Offer exactly one
+        // perpendicular ray through that new point for the following pick.
+        if let Some((dir, origin)) = carried_perp {
+            rays.push(Ray {
+                origin,
+                dir,
+                group: self.tracking_points.len(),
+                kind: TrackingKind::Perpendicular,
+            });
+        }
+
         // OTRACK rays come first; the auxiliary rays appended below (polar from
         // last_point, ortho axis from last_point) only participate in
         // intersection locking, never in single-ray fallback.
@@ -963,19 +1047,17 @@ impl Snapper {
                 if sd < r && best_x.as_ref().map_or(true, |(bd, _)| sd < *bd) {
                     // Report an acquired tracking ray (not an auxiliary
                     // last_point ray) as base/dir for typed-distance entry.
-                    let (ot, other) = if rays[i].group != POLAR_GROUP
-                        && rays[i].group != ORTHO_GROUP
-                    {
-                        (&rays[i], &rays[j])
-                    } else {
-                        (&rays[j], &rays[i])
-                    };
+                    let (ot, other) =
+                        if rays[i].group != POLAR_GROUP && rays[i].group != ORTHO_GROUP {
+                            (&rays[i], &rays[j])
+                        } else {
+                            (&rays[j], &rays[i])
+                        };
                     // Point each ray the way the crossing lies from its own
                     // origin, so the guide drawn for it runs through the lock
                     // rather than away from it.
                     let outward = |ray: &Ray| {
-                        let t = (x.x - ray.origin.x) * ray.dir.x
-                            + (x.y - ray.origin.y) * ray.dir.y;
+                        let t = (x.x - ray.origin.x) * ray.dir.x + (x.y - ray.origin.y) * ray.dir.y;
                         if t >= 0.0 {
                             ray.dir
                         } else {
@@ -993,7 +1075,7 @@ impl Snapper {
                             // drawn, so the intersection reads as one. (#1313)
                             cross: Some((other.origin, outward(other))),
                             kind: ot.kind,
-                        }
+                        },
                     ));
                 }
             }
@@ -1042,11 +1124,21 @@ impl Snapper {
         best.map(|(_, h)| h)
     }
 
+    /// Carry the direction of a reference ray used by typed-distance entry
+    /// into the next point, as its perpendicular construction direction.
+    pub fn remember_distance_reference(&mut self, dir: DVec3) {
+        let planar = DVec3::new(dir.x, dir.y, 0.0);
+        self.post_distance_perp_dir = planar
+            .try_normalize()
+            .map(|unit| DVec3::new(-unit.y, unit.x, 0.0));
+    }
+
     /// Clear all acquired tracking points (e.g. when command ends).
     pub fn clear_tracking(&mut self) {
         self.tracking_points.clear();
         self.tracking_dirs.clear();
         self.tracking_perp_dirs.clear();
+        self.post_distance_perp_dir = None;
         self.parallel_ref = None;
         self.parallel_dwell = None;
         self.last_snap_world = None;
@@ -1188,6 +1280,7 @@ impl Snapper {
             tracking_points: Vec::new(),
             tracking_dirs: Vec::new(),
             tracking_perp_dirs: Vec::new(),
+            post_distance_perp_dir: None,
             last_snap_world: None,
             dwell_since: None,
             dwell_acquired: false,
@@ -1448,9 +1541,7 @@ impl Snapper {
                 && best.is_some_and(|prev| {
                     (world - eye).length_squared() < (prev.world - eye).length_squared()
                 });
-            if depth_tie
-                || snap_better(tier, d2, sub, (best_rank, best_d2, best_sub))
-            {
+            if depth_tie || snap_better(tier, d2, sub, (best_rank, best_d2, best_sub)) {
                 best_rank = tier;
                 best_sub = sub;
                 best_d2 = d2;
@@ -1472,33 +1563,37 @@ impl Snapper {
         };
 
         // ── Pre-baked snap points (Center, Node, Quadrant, Insertion) ──────
-        let mut try_snap_hint = |world: DVec3,
-                                 hint: SnapHint,
-                                 src: Option<DimensionAssociationSource>| {
-            // 3D hints run on the separate 3D master + mode set; everything
-            // else stays on the 2D master + mode set.
-            let (snap_type, on) = match hint {
-                SnapHint::Center => (SnapType::Center, self.is_on(SnapType::Center)),
-                SnapHint::Node => (SnapType::Node, self.is_on(SnapType::Node)),
-                SnapHint::Quadrant => (SnapType::Quadrant, self.is_on(SnapType::Quadrant)),
-                SnapHint::Insertion => (SnapType::Insertion, self.is_on(SnapType::Insertion)),
-                SnapHint::Midpoint => (SnapType::Midpoint, self.is_on(SnapType::Midpoint)),
-                SnapHint::Endpoint => (SnapType::Endpoint, self.is_on(SnapType::Endpoint)),
-                SnapHint::Vertex => (SnapType::Vertex, self.is_on_3d(SnapType::Vertex)),
-                SnapHint::EdgeMidpoint => (
-                    SnapType::EdgeMidpoint,
-                    self.is_on_3d(SnapType::EdgeMidpoint),
-                ),
-                SnapHint::FaceCenter => (
-                    SnapType::FaceCenter,
-                    self.is_on_3d(SnapType::FaceCenter),
-                ),
-                SnapHint::Knot => (SnapType::Knot, self.is_on_3d(SnapType::Knot)),
+        let mut try_snap_hint =
+            |world: DVec3, hint: SnapHint, src: Option<DimensionAssociationSource>| {
+                // 3D hints run on the separate 3D master + mode set; everything
+                // else stays on the 2D master + mode set.
+                let (snap_type, on) = match hint {
+                    SnapHint::Center | SnapHint::ArcCenter => {
+                        (SnapType::Center, self.is_on(SnapType::Center))
+                    }
+                    SnapHint::GeometricCenter => (
+                        SnapType::GeometricCenter,
+                        self.is_on(SnapType::GeometricCenter),
+                    ),
+                    SnapHint::Node => (SnapType::Node, self.is_on(SnapType::Node)),
+                    SnapHint::Quadrant => (SnapType::Quadrant, self.is_on(SnapType::Quadrant)),
+                    SnapHint::Insertion => (SnapType::Insertion, self.is_on(SnapType::Insertion)),
+                    SnapHint::Midpoint => (SnapType::Midpoint, self.is_on(SnapType::Midpoint)),
+                    SnapHint::Endpoint => (SnapType::Endpoint, self.is_on(SnapType::Endpoint)),
+                    SnapHint::Vertex => (SnapType::Vertex, self.is_on_3d(SnapType::Vertex)),
+                    SnapHint::EdgeMidpoint => (
+                        SnapType::EdgeMidpoint,
+                        self.is_on_3d(SnapType::EdgeMidpoint),
+                    ),
+                    SnapHint::FaceCenter => {
+                        (SnapType::FaceCenter, self.is_on_3d(SnapType::FaceCenter))
+                    }
+                    SnapHint::Knot => (SnapType::Knot, self.is_on_3d(SnapType::Knot)),
+                };
+                if on {
+                    try_pt(world, snap_type, src, None);
+                }
             };
-            if on {
-                try_pt(world, snap_type, src, None);
-            }
-        };
         if let Some(points) = wires.snap_points() {
             for point_ref in points {
                 let Some(wire) = wires.source_wire(point_ref.wire) else {
@@ -1788,11 +1883,8 @@ impl Snapper {
                 for &dir in perp_dirs {
                     let rel = cursor_world - origin;
                     let t = rel.x * dir.x + rel.y * dir.y;
-                    let aligned = glam::DVec3::new(
-                        origin.x + dir.x * t,
-                        origin.y + dir.y * t,
-                        origin.z,
-                    );
+                    let aligned =
+                        glam::DVec3::new(origin.x + dir.x * t, origin.y + dir.y * t, origin.z);
                     let aligned_screen = world_to_screen(aligned, view_rot, eye, bounds);
                     if dist2(aligned_screen, cursor_screen) > radius2 {
                         continue;
@@ -1844,12 +1936,7 @@ impl Snapper {
                             }
 
                             if let Some(pt) = seg_intersect_3d(a0, a1, b0, b1) {
-                                try_pt(
-                                    pt,
-                                    SnapType::Intersection,
-                                    src,
-                                    None,
-                                );
+                                try_pt(pt, SnapType::Intersection, src, None);
                             }
                         }
                     }
@@ -1889,8 +1976,8 @@ impl Snapper {
                             if b.min_x() > a.max_x() {
                                 break;
                             }
-                            let same_wire_neighbours = a.wire == b.wire
-                                && segments_share_endpoint(a.a, a.b, b.a, b.b);
+                            let same_wire_neighbours =
+                                a.wire == b.wire && segments_share_endpoint(a.a, a.b, b.a, b.b);
 
                             if same_wire_neighbours
                                 || a.max_y() < b.min_y()
@@ -1898,8 +1985,11 @@ impl Snapper {
                             {
                                 continue;
                             }
-                            if wires.source_wire(a.wire).zip(wires.source_wire(b.wire))
-                                .is_some_and(|(a, b)| resolved_pairs.contains(&pair_key(a, b))) {
+                            if wires
+                                .source_wire(a.wire)
+                                .zip(wires.source_wire(b.wire))
+                                .is_some_and(|(a, b)| resolved_pairs.contains(&pair_key(a, b)))
+                            {
                                 continue;
                             }
                             if let Some(pt) = seg_intersect_3d(a.a, a.b, b.a, b.b) {
@@ -1907,24 +1997,15 @@ impl Snapper {
                                     world_to_screen(pt, view_rot, eye, bounds),
                                     cursor_screen,
                                 ) <= f32::EPSILON;
-                                let primary = wires
-                                    .source_wire(a.wire)
-                                    .and_then(wire_source);
+                                let primary = wires.source_wire(a.wire).and_then(wire_source);
 
                                 let secondary = if a.wire == b.wire {
                                     None
                                 } else {
-                                    wires
-                                        .source_wire(b.wire)
-                                        .and_then(wire_source)
+                                    wires.source_wire(b.wire).and_then(wire_source)
                                 };
 
-                                try_pt(
-                                    pt,
-                                    SnapType::Intersection,
-                                    primary,
-                                    secondary,
-                                );
+                                try_pt(pt, SnapType::Intersection, primary, secondary);
                                 if exact_cursor {
                                     break 'intersection_sweep;
                                 }
@@ -2161,25 +2242,17 @@ impl Snapper {
         // direct-evaluation pass).
         if self.snap_enabled && self.is_on(SnapType::Tangent) {
             let mut eval_tangent = |wire: &WireModel| {
+                let mut line_cursor = 0usize;
                 for tg in &wire.tangent_geoms {
                     let (world_pt, d2) = match tg {
                         TangentGeom::Line { p1, p2 } => {
-                            let sp0 = world_to_screen(
-                                glam::DVec3::new(p1[0] as f64, p1[1] as f64, p1[2] as f64),
-                                view_rot,
-                                eye,
-                                bounds,
-                            );
-                            let sp1 = world_to_screen(
-                                glam::DVec3::new(p2[0] as f64, p2[1] as f64, p2[2] as f64),
-                                view_rot,
-                                eye,
-                                bounds,
-                            );
+                            let (lp1, lp2) = tangent_line_endpoints(wire, *p1, *p2, &mut line_cursor);
+                            let sp0 = world_to_screen(lp1, view_rot, eye, bounds);
+                            let sp1 = world_to_screen(lp2, view_rot, eye, bounds);
                             let d2 = dist2_to_segment(cursor_screen, sp0, sp1);
-                            let t = t_on_segment(cursor_screen, sp0, sp1);
-                            let w = Vec3::from(*p1) + t * (Vec3::from(*p2) - Vec3::from(*p1));
-                            (w.as_dvec3(), d2)
+                            let t = t_on_segment(cursor_screen, sp0, sp1) as f64;
+                            let w = lp1 + t * (lp2 - lp1);
+                            (w, d2)
                         }
                         TangentGeom::Circle { center, radius } => {
                             let cv = Vec3::from(*center);
@@ -2195,7 +2268,8 @@ impl Snapper {
                             let dc = dist2(cursor_screen, sc).sqrt();
                             let edge_d = (dc - sr).abs();
                             let w = if let Some(from) = self.from_point {
-                                if let Some((t0, t1)) = circle_tangent_points(from.as_vec3(), cv, r) {
+                                if let Some((t0, t1)) = circle_tangent_points(from.as_vec3(), cv, r)
+                                {
                                     let s0 = world_to_screen(t0.as_dvec3(), view_rot, eye, bounds);
                                     let s1 = world_to_screen(t1.as_dvec3(), view_rot, eye, bounds);
                                     if dist2(s0, cursor_screen) <= dist2(s1, cursor_screen) {
@@ -2292,11 +2366,7 @@ impl Snapper {
                             let cv = DVec3::from_array(*center);
                             let candidate = self.from_point.and_then(|from| {
                                 planar_circle_tangent_points(
-                                    from,
-                                    *center,
-                                    *axis_x,
-                                    *axis_y,
-                                    *radius,
+                                    from, *center, *axis_x, *axis_y, *radius,
                                 )
                                 .into_iter()
                                 .min_by(|a, b| {
@@ -2367,7 +2437,8 @@ impl Snapper {
                                     .min_by(|pt_a, pt_b| {
                                         let sa = world_to_screen(*pt_a, view_rot, eye, bounds);
                                         let sb = world_to_screen(*pt_b, view_rot, eye, bounds);
-                                        dist2(sa, cursor_screen).total_cmp(&dist2(sb, cursor_screen))
+                                        dist2(sa, cursor_screen)
+                                            .total_cmp(&dist2(sb, cursor_screen))
                                     })
                                 });
 
@@ -2376,19 +2447,24 @@ impl Snapper {
                                 let v_proj = d_vec.dot(v_hat);
                                 let t = (v_proj / b).atan2(u_proj / a);
 
-                                let fallback = if is_ellipse_param_on_arc(t, *start_param, *end_param) {
-                                    c + u_hat * (a * t.cos()) + v_hat * (b * t.sin())
-                                } else {
-                                    let p_start = c + u_hat * (a * start_param.cos()) + v_hat * (b * start_param.sin());
-                                    let p_end = c + u_hat * (a * end_param.cos()) + v_hat * (b * end_param.sin());
-                                    let sa = world_to_screen(p_start, view_rot, eye, bounds);
-                                    let sb = world_to_screen(p_end, view_rot, eye, bounds);
-                                    if dist2(sa, cursor_screen) <= dist2(sb, cursor_screen) {
-                                        p_start
+                                let fallback =
+                                    if is_ellipse_param_on_arc(t, *start_param, *end_param) {
+                                        c + u_hat * (a * t.cos()) + v_hat * (b * t.sin())
                                     } else {
-                                        p_end
-                                    }
-                                };
+                                        let p_start = c
+                                            + u_hat * (a * start_param.cos())
+                                            + v_hat * (b * start_param.sin());
+                                        let p_end = c
+                                            + u_hat * (a * end_param.cos())
+                                            + v_hat * (b * end_param.sin());
+                                        let sa = world_to_screen(p_start, view_rot, eye, bounds);
+                                        let sb = world_to_screen(p_end, view_rot, eye, bounds);
+                                        if dist2(sa, cursor_screen) <= dist2(sb, cursor_screen) {
+                                            p_start
+                                        } else {
+                                            p_end
+                                        }
+                                    };
 
                                 let world = candidate.unwrap_or(fallback);
                                 let edge_d2 = if wire.points.len() >= 2 {
@@ -2430,10 +2506,14 @@ impl Snapper {
                         best_sub = sub;
                         best_d2 = d2;
                         let tangent_obj = match tg {
-                            TangentGeom::Line { p1, p2 } => TangentObject::Line {
-                                p1: glam::DVec3::new(p1[0] as f64, p1[1] as f64, p1[2] as f64),
-                                p2: glam::DVec3::new(p2[0] as f64, p2[1] as f64, p2[2] as f64),
-                            },
+                            TangentGeom::Line { p1, p2 } => {
+                                let mut cursor = 0usize;
+                                let (lp1, lp2) = tangent_line_endpoints(wire, *p1, *p2, &mut cursor);
+                                TangentObject::Line {
+                                    p1: lp1,
+                                    p2: lp2,
+                                }
+                            }
                             TangentGeom::Circle { center, radius } => TangentObject::Circle {
                                 center: glam::DVec3::new(
                                     center[0] as f64,
@@ -2507,12 +2587,39 @@ impl Snapper {
         // so it can update the candidate state directly. (#152)
         // 2D master applies (this direct-evaluation pass bypasses `try_pt`).
         if self.snap_enabled && self.is_on(SnapType::Center) {
-            let mut offer = |wire: &WireModel, curve_d2: f32| {
+            // A polyline drawn piece by piece keeps its arc centres on one of
+            // its wires: the one with the same name that carries them.
+            let carries = |w: &WireModel| {
+                w.snap_pts
+                    .iter()
+                    .any(|(_, hint)| matches!(hint, SnapHint::ArcCenter))
+            };
+            let arc_centre = |wire: &WireModel, on: (DVec3, DVec3)| -> Option<DVec3> {
+                if carries(wire) {
+                    return arc_segment_center(wire, on);
+                }
+                let carrier = wires
+                    .iter()
+                    .find(|w| !wire.name.is_empty() && w.name == wire.name && carries(w))?;
+                arc_segment_center(carrier, on)
+            };
+            let has_centre = |wire: &WireModel| {
+                wire.snap_pts
+                    .iter()
+                    .any(|(_, hint)| matches!(hint, SnapHint::Center))
+                    || carries(wire)
+                    || (!wire.name.is_empty()
+                        && wires.iter().any(|w| w.name == wire.name && carries(w)))
+            };
+            // `on`: the piece of the wire under the cursor, which picks out
+            // the arc segment of a polyline whose centre is offered.
+            let mut offer = |wire: &WireModel, curve_d2: f32, on: Option<(DVec3, DVec3)>| {
                 let Some(center) = wire
                     .snap_pts
                     .iter()
                     .find(|(_, hint)| matches!(hint, SnapHint::Center))
                     .map(|&(c, _)| c)
+                    .or_else(|| arc_centre(wire, on?))
                 else {
                     return;
                 };
@@ -2549,16 +2656,12 @@ impl Snapper {
                 }
             };
             if let Some(segments) = &local_segments {
-                let mut distances: HashMap<u32, f32> = HashMap::default();
+                let mut distances: HashMap<u32, (f32, (DVec3, DVec3))> = HashMap::default();
                 for segment in segments {
                     let Some(wire) = wires.source_wire(segment.wire) else {
                         continue;
                     };
-                    if !wire
-                        .snap_pts
-                        .iter()
-                        .any(|(_, hint)| matches!(hint, SnapHint::Center))
-                    {
+                    if !has_centre(wire) {
                         continue;
                     }
                     let nearest = nearest_on_segment(cursor_world, segment.a, segment.b);
@@ -2566,31 +2669,38 @@ impl Snapper {
                         world_to_screen(nearest, view_rot, eye, bounds),
                         cursor_screen,
                     );
+                    let piece = (segment.a, segment.b);
                     distances
                         .entry(segment.wire)
-                        .and_modify(|best| *best = best.min(distance))
-                        .or_insert(distance);
+                        .and_modify(|best| {
+                            if distance < best.0 {
+                                *best = (distance, piece);
+                            }
+                        })
+                        .or_insert((distance, piece));
                 }
-                for (wire_idx, distance) in distances {
+                for (wire_idx, (distance, piece)) in distances {
                     if let Some(wire) = wires.source_wire(wire_idx) {
-                        offer(wire, distance);
+                        offer(wire, distance, Some(piece));
                     }
                 }
             } else {
                 for wire in in_range_wires.iter() {
                     let mut curve_d2 = f32::INFINITY;
+                    let mut piece = None;
                     for index in 0..wire.points.len().saturating_sub(1) {
-                        let nearest = nearest_on_segment(
-                            cursor_world,
-                            wp_f64(wire, index),
-                            wp_f64(wire, index + 1),
-                        );
-                        curve_d2 = curve_d2.min(dist2(
+                        let (a, b) = (wp_f64(wire, index), wp_f64(wire, index + 1));
+                        let nearest = nearest_on_segment(cursor_world, a, b);
+                        let distance = dist2(
                             world_to_screen(nearest, view_rot, eye, bounds),
                             cursor_screen,
-                        ));
+                        );
+                        if distance < curve_d2 {
+                            curve_d2 = distance;
+                            piece = Some((a, b));
+                        }
                     }
-                    offer(wire, curve_d2);
+                    offer(wire, curve_d2, piece);
                 }
             }
         }
@@ -2621,6 +2731,29 @@ impl Snapper {
     }
 }
 
+/// The centre of the polyline arc segment a drawn piece `(a, b)` of `wire`
+/// belongs to: the one its two ends are equally far from. A piece joining two
+/// of the chain's own vertices is a straight segment, which has none.
+fn arc_segment_center(wire: &WireModel, (a, b): (DVec3, DVec3)) -> Option<DVec3> {
+    let vertex = |p: DVec3| {
+        wire.key_vertices.iter().any(|v| {
+            DVec3::from_array(*v).distance_squared(p) <= 1e-18 * p.length_squared().max(1.0)
+        })
+    };
+    if vertex(a) && vertex(b) {
+        return None;
+    }
+    wire.snap_pts
+        .iter()
+        .filter(|(_, hint)| matches!(hint, SnapHint::ArcCenter))
+        .map(|&(c, _)| (c, (c.distance(a) - c.distance(b)).abs()))
+        // ponytail: a thousandth of the radius absorbs the drawn points' f32
+        // rounding far from the origin; two arcs that close would both fit.
+        .filter(|(c, gap)| *gap <= 1e-3 * c.distance(a).max(1e-9))
+        .min_by(|x, y| x.1.total_cmp(&y.1))
+        .map(|(c, _)| c)
+}
+
 // ── Object-snap priority ───────────────────────────────────────────────────
 
 /// Selection priority for an object snap — lower wins. Discrete snaps that
@@ -2641,6 +2774,7 @@ pub(crate) fn snap_tier(t: SnapType) -> u8 {
         | SnapType::ApparentIntersection
         | SnapType::Midpoint
         | SnapType::Center
+        | SnapType::GeometricCenter
         | SnapType::Node
         | SnapType::Quadrant
         | SnapType::Insertion
@@ -2702,7 +2836,7 @@ pub(crate) fn snap_priority(t: SnapType) -> u8 {
         SnapType::Intersection => 1,
         SnapType::ApparentIntersection => 2,
         SnapType::Midpoint => 3,
-        SnapType::Center => 4,
+        SnapType::Center | SnapType::GeometricCenter => 4,
         SnapType::Node => 5,
         SnapType::Quadrant => 6,
         SnapType::Insertion => 7,
@@ -2744,10 +2878,7 @@ pub(crate) fn snap_priority(t: SnapType) -> u8 {
 /// Scanned once, at acquisition — not per move. The edge list is empty when `p`
 /// is not a segment endpoint (midpoint / centre / node), which is what makes it
 /// double as the endpoint test.
-fn tracking_dirs_at<W: WireSource + ?Sized>(
-    p: DVec3,
-    wires: &W,
-) -> (Vec<DVec3>, Vec<DVec3>) {
+fn tracking_dirs_at<W: WireSource + ?Sized>(p: DVec3, wires: &W) -> (Vec<DVec3>, Vec<DVec3>) {
     // Acquired points and reconstructed wire vertices are both f64. Keep a
     // small scale-aware window for double-single reconstruction residuals
     // without allowing unrelated UTM-scale vertices to match.
@@ -2800,10 +2931,14 @@ fn tracking_dirs_at<W: WireSource + ?Sized>(
 
         edges.len() >= 6 && perps.len() >= 6
     };
+    // A chain (polyline) keeps its straight segments even when an arc
+    // segment gives it quadrants.
     let is_round = |wire: &WireModel| {
-        wire.snap_pts
-            .iter()
-            .any(|(_, hint)| matches!(hint, SnapHint::Quadrant | SnapHint::Center))
+        wire.key_vertices.is_empty()
+            && wire
+                .snap_pts
+                .iter()
+                .any(|(_, hint)| matches!(hint, SnapHint::Quadrant | SnapHint::Center))
     };
     if let Some(segments) = indexed_segments(wires) {
         for segment in segments {
@@ -3049,13 +3184,28 @@ fn wire_plane(wire: &WireModel) -> Option<WirePlane> {
                 DVec3::X,
                 DVec3::Y,
             )),
-            TangentGeom::PlanarCircle { center, axis_x, axis_y, .. }
-            | TangentGeom::Arc { center, axis_x, axis_y, .. } => Some((
+            TangentGeom::PlanarCircle {
+                center,
+                axis_x,
+                axis_y,
+                ..
+            }
+            | TangentGeom::Arc {
+                center,
+                axis_x,
+                axis_y,
+                ..
+            } => Some((
                 DVec3::new(center[0], center[1], center[2]),
                 DVec3::new(axis_x[0], axis_x[1], axis_x[2]),
                 DVec3::new(axis_y[0], axis_y[1], axis_y[2]),
             )),
-            TangentGeom::PlanarEllipse { center, major_axis, normal, .. } => {
+            TangentGeom::PlanarEllipse {
+                center,
+                major_axis,
+                normal,
+                ..
+            } => {
                 let origin = DVec3::new(center[0], center[1], center[2]);
                 let n = DVec3::new(normal[0], normal[1], normal[2]).normalize();
                 let major = DVec3::new(major_axis[0], major_axis[1], major_axis[2]);
@@ -3068,7 +3218,12 @@ fn wire_plane(wire: &WireModel) -> Option<WirePlane> {
             TangentGeom::Line { .. } => None,
         };
         if let Some((origin, axis_x, axis_y)) = plane_axes {
-            return Some(WirePlane { origin, axis_x, axis_y, normal: axis_x.cross(axis_y).normalize() });
+            return Some(WirePlane {
+                origin,
+                axis_x,
+                axis_y,
+                normal: axis_x.cross(axis_y).normalize(),
+            });
         }
     }
     None
@@ -3120,7 +3275,10 @@ fn tangent_line_endpoints(
 }
 
 fn curves_in_frame(wire: &WireModel, frame: &WirePlane, tol: f64) -> Option<Vec<Curve>> {
-    use kernel::geom2d::{Arc as KArc, Circle as KCircle, Ellipse as KEllipse, EllipseArc as KEllipseArc, Line as KLine};
+    use kernel::geom2d::{
+        Arc as KArc, Circle as KCircle, Ellipse as KEllipse, EllipseArc as KEllipseArc,
+        Line as KLine,
+    };
 
     let mut curves = Vec::new();
 
@@ -3151,41 +3309,93 @@ fn curves_in_frame(wire: &WireModel, frame: &WirePlane, tol: f64) -> Option<Vec<
                 if !frame.contains(p1, tol) || !frame.contains(p2, tol) {
                     return None;
                 }
-                curves.push(Curve::Line(KLine { start: frame.to_2d(p1), end: frame.to_2d(p2) }));
+                curves.push(Curve::Line(KLine {
+                    start: frame.to_2d(p1),
+                    end: frame.to_2d(p2),
+                }));
             }
             TangentGeom::Circle { center, radius } => {
                 let c = DVec3::new(center[0] as f64, center[1] as f64, center[2] as f64);
                 if DVec3::Z.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
                     return None;
                 }
-                curves.push(Curve::Circle(KCircle { centre: frame.to_2d(c), radius: *radius as f64 }));
+                curves.push(Curve::Circle(KCircle {
+                    centre: frame.to_2d(c),
+                    radius: *radius as f64,
+                }));
             }
-            TangentGeom::PlanarCircle { center, axis_x, axis_y, radius } => {
+            TangentGeom::PlanarCircle {
+                center,
+                axis_x,
+                axis_y,
+                radius,
+            } => {
                 let c = DVec3::new(center[0], center[1], center[2]);
-                let n = DVec3::new(axis_x[0], axis_x[1], axis_x[2]).cross(DVec3::new(axis_y[0], axis_y[1], axis_y[2])).normalize();
+                let n = DVec3::new(axis_x[0], axis_x[1], axis_x[2])
+                    .cross(DVec3::new(axis_y[0], axis_y[1], axis_y[2]))
+                    .normalize();
                 if n.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
                     return None;
                 }
-                curves.push(Curve::Circle(KCircle { centre: frame.to_2d(c), radius: *radius }));
+                curves.push(Curve::Circle(KCircle {
+                    centre: frame.to_2d(c),
+                    radius: *radius,
+                }));
             }
-            TangentGeom::Arc { center, axis_x, axis_y, radius, start_angle, end_angle } => {
+            TangentGeom::Arc {
+                center,
+                axis_x,
+                axis_y,
+                radius,
+                start_angle,
+                end_angle,
+            } => {
                 let c = DVec3::new(center[0], center[1], center[2]);
-                let (ax, ay) = (DVec3::new(axis_x[0], axis_x[1], axis_x[2]), DVec3::new(axis_y[0], axis_y[1], axis_y[2]));
+                let (ax, ay) = (
+                    DVec3::new(axis_x[0], axis_x[1], axis_x[2]),
+                    DVec3::new(axis_y[0], axis_y[1], axis_y[2]),
+                );
                 let n = ax.cross(ay).normalize();
                 if n.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
                     return None;
                 }
-                let arc = KArc { centre: frame.to_2d(c), radius: *radius, start_angle: *start_angle, end_angle: *end_angle };
+                let arc = KArc {
+                    centre: frame.to_2d(c),
+                    radius: *radius,
+                    start_angle: *start_angle,
+                    end_angle: *end_angle,
+                };
                 let sweep = arc.sweep();
                 if (sweep - std::f64::consts::TAU).abs() <= 1e-12 {
-                    curves.push(Curve::Circle(KCircle { centre: arc.centre, radius: *radius }));
+                    curves.push(Curve::Circle(KCircle {
+                        centre: arc.centre,
+                        radius: *radius,
+                    }));
                 } else {
-                    let boundary = if n.dot(frame.normal) < 0.0 { *end_angle } else { *start_angle };
-                    let start_angle = angle_in_frame(c + *radius * (boundary.cos() * ax + boundary.sin() * ay), c);
-                    curves.push(Curve::Arc(KArc { start_angle, end_angle: start_angle + sweep, ..arc }));
+                    let boundary = if n.dot(frame.normal) < 0.0 {
+                        *end_angle
+                    } else {
+                        *start_angle
+                    };
+                    let start_angle = angle_in_frame(
+                        c + *radius * (boundary.cos() * ax + boundary.sin() * ay),
+                        c,
+                    );
+                    curves.push(Curve::Arc(KArc {
+                        start_angle,
+                        end_angle: start_angle + sweep,
+                        ..arc
+                    }));
                 }
             }
-            TangentGeom::PlanarEllipse { center, major_axis, normal, minor_axis_ratio, start_param, end_param } => {
+            TangentGeom::PlanarEllipse {
+                center,
+                major_axis,
+                normal,
+                minor_axis_ratio,
+                start_param,
+                end_param,
+            } => {
                 let c = DVec3::new(center[0], center[1], center[2]);
                 let ell_normal = DVec3::new(normal[0], normal[1], normal[2]).normalize();
                 if ell_normal.cross(frame.normal).length() > tol || !frame.contains(c, tol) {
@@ -3209,7 +3419,12 @@ fn curves_in_frame(wire: &WireModel, frame: &WirePlane, tol: f64) -> Option<Vec<
                     (*start_param, *end_param)
                 };
                 curves.push(Curve::Ellipse(KEllipseArc {
-                    ellipse: KEllipse { centre: frame.to_2d(c), major_radius, minor_radius, major_axis: major_axis_2d },
+                    ellipse: KEllipse {
+                        centre: frame.to_2d(c),
+                        major_radius,
+                        minor_radius,
+                        major_axis: major_axis_2d,
+                    },
                     start_parameter,
                     end_parameter,
                 }));
@@ -3260,7 +3475,10 @@ pub(crate) fn exact_curve_intersections(
             let crossings = kernel::geom2d::intersect(ca, cb, tolerance);
             for c in crossings {
                 let pt = frame.to_3d(c.point);
-                if !points.iter().any(|existing| existing.distance_squared(pt) <= 1e-12) {
+                if !points
+                    .iter()
+                    .any(|existing| existing.distance_squared(pt) <= 1e-12)
+                {
                     points.push(pt);
                 }
             }
@@ -3274,12 +3492,7 @@ pub(crate) fn exact_curve_intersections(
 ///
 /// Non-adjacent segments are allowed to intersect even when they belong to
 /// the same WireModel.
-fn segments_share_endpoint(
-    a0: DVec3,
-    a1: DVec3,
-    b0: DVec3,
-    b1: DVec3,
-) -> bool {
+fn segments_share_endpoint(a0: DVec3, a1: DVec3, b0: DVec3, b1: DVec3) -> bool {
     const EPS2: f64 = 1.0e-18;
 
     a0.distance_squared(b0) <= EPS2
@@ -3854,7 +4067,9 @@ mod ext_tests {
         let (q, d2, w) = closest_point_on_tri_2d([2.0, 2.0], a, b, c);
         assert!((q[0] - 2.0).abs() < 1e-6 && (q[1] - 2.0).abs() < 1e-6);
         assert!(d2 < 1e-12);
-        assert!((w[0] - 0.6).abs() < 1e-6 && (w[1] - 0.2).abs() < 1e-6 && (w[2] - 0.2).abs() < 1e-6);
+        assert!(
+            (w[0] - 0.6).abs() < 1e-6 && (w[1] - 0.2).abs() < 1e-6 && (w[2] - 0.2).abs() < 1e-6
+        );
         // Outside near an edge → foot on the edge.
         let (q, d2, w) = closest_point_on_tri_2d([5.0, -3.0], a, b, c);
         assert!((q[0] - 5.0).abs() < 1e-6 && q[1].abs() < 1e-6);
@@ -3874,8 +4089,7 @@ mod ext_tests {
             DVec3::new(0.0, 10.0, 5.0),
         );
         // Base below the face interior → foot straight above it.
-        let foot = foot_on_triangle(DVec3::new(2.0, 3.0, 0.0), a, b, c)
-            .expect("interior foot");
+        let foot = foot_on_triangle(DVec3::new(2.0, 3.0, 0.0), a, b, c).expect("interior foot");
         assert!((foot - DVec3::new(2.0, 3.0, 5.0)).length() < 1e-9);
         // Base outside the triangle's span → the foot misses it.
         assert!(foot_on_triangle(DVec3::new(9.0, 9.0, 0.0), a, b, c).is_none());
@@ -3915,7 +4129,10 @@ mod ext_tests {
         let (enabled, enabled3d) = (s.enabled.clone(), s.enabled3d.clone());
         s.set_override(SnapType::FaceCenter);
         assert!(s.is_on_3d(SnapType::FaceCenter));
-        assert!(!s.is_on_3d(SnapType::Vertex), "only the override mode snaps");
+        assert!(
+            !s.is_on_3d(SnapType::Vertex),
+            "only the override mode snaps"
+        );
         assert!(!s.is_active(), "no 2D mode snaps during a 3D override");
         s.clear_override();
         assert_eq!(s.enabled, enabled);
@@ -3982,7 +4199,7 @@ mod ext_tests {
             text_verts: Vec::new(),
             points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
             ..Default::default()
-};
+        };
         let wires = [wire];
 
         // Extension-driven acquisition (endpoints_only): a midpoint — like an
@@ -4187,6 +4404,69 @@ mod ext_tests {
     }
 
     #[test]
+    fn typed_distance_reference_offers_perpendicular_for_next_point() {
+        let mut s = Snapper::default();
+        s.enabled.insert(SnapType::Perpendicular);
+        // This must not depend on F11: the carried construction belongs to
+        // Perpendicular OSNAP itself.
+        s.otrack_enabled = false;
+        s.osnap_radius_px = 10.0;
+
+        // The first point was placed along a horizontal Extension ray.
+        s.remember_distance_reference(DVec3::X);
+        let base = DVec3::new(2_000.0, 3_000.0, 0.0);
+
+        let view_rot = Mat4::from_scale(Vec3::splat(0.0001));
+        let eye = DVec3::ZERO;
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
+
+        // Pull almost vertically from the newly placed point. The preserved
+        // horizontal reference must produce a vertical perpendicular guide.
+        let cursor = base + DVec3::Y * 5_000.0 + DVec3::X * 0.05;
+        let hit = s
+            .otrack_snap(
+                cursor,
+                view_rot,
+                eye,
+                bounds,
+                None,
+                Some(base),
+                None,
+                false,
+                DVec3::X,
+                DVec3::Y,
+            )
+            .expect("carried Extension direction should offer perpendicular");
+
+        assert_eq!(hit.kind, TrackingKind::Perpendicular);
+        assert!((hit.base - base).length() < 1e-12);
+        assert!((hit.aligned.x - base.x).abs() < 1e-12);
+        assert!((hit.aligned.y - (base.y + 5_000.0)).abs() < 1e-9);
+
+        // It is deliberately one-step state: the next accepted point clears it.
+        s.clear_tracking();
+        assert!(s
+            .otrack_snap(
+                cursor,
+                view_rot,
+                eye,
+                bounds,
+                None,
+                Some(base),
+                None,
+                false,
+                DVec3::X,
+                DVec3::Y,
+            )
+            .is_none());
+    }
+
+    #[test]
     fn tangent_points_are_perpendicular_to_the_radius() {
         let c = Vec3::new(0.0, 0.0, 0.0);
         let p = Vec3::new(10.0, 0.0, 0.0);
@@ -4272,13 +4552,27 @@ mod ext_tests {
             }],
             ..Default::default()
         };
-        let pts = exact_curve_intersections(&c1, &c2).expect("two overlapping circles must intersect");
+        let pts =
+            exact_curve_intersections(&c1, &c2).expect("two overlapping circles must intersect");
         assert_eq!(pts.len(), 2, "two distinct circles crossing at two points");
-        let upper = pts.iter().copied().find(|p| p.y > 0.0).expect("an upper intersection");
-        assert!((upper - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9, "expected exactly (0,4,0), got {upper:?}");
+        let upper = pts
+            .iter()
+            .copied()
+            .find(|p| p.y > 0.0)
+            .expect("an upper intersection");
+        assert!(
+            (upper - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9,
+            "expected exactly (0,4,0), got {upper:?}"
+        );
         for p in &pts {
-            assert!(((*p - DVec3::ZERO).length() - 4.0).abs() < 1e-9, "must be exactly radius 4 from c1's centre, got {p:?}");
-            assert!(((*p - DVec3::new(3.0, 0.0, 0.0)).length() - 5.0).abs() < 1e-9, "must be exactly radius 5 from c2's centre, got {p:?}");
+            assert!(
+                ((*p - DVec3::ZERO).length() - 4.0).abs() < 1e-9,
+                "must be exactly radius 4 from c1's centre, got {p:?}"
+            );
+            assert!(
+                ((*p - DVec3::new(3.0, 0.0, 0.0)).length() - 5.0).abs() < 1e-9,
+                "must be exactly radius 5 from c2's centre, got {p:?}"
+            );
         }
     }
 
@@ -4340,11 +4634,21 @@ mod ext_tests {
     #[test]
     fn exact_curve_intersections_resolves_disjoint_circles() {
         let near = WireModel {
-            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [0.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 1.0 }],
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 1.0,
+            }],
             ..Default::default()
         };
         let far = WireModel {
-            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [100.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 1.0 }],
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [100.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 1.0,
+            }],
             ..Default::default()
         };
         assert!(exact_curve_intersections(&near, &far).unwrap().is_empty());
@@ -4375,7 +4679,9 @@ mod ext_tests {
             }],
             ..Default::default()
         };
-        assert!(exact_curve_intersections(&arc_a, &arc_b).unwrap().is_empty());
+        assert!(exact_curve_intersections(&arc_a, &arc_b)
+            .unwrap()
+            .is_empty());
 
         // Flip A to cover the lower-right quadrant (270..360°) instead: now
         // (0,-4,0) is on both A's and B's own sweep, independently checked
@@ -4391,27 +4697,48 @@ mod ext_tests {
             }],
             ..Default::default()
         };
-        let pts = exact_curve_intersections(&arc_a_lower, &arc_b).expect("both sweeps cover (0,-4,0)");
+        let pts =
+            exact_curve_intersections(&arc_a_lower, &arc_b).expect("both sweeps cover (0,-4,0)");
         assert_eq!(pts.len(), 1);
-        assert!((pts[0] - DVec3::new(0.0, -4.0, 0.0)).length() < 1e-9, "got {:?}", pts[0]);
+        assert!(
+            (pts[0] - DVec3::new(0.0, -4.0, 0.0)).length() < 1e-9,
+            "got {:?}",
+            pts[0]
+        );
     }
 
     fn plain_line(a: [f64; 3], b: [f64; 3]) -> WireModel {
-        WireModel { points: vec![[a[0] as f32, a[1] as f32, a[2] as f32], [b[0] as f32, b[1] as f32, b[2] as f32]], points_low: vec![], ..Default::default() }
+        WireModel {
+            points: vec![
+                [a[0] as f32, a[1] as f32, a[2] as f32],
+                [b[0] as f32, b[1] as f32, b[2] as f32],
+            ],
+            points_low: vec![],
+            ..Default::default()
+        }
     }
 
     #[test]
     fn exact_curve_intersections_handles_a_line_against_a_circle() {
         let line = plain_line([-10.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
         let circle = WireModel {
-            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [0.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 5.0 }],
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [0.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 5.0,
+            }],
             ..Default::default()
         };
-        let pts = exact_curve_intersections(&line, &circle).expect("a diameter line crosses its circle twice");
+        let pts = exact_curve_intersections(&line, &circle)
+            .expect("a diameter line crosses its circle twice");
         assert_eq!(pts.len(), 2);
         let mut xs: Vec<f64> = pts.iter().map(|p| p.x).collect();
         xs.sort_by(f64::total_cmp);
-        assert!((xs[0] - -5.0).abs() < 1e-9 && (xs[1] - 5.0).abs() < 1e-9, "expected x = -5 and +5, got {xs:?}");
+        assert!(
+            (xs[0] - -5.0).abs() < 1e-9 && (xs[1] - 5.0).abs() < 1e-9,
+            "expected x = -5 and +5, got {xs:?}"
+        );
         for p in &pts {
             assert!(p.y.abs() < 1e-9);
         }
@@ -4431,7 +4758,8 @@ mod ext_tests {
             ..Default::default()
         };
         let line = plain_line([0.0, -10.0, 0.0], [0.0, 10.0, 0.0]);
-        let pts = exact_curve_intersections(&arc, &line).expect("the line crosses the arc's own sweep");
+        let pts =
+            exact_curve_intersections(&arc, &line).expect("the line crosses the arc's own sweep");
         assert_eq!(pts.len(), 1);
         assert!((pts[0] - DVec3::new(0.0, 4.0, 0.0)).length() < 1e-9);
     }
@@ -4456,7 +4784,10 @@ mod ext_tests {
         assert_eq!(pts.len(), 2);
         for p in &pts {
             assert!(p.x.abs() < 1e-9);
-            assert!((p.y.abs() - 2.0).abs() < 1e-9, "expected y = +-2, got {p:?}");
+            assert!(
+                (p.y.abs() - 2.0).abs() < 1e-9,
+                "expected y = +-2, got {p:?}"
+            );
         }
     }
 
@@ -4477,15 +4808,24 @@ mod ext_tests {
             ..Default::default()
         };
         let circle = WireModel {
-            tangent_geoms: vec![TangentGeom::PlanarCircle { center: [6.0, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 3.0 }],
+            tangent_geoms: vec![TangentGeom::PlanarCircle {
+                center: [6.0, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 3.0,
+            }],
             ..Default::default()
         };
-        let pts = exact_curve_intersections(&ellipse, &circle).expect("the circle crosses the ellipse");
+        let pts =
+            exact_curve_intersections(&ellipse, &circle).expect("the circle crosses the ellipse");
         assert_eq!(pts.len(), 2);
         let expected_y = (63.0_f64).sqrt() / 4.0;
         for p in &pts {
             assert!((p.x - 3.75).abs() < 1e-6, "expected x=3.75, got {p:?}");
-            assert!((p.y.abs() - expected_y).abs() < 1e-6, "expected y=+-{expected_y}, got {p:?}");
+            assert!(
+                (p.y.abs() - expected_y).abs() < 1e-6,
+                "expected y=+-{expected_y}, got {p:?}"
+            );
         }
     }
 
@@ -4520,15 +4860,21 @@ mod ext_tests {
 
         // normal=+Z: independently computed, param range [100,170]deg holds
         // only the UPPER crossing's own angle (~138.59deg under +Z).
-        let plus = exact_curve_intersections(&ellipse, &make_arc(1.0)).expect("normal=+Z arc crosses the ellipse");
+        let plus = exact_curve_intersections(&ellipse, &make_arc(1.0))
+            .expect("normal=+Z arc crosses the ellipse");
         assert_eq!(plus.len(), 1);
-        assert!(plus[0].y > 0.0, "expected the upper point, got {:?}", plus[0]);
+        assert!(
+            plus[0].y > 0.0,
+            "expected the upper point, got {:?}",
+            plus[0]
+        );
         assert!((plus[0] - DVec3::new(3.75, (63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
 
         // normal=-Z, SAME numeric [100,170]deg range: independently computed
         // to hold only the LOWER crossing's own angle under this flipped
         // convention (~138.59deg under -Z maps to the lower world point).
-        let minus = exact_curve_intersections(&ellipse, &make_arc(-1.0)).expect("normal=-Z arc crosses the ellipse");
+        let minus = exact_curve_intersections(&ellipse, &make_arc(-1.0))
+            .expect("normal=-Z arc crosses the ellipse");
         assert_eq!(minus.len(), 1);
         assert!(minus[0].y < 0.0, "expected the lower point (normal flip must change which physical arc this is), got {:?}", minus[0]);
         assert!((minus[0] - DVec3::new(3.75, -(63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
@@ -4561,7 +4907,8 @@ mod ext_tests {
             }],
             ..Default::default()
         };
-        let pts = exact_curve_intersections(&ellipse, &arc_minus_z).expect("the arc crosses the ellipse");
+        let pts =
+            exact_curve_intersections(&ellipse, &arc_minus_z).expect("the arc crosses the ellipse");
         assert_eq!(pts.len(), 1);
         assert!(pts[0].y < 0.0, "expected the lower point (normal flip must change which physical arc this is), got {:?}", pts[0]);
         assert!((pts[0] - DVec3::new(3.75, -(63.0_f64).sqrt() / 4.0, 0.0)).length() < 1e-6);
@@ -4571,14 +4918,29 @@ mod ext_tests {
         use crate::scene::pick::interaction_index::InteractionIndex;
         use std::sync::Arc;
         let circle = |name: &str, x: f64, radius: f64| {
-            let points = (0..=48).map(|i| {
-                let angle = i as f64 * std::f64::consts::TAU / 48.0 + if x == 0.0 { 0.03 } else { 0.0 };
-                [(x + radius * angle.cos()) as f32, (radius * angle.sin()) as f32, 0.0]
-            }).collect();
+            let points = (0..=48)
+                .map(|i| {
+                    let angle =
+                        i as f64 * std::f64::consts::TAU / 48.0 + if x == 0.0 { 0.03 } else { 0.0 };
+                    [
+                        (x + radius * angle.cos()) as f32,
+                        (radius * angle.sin()) as f32,
+                        0.0,
+                    ]
+                })
+                .collect();
             let mut wire = WireModel::solid(name.to_owned(), points, [1.0; 4], false);
-            wire.aabb = [(x - radius) as f32, -radius as f32, (x + radius) as f32, radius as f32];
+            wire.aabb = [
+                (x - radius) as f32,
+                -radius as f32,
+                (x + radius) as f32,
+                radius as f32,
+            ];
             wire.tangent_geoms = vec![TangentGeom::PlanarCircle {
-                center: [x, 0.0, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius,
+                center: [x, 0.0, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius,
             }];
             wire
         };
@@ -4586,17 +4948,33 @@ mod ext_tests {
         let index = InteractionIndex::build(&wires);
         let candidates = index.query_xy(Arc::clone(&wires), [-0.0001, 3.9999, 0.0001, 4.0001]);
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.segments().unwrap().iter().all(|segment| segment.wire == 1));
+        assert!(candidates
+            .segments()
+            .unwrap()
+            .iter()
+            .all(|segment| segment.wire == 1));
         let point = DVec3::new(0.0, 4.0, 0.0);
         let mut snapper = Snapper::default();
         snapper.snap_enabled = true;
         snapper.enabled = [SnapType::Intersection].into_iter().collect();
-        let result = snapper.snap(
-            point, Point::new(500.0, 500.0), &candidates,
-            Mat4::from_scale(Vec3::splat(100.0)), point,
-            Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 },
-            Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("the true intersection remains available at high zoom");
+        let result = snapper
+            .snap(
+                point,
+                Point::new(500.0, 500.0),
+                &candidates,
+                Mat4::from_scale(Vec3::splat(100.0)),
+                point,
+                Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1000.0,
+                    height: 1000.0,
+                },
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("the true intersection remains available at high zoom");
         assert!((result.world - point).length() < 1e-9);
     }
 
@@ -4606,50 +4984,83 @@ mod ext_tests {
         let a = [origin - 10.0, origin, 0.0];
         let b = [origin + 10.0, origin, 0.0];
         let points = [a, b].map(|point| point.map(|value| value as f32));
-        let low = [a, b].into_iter().zip(points).map(|(point, high)| {
-            std::array::from_fn(|axis| (point[axis] - high[axis] as f64) as f32)
-        }).collect();
+        let low = [a, b]
+            .into_iter()
+            .zip(points)
+            .map(|(point, high)| {
+                std::array::from_fn(|axis| (point[axis] - high[axis] as f64) as f32)
+            })
+            .collect();
         let line = WireModel {
-            points: points.to_vec(), points_low: low,
-            tangent_geoms: vec![TangentGeom::Line { p1: points[0], p2: points[1] }],
+            points: points.to_vec(),
+            points_low: low,
+            tangent_geoms: vec![TangentGeom::Line {
+                p1: points[0],
+                p2: points[1],
+            }],
             ..Default::default()
         };
         let circle = WireModel {
             tangent_geoms: vec![TangentGeom::PlanarCircle {
-                center: [origin, origin, 0.0], axis_x: [1.0, 0.0, 0.0], axis_y: [0.0, 1.0, 0.0], radius: 3.0,
-            }], ..Default::default()
+                center: [origin, origin, 0.0],
+                axis_x: [1.0, 0.0, 0.0],
+                axis_y: [0.0, 1.0, 0.0],
+                radius: 3.0,
+            }],
+            ..Default::default()
         };
         let points = exact_curve_intersections(&line, &circle).unwrap();
         assert_eq!(points.len(), 2);
-        assert!(points.iter().all(|point| (point.x - origin).abs() == 3.0 && point.y == origin));
+        assert!(points
+            .iter()
+            .all(|point| (point.x - origin).abs() == 3.0 && point.y == origin));
     }
 
     #[test]
     fn test_unindexed_snap_endpoint_and_midpoint_accuracy() {
         let mut snapper = Snapper::default();
         snapper.snap_enabled = true;
-        snapper.enabled = [SnapType::Endpoint, SnapType::Midpoint].into_iter().collect();
+        snapper.enabled = [SnapType::Endpoint, SnapType::Midpoint]
+            .into_iter()
+            .collect();
 
         let line = WireModel {
             points: vec![[0.0, 0.0, 0.0], [100.0, 100.0, 0.0]],
             key_vertices: vec![[0.0, 0.0, 0.0], [100.0, 100.0, 0.0]],
             aabb: [0.0, 0.0, 100.0, 100.0],
-            tangent_geoms: vec![TangentGeom::Line { p1: [0.0, 0.0, 0.0], p2: [100.0, 100.0, 0.0] }],
+            tangent_geoms: vec![TangentGeom::Line {
+                p1: [0.0, 0.0, 0.0],
+                p2: [100.0, 100.0, 0.0],
+            }],
             ..Default::default()
         };
         let wires = vec![line];
 
         let view_rot = Mat4::IDENTITY;
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
 
         // Test Endpoint snap near (0, 0) with eye at (0, 0, 500)
         let eye_origin = DVec3::new(0.0, 0.0, 500.0);
         let cursor_world = DVec3::new(0.01, 0.01, 0.0);
         let cursor_screen = world_to_screen(cursor_world, view_rot, eye_origin, bounds);
-        let res = snapper.snap(
-            cursor_world, cursor_screen, wires.as_slice(),
-            view_rot, eye_origin, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("should snap to endpoint");
+        let res = snapper
+            .snap(
+                cursor_world,
+                cursor_screen,
+                wires.as_slice(),
+                view_rot,
+                eye_origin,
+                bounds,
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("should snap to endpoint");
         assert_eq!(res.snap_type, SnapType::Endpoint);
         assert_eq!(res.world, DVec3::new(0.0, 0.0, 0.0));
 
@@ -4657,10 +5068,19 @@ mod ext_tests {
         let eye_mid = DVec3::new(50.0, 50.0, 500.0);
         let cursor_world = DVec3::new(50.01, 50.01, 0.0);
         let cursor_screen = world_to_screen(cursor_world, view_rot, eye_mid, bounds);
-        let res = snapper.snap(
-            cursor_world, cursor_screen, wires.as_slice(),
-            view_rot, eye_mid, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("should snap to midpoint");
+        let res = snapper
+            .snap(
+                cursor_world,
+                cursor_screen,
+                wires.as_slice(),
+                view_rot,
+                eye_mid,
+                bounds,
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("should snap to midpoint");
         assert_eq!(res.snap_type, SnapType::Midpoint);
         assert_eq!(res.world, DVec3::new(50.0, 50.0, 0.0));
     }
@@ -4681,14 +5101,26 @@ mod ext_tests {
 
         let view_rot = Mat4::IDENTITY;
         let eye = DVec3::new(500.0, 500.0, 500.0);
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
 
         // Cursor in far whitespace (5000, 5000)
         let cursor_world = DVec3::new(5000.0, 5000.0, 0.0);
         let cursor_screen = Point::new(500.0, 500.0);
         let res = snapper.snap(
-            cursor_world, cursor_screen, wires.as_slice(),
-            view_rot, eye, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
+            cursor_world,
+            cursor_screen,
+            wires.as_slice(),
+            view_rot,
+            eye,
+            bounds,
+            Vec3::ZERO,
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            None,
         );
         assert!(res.is_none(), "whitespace cursor must return None");
     }
@@ -4715,15 +5147,29 @@ mod ext_tests {
 
         let view_rot = Mat4::IDENTITY;
         let eye = DVec3::new(50.0, 50.0, 500.0);
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
 
         // Cursor near intersection (50, 50)
         let cursor_world = DVec3::new(50.01, 50.01, 0.0);
         let cursor_screen = world_to_screen(cursor_world, view_rot, eye, bounds);
-        let res = snapper.snap(
-            cursor_world, cursor_screen, wires.as_slice(),
-            view_rot, eye, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("should snap to intersection");
+        let res = snapper
+            .snap(
+                cursor_world,
+                cursor_screen,
+                wires.as_slice(),
+                view_rot,
+                eye,
+                bounds,
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("should snap to intersection");
         assert_eq!(res.snap_type, SnapType::Intersection);
         assert!((res.world - DVec3::new(50.0, 50.0, 0.0)).length() < 1e-6);
     }
@@ -4739,27 +5185,50 @@ mod ext_tests {
         for i in 0..25 {
             let angle = (i as f64) * 0.1;
             let p1 = [0.0f32, 0.0, 0.0];
-            let p2 = [(angle.cos() * 50.0) as f32, (angle.sin() * 50.0) as f32, 0.0];
+            let p2 = [
+                (angle.cos() * 50.0) as f32,
+                (angle.sin() * 50.0) as f32,
+                0.0,
+            ];
             let p1_f64 = [0.0f64, 0.0, 0.0];
             let p2_f64 = [angle.cos() * 50.0, angle.sin() * 50.0, 0.0];
             wires.push(WireModel {
                 points: vec![p1, p2],
                 key_vertices: vec![p1_f64, p2_f64],
-                aabb: [p1[0].min(p2[0]), p1[1].min(p2[1]), p1[0].max(p2[0]), p1[1].max(p2[1])],
+                aabb: [
+                    p1[0].min(p2[0]),
+                    p1[1].min(p2[1]),
+                    p1[0].max(p2[0]),
+                    p1[1].max(p2[1]),
+                ],
                 ..Default::default()
             });
         }
 
         let view_rot = Mat4::IDENTITY;
         let eye = DVec3::new(0.0, 0.0, 500.0);
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
 
         let cursor_world = DVec3::new(0.01, 0.01, 0.0);
         let cursor_screen = world_to_screen(cursor_world, view_rot, eye, bounds);
-        let res = snapper.snap(
-            cursor_world, cursor_screen, wires.as_slice(),
-            view_rot, eye, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("should snap to endpoint even with > 16 wires in aperture");
+        let res = snapper
+            .snap(
+                cursor_world,
+                cursor_screen,
+                wires.as_slice(),
+                view_rot,
+                eye,
+                bounds,
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("should snap to endpoint even with > 16 wires in aperture");
         assert_eq!(res.snap_type, SnapType::Endpoint);
         assert_eq!(res.world, DVec3::ZERO);
     }
@@ -4775,7 +5244,12 @@ mod ext_tests {
 
         let view_rot = Mat4::IDENTITY;
         let eye = DVec3::new(0.0, 0.0, 500.0);
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
         let wires: Vec<WireModel> = Vec::new();
 
         // 500 px per world unit: the cursor sits ~160 px from the nearest
@@ -4783,13 +5257,30 @@ mod ext_tests {
         // lock like AutoCAD instead of magnetizing only when near a point.
         let cursor_world = DVec3::new(0.32, 0.47, 500.0);
         let cursor_screen = world_to_screen(cursor_world, view_rot, eye, bounds);
-        let res = s.snap(
-            cursor_world, cursor_screen, &wires,
-            view_rot, eye, bounds, Vec3::ZERO, (Vec3::X, Vec3::Y, Vec3::Z), None,
-        ).expect("grid snap must lock even outside the aperture");
+        let res = s
+            .snap(
+                cursor_world,
+                cursor_screen,
+                &wires,
+                view_rot,
+                eye,
+                bounds,
+                Vec3::ZERO,
+                (Vec3::X, Vec3::Y, Vec3::Z),
+                None,
+            )
+            .expect("grid snap must lock even outside the aperture");
         assert_eq!(res.snap_type, SnapType::Grid);
-        assert!((res.world.x - 0.0).abs() < 1e-9, "x rounds to 0: {:?}", res.world);
-        assert!((res.world.y - 0.5).abs() < 1e-9, "y rounds to 0.5: {:?}", res.world);
+        assert!(
+            (res.world.x - 0.0).abs() < 1e-9,
+            "x rounds to 0: {:?}",
+            res.world
+        );
+        assert!(
+            (res.world.y - 0.5).abs() < 1e-9,
+            "y rounds to 0.5: {:?}",
+            res.world
+        );
     }
 
     #[test]
@@ -4797,8 +5288,14 @@ mod ext_tests {
         let polyline = WireModel {
             key_vertices: vec![[-10.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
             tangent_geoms: vec![
-                TangentGeom::Line { p1: [-10.0, 0.0, 0.0], p2: [0.0, 0.0, 0.0] },
-                TangentGeom::Line { p1: [0.0, 0.0, 0.0], p2: [0.0, 10.0, 0.0] },
+                TangentGeom::Line {
+                    p1: [-10.0, 0.0, 0.0],
+                    p2: [0.0, 0.0, 0.0],
+                },
+                TangentGeom::Line {
+                    p1: [0.0, 0.0, 0.0],
+                    p2: [0.0, 10.0, 0.0],
+                },
             ],
             ..Default::default()
         };
@@ -4813,11 +5310,23 @@ mod ext_tests {
         };
         let pts = exact_curve_intersections(&polyline, &circle)
             .expect("polyline must analytically intersect circle");
-        assert_eq!(pts.len(), 2, "expected intersections at (0,0) and (0,10), got {pts:?}");
+        assert_eq!(
+            pts.len(),
+            2,
+            "expected intersections at (0,0) and (0,10), got {pts:?}"
+        );
         let mut ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
         ys.sort_by(f64::total_cmp);
-        assert!((ys[0] - 0.0).abs() < 1e-9, "expected corner intersection at y=0, got {}", ys[0]);
-        assert!((ys[1] - 10.0).abs() < 1e-9, "expected endpoint intersection at y=10, got {}", ys[1]);
+        assert!(
+            (ys[0] - 0.0).abs() < 1e-9,
+            "expected corner intersection at y=0, got {}",
+            ys[0]
+        );
+        assert!(
+            (ys[1] - 10.0).abs() < 1e-9,
+            "expected endpoint intersection at y=10, got {}",
+            ys[1]
+        );
         for p in &pts {
             assert!(p.x.abs() < 1e-9, "expected x=0, got {}", p.x);
             assert!(p.z.abs() < 1e-9, "expected z=0, got {}", p.z);
@@ -4828,7 +5337,10 @@ mod ext_tests {
     fn exact_curve_intersections_handles_polyline_with_bulge_arc_against_circle() {
         let polyline = WireModel {
             tangent_geoms: vec![
-                TangentGeom::Line { p1: [-10.0, 0.0, 0.0], p2: [0.0, 0.0, 0.0] },
+                TangentGeom::Line {
+                    p1: [-10.0, 0.0, 0.0],
+                    p2: [0.0, 0.0, 0.0],
+                },
                 TangentGeom::Arc {
                     center: [0.0, 4.0, 0.0],
                     axis_x: [1.0, 0.0, 0.0],
@@ -4852,8 +5364,13 @@ mod ext_tests {
         let pts = exact_curve_intersections(&polyline, &circle)
             .expect("polyline with arc must intersect circle");
         assert!(!pts.is_empty());
-        let line_pt = pts.iter().find(|p| (p.x - -5.0).abs() < 1e-9 && p.y.abs() < 1e-9);
-        assert!(line_pt.is_some(), "expected line crossing at (-5, 0, 0), got {pts:?}");
+        let line_pt = pts
+            .iter()
+            .find(|p| (p.x - -5.0).abs() < 1e-9 && p.y.abs() < 1e-9);
+        assert!(
+            line_pt.is_some(),
+            "expected line crossing at (-5, 0, 0), got {pts:?}"
+        );
     }
 
     fn xy_circle(cx: f64, cy: f64, radius: f64) -> WireModel {
@@ -4897,9 +5414,19 @@ mod ext_tests {
         let mut pts = exact_curve_intersections(&mark, &xy_circle(0.0, 0.0, 5.0))
             .expect("the extension lines cross the circle");
         pts.sort_by(|a, b| a.x.total_cmp(&b.x));
-        assert_eq!(pts.len(), 2, "only the two extension lines reach r=5: {pts:?}");
-        assert!((pts[0] - DVec3::new(0.0, 5.0, 0.0)).length() < 1e-9, "{pts:?}");
-        assert!((pts[1] - DVec3::new(5.0, 0.0, 0.0)).length() < 1e-9, "{pts:?}");
+        assert_eq!(
+            pts.len(),
+            2,
+            "only the two extension lines reach r=5: {pts:?}"
+        );
+        assert!(
+            (pts[0] - DVec3::new(0.0, 5.0, 0.0)).length() < 1e-9,
+            "{pts:?}"
+        );
+        assert!(
+            (pts[1] - DVec3::new(5.0, 0.0, 0.0)).length() < 1e-9,
+            "{pts:?}"
+        );
     }
 
     /// A block entry (`cache/block_cache.rs`) appends each entity's
@@ -4928,8 +5455,14 @@ mod ext_tests {
             .expect("the first line crosses the circle");
         pts.sort_by(|a, b| a.x.total_cmp(&b.x));
         assert_eq!(pts.len(), 2, "the seam a1->b0 is not a segment: {pts:?}");
-        assert!((pts[0] - DVec3::new(-5.0, 0.0, 0.0)).length() < 1e-9, "{pts:?}");
-        assert!((pts[1] - DVec3::new(5.0, 0.0, 0.0)).length() < 1e-9, "{pts:?}");
+        assert!(
+            (pts[0] - DVec3::new(-5.0, 0.0, 0.0)).length() < 1e-9,
+            "{pts:?}"
+        );
+        assert!(
+            (pts[1] - DVec3::new(5.0, 0.0, 0.0)).length() < 1e-9,
+            "{pts:?}"
+        );
     }
 
     /// The closing segment of a closed polyline runs from the last vertex
@@ -4955,7 +5488,10 @@ mod ext_tests {
             .expect("the circle crosses the closing edge");
         assert_eq!(pts.len(), 2, "{pts:?}");
         for p in &pts {
-            assert!((p.x - ox).abs() < 1e-9, "closing edge fell back to f32 endpoints: {p:?}");
+            assert!(
+                (p.x - ox).abs() < 1e-9,
+                "closing edge fell back to f32 endpoints: {p:?}"
+            );
         }
     }
 
@@ -4972,11 +5508,17 @@ mod ext_tests {
         };
         let mut cursor = 0usize;
         for (i, geom) in wire.tangent_geoms.iter().enumerate() {
-            let TangentGeom::Line { p1, p2 } = geom else { unreachable!() };
+            let TangentGeom::Line { p1, p2 } = geom else {
+                unreachable!()
+            };
             let (a, b) = tangent_line_endpoints(&wire, *p1, *p2, &mut cursor);
             assert_eq!(a, DVec3::from_array(verts[i]));
             assert_eq!(b, DVec3::from_array(verts[i + 1]));
-            assert_eq!(cursor, i + 1, "cursor must land on the segment's end vertex");
+            assert_eq!(
+                cursor,
+                i + 1,
+                "cursor must land on the segment's end vertex"
+            );
         }
     }
 
@@ -5076,7 +5618,12 @@ mod ext_tests {
         let wires = vec![ellipse_arc];
 
         let view_rot = Mat4::from_scale(Vec3::new(0.005, 0.005, 1.0));
-        let bounds = Rectangle { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+        };
         let eye = DVec3::ZERO;
 
         // 1. Cursor hovering directly over the drawn arc near apex (0, 50, 0)
@@ -5093,7 +5640,10 @@ mod ext_tests {
             (Vec3::X, Vec3::Y, Vec3::Z),
             None,
         );
-        assert!(res_arc.is_some(), "cursor near valid ellipse arc must snap to tangent");
+        assert!(
+            res_arc.is_some(),
+            "cursor near valid ellipse arc must snap to tangent"
+        );
         let snap = res_arc.unwrap();
         assert_eq!(snap.snap_type, SnapType::Tangent);
         assert!((snap.world.y - 50.0).abs() < 1.0);
@@ -5112,6 +5662,76 @@ mod ext_tests {
             (Vec3::X, Vec3::Y, Vec3::Z),
             None,
         );
-        assert!(res_break.is_none(), "cursor over ellipse arc break must NOT snap to tangent");
+        assert!(
+            res_break.is_none(),
+            "cursor over ellipse arc break must NOT snap to tangent"
+        );
+    }
+
+    #[test]
+    fn test_parse_snap_override() {
+        use super::{parse_snap_override, SnapOverrideKind, SnapType};
+
+        // 3-letter prefixes
+        assert_eq!(parse_snap_override("end"), Some(SnapOverrideKind::Mode(SnapType::Endpoint)));
+        assert_eq!(parse_snap_override("mid"), Some(SnapOverrideKind::Mode(SnapType::Midpoint)));
+        assert_eq!(parse_snap_override("cen"), Some(SnapOverrideKind::Mode(SnapType::Center)));
+        assert_eq!(parse_snap_override("nod"), Some(SnapOverrideKind::Mode(SnapType::Node)));
+        assert_eq!(parse_snap_override("qua"), Some(SnapOverrideKind::Mode(SnapType::Quadrant)));
+        assert_eq!(parse_snap_override("int"), Some(SnapOverrideKind::Mode(SnapType::Intersection)));
+        assert_eq!(parse_snap_override("ext"), Some(SnapOverrideKind::Mode(SnapType::Extension)));
+        assert_eq!(parse_snap_override("ins"), Some(SnapOverrideKind::Mode(SnapType::Insertion)));
+        assert_eq!(parse_snap_override("per"), Some(SnapOverrideKind::Mode(SnapType::Perpendicular)));
+        assert_eq!(parse_snap_override("tan"), Some(SnapOverrideKind::Mode(SnapType::Tangent)));
+        assert_eq!(parse_snap_override("nea"), Some(SnapOverrideKind::Mode(SnapType::Nearest)));
+        assert_eq!(parse_snap_override("app"), Some(SnapOverrideKind::Mode(SnapType::ApparentIntersection)));
+        assert_eq!(parse_snap_override("par"), Some(SnapOverrideKind::Mode(SnapType::Parallel)));
+        assert_eq!(parse_snap_override("non"), Some(SnapOverrideKind::None));
+        assert_eq!(parse_snap_override("geo"), Some(SnapOverrideKind::Mode(SnapType::GeometricCenter)));
+        assert_eq!(parse_snap_override("gce"), Some(SnapOverrideKind::Mode(SnapType::GeometricCenter)));
+
+        // Case insensitivity & leading underscores
+        assert_eq!(parse_snap_override("_MID"), Some(SnapOverrideKind::Mode(SnapType::Midpoint)));
+        assert_eq!(parse_snap_override("_Endpoint"), Some(SnapOverrideKind::Mode(SnapType::Endpoint)));
+        assert_eq!(parse_snap_override("  _NON  "), Some(SnapOverrideKind::None));
+        assert_eq!(parse_snap_override("CEN"), Some(SnapOverrideKind::Mode(SnapType::Center)));
+
+        // Full names and aliases
+        assert_eq!(parse_snap_override("endpoint"), Some(SnapOverrideKind::Mode(SnapType::Endpoint)));
+        assert_eq!(parse_snap_override("midpoint"), Some(SnapOverrideKind::Mode(SnapType::Midpoint)));
+        assert_eq!(parse_snap_override("center"), Some(SnapOverrideKind::Mode(SnapType::Center)));
+        assert_eq!(parse_snap_override("centre"), Some(SnapOverrideKind::Mode(SnapType::Center)));
+        assert_eq!(parse_snap_override("quadrant"), Some(SnapOverrideKind::Mode(SnapType::Quadrant)));
+        assert_eq!(parse_snap_override("intersection"), Some(SnapOverrideKind::Mode(SnapType::Intersection)));
+        assert_eq!(parse_snap_override("perpendicular"), Some(SnapOverrideKind::Mode(SnapType::Perpendicular)));
+        assert_eq!(parse_snap_override("tangent"), Some(SnapOverrideKind::Mode(SnapType::Tangent)));
+        assert_eq!(parse_snap_override("nearest"), Some(SnapOverrideKind::Mode(SnapType::Nearest)));
+        assert_eq!(parse_snap_override("apparent"), Some(SnapOverrideKind::Mode(SnapType::ApparentIntersection)));
+        assert_eq!(parse_snap_override("apparentintersection"), Some(SnapOverrideKind::Mode(SnapType::ApparentIntersection)));
+        assert_eq!(parse_snap_override("appint"), Some(SnapOverrideKind::Mode(SnapType::ApparentIntersection)));
+        assert_eq!(parse_snap_override("parallel"), Some(SnapOverrideKind::Mode(SnapType::Parallel)));
+        assert_eq!(parse_snap_override("insert"), Some(SnapOverrideKind::Mode(SnapType::Insertion)));
+        assert_eq!(parse_snap_override("insertion"), Some(SnapOverrideKind::Mode(SnapType::Insertion)));
+        assert_eq!(parse_snap_override("none"), Some(SnapOverrideKind::None));
+        assert_eq!(parse_snap_override("gcen"), Some(SnapOverrideKind::Mode(SnapType::GeometricCenter)));
+        assert_eq!(parse_snap_override("geometriccenter"), Some(SnapOverrideKind::Mode(SnapType::GeometricCenter)));
+        assert_eq!(parse_snap_override("geocenter"), Some(SnapOverrideKind::Mode(SnapType::GeometricCenter)));
+
+        // Rejection of strings shorter than 3 chars
+        assert_eq!(parse_snap_override("en"), None);
+        assert_eq!(parse_snap_override("mi"), None);
+        assert_eq!(parse_snap_override("ce"), None);
+        assert_eq!(parse_snap_override("p"), None);
+        assert_eq!(parse_snap_override("no"), None);
+        assert_eq!(parse_snap_override("_m"), None);
+        assert_eq!(parse_snap_override(""), None);
+
+        // Non-matching tokens
+        assert_eq!(parse_snap_override("line"), None);
+        assert_eq!(parse_snap_override("circle"), None);
+        assert_eq!(parse_snap_override("10,20"), None);
+        assert_eq!(parse_snap_override("@5<45"), None);
+        assert_eq!(parse_snap_override("undo"), None);
+        assert_eq!(parse_snap_override("close"), None);
     }
 }

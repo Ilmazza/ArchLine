@@ -4,8 +4,8 @@
 use serde_json::{json, Map, Value};
 
 pub const TARGET_VERSIONS: &[&str] = &[
-    "R14", "2000", "2004", "2007", "2010", "2013", "2018",
-    "AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032",
+    "R14", "2000", "2004", "2007", "2010", "2013", "2018", "AC1014", "AC1015", "AC1018", "AC1021",
+    "AC1024", "AC1027", "AC1032",
 ];
 
 pub const ENVELOPE_KEYS: &[&str] = &[
@@ -72,11 +72,21 @@ pub struct OpDef {
 }
 
 const fn req(name: &'static str, ty: Ty, doc: &'static str) -> Param {
-    Param { name, ty, required: true, doc }
+    Param {
+        name,
+        ty,
+        required: true,
+        doc,
+    }
 }
 
 const fn opt(name: &'static str, ty: Ty, doc: &'static str) -> Param {
-    Param { name, ty, required: false, doc }
+    Param {
+        name,
+        ty,
+        required: false,
+        doc,
+    }
 }
 
 // ============================================================================
@@ -87,9 +97,11 @@ pub static NEW: OpDef = OpDef {
     name: "new",
     doc: "Start an empty document, optionally seeded from a DWG/DXF/DWT template.",
     batchable: true,
-    params: &[
-        opt("template", Ty::Str, "Optional template drawing path whose styles and tables survive."),
-    ],
+    params: &[opt(
+        "template",
+        Ty::Str,
+        "Optional template drawing path whose styles and tables survive.",
+    )],
     rules: &[],
     example: r#"{"op":"new"}"#,
 };
@@ -98,9 +110,7 @@ pub static OPEN: OpDef = OpDef {
     name: "open",
     doc: "Open an existing drawing file (DWG or DXF).",
     batchable: true,
-    params: &[
-        req("path", Ty::Str, "Absolute path to the drawing file."),
-    ],
+    params: &[req("path", Ty::Str, "Absolute path to the drawing file.")],
     rules: &[],
     example: r#"{"op":"open","path":"drawing.dxf"}"#,
 };
@@ -109,9 +119,11 @@ pub static ACTIVATE: OpDef = OpDef {
     name: "activate",
     doc: "Switch the active drawing tab to another open document.",
     batchable: true,
-    params: &[
-        req("document_id", Ty::Int, "Target document ID to activate."),
-    ],
+    params: &[req(
+        "document_id",
+        Ty::Int,
+        "Target document ID to activate.",
+    )],
     rules: &[],
     example: r#"{"op":"activate","document_id":1}"#,
 };
@@ -120,20 +132,21 @@ pub static SWITCH_DOCUMENT: OpDef = OpDef {
     name: "switch_document",
     doc: "Alias for activate. Switch the active drawing tab to another open document.",
     batchable: true,
-    params: &[
-        req("document_id", Ty::Int, "Target document ID to activate."),
-    ],
+    params: &[req(
+        "document_id",
+        Ty::Int,
+        "Target document ID to activate.",
+    )],
     rules: &[],
     example: r#"{"op":"switch_document","document_id":1}"#,
 };
 
 pub static RUN: OpDef = OpDef {
     name: "run",
-    doc: "Execute a command string with prompt answers separated by spaces (e.g. 'LINE 0,0 10,10').",
+    doc:
+        "Execute a command string with prompt answers separated by spaces (e.g. 'LINE 0,0 10,10').",
     batchable: true,
-    params: &[
-        req("cmd", Ty::Str, "Command name and arguments."),
-    ],
+    params: &[req("cmd", Ty::Str, "Command name and arguments.")],
     rules: &[],
     example: r#"{"op":"run","cmd":"LINE 0,0 10,10"}"#,
 };
@@ -142,9 +155,7 @@ pub static START: OpDef = OpDef {
     name: "start",
     doc: "Start an interactive command waiting for subsequent 'input' steps.",
     batchable: true,
-    params: &[
-        req("cmd", Ty::Str, "Command name to start."),
-    ],
+    params: &[req("cmd", Ty::Str, "Command name to start.")],
     rules: &[],
     example: r#"{"op":"start","cmd":"LINE"}"#,
 };
@@ -154,17 +165,53 @@ pub static INPUT: OpDef = OpDef {
     doc: "Feed the next step input to an active command.",
     batchable: true,
     params: &[
-        req("kind", Ty::Enum(&["text", "token", "point", "entity", "structure", "selection", "enter"]), "Input kind."),
+        req(
+            "kind",
+            Ty::Enum(&[
+                "text",
+                "token",
+                "point",
+                "entity",
+                "structure",
+                "selection",
+                "enter",
+            ]),
+            "Input kind.",
+        ),
         opt("text", Ty::Str, "Free text or token option."),
         opt("point", Ty::Point, "Point coordinates."),
-        opt("space", Ty::Enum(&["wcs", "ucs", "relative"]), "Coordinate space for point (defaults to wcs)."),
-        opt("handle", Ty::Handle, "Target entity handle for entity/structure pick."),
+        opt(
+            "space",
+            Ty::Enum(&["wcs", "ucs", "relative"]),
+            "Coordinate space for point (defaults to wcs).",
+        ),
+        opt(
+            "handle",
+            Ty::Handle,
+            "Target entity handle for entity/structure pick.",
+        ),
     ],
     rules: &[
-        Rule::RequiredWhen { key: "kind", equals: "token", then: &["text"] },
-        Rule::RequiredWhen { key: "kind", equals: "point", then: &["point"] },
-        Rule::RequiredWhen { key: "kind", equals: "entity", then: &["handle", "point"] },
-        Rule::RequiredWhen { key: "kind", equals: "structure", then: &["handle", "point"] },
+        Rule::RequiredWhen {
+            key: "kind",
+            equals: "token",
+            then: &["text"],
+        },
+        Rule::RequiredWhen {
+            key: "kind",
+            equals: "point",
+            then: &["point"],
+        },
+        Rule::RequiredWhen {
+            key: "kind",
+            equals: "entity",
+            then: &["handle", "point"],
+        },
+        Rule::RequiredWhen {
+            key: "kind",
+            equals: "structure",
+            then: &["handle", "point"],
+        },
     ],
     example: r#"{"op":"input","kind":"point","point":[10,20]}"#,
 };
@@ -204,6 +251,8 @@ pub static SELECT: OpDef = OpDef {
         opt("handles", Ty::Handles, "Explicit entity handles to select."),
         opt("type", Ty::Str, "Entity type filter."),
         opt("layer", Ty::Str, "Layer name filter."),
+        opt("window", Ty::Raw(r#"{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4}"#), "World XY box [x1, y1, x2, y2]: selects what lies inside it, as a viewport window does."),
+        opt("crossing", Ty::Bool, "With window: also select what the box crosses."),
         opt("clear", Ty::Bool, "Clear existing selection before applying."),
         opt("where", Ty::ArrayOf(&Ty::Raw(r#"{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string"},"value":{}},"required":["path"]}"#)), "Property filter predicates."),
     ],
@@ -217,10 +266,39 @@ pub static PROPERTY: OpDef = OpDef {
     batchable: true,
     params: &[
         req("field", Ty::Str, "Property field name."),
-        req("value", Ty::Raw(r#"{"description":"New property value"}"#), "New value for the field."),
+        req(
+            "value",
+            Ty::Raw(r#"{"description":"New property value"}"#),
+            "New value for the field.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"property","field":"color","value":1}"#,
+};
+
+pub static GRIP_DRAG: OpDef = OpDef {
+    name: "grip_drag",
+    doc: "Drag one grip of an entity to a world point the way a grip pick-and-place in the viewport does. Read grips for the ids; object snaps, ortho and polar are off for the move.",
+    batchable: true,
+    params: &[
+        req("handle", Ty::Handle, "Entity whose grip moves."),
+        req("grip_id", Ty::Int, "Grip id from the grips read."),
+        req("point", Ty::Point, "World point [x, y, z] the grip moves to."),
+    ],
+    rules: &[],
+    example: r#"{"op":"grip_drag","handle":"2A","grip_id":0,"point":[10,0,0]}"#,
+};
+
+pub static CLICK: OpDef = OpDef {
+    name: "click",
+    doc: "Left-click the viewport where a world point shows, as the mouse would. modifiers holds ctrl and/or shift (e.g. Ctrl+click picks the solid of a composite under the cursor).",
+    batchable: true,
+    params: &[
+        req("point", Ty::Point, "World point [x, y, z] to click on."),
+        opt("modifiers", Ty::Str, "Keys held during the click: \"ctrl\", \"shift\" or \"ctrl+shift\"."),
+    ],
+    rules: &[],
+    example: r#"{"op":"click","point":[10,0,0],"modifiers":"ctrl"}"#,
 };
 
 pub static SET_PROPERTIES: OpDef = OpDef {
@@ -230,7 +308,13 @@ pub static SET_PROPERTIES: OpDef = OpDef {
     params: &[
         req("collection", Ty::Str, "Record collection name."),
         opt("handle", Ty::Handle, "Target record handle if applicable."),
-        req("updates", Ty::ArrayOf(&Ty::Raw(r#"{"type":"object","properties":{"path":{"type":"string"},"value":{},"expected":{}},"required":["path","value"]}"#)), "List of pointer replacements."),
+        req(
+            "updates",
+            Ty::ArrayOf(&Ty::Raw(
+                r#"{"type":"object","properties":{"path":{"type":"string"},"value":{},"expected":{}},"required":["path","value"]}"#,
+            )),
+            "List of pointer replacements.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"set_properties","collection":"entities","handle":"2A","updates":[{"path":"/common/layer","value":"Walls"}]}"#,
@@ -240,9 +324,11 @@ pub static ACTION: OpDef = OpDef {
     name: "action",
     doc: "Trigger a named GUI action or dialog command.",
     batchable: true,
-    params: &[
-        req("name", Ty::ActionName, "Name of the UI action to execute."),
-    ],
+    params: &[req(
+        "name",
+        Ty::ActionName,
+        "Name of the UI action to execute.",
+    )],
     rules: &[],
     example: r#"{"op":"action","name":"zoom_extents"}"#,
 };
@@ -274,8 +360,16 @@ pub static WBLOCK: OpDef = OpDef {
         req("path", Ty::Str, "Target drawing path for export."),
         opt("handles", Ty::Handles, "Entity handles to export."),
         opt("block", Ty::Str, "Block name to export."),
-        opt("template", Ty::Str, "Base template file to carry styles and tables."),
-        opt("normalize", Ty::Bool, "Translate exported entities to origin [0,0,0]."),
+        opt(
+            "template",
+            Ty::Str,
+            "Base template file to carry styles and tables.",
+        ),
+        opt(
+            "normalize",
+            Ty::Bool,
+            "Translate exported entities to origin [0,0,0].",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"wblock","path":"part.dwg","handles":["2A"]}"#,
@@ -313,9 +407,13 @@ pub static ENTITIES_CREATE: OpDef = OpDef {
     name: "entities_create",
     doc: "Create new CAD entities from typed definitions.",
     batchable: true,
-    params: &[
-        req("entities", Ty::ArrayOf(&Ty::Raw(r#"{"type":"object","properties":{"type":{"type":"string"}},"required":["type"]}"#)), "List of entity definitions to create."),
-    ],
+    params: &[req(
+        "entities",
+        Ty::ArrayOf(&Ty::Raw(
+            r#"{"type":"object","properties":{"type":{"type":"string"}},"required":["type"]}"#,
+        )),
+        "List of entity definitions to create.",
+    )],
     rules: &[],
     example: r#"{"op":"entities_create","entities":[{"type":"Line","start":[0,0],"end":[10,10]}]}"#,
 };
@@ -324,9 +422,11 @@ pub static ENTITIES_DELETE: OpDef = OpDef {
     name: "entities_delete",
     doc: "Delete entities by their handles.",
     batchable: true,
-    params: &[
-        req("handles", Ty::Handles, "Handles of entities to delete."),
-    ],
+    params: &[req(
+        "handles",
+        Ty::Handles,
+        "Handles of entities to delete.",
+    )],
     rules: &[],
     example: r#"{"op":"entities_delete","handles":["2A"]}"#,
 };
@@ -337,21 +437,49 @@ pub static ENTITIES_TRANSFORM: OpDef = OpDef {
     batchable: true,
     params: &[
         req("handles", Ty::Handles, "Entities to transform."),
-        opt("action", Ty::EnumCi(&["move", "copy", "rotate", "scale", "mirror", "array"]), "Transform action (defaults to move)."),
-        opt("vector", Ty::Point, "move/copy: displacement [dx, dy] or [dx, dy, dz]."),
+        opt(
+            "action",
+            Ty::EnumCi(&["move", "copy", "rotate", "scale", "mirror", "array"]),
+            "Transform action (defaults to move).",
+        ),
+        opt(
+            "vector",
+            Ty::Point,
+            "move/copy: displacement [dx, dy] or [dx, dy, dz].",
+        ),
         opt("center", Ty::Point, "rotate/scale: base point."),
         opt("angle_deg", Ty::Num, "rotate: angle in degrees CCW."),
         opt("factor", Ty::Num, "scale: non-zero scale factor."),
-        opt("axis", Ty::ArrayOf(&Ty::Point), "mirror: axis as two points [[x1, y1], [x2, y2]]."),
-        opt("copy", Ty::Bool, "mirror/copy: keep originals and return new copies."),
+        opt(
+            "axis",
+            Ty::ArrayOf(&Ty::Point),
+            "mirror: axis as two points [[x1, y1], [x2, y2]].",
+        ),
+        opt(
+            "copy",
+            Ty::Bool,
+            "mirror/copy: keep originals and return new copies.",
+        ),
         opt("rows", Ty::Int, "array: row count (1..100, defaults to 1)."),
-        opt("columns", Ty::Int, "array: column count (1..100, defaults to 1)."),
+        opt(
+            "columns",
+            Ty::Int,
+            "array: column count (1..100, defaults to 1).",
+        ),
         opt("row_spacing", Ty::Num, "array: row spacing."),
         opt("column_spacing", Ty::Num, "array: column spacing."),
     ],
     rules: &[
-        Rule::RequiredWhen { key: "action", equals: "scale", then: &["factor"] },
-        Rule::RequiredWhen { key: "action", equals: "mirror", then: &["axis"] },
+        Rule::RequiredWhen {
+            key: "action",
+            equals: "scale",
+            then: &["factor"],
+        },
+        Rule::RequiredWhen {
+            key: "action",
+            equals: "mirror",
+            then: &["axis"],
+        },
     ],
     example: r#"{"op":"entities_transform","handles":["2A"],"action":"move","vector":[10,0]}"#,
 };
@@ -389,8 +517,16 @@ pub static BLOCK_DEFINE: OpDef = OpDef {
         req("name", Ty::Str, "Block name."),
         req("handles", Ty::Handles, "Entities that form the block."),
         req("base", Ty::Point, "Block origin point."),
-        opt("insert_at", Ty::Point, "Placement coordinates for the replacement Insert reference (defaults to base)."),
-        opt("replace", Ty::Bool, "Overwrite an existing block definition of the same name."),
+        opt(
+            "insert_at",
+            Ty::Point,
+            "Placement coordinates for the replacement Insert reference (defaults to base).",
+        ),
+        opt(
+            "replace",
+            Ty::Bool,
+            "Overwrite an existing block definition of the same name.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"block_define","name":"DOOR_90","handles":["2A","2B"],"base":[0,0]}"#,
@@ -398,13 +534,18 @@ pub static BLOCK_DEFINE: OpDef = OpDef {
 
 pub static BLOCK_DELETE: OpDef = OpDef {
     name: "block_delete",
-    doc: "Delete a block definition and all its child entities and inserts.",
+    doc: "Delete a block definition and all its child entities. A referenced block is refused; force erases the referencing inserts.",
     batchable: true,
     params: &[
         req("name", Ty::Str, "Block name to delete."),
+        opt(
+            "force",
+            Ty::Bool,
+            "Erase the referencing inserts instead of refusing a referenced block. Result reports how many references were overridden.",
+        ),
     ],
     rules: &[],
-    example: r#"{"op":"block_delete","name":"DOOR"}"#,
+    example: r#"{"op":"block_delete","name":"DOOR","force":true}"#,
 };
 
 pub static XDATA_SET: OpDef = OpDef {
@@ -414,7 +555,13 @@ pub static XDATA_SET: OpDef = OpDef {
     params: &[
         req("app", Ty::Str, "Application name."),
         req("handles", Ty::Handles, "Target entity handles."),
-        opt("data", Ty::ArrayOf(&Ty::Raw(r#"{"type":"object","properties":{"code":{"type":"integer"},"value":{}},"required":["code","value"]}"#)), "Typed XData entries [{code, value}]. Empty list removes app record."),
+        opt(
+            "data",
+            Ty::ArrayOf(&Ty::Raw(
+                r#"{"type":"object","properties":{"code":{"type":"integer"},"value":{}},"required":["code","value"]}"#,
+            )),
+            "Typed XData entries [{code, value}]. Empty list removes app record.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"xdata_set","app":"APP","handles":["2A"],"data":[{"code":1000,"value":"tag"}]}"#,
@@ -426,7 +573,11 @@ pub static VIEW_FOCUS: OpDef = OpDef {
     batchable: true,
     params: &[
         req("handles", Ty::Handles, "Entities to focus on."),
-        opt("highlight", Ty::Bool, "Also select the entities (defaults to true)."),
+        opt(
+            "highlight",
+            Ty::Bool,
+            "Also select the entities (defaults to true).",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"view_focus","handles":["2A"]}"#,
@@ -437,9 +588,21 @@ pub static ENTITIES_COPY_TO: OpDef = OpDef {
     doc: "Copy entities from the current document into another open document.",
     batchable: true,
     params: &[
-        req("handles", Ty::Handles, "Entities in the current active document to copy."),
-        opt("target_document_id", Ty::Int, "Target document ID to receive the copied entities."),
-        opt("document_id", Ty::Int, "Deprecated alias for target_document_id."),
+        req(
+            "handles",
+            Ty::Handles,
+            "Entities in the current active document to copy.",
+        ),
+        opt(
+            "target_document_id",
+            Ty::Int,
+            "Target document ID to receive the copied entities.",
+        ),
+        opt(
+            "document_id",
+            Ty::Int,
+            "Deprecated alias for target_document_id.",
+        ),
     ],
     rules: &[Rule::AnyOf(&["target_document_id", "document_id"])],
     example: r#"{"op":"entities_copy_to","handles":["2A"],"target_document_id":2}"#,
@@ -475,7 +638,11 @@ pub static SELECTION_SET_LOAD: OpDef = OpDef {
     batchable: true,
     params: &[
         req("name", Ty::Str, "Selection set name."),
-        opt("select", Ty::Bool, "Also select the recalled entities in the viewport (defaults to true)."),
+        opt(
+            "select",
+            Ty::Bool,
+            "Also select the recalled entities in the viewport (defaults to true).",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"selection_set_load","name":"Sel1"}"#,
@@ -486,11 +653,23 @@ pub static USER_SELECT: OpDef = OpDef {
     doc: "Prompt the user at the desktop screen to interactively pick entities.",
     batchable: true,
     params: &[
-        opt("prompt", Ty::Str, "Prompt text pinned on screen while user picks."),
-        opt("detail", Ty::EnumCi(&["summary", "geometry", "full"]), "Returned entity detail level (defaults to full)."),
+        opt(
+            "prompt",
+            Ty::Str,
+            "Prompt text pinned on screen while user picks.",
+        ),
+        opt(
+            "detail",
+            Ty::EnumCi(&["summary", "geometry", "full"]),
+            "Returned entity detail level (defaults to full).",
+        ),
         opt("type", Ty::Str, "Entity type filter."),
         opt("layer", Ty::Str, "Layer filter."),
-        opt("clear", Ty::Bool, "Clear current selection before pick begins (defaults to true)."),
+        opt(
+            "clear",
+            Ty::Bool,
+            "Clear current selection before pick begins (defaults to true).",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"user_select","prompt":"Pick entities"}"#,
@@ -500,9 +679,11 @@ pub static GETPOINT: OpDef = OpDef {
     name: "getpoint",
     doc: "Prompt the user at the desktop screen to click one point in the viewport.",
     batchable: true,
-    params: &[
-        opt("prompt", Ty::Str, "Prompt text displayed while waiting for click."),
-    ],
+    params: &[opt(
+        "prompt",
+        Ty::Str,
+        "Prompt text displayed while waiting for click.",
+    )],
     rules: &[],
     example: r#"{"op":"getpoint","prompt":"Click start point"}"#,
 };
@@ -511,9 +692,11 @@ pub static CLOSE: OpDef = OpDef {
     name: "close",
     doc: "Close the active drawing document.",
     batchable: true,
-    params: &[
-        opt("discard", Ty::Bool, "Erase unsaved changes instead of refusing a dirty document."),
-    ],
+    params: &[opt(
+        "discard",
+        Ty::Bool,
+        "Erase unsaved changes instead of refusing a dirty document.",
+    )],
     rules: &[],
     example: r#"{"op":"close"}"#,
 };
@@ -523,8 +706,16 @@ pub static SYSVAR: OpDef = OpDef {
     doc: "Read or write CAD system variables (ltscale, pdmode, pdsize, clayer, etc.).",
     batchable: true,
     params: &[
-        opt("get", Ty::ArrayOf(&Ty::Str), "List of variable names to read."),
-        opt("set", Ty::Raw(r#"{"type":"object","description":"Variable name=value pairs to set"}"#), "Key-value map of variables to set in one undo transaction."),
+        opt(
+            "get",
+            Ty::ArrayOf(&Ty::Str),
+            "List of variable names to read.",
+        ),
+        opt(
+            "set",
+            Ty::Raw(r#"{"type":"object","description":"Variable name=value pairs to set"}"#),
+            "Key-value map of variables to set in one undo transaction.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"sysvar","get":["LTSCALE"]}"#,
@@ -534,9 +725,7 @@ pub static LAYOUT_CREATE: OpDef = OpDef {
     name: "layout_create",
     doc: "Create a new paper-space layout tab.",
     batchable: true,
-    params: &[
-        req("name", Ty::Str, "Layout tab name."),
-    ],
+    params: &[req("name", Ty::Str, "Layout tab name.")],
     rules: &[],
     example: r#"{"op":"layout_create","name":"Sheet1"}"#,
 };
@@ -548,17 +737,37 @@ pub static PAGE_SETUP_SET: OpDef = OpDef {
     params: &[
         req("layout", Ty::Str, "Target layout name."),
         opt("paper", Ty::Str, "Paper size name."),
-        opt("orientation", Ty::EnumCi(&["Portrait", "Landscape"]), "Paper orientation."),
+        opt(
+            "orientation",
+            Ty::EnumCi(&["Portrait", "Landscape"]),
+            "Paper orientation.",
+        ),
         opt("fit", Ty::Bool, "Fit to paper (defaults to true)."),
         opt("scale", Ty::Str, "Paper-to-drawing scale ratio."),
-        opt("center", Ty::Bool, "Center drawing on sheet (defaults to true)."),
+        opt(
+            "center",
+            Ty::Bool,
+            "Center drawing on sheet (defaults to true).",
+        ),
         opt("offset_x", Ty::Num, "X offset in mm."),
         opt("offset_y", Ty::Num, "Y offset in mm."),
         opt("plot_style", Ty::Str, "CTB file path or named style."),
-        opt("area", Ty::EnumCi(&["extents", "display", "limits", "layout", "window"]), "Plot area."),
-        opt("window", Ty::Window, "World [x0, y0, x1, y1] rectangle; required when area=window."),
+        opt(
+            "area",
+            Ty::EnumCi(&["extents", "display", "limits", "layout", "window"]),
+            "Plot area.",
+        ),
+        opt(
+            "window",
+            Ty::Window,
+            "World [x0, y0, x1, y1] rectangle; required when area=window.",
+        ),
     ],
-    rules: &[Rule::RequiredWhen { key: "area", equals: "window", then: &["window"] }],
+    rules: &[Rule::RequiredWhen {
+        key: "area",
+        equals: "window",
+        then: &["window"],
+    }],
     example: r#"{"op":"page_setup_set","layout":"Sheet1","paper":"A4"}"#,
 };
 
@@ -566,9 +775,11 @@ pub static FILE_IDENTITY: OpDef = OpDef {
     name: "file_identity",
     doc: "Inspect or refresh internal drawing UUIDs and fingerprint identity.",
     batchable: true,
-    params: &[
-        opt("renew", Ty::Bool, "Generate fresh document identity tokens."),
-    ],
+    params: &[opt(
+        "renew",
+        Ty::Bool,
+        "Generate fresh document identity tokens.",
+    )],
     rules: &[],
     example: r#"{"op":"file_identity"}"#,
 };
@@ -579,9 +790,21 @@ pub static SAVE: OpDef = OpDef {
     batchable: true,
     params: &[
         opt("path", Ty::Str, "Destination file path."),
-        opt("target_format", Ty::Enum(&["dwg", "dxf"]), "Target CAD format."),
-        opt("target_version", Ty::Enum(TARGET_VERSIONS), "Target AutoCAD version."),
-        opt("allow_lossy", Ty::Bool, "Acknowledge dropping unsupported passthrough records."),
+        opt(
+            "target_format",
+            Ty::Enum(&["dwg", "dxf"]),
+            "Target CAD format.",
+        ),
+        opt(
+            "target_version",
+            Ty::Enum(TARGET_VERSIONS),
+            "Target AutoCAD version.",
+        ),
+        opt(
+            "allow_lossy",
+            Ty::Bool,
+            "Acknowledge dropping unsupported passthrough records.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"save"}"#,
@@ -593,10 +816,26 @@ pub static SAVE_VERIFIED: OpDef = OpDef {
     batchable: false,
     params: &[
         req("path", Ty::Str, "Destination file path (.dwg or .dxf)."),
-        opt("target_format", Ty::Enum(&["dwg", "dxf"]), "Explicit output format matching extension."),
-        opt("target_version", Ty::Enum(TARGET_VERSIONS), "Explicit CAD version."),
-        opt("allow_lossy", Ty::Bool, "Acknowledge dropping unsupported records."),
-        opt("overwrite", Ty::Bool, "Replace destination if file already exists."),
+        opt(
+            "target_format",
+            Ty::Enum(&["dwg", "dxf"]),
+            "Explicit output format matching extension.",
+        ),
+        opt(
+            "target_version",
+            Ty::Enum(TARGET_VERSIONS),
+            "Explicit CAD version.",
+        ),
+        opt(
+            "allow_lossy",
+            Ty::Bool,
+            "Acknowledge dropping unsupported records.",
+        ),
+        opt(
+            "overwrite",
+            Ty::Bool,
+            "Replace destination if file already exists.",
+        ),
     ],
     rules: &[],
     example: r#"{"op":"save_verified","path":"drawing.dwg"}"#,
@@ -635,6 +874,8 @@ pub static OPS: &[&OpDef] = &[
     &REDO,
     &SELECT,
     &PROPERTY,
+    &GRIP_DRAG,
+    &CLICK,
     &SET_PROPERTIES,
     &ACTION,
     &EMBED_IMAGE,
@@ -694,26 +935,20 @@ fn ty_schema(ty: &Ty) -> Value {
 }
 
 pub fn shared_defs() -> Value {
-    let batch_variants: Vec<Value> = OPS
-        .iter()
-        .filter(|op| op.batchable)
-        .map(|op| op_schema(op))
-        .collect();
-
-    json!({
+    let mut defs = json!({
         "point":  {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 3},
         "window": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
         "handle": {"type": "string", "pattern": "^(0[xX])?[0-9A-Fa-f]+$"},
-        "batch_step": {
-            "type": "object",
-            "properties": {
-                "op": {"type": "string"},
-                "document_id": {"type": "integer", "minimum": 0}
-            },
-            "required": ["op"],
-            "anyOf": batch_variants
-        }
-    })
+        "batch_step": batch_step_schema()
+    });
+    for op in OPS {
+        defs[format!("op_{}", op.name)] = op_schema(op);
+    }
+    defs
+}
+
+fn op_ref(op: &OpDef) -> Value {
+    json!({"$ref": format!("#/$defs/op_{}", op.name)})
 }
 
 fn rules_text(op: &OpDef) -> String {
@@ -724,7 +959,10 @@ fn rules_text(op: &OpDef) -> String {
                 out.push_str(&format!(" Requires at least one of: {}.", keys.join(", ")));
             }
             Rule::RequiredWhen { key, equals, then } => {
-                out.push_str(&format!(" When {key}={equals}, requires: {}.", then.join(", ")));
+                out.push_str(&format!(
+                    " When {key}={equals}, requires: {}.",
+                    then.join(", ")
+                ));
             }
         }
     }
@@ -752,7 +990,7 @@ pub fn op_schema(op: &OpDef) -> Value {
 }
 
 pub fn execute_request_schema() -> Value {
-    let variants: Vec<Value> = OPS.iter().map(|op| op_schema(op)).collect();
+    let variants: Vec<Value> = OPS.iter().map(|op| op_ref(op)).collect();
     let op_names: Vec<&str> = OPS.iter().map(|op| op.name).collect();
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -777,7 +1015,7 @@ pub fn batch_step_schema() -> Value {
     let batch_variants: Vec<Value> = OPS
         .iter()
         .filter(|op| op.batchable)
-        .map(|op| op_schema(op))
+        .map(|op| op_ref(op))
         .collect();
 
     json!({
@@ -895,8 +1133,7 @@ fn validate_type(ty: &Ty, val: &Value) -> Result<(), String> {
                 return Err("expected array".into());
             };
             for (idx, item) in arr.iter().enumerate() {
-                validate_type(inner, item)
-                    .map_err(|e| format!("item {idx}: {e}"))?;
+                validate_type(inner, item).map_err(|e| format!("item {idx}: {e}"))?;
             }
         }
         Ty::Raw(_) => {}
@@ -904,10 +1141,7 @@ fn validate_type(ty: &Ty, val: &Value) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_request(
-    request: &Value,
-    is_batch_step: bool,
-) -> Result<ValidationResult, String> {
+pub fn validate_request(request: &Value, is_batch_step: bool) -> Result<ValidationResult, String> {
     let Some(obj) = request.as_object() else {
         return Err("request must be a JSON object".into());
     };
@@ -921,7 +1155,9 @@ pub fn validate_request(
     };
 
     if is_batch_step && !op_def.batchable {
-        return Err(format!("operation '{op_name}' cannot be used in a batch step"));
+        return Err(format!(
+            "operation '{op_name}' cannot be used in a batch step"
+        ));
     }
 
     // Check required params
@@ -941,7 +1177,9 @@ pub fn validate_request(
     for r in op_def.rules {
         match r {
             Rule::AnyOf(keys) => {
-                let any_present = keys.iter().any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
+                let any_present = keys
+                    .iter()
+                    .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
                 if !any_present {
                     return Err(format!(
                         "Missing {} for {}. Example request: {}",
@@ -952,7 +1190,10 @@ pub fn validate_request(
                 }
             }
             Rule::RequiredWhen { key, equals, then } => {
-                let matches = obj.get(*key).and_then(Value::as_str).is_some_and(|v| v.eq_ignore_ascii_case(equals));
+                let matches = obj
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v.eq_ignore_ascii_case(equals));
                 if matches {
                     for req_key in *then {
                         let val = obj.get(*req_key);
@@ -972,9 +1213,8 @@ pub fn validate_request(
     for p in op_def.params {
         if let Some(val) = obj.get(p.name) {
             if !val.is_null() {
-                validate_type(&p.ty, val).map_err(|e| {
-                    format!("parameter '{}' for op '{}': {e}", p.name, op_name)
-                })?;
+                validate_type(&p.ty, val)
+                    .map_err(|e| format!("parameter '{}' for op '{}': {e}", p.name, op_name))?;
             }
         }
     }
@@ -991,9 +1231,14 @@ pub fn validate_request(
     for (k, _) in obj {
         if !allowed.contains(&k.as_str()) {
             if k == "data_base64" {
-                warnings.push("data_base64 is supported only in the Web/WASM build, not in native desktop".into());
+                warnings.push(
+                    "data_base64 is supported only in the Web/WASM build, not in native desktop"
+                        .into(),
+                );
             } else {
-                warnings.push(format!("unknown parameter '{k}' ignored for op '{op_name}'"));
+                warnings.push(format!(
+                    "unknown parameter '{k}' ignored for op '{op_name}'"
+                ));
             }
         }
     }

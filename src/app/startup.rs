@@ -14,7 +14,14 @@ impl OpenCADStudio {
             self.pending_startup_modals
                 .push_back(ModalKind::AssocPrompt);
         }
-        if promo && self.donation_prompt_version != env!("OCS_APP_VERSION") {
+        // Automation sessions (#1349): once control traffic has arrived (or a
+        // web host opted in at boot) while control is enabled, the donation
+        // prompt is suppressed - a modal would block every automated
+        // operation until a client closed it by hand.
+        if promo
+            && self.donation_prompt_version != env!("OCS_APP_VERSION")
+            && !(self.control.enabled && self.control.automation_seen)
+        {
             self.pending_startup_modals
                 .push_back(ModalKind::DonationPrompt);
         }
@@ -23,11 +30,41 @@ impl OpenCADStudio {
 
     pub(super) fn show_next_startup_modal(&mut self) {
         if self.active_modal.is_none() && self.opening.is_none() && self.pending_opens.is_empty() {
+            // A queued AutosaveRestore can outlive its pending list when a
+            // concurrent open displaces the modal and the entry is consumed
+            // meanwhile; resurfacing it would show an empty prompt.
+            #[cfg(target_arch = "wasm32")]
+            while self.pending_startup_modals.front() == Some(&ModalKind::AutosaveRestore)
+                && self.web_autosave_pending.is_empty()
+            {
+                self.pending_startup_modals.pop_front();
+            }
             if let Some(&kind) = self.pending_startup_modals.front() {
                 self.active_modal = Some(kind);
                 self.reset_modal_geometry();
             }
         }
+    }
+
+    /// Queue the web crash-recovery prompt behind whatever startup modal is
+    /// already showing (donation, GPU warning…); the after-message hook in
+    /// `update` surfaces it as soon as the slot is free. No-op when nothing
+    /// is pending: once the autosave OPFS directory merely exists (even with
+    /// no entries), queueing unconditionally would show an empty
+    /// "Recover Drawing" modal on every boot.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn queue_autosave_restore_prompt(&mut self) {
+        if self.web_autosave_pending.is_empty() {
+            return;
+        }
+        if !self
+            .pending_startup_modals
+            .contains(&ModalKind::AutosaveRestore)
+        {
+            self.pending_startup_modals
+                .push_back(ModalKind::AutosaveRestore);
+        }
+        self.show_next_startup_modal();
     }
 
     /// Notice when the scene is drawn by a software rasterizer, or not at
@@ -54,7 +91,8 @@ impl OpenCADStudio {
         };
         match &self.gpu_status {
             GpuStatus::Software(adapter) => {
-                self.command_line.push_warning(&software_rasterizer_warning(adapter));
+                self.command_line
+                    .push_warning(&software_rasterizer_warning(adapter));
             }
             GpuStatus::NoRenderer => {
                 crate::scene::pipeline::report_gpu_line(
@@ -133,9 +171,15 @@ mod tests {
         // The name carries parentheses and commas of its own; the localized
         // template must still place it whole. The loader follows the system
         // locale here, so the assertions stay language-neutral.
-        assert!(warning.contains("(llvmpipe (LLVM 20.1.8, 256 bits))"), "{warning}");
+        assert!(
+            warning.contains("(llvmpipe (LLVM 20.1.8, 256 bits))"),
+            "{warning}"
+        );
         assert!(warning.contains("GPU"), "{warning}");
-        assert!(!warning.contains("{adapter}") && !warning.contains("__ocs_"), "{warning}");
+        assert!(
+            !warning.contains("{adapter}") && !warning.contains("__ocs_"),
+            "{warning}"
+        );
         // Every platform has a hint, and it is a sentence, not a missing key.
         let hint = gpu_platform_hint();
         assert!(hint.len() > 20 && !hint.contains("hint-"), "{hint}");
@@ -209,6 +253,39 @@ mod tests {
         assert_eq!(restarted.donation_prompt_version, env!("OCS_APP_VERSION"));
         let _ = restarted.update(Message::Noop);
         assert!(restarted.active_modal.is_none());
+    }
+
+    #[test]
+    fn automation_sessions_skip_the_donation_prompt() {
+        // First control contact drops a still-queued donation prompt and
+        // stops later queueing while control stays enabled (#1349).
+        let mut app = OpenCADStudio::new_for_test();
+        app.default_assoc_prompted = true;
+        app.queue_startup_prompts_with(true);
+        assert_eq!(app.active_modal, Some(ModalKind::DonationPrompt));
+        let _ = app.update(Message::CloseModal);
+        app.donation_prompt_version = "previous-release".to_string();
+        app.pending_startup_modals.push_back(ModalKind::DonationPrompt);
+        let _ = app.control_request(serde_json::json!({"op":"state"}));
+        assert!(app.pending_startup_modals.is_empty());
+        app.queue_startup_prompts_with(true);
+        assert_ne!(app.active_modal, Some(ModalKind::DonationPrompt));
+
+        // A still-queued (not yet shown) prompt is dropped on first contact.
+        let mut queued = OpenCADStudio::new_for_test();
+        queued.default_assoc_prompted = true;
+        queued.donation_prompt_version = "previous-release".to_string();
+        queued.pending_startup_modals.push_back(ModalKind::DonationPrompt);
+        let _ = queued.control_request(serde_json::json!({"op":"state"}));
+        queued.queue_startup_prompts_with(true);
+        assert_ne!(queued.active_modal, Some(ModalKind::DonationPrompt));
+
+        // A prompt already on screen is left for its reader; clients close
+        // it themselves, and a session with no control traffic still prompts.
+        let mut human = OpenCADStudio::new_for_test();
+        human.default_assoc_prompted = true;
+        human.queue_startup_prompts_with(true);
+        assert_eq!(human.active_modal, Some(ModalKind::DonationPrompt));
     }
 
     #[test]

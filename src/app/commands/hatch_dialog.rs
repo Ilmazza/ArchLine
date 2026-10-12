@@ -246,7 +246,7 @@ impl OpenCADStudio {
     /// A canvas point in the coordinates of the active model tile, as the
     /// release handler maps it before it records a click.
     fn tile_point(&self, i: usize, canvas: iced::Point) -> iced::Point {
-        let size = self.tabs[i].scene.selection.borrow().vp_size;
+        let size = self.tabs[i].scene.selection.borrow().view.vp_size;
         let offset = match self.tabs[i].scene.viewport_edit_frame(size) {
             Some((_, full)) => (full.x, full.y),
             None => {
@@ -3672,7 +3672,7 @@ mod tests {
     /// A viewport of 800 x 600 framing the drawing.
     fn frame(app: &mut OpenCADStudio) {
         let i = app.active_tab;
-        app.tabs[i].scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        app.tabs[i].scene.selection.borrow_mut().view.vp_size = (800.0, 600.0);
         app.tabs[i].scene.fit_all();
     }
 

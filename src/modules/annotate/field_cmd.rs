@@ -29,6 +29,7 @@ pub struct FieldPlaceCommand {
     height: f64,
     attachment: AttachmentPoint,
     plane: WorkingPlane,
+    name: &'static str,
 }
 
 impl FieldPlaceCommand {
@@ -41,7 +42,15 @@ impl FieldPlaceCommand {
             height,
             attachment: AttachmentPoint::TopLeft,
             plane: WorkingPlane::default(),
+            name: "FIELD",
         }
+    }
+
+    /// The command name shown with the prompts (COUNTFIELD places its field
+    /// as MTEXT).
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
     }
 }
 
@@ -52,7 +61,7 @@ fn short(v: f64) -> String {
 
 impl CadCommand for FieldPlaceCommand {
     fn name(&self) -> &'static str {
-        "FIELD"
+        self.name
     }
 
     fn set_working_plane(&mut self, plane: WorkingPlane) {
@@ -84,8 +93,16 @@ impl CadCommand for FieldPlaceCommand {
             Step::Point => match word.as_str() {
                 "H" | "HEIGHT" => self.step = Step::Height,
                 "J" | "JUSTIFY" => self.step = Step::Justify,
-                "" => return Some(CmdResult::ReportError("Point or option keyword required.".into())),
-                _ => return Some(CmdResult::ReportError("Point or option keyword required.".into())),
+                "" => {
+                    return Some(CmdResult::ReportError(
+                        "Point or option keyword required.".into(),
+                    ))
+                }
+                _ => {
+                    return Some(CmdResult::ReportError(
+                        "Point or option keyword required.".into(),
+                    ))
+                }
             },
             Step::Height => {
                 if word.is_empty() {
@@ -97,8 +114,16 @@ impl CadCommand for FieldPlaceCommand {
                         self.height = v;
                         self.step = Step::Point;
                     }
-                    Ok(_) => return Some(CmdResult::ReportError("Value must be positive and nonzero.".into())),
-                    Err(_) => return Some(CmdResult::ReportError("Requires numeric distance or two points.".into())),
+                    Ok(_) => {
+                        return Some(CmdResult::ReportError(
+                            "Value must be positive and nonzero.".into(),
+                        ))
+                    }
+                    Err(_) => {
+                        return Some(CmdResult::ReportError(
+                            "Requires numeric distance or two points.".into(),
+                        ))
+                    }
                 }
             }
             Step::Justify => {
@@ -199,7 +224,10 @@ pub struct FieldTablePickCommand {
 
 impl FieldTablePickCommand {
     pub fn new(function: &'static str) -> Self {
-        Self { function, first: None }
+        Self {
+            function,
+            first: None,
+        }
     }
 }
 

@@ -78,6 +78,169 @@ fn oriented_text_corners(
     ]
 }
 
+use crate::entities::field::{BOX_ABOVE as FIELD_BOX_ABOVE, BOX_BELOW as FIELD_BOX_BELOW};
+
+/// FIELDDISPLAY boxes: each field's shown text, one box per line it spans,
+/// placed from the text layout itself, in the text's own (rotated) frame —
+/// MTEXT and multi-line attributes from the layout's character cells, TEXT
+/// and single-line attributes from each line's character cells (the
+/// shaper's glyph cells for TrueType fonts and shaped scripts, else the
+/// stroke font's advances) — so formatting codes, missing glyphs, shaped or
+/// right-to-left scripts before a field do not shift it. A box spans the
+/// field's character cells along the line and FIELD_BOX_BELOW /
+/// FIELD_BOX_ABOVE across it. `None` when the host's fields cannot be
+/// located in its text (the whole text is boxed then).
+fn field_run_corner_groups(
+    document: &codec::CadDocument,
+    entity: &EntityType,
+    stroke_groups: &[crate::scene::convert::acad_to_render::TextStroke],
+    anno: f64,
+    ref_origin: [f64; 2],
+) -> Option<Vec<[[f64; 2]; 4]>> {
+    use crate::entities::text_support::{
+        mtext_visible_count, resolve_dxf_special_chars, resolve_text_style, text_char_cells,
+        GlyphBox,
+    };
+    let handle = entity.common().handle;
+    // Field lines as (origin, rotation, [left, baseline, right, height]) in
+    // the origin's frame.
+    let mut lines: Vec<([f64; 2], f64, [f64; 4])> = Vec::new();
+    // Group a field's layout cells by line (a shared baseline).
+    let from_cells = |lines: &mut Vec<([f64; 2], f64, [f64; 4])>,
+                      cells: &[GlyphBox],
+                      text: &str,
+                      spans: &[std::ops::Range<usize>],
+                      origin: [f64; 2],
+                      rotation: f64|
+     -> Option<()> {
+        for span in spans {
+            let first = mtext_visible_count(text.get(..span.start)?);
+            let last = mtext_visible_count(text.get(..span.end)?);
+            let mut line: Option<[f64; 4]> = None;
+            for b in cells.iter().filter(|b| (first..last).contains(&b.vis)) {
+                let [l, base, r, top] = b.local.map(|v| v as f64 * anno);
+                let h = top - base;
+                line = Some(match line {
+                    Some(c) if (c[1] - base).abs() <= 1e-3 * h.max(c[3]) => {
+                        [c[0].min(l), c[1], c[2].max(r), c[3].max(h)]
+                    }
+                    Some(c) => {
+                        lines.push((origin, rotation, c));
+                        [l, base, r, h]
+                    }
+                    None => [l, base, r, h],
+                });
+            }
+            lines.extend(line.map(|c| (origin, rotation, c)));
+        }
+        Some(())
+    };
+    let multiline_attribute = match entity {
+        EntityType::AttributeEntity(a) => crate::entities::attribute::attribute_cells(a, document),
+        _ => None,
+    };
+    match entity {
+        EntityType::MText(m) => {
+            let spans = codec::fields::field_spans(document, handle, &m.value)?;
+            let cells = crate::entities::mtext::glyph_boxes(m, document);
+            let flip = if resolve_text_style(&m.style, document).is_upside_down {
+                std::f64::consts::PI
+            } else {
+                0.0
+            };
+            from_cells(
+                &mut lines,
+                &cells,
+                &m.value,
+                &spans,
+                [m.insertion_point.x, m.insertion_point.y],
+                m.rotation + flip,
+            )?;
+        }
+        // A multi-line attribute is laid out like MTEXT.
+        EntityType::AttributeEntity(a) if multiline_attribute.is_some() => {
+            let spans = codec::fields::field_spans(document, handle, &a.value)?;
+            let (cells, origin, rotation) = multiline_attribute?;
+            from_cells(
+                &mut lines,
+                &cells,
+                &a.value,
+                &spans,
+                origin,
+                rotation as f64,
+            )?;
+        }
+        EntityType::Text(_) | EntityType::AttributeEntity(_) => {
+            let text = match entity {
+                EntityType::Text(t) => &t.value,
+                EntityType::AttributeEntity(a) => &a.value,
+                _ => return None,
+            };
+            let spans = codec::fields::field_spans(document, handle, text)?;
+            // One laid-out line per `\P`-separated line, in order.
+            let mut start = 0;
+            for (line_text, group) in text.split("\\P").zip(stroke_groups) {
+                let range = start..start + line_text.len();
+                start = range.end + 2;
+                let run = group.run.as_ref()?;
+                let resolved = resolve_dxf_special_chars(line_text);
+                let cells = text_char_cells(&run.font, &resolved, run.height, run.width_factor);
+                let char_at = |byte: usize| {
+                    line_text
+                        .get(..byte)
+                        .map_or(0, |head| resolve_dxf_special_chars(head).chars().count())
+                };
+                for span in &spans {
+                    let (a, b) = (span.start.max(range.start), span.end.min(range.end));
+                    if a >= b {
+                        continue;
+                    }
+                    let picked = cells
+                        .get(char_at(a - range.start)..char_at(b - range.start))
+                        .unwrap_or_default();
+                    let l = picked.iter().map(|c| c.0).fold(f32::INFINITY, f32::min) as f64;
+                    let r = picked.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max) as f64;
+                    if l.is_finite() && r.is_finite() {
+                        // Glyphs scale about the reference origin.
+                        let origin = [
+                            (group.origin[0] - ref_origin[0]) * anno + ref_origin[0],
+                            (group.origin[1] - ref_origin[1]) * anno + ref_origin[1],
+                        ];
+                        lines.push((
+                            origin,
+                            run.rotation as f64,
+                            [l * anno, 0.0, r * anno, run.height as f64 * anno],
+                        ));
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(
+        lines
+            .into_iter()
+            .filter(|(_, _, [l, _, r, _])| r > l)
+            .map(|(origin, rotation, [l, base, r, h])| {
+                let (sin_r, cos_r) = rotation.sin_cos();
+                let to_world = |x: f64, y: f64| {
+                    [
+                        origin[0] + x * cos_r - y * sin_r,
+                        origin[1] + x * sin_r + y * cos_r,
+                    ]
+                };
+                let (b, t) = (base - FIELD_BOX_BELOW * h, base + FIELD_BOX_ABOVE * h);
+                [
+                    to_world(l, b),
+                    to_world(r, b),
+                    to_world(r, t),
+                    to_world(l, t),
+                ]
+            })
+            .collect(),
+    )
+}
+
 fn oriented_mtext_corner_groups(
     verts: &[crate::scene::pipeline::text_gpu::TextVertex],
     text: &codec::MText,
@@ -86,8 +249,8 @@ fn oriented_mtext_corner_groups(
     annotation_scale: f64,
 ) -> Vec<[[f64; 2]; 4]> {
     let columns = &text.column_data;
-    let count = crate::entities::text_support::clamp_mtext_column_count(columns.column_count)
-        as usize;
+    let count =
+        crate::entities::text_support::clamp_mtext_column_count(columns.column_count) as usize;
     if columns.column_type == 0 || count <= 1 || columns.width <= 0.0 {
         return vec![oriented_text_corners(
             verts,
@@ -160,26 +323,33 @@ pub(crate) fn explicit_mtext_background(entity: &EntityType) -> Option<[f32; 4]>
     if text.background_fill_flags & 0x01 == 0 || text.background_fill_flags & 0x02 != 0 {
         return None;
     }
-    text.background_color.rgb().map(|(r, g, b)| {
-        [
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-            1.0,
-        ]
-    })
+    text.background_color
+        .rgb()
+        .map(|(r, g, b)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
 }
 
-pub(crate) fn text_contrast_background(
-    entity: &EntityType,
-    canvas: [f32; 4],
-) -> [f32; 4] {
+pub(crate) fn text_contrast_background(entity: &EntityType, canvas: [f32; 4]) -> [f32; 4] {
     explicit_mtext_background(entity).unwrap_or(canvas)
 }
 
 /// Split each absolute f64 source point into double-single (high, low) f32
 /// buffers in one pass — the relative-to-eye residual the GPU/CPU reconstruct
 /// to f64 precision at UTM-scale coordinates.
+/// Area centroid of a closed polyline, for the Geometric Center snap.
+fn geometric_center(entity: &EntityType) -> Option<glam::DVec3> {
+    let closed = match entity {
+        EntityType::LwPolyline(p) => p.is_closed && p.vertices.len() >= 3,
+        EntityType::Polyline2D(p) => p.is_closed() && p.vertices.len() >= 3,
+        _ => false,
+    };
+    if !closed {
+        return None;
+    }
+    let planar = crate::entities::curve::entity_curve(entity)?;
+    let center = planar.curve.enclosed_centroid()?;
+    Some(glam::DVec3::from_array(planar.plane.point_at(center)))
+}
+
 pub(crate) fn points_to_ds(
     src: impl IntoIterator<Item = [f64; 3]>,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
@@ -229,8 +399,7 @@ fn polyline_segment_widths(entity: &EntityType) -> Vec<(f32, f32)> {
         }
         EntityType::Polyline2D(p) => {
             let filtered = crate::entities::polyline::drawn_vertices2d(p);
-            let verts: &[codec::entities::Vertex2D] =
-                filtered.as_deref().unwrap_or(&p.vertices);
+            let verts: &[codec::entities::Vertex2D] = filtered.as_deref().unwrap_or(&p.vertices);
             let count = verts.len();
             let seg_count = if p.is_closed() {
                 count
@@ -308,9 +477,12 @@ fn split_mixed_polyline(
             };
 
             let p_sa = [
-                center[0] + radius * (start_angle.cos() * axis_x[0] + start_angle.sin() * axis_y[0]),
-                center[1] + radius * (start_angle.cos() * axis_x[1] + start_angle.sin() * axis_y[1]),
-                center[2] + radius * (start_angle.cos() * axis_x[2] + start_angle.sin() * axis_y[2]),
+                center[0]
+                    + radius * (start_angle.cos() * axis_x[0] + start_angle.sin() * axis_y[0]),
+                center[1]
+                    + radius * (start_angle.cos() * axis_x[1] + start_angle.sin() * axis_y[1]),
+                center[2]
+                    + radius * (start_angle.cos() * axis_x[2] + start_angle.sin() * axis_y[2]),
             ];
             let is_reversed = if !key_vertices.is_empty() {
                 let d_start_sq = (p_sa[0] - p_seg_start[0]).powi(2)
@@ -324,11 +496,7 @@ fn split_mixed_polyline(
                 false
             };
 
-            let (w_at_sa, w_at_ea) = if is_reversed {
-                (ew, sw)
-            } else {
-                (sw, ew)
-            };
+            let (w_at_sa, w_at_ea) = if is_reversed { (ew, sw) } else { (sw, ew) };
 
             let n = 16;
             let mut points = Vec::with_capacity(n + 1);
@@ -360,7 +528,10 @@ fn split_mixed_polyline(
             let world_width = sw.max(ew);
 
             let (arc_pt, arc_ptl) = if out.is_empty() && !pick_tris.is_empty() {
-                (std::mem::take(&mut pick_tris), std::mem::take(&mut pick_tris_low))
+                (
+                    std::mem::take(&mut pick_tris),
+                    std::mem::take(&mut pick_tris_low),
+                )
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -399,9 +570,9 @@ fn split_mixed_polyline(
                 plinegen: true,
                 fill_tris: vec![],
                 fill_tris_low: Vec::new(),
-            
+
                 ..Default::default()
-});
+            });
         }
     }
 
@@ -491,10 +662,7 @@ fn split_mixed_polyline(
         } else {
             (Vec::new(), Vec::new())
         };
-        let line_world_width = straight_widths
-            .iter()
-            .copied()
-            .fold(0.0f32, f32::max);
+        let line_world_width = straight_widths.iter().copied().fold(0.0f32, f32::max);
         // NaN breaks carry a 0 width; only real points decide whether the
         // band tapers, so a constant-width run keeps its mitered joints.
         let mut real_widths = line_pts
@@ -544,9 +712,9 @@ fn split_mixed_polyline(
             plinegen,
             fill_tris: vec![],
             fill_tris_low: Vec::new(),
-        
+
             ..Default::default()
-});
+        });
     } else if let Some(first_arc) = out.first_mut() {
         first_arc.snap_pts = snap_pts;
         first_arc.key_vertices = key_vertices.to_vec();
@@ -585,7 +753,14 @@ fn point_cloud_wires(
         shown = crate::scene::model::point_cloud::shows_no_points(document, data);
         let c = codec::entities::point_cloud_ex_corners(data).map(|c| [c.x, c.y, c.z]);
         let mut tris = Vec::with_capacity(36);
-        for [a, b, d, e] in [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 4, 5], [2, 3, 6, 7], [0, 2, 4, 6], [1, 3, 5, 7]] {
+        for [a, b, d, e] in [
+            [0, 1, 3, 2],
+            [4, 5, 7, 6],
+            [0, 1, 4, 5],
+            [2, 3, 6, 7],
+            [0, 2, 4, 6],
+            [1, 3, 5, 7],
+        ] {
             tris.extend([c[a], c[b], c[e], c[a], c[e], c[d]]);
         }
         (pick_tris, pick_tris_low) = points_to_ds(tris);
@@ -625,21 +800,13 @@ fn point_cloud_wires(
         plinegen: true,
         fill_tris: Vec::new(),
         fill_tris_low: Vec::new(),
-    
+
         ..Default::default()
-}];
-    let mode = crate::scene::frame::mode(
-        document,
-        crate::scene::frame::FrameKind::PointCloudClip,
-    );
+    }];
+    let mode = crate::scene::frame::mode(document, crate::scene::frame::FrameKind::PointCloudClip);
     if !frame_points.is_empty() {
         let (points, points_low) = points_to_ds(frame_points);
-        let mut frame = WireModel::solid(
-            handle.value().to_string(),
-            points,
-            color,
-            selected,
-        );
+        let mut frame = WireModel::solid(handle.value().to_string(), points, color, selected);
         frame.points_low = points_low;
         frame.line_weight_px = line_weight_px;
         frame.display_visible = mode != 0;
@@ -778,8 +945,7 @@ pub fn tessellate(
         if lines.is_empty() {
             return vec![];
         }
-        let lt_scale =
-            document.header.linetype_scale as f32 * m.common.linetype_scale as f32;
+        let lt_scale = document.header.linetype_scale as f32 * m.common.linetype_scale as f32;
         let snap_pts: Vec<(glam::DVec3, SnapHint)> = m
             .vertices
             .iter()
@@ -833,8 +999,7 @@ pub fn tessellate(
         };
         let mut out: Vec<WireModel> = Vec::with_capacity(lines.len());
         if let Some(style) = crate::entities::mline::resolved_mline_style(m, document) {
-            let triangles =
-                crate::entities::mline::mline_fill_triangles_with_style(m, style);
+            let triangles = crate::entities::mline::mline_fill_triangles_with_style(m, style);
             if !triangles.is_empty() {
                 let (fill_tris, fill_tris_low) = points_to_ds(triangles);
                 let fill_color = if selected {
@@ -883,9 +1048,9 @@ pub fn tessellate(
                     plinegen: true,
                     fill_tris,
                     fill_tris_low,
-                
+
                     ..Default::default()
-});
+                });
             }
         }
         let mut snap_attached = false;
@@ -901,8 +1066,7 @@ pub fn tessellate(
                 match l.color {
                     AcadColor::ByLayer | AcadColor::ByBlock => entity_color,
                     other => {
-                        let [r, g, b, _] =
-                            crate::scene::convert::tess_util::aci_to_rgba(&other);
+                        let [r, g, b, _] = crate::scene::convert::tess_util::aci_to_rgba(&other);
                         [r, g, b, entity_color[3]]
                     }
                 }
@@ -1054,9 +1218,9 @@ pub fn tessellate(
                     plinegen: false,
                     fill_tris: Vec::new(),
                     fill_tris_low: Vec::new(),
-                
+
                     ..Default::default()
-});
+                });
             }
 
             // Snap / key vertices ride the first emitted wire only (they describe
@@ -1076,14 +1240,9 @@ pub fn tessellate(
         return out;
     }
 
-    if let Some(wires) = point_cloud_wires(
-        document,
-        handle,
-        entity,
-        selected,
-        color,
-        line_weight_px,
-    ) {
+    if let Some(wires) =
+        point_cloud_wires(document, handle, entity, selected, color, line_weight_px)
+    {
         return wires;
     }
 
@@ -1096,13 +1255,14 @@ pub fn tessellate(
         .or_else(|| crate::entities::light::relative_render(entity, document, world_per_pixel))
         .or_else(|| match entity {
             EntityType::Text(text) => Some(crate::entities::text::to_render_at_scale(
-                text,
-                document,
-                anno_scale,
+                text, document, anno_scale,
             )),
             _ => convert(entity, document),
         });
-    if let Some(te) = te {
+    if let Some(mut te) = te {
+        if let Some(center) = geometric_center(entity) {
+            te.snap_pts.push((center, SnapHint::GeometricCenter));
+        }
         match te.object {
             // ── Text / MText: pre-tessellated glyph strokes ───────────────
             //
@@ -1118,10 +1278,7 @@ pub fn tessellate(
 
                 // Scale MTEXT around its attachment point.
                 let ref_origin = match entity {
-                    EntityType::MText(m) => [
-                        m.insertion_point.x,
-                        m.insertion_point.y,
-                    ],
+                    EntityType::MText(m) => [m.insertion_point.x, m.insertion_point.y],
                     _ => stroke_groups
                         .first()
                         .map(|g| g.origin)
@@ -1172,16 +1329,13 @@ pub fn tessellate(
                 // require bidi or joined-script shaping keep their already
                 // shaped vector geometry because the per-glyph SDF path has no
                 // cluster-position data.
-                for group in stroke_groups
-                    .iter()
-                    .filter(|group| {
-                        force_text_strokes
-                            || group.run.is_none()
-                            || group.run.as_ref().is_some_and(|run| {
-                                crate::scene::text::web_font::requires_shaping(&run.text)
-                            })
-                    })
-                {
+                for group in stroke_groups.iter().filter(|group| {
+                    force_text_strokes
+                        || group.run.is_none()
+                        || group.run.as_ref().is_some_and(|run| {
+                            crate::scene::text::web_font::requires_shaping(&run.text)
+                        })
+                }) {
                     let lx_v = group.origin[0];
                     let ly_v = group.origin[1];
                     let slx_v = (lx_v - ref_lx_v) * anno + ref_lx_v;
@@ -1189,7 +1343,7 @@ pub fn tessellate(
                     let bin_key = if split_by_color { group.color } else { None };
                     let group_bold = group.run.as_ref().is_some_and(|r| r.bold);
                     let bi = find_or_make(bin_key, group_bold, &mut bins, &mut bin_first);
-                    
+
                     // 1. Process outline strokes
                     for stroke in &group.strokes {
                         if stroke.len() < 2 {
@@ -1213,15 +1367,9 @@ pub fn tessellate(
                                 let x = x as f64 * anno;
                                 let y = y as f64 * anno;
                                 [
-                                    scaled_origin[0]
-                                        + plane.x_axis[0] * x
-                                        + plane.y_axis[0] * y,
-                                    scaled_origin[1]
-                                        + plane.x_axis[1] * x
-                                        + plane.y_axis[1] * y,
-                                    scaled_origin[2]
-                                        + plane.x_axis[2] * x
-                                        + plane.y_axis[2] * y,
+                                    scaled_origin[0] + plane.x_axis[0] * x + plane.y_axis[0] * y,
+                                    scaled_origin[1] + plane.x_axis[1] * x + plane.y_axis[1] * y,
+                                    scaled_origin[2] + plane.x_axis[2] * x + plane.y_axis[2] * y,
                                 ]
                             } else {
                                 [x as f64 * anno + slx_v, y as f64 * anno + sly_v, elev_v]
@@ -1246,15 +1394,9 @@ pub fn tessellate(
                             let x = x as f64 * anno;
                             let y = y as f64 * anno;
                             [
-                                scaled_origin[0]
-                                    + plane.x_axis[0] * x
-                                    + plane.y_axis[0] * y,
-                                scaled_origin[1]
-                                    + plane.x_axis[1] * x
-                                    + plane.y_axis[1] * y,
-                                scaled_origin[2]
-                                    + plane.x_axis[2] * x
-                                    + plane.y_axis[2] * y,
+                                scaled_origin[0] + plane.x_axis[0] * x + plane.y_axis[0] * y,
+                                scaled_origin[1] + plane.x_axis[1] * x + plane.y_axis[1] * y,
+                                scaled_origin[2] + plane.x_axis[2] * x + plane.y_axis[2] * y,
                             ]
                         } else {
                             [x as f64 * anno + slx_v, y as f64 * anno + sly_v, elev_v]
@@ -1356,14 +1498,11 @@ pub fn tessellate(
                                     (
                                         [
                                             plane.scale_origin[0]
-                                                + (plane.origin[0] - plane.scale_origin[0])
-                                                    * anno,
+                                                + (plane.origin[0] - plane.scale_origin[0]) * anno,
                                             plane.scale_origin[1]
-                                                + (plane.origin[1] - plane.scale_origin[1])
-                                                    * anno,
+                                                + (plane.origin[1] - plane.scale_origin[1]) * anno,
                                             plane.scale_origin[2]
-                                                + (plane.origin[2] - plane.scale_origin[2])
-                                                    * anno,
+                                                + (plane.origin[2] - plane.scale_origin[2]) * anno,
                                         ],
                                         (plane.x_axis[1]).atan2(plane.x_axis[0]) as f32,
                                     )
@@ -1394,8 +1533,7 @@ pub fn tessellate(
 
                 // Derive the pick box from the rendered glyph quads.
                 let text_aabb = if !sdf_verts.is_empty() {
-                    let (mut nx, mut ny, mut xx, mut xy) =
-                        (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                    let (mut nx, mut ny, mut xx, mut xy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
                     for v in &sdf_verts {
                         let x = v.pos[0] as f64 + v.pos_low[0] as f64;
                         let y = v.pos[1] as f64 + v.pos_low[1] as f64;
@@ -1409,65 +1547,70 @@ pub fn tessellate(
                     WireModel::UNBOUNDED_AABB
                 };
 
+                // FIELDDISPLAY: a field shows on a gray box behind its glyphs,
+                // on screen only — for SDF glyphs and shaped stroke text alike.
+                let mut field_background: Option<WireModel> = None;
+                if crate::entities::field::display()
+                    && crate::entities::field::hosts_field(document, entity)
+                {
+                    let runs =
+                        field_run_corner_groups(document, entity, &stroke_groups, anno, ref_origin);
+                    let corner_groups = match entity {
+                        _ if runs.is_some() => runs.unwrap_or_default(),
+                        _ if text_aabb == WireModel::UNBOUNDED_AABB => Vec::new(),
+                        EntityType::MText(m) => {
+                            let rotation = stroke_groups
+                                .iter()
+                                .find_map(|group| group.run.as_ref().map(|run| run.rotation as f64))
+                                .unwrap_or(m.rotation);
+                            oriented_mtext_corner_groups(&sdf_verts, m, rotation, 0.0, anno)
+                        }
+                        EntityType::Text(t) => vec![oriented_text_corners(
+                            &sdf_verts,
+                            [t.insertion_point.x, t.insertion_point.y],
+                            t.rotation,
+                            0.0,
+                        )],
+                        EntityType::AttributeEntity(a) => vec![oriented_text_corners(
+                            &sdf_verts,
+                            [a.insertion_point.x, a.insertion_point.y],
+                            a.rotation,
+                            0.0,
+                        )],
+                        _ => Vec::new(),
+                    };
+                    let mut ft = Vec::with_capacity(6 * corner_groups.len());
+                    let mut ftl = Vec::with_capacity(6 * corner_groups.len());
+                    for corners in &corner_groups {
+                        for &k in &[0usize, 1, 2, 0, 2, 3] {
+                            let (h, lo) = split_ds_xyz(corners[k][0], corners[k][1], elev_v);
+                            ft.push(h);
+                            ftl.push(lo);
+                        }
+                    }
+                    if !ft.is_empty() {
+                        field_background = Some(WireModel {
+                            display_visible: true,
+                            plot_visible: false,
+                            name: name.clone(),
+                            color: crate::entities::field::BACKGROUND,
+                            selected,
+                            line_weight_px,
+                            aabb: WireModel::UNBOUNDED_AABB,
+                            plinegen: true,
+                            fill_tris: ft,
+                            fill_tris_low: ftl,
+                            ..Default::default()
+                        });
+                    }
+                }
                 // Empty input (no glyphs) → emit a single empty wire so the
                 // entity still has a hit-test target via snap_pts. With SDF on
                 // this is the normal path (strokes suppressed) and the wire
                 // also carries the glyph quads built above.
                 if bins.is_empty() {
                     let mut wires: Vec<WireModel> = Vec::new();
-                    // FIELDDISPLAY: a field shows on a gray box behind its
-                    // glyphs, on screen only.
-                    if text_aabb != WireModel::UNBOUNDED_AABB
-                        && crate::entities::field::display()
-                        && crate::entities::field::hosts_field(document, entity)
-                    {
-                        let corner_groups = match entity {
-                            EntityType::MText(m) => {
-                                let rotation = stroke_groups
-                                    .iter()
-                                    .find_map(|group| group.run.as_ref().map(|run| run.rotation as f64))
-                                    .unwrap_or(m.rotation);
-                                oriented_mtext_corner_groups(&sdf_verts, m, rotation, 0.0, anno)
-                            }
-                            EntityType::Text(t) => vec![oriented_text_corners(
-                                &sdf_verts,
-                                [t.insertion_point.x, t.insertion_point.y],
-                                t.rotation,
-                                0.0,
-                            )],
-                            EntityType::AttributeEntity(a) => vec![oriented_text_corners(
-                                &sdf_verts,
-                                [a.insertion_point.x, a.insertion_point.y],
-                                a.rotation,
-                                0.0,
-                            )],
-                            _ => Vec::new(),
-                        };
-                        let mut ft = Vec::with_capacity(6 * corner_groups.len());
-                        let mut ftl = Vec::with_capacity(6 * corner_groups.len());
-                        for corners in &corner_groups {
-                            for &k in &[0usize, 1, 2, 0, 2, 3] {
-                                let (h, lo) = split_ds_xyz(corners[k][0], corners[k][1], elev_v);
-                                ft.push(h);
-                                ftl.push(lo);
-                            }
-                        }
-                        if !ft.is_empty() {
-                            wires.push(WireModel {
-                                display_visible: true,
-                                plot_visible: false,
-                                name: name.clone(),
-                                color: crate::entities::field::BACKGROUND,
-                                selected,
-                                line_weight_px,
-                                aabb: WireModel::UNBOUNDED_AABB,
-                                plinegen: true,
-                                fill_tris: ft,
-                                fill_tris_low: ftl,
-                                ..Default::default()
-                            });
-                        }
-                    }
+                    wires.extend(field_background.take());
                     // MTEXT background and frame follow the glyph bounds.
                     if text_aabb != WireModel::UNBOUNDED_AABB {
                         if let EntityType::MText(m) = entity {
@@ -1500,11 +1643,8 @@ pub fn tessellate(
                                     let mut ftl = Vec::with_capacity(6 * corner_groups.len());
                                     for corners in &corner_groups {
                                         for &k in &[0usize, 1, 2, 0, 2, 3] {
-                                            let (h, lo) = split_ds_xyz(
-                                                corners[k][0],
-                                                corners[k][1],
-                                                elev_v,
-                                            );
+                                            let (h, lo) =
+                                                split_ds_xyz(corners[k][0], corners[k][1], elev_v);
                                             ft.push(h);
                                             ftl.push(lo);
                                         }
@@ -1543,9 +1683,9 @@ pub fn tessellate(
                                         plinegen: true,
                                         fill_tris: ft,
                                         fill_tris_low: ftl,
-                                    
+
                                         ..Default::default()
-});
+                                    });
                                 }
                                 // Text frame — a closed rectangle in the text
                                 // colour around the same box.
@@ -1558,10 +1698,7 @@ pub fn tessellate(
                                             fpl.push([0.0; 3]);
                                         }
                                         for &[x, y] in &[
-                                            corners[0],
-                                            corners[1],
-                                            corners[2],
-                                            corners[3],
+                                            corners[0], corners[1], corners[2], corners[3],
                                             corners[0],
                                         ] {
                                             let (h, lo) = split_ds_xyz(x, y, elev_v);
@@ -1603,9 +1740,9 @@ pub fn tessellate(
                                         plinegen: true,
                                         fill_tris: vec![],
                                         fill_tris_low: Vec::new(),
-                                    
+
                                         ..Default::default()
-});
+                                    });
                                 }
                             }
                         }
@@ -1614,9 +1751,7 @@ pub fn tessellate(
                     // bounds as a separate outline wire so the text box is
                     // visible for testing. The empty text wire below is left
                     // untouched (still the SDF + pick target).
-                    if !sdf_verts.is_empty()
-                        && crate::scene::text::sdf_atlas::text_box_debug()
-                    {
+                    if !sdf_verts.is_empty() && crate::scene::text::sdf_atlas::text_box_debug() {
                         let [nx, ny, xx, xy] = text_aabb;
                         let (nx, ny, xx, xy) = (nx as f64, ny as f64, xx as f64, xy as f64);
                         let mut pts = Vec::with_capacity(5);
@@ -1660,9 +1795,9 @@ pub fn tessellate(
                             plinegen: true,
                             fill_tris: vec![],
                             fill_tris_low: Vec::new(),
-                        
+
                             ..Default::default()
-});
+                        });
                     }
                     wires.push(WireModel {
                         bg_adapt: None,
@@ -1704,6 +1839,7 @@ pub fn tessellate(
                 }
 
                 let mut out: Vec<WireModel> = Vec::new();
+                out.extend(field_background);
                 let mut is_first = true;
                 for bin in bins {
                     let wire_color = match bin.color {
@@ -1746,9 +1882,9 @@ pub fn tessellate(
                             render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                            dash_from_start: false,
+                            dash_align_end: None,
+                            text_verts: Vec::new(),
                             name: name.clone(),
                             points: bin.pts,
                             points_low: bin.pts_low,
@@ -1765,9 +1901,9 @@ pub fn tessellate(
                             plinegen: true,
                             fill_tris: vec![],
                             fill_tris_low: Vec::new(),
-                        
-            ..Default::default()
-});
+
+                            ..Default::default()
+                        });
                     }
 
                     if !bin.fill_tris.is_empty() {
@@ -1796,9 +1932,9 @@ pub fn tessellate(
                             render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                            dash_from_start: false,
+                            dash_align_end: None,
+                            text_verts: Vec::new(),
                             name: name.clone(),
                             points: Vec::new(),
                             points_low: Vec::new(),
@@ -1815,9 +1951,9 @@ pub fn tessellate(
                             plinegen: true,
                             fill_tris: bin.fill_tris,
                             fill_tris_low: bin.fill_tris_low,
-                        
-            ..Default::default()
-});
+
+                            ..Default::default()
+                        });
                     }
                 }
 
@@ -1882,9 +2018,9 @@ pub fn tessellate(
                         render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                        dash_from_start: false,
+                        dash_align_end: None,
+                        text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
                         points_low: Vec::new(),
@@ -1901,9 +2037,9 @@ pub fn tessellate(
                         plinegen: true,
                         fill_tris: vec![],
                         fill_tris_low: Vec::new(),
-                    
-            ..Default::default()
-});
+
+                        ..Default::default()
+                    });
                 }
                 return out;
             }
@@ -1915,11 +2051,8 @@ pub fn tessellate(
                         // Split into a coarse float and a fine correction, so
                         // a point at survey coordinates keeps its last
                         // millimetres instead of losing them to f32.
-                        let [x, y, z] = [
-                            position[0] as f32,
-                            position[1] as f32,
-                            position[2] as f32,
-                        ];
+                        let [x, y, z] =
+                            [position[0] as f32, position[1] as f32, position[2] as f32];
                         let [xl, yl, zl] = [
                             (position[0] - x as f64) as f32,
                             (position[1] - y as f64) as f32,
@@ -1932,9 +2065,7 @@ pub fn tessellate(
                         // the view with crosses. The tessellation cache keys on
                         // world-per-pixel, so this re-sizes on zoom and stays a
                         // constant on-screen size. (#139)
-                        let s = world_per_pixel
-                            .map(|w| (w * 0.75).max(1e-6))
-                            .unwrap_or(0.1);
+                        let s = world_per_pixel.map(|w| (w * 0.75).max(1e-6)).unwrap_or(0.1);
                         let snap_pts = te.snap_pts;
                         let key_vertices: Vec<[f64; 3]> = te
                             .key_vertices
@@ -1956,9 +2087,9 @@ pub fn tessellate(
                             render_instance: None,
                             pick_tris: Vec::new(),
                             pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                            dash_from_start: false,
+                            dash_align_end: None,
+                            text_verts: Vec::new(),
                             name,
                             points: vec![
                                 [x - s, y, z],
@@ -1984,14 +2115,12 @@ pub fn tessellate(
                             plinegen: true,
                             fill_tris: vec![],
                             fill_tris_low: Vec::new(),
-                        
-            ..Default::default()
-}];
+
+                            ..Default::default()
+                        }];
                     }
                 }
             }
-
-
 
             RenderObject::Lines(points) => {
                 // Points are world-space f64 from entity converters (polyline,
@@ -2029,10 +2158,12 @@ pub fn tessellate(
                 let mut out = Vec::new();
                 let mut is_first = true;
 
-                // A thickened polyline's extrusion — its corner / cap edges
-                // frame the solid tube and read black (like solid-with-edges
-                // outlines), while the tube fill keeps the entity colour. Both
-                // wide polyline kinds (LwPolyline + Polyline2D) extrude tubes.
+                // A thickened wide polyline's extrusion — its corner / cap
+                // edges frame the solid tube and read black (like
+                // solid-with-edges outlines), while the tube fill keeps the
+                // entity colour. A thickened polyline without width has no
+                // fill, so its edges are all there is and keep the entity
+                // colour.
                 let is_thick_extrusion = matches!(
                     entity,
                     EntityType::LwPolyline(p) if p.thickness.abs() > 1e-10
@@ -2040,26 +2171,25 @@ pub fn tessellate(
                     entity,
                     EntityType::Polyline2D(p) if p.thickness.abs() > 1e-10
                 );
-                let edge_color = if is_thick_extrusion {
+                let edge_color = if is_thick_extrusion && polyline_max_width(entity) > 1e-9 {
                     [0.0, 0.0, 0.0, 1.0]
                 } else {
                     color
                 };
                 // Basic curves keep their resolved linetype.
-                let (edge_pattern_length, edge_pattern) =
-                    if matches!(
-                        entity,
-                        EntityType::Line(_)
-                            | EntityType::Circle(_)
-                            | EntityType::Arc(_)
-                            | EntityType::Ellipse(_)
-                            | EntityType::Spline(_)
-                            | EntityType::LwPolyline(_)
-                    ) {
-                        (pattern_length, pattern)
-                    } else {
-                        (0.0, [0.0; 8])
-                    };
+                let (edge_pattern_length, edge_pattern) = if matches!(
+                    entity,
+                    EntityType::Line(_)
+                        | EntityType::Circle(_)
+                        | EntityType::Arc(_)
+                        | EntityType::Ellipse(_)
+                        | EntityType::Spline(_)
+                        | EntityType::LwPolyline(_)
+                ) {
+                    (pattern_length, pattern)
+                } else {
+                    (0.0, [0.0; 8])
+                };
                 if !local_pts.is_empty() {
                     let (snap, keys, tangents) = if is_first {
                         is_first = false;
@@ -2080,7 +2210,10 @@ pub fn tessellate(
                         .any(|tg| matches!(tg, TangentGeom::Arc { .. }));
                     let can_split = !is_thick_extrusion
                         && fill_tris.is_empty()
-                        && matches!(entity, EntityType::LwPolyline(_) | EntityType::Polyline2D(_));
+                        && matches!(
+                            entity,
+                            EntityType::LwPolyline(_) | EntityType::Polyline2D(_)
+                        );
 
                     if has_arc && can_split {
                         let seg_widths = polyline_segment_widths(entity);
@@ -2137,9 +2270,9 @@ pub fn tessellate(
                             plinegen: true,
                             fill_tris: vec![],
                             fill_tris_low: Vec::new(),
-                        
+
                             ..Default::default()
-});
+                        });
                     }
                 }
 
@@ -2161,9 +2294,9 @@ pub fn tessellate(
                         world_width: 0.0,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                        dash_from_start: false,
+                        dash_align_end: None,
+                        text_verts: Vec::new(),
                         name: name.clone(),
                         points: Vec::new(),
                         points_low: Vec::new(),
@@ -2187,9 +2320,9 @@ pub fn tessellate(
                         display_visible: true,
                         snap_only: false,
                         plot_visible: true,
-                    
-            ..Default::default()
-});
+
+                        ..Default::default()
+                    });
                 }
 
                 if out.is_empty() {
@@ -2208,9 +2341,9 @@ pub fn tessellate(
                         render_instance: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                        dash_from_start: false,
+                        dash_align_end: None,
+                        text_verts: Vec::new(),
                         name,
                         points: Vec::new(),
                         points_low: Vec::new(),
@@ -2227,9 +2360,9 @@ pub fn tessellate(
                         plinegen: true,
                         fill_tris: vec![],
                         fill_tris_low: Vec::new(),
-                    
-            ..Default::default()
-});
+
+                        ..Default::default()
+                    });
                 }
 
                 return out;
@@ -2289,9 +2422,9 @@ pub fn tessellate(
                     aabb: WireModel::UNBOUNDED_AABB,
                     fill_tris: Vec::new(),
                     fill_tris_low: Vec::new(),
-                
+
                     ..Default::default()
-}];
+                }];
             }
 
             RenderObject::SegmentedLines(points) => {
@@ -2313,18 +2446,17 @@ pub fn tessellate(
                     EntityType::Polyline2D(p) if p.thickness.abs() > 1e-10
                 );
                 let can_split = !is_thick_extrusion
-                    && matches!(entity, EntityType::LwPolyline(_) | EntityType::Polyline2D(_));
+                    && matches!(
+                        entity,
+                        EntityType::LwPolyline(_) | EntityType::Polyline2D(_)
+                    );
                 let has_arc = te
                     .tangent_geoms
                     .iter()
                     .any(|tg| matches!(tg, TangentGeom::Arc { .. }));
 
                 if has_arc && can_split {
-                    let edge_color = if is_thick_extrusion {
-                        [0.0, 0.0, 0.0, 1.0]
-                    } else {
-                        color
-                    };
+                    let edge_color = color;
                     let point_marker =
                         crate::entities::point::relative_marker_spec(entity, document);
                     let seg_widths = polyline_segment_widths(entity);
@@ -2362,9 +2494,9 @@ pub fn tessellate(
                     render_instance: None,
                     pick_tris,
                     pick_tris_low,
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+                    dash_from_start: false,
+                    dash_align_end: None,
+                    text_verts: Vec::new(),
                     name,
                     points: local_pts,
                     points_low: local_pts_low,
@@ -2381,9 +2513,9 @@ pub fn tessellate(
                     aabb: WireModel::UNBOUNDED_AABB,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
-                
-            ..Default::default()
-}];
+
+                    ..Default::default()
+                }];
             }
 
             RenderObject::TaperedLines(points, widths) => {
@@ -2391,7 +2523,10 @@ pub fn tessellate(
                     .tangent_geoms
                     .iter()
                     .any(|tg| matches!(tg, TangentGeom::Arc { .. }));
-                let can_split = matches!(entity, EntityType::LwPolyline(_) | EntityType::Polyline2D(_));
+                let can_split = matches!(
+                    entity,
+                    EntityType::LwPolyline(_) | EntityType::Polyline2D(_)
+                );
                 let (pick_tris, pick_tris_low) = points_to_ds(te.pick_tris);
                 let world_width = widths.iter().copied().fold(0.0f32, f32::max);
                 let key_vertices: Vec<[f64; 3]> = te
@@ -2462,17 +2597,15 @@ pub fn tessellate(
                     aabb: WireModel::UNBOUNDED_AABB,
                     fill_tris: vec![],
                     fill_tris_low: Vec::new(),
-                
-                    ..Default::default()
-}];
-            }
 
+                    ..Default::default()
+                }];
+            }
         }
     }
 
     // ── Fallback for Viewport / Insert / Hatch / Ole2Frame ────────────────
-    let (mut points_f64, snap_pts, tangent_geoms, mut key_vertices) =
-        fallback_geometry(entity);
+    let (mut points_f64, snap_pts, tangent_geoms, mut key_vertices) = fallback_geometry(entity);
     let clipped_viewport_polygon = match entity {
         EntityType::Viewport(viewport) if !viewport.clip_boundary_handle.is_null() => {
             let polygon = crate::scene::project::clip_boundary_polygon_for_document(
@@ -2483,13 +2616,7 @@ pub fn tessellate(
             if polygon.len() >= 3 {
                 let polygon: Vec<[f64; 3]> = polygon
                     .into_iter()
-                    .map(|point| {
-                        [
-                            point[0] as f64,
-                            point[1] as f64,
-                            point[2] as f64,
-                        ]
-                    })
+                    .map(|point| [point[0] as f64, point[1] as f64, point[2] as f64])
                     .collect();
                 points_f64 = polygon.clone();
                 points_f64.push(polygon[0]);
@@ -2520,8 +2647,10 @@ pub fn tessellate(
     }
     // fallback_geometry still emits offset-relative f32 snap points; widen to
     // f64 for the WireModel's double-single-era snap buffer.
-    let snap_pts: Vec<(glam::DVec3, SnapHint)> =
-        snap_pts.into_iter().map(|(p, h)| (p.as_dvec3(), h)).collect();
+    let snap_pts: Vec<(glam::DVec3, SnapHint)> = snap_pts
+        .into_iter()
+        .map(|(p, h)| (p.as_dvec3(), h))
+        .collect();
     // Paper viewports are pickable inside their frames; the sheet viewport is not.
     let (pick_tris, pick_tris_low) = match entity {
         EntityType::Viewport(vp) if !crate::scene::Scene::is_sheet_viewport(document, vp) => {
@@ -2555,9 +2684,9 @@ pub fn tessellate(
         render_instance: None,
         pick_tris,
         pick_tris_low,
-            dash_from_start: false,
-            dash_align_end: None,
-            text_verts: Vec::new(),
+        dash_from_start: false,
+        dash_align_end: None,
+        text_verts: Vec::new(),
         name,
         points,
         points_low,
@@ -2574,23 +2703,41 @@ pub fn tessellate(
         plinegen: true,
         fill_tris: vec![],
         fill_tris_low: Vec::new(),
-    
-            ..Default::default()
-}]
+
+        ..Default::default()
+    }]
 }
-
-
 
 #[derive(Clone)]
 pub(crate) enum ArrowKind {
     None,
-    Triangle { size: f32, filled: bool, size_mul: f32 },
-    Tick { size: f32 },
-    Open { size: f32, half_angle: f32 },
-    Dot { size: f32, filled: bool },
-    Origin { size: f32 },
-    Box_ { size: f32, filled: bool },
-    Datum { size: f32, filled: bool },
+    Triangle {
+        size: f32,
+        filled: bool,
+        size_mul: f32,
+    },
+    Tick {
+        size: f32,
+    },
+    Open {
+        size: f32,
+        half_angle: f32,
+    },
+    Dot {
+        size: f32,
+        filled: bool,
+    },
+    Origin {
+        size: f32,
+    },
+    Box_ {
+        size: f32,
+        filled: bool,
+    },
+    Datum {
+        size: f32,
+        filled: bool,
+    },
     Custom {
         size: f32,
         lines: Vec<[f32; 3]>,
@@ -2625,7 +2772,10 @@ pub(crate) fn arrow_from_block_with_deferred_hatch(
         .unwrap_or_else(|| arrow_from_block_name(None, dimasz))
 }
 
-fn arrow_from_block_name(name: Option<&str>, dimasz: f32) -> ArrowKind {
+/// Canonical block-name → arrow-kind mapping shared by the renderer and the
+/// dimstyle preview so both agree on what a named arrowhead looks like.
+/// Unknown / empty names fall back to the standard filled triangle.
+pub(crate) fn arrow_from_block_name(name: Option<&str>, dimasz: f32) -> ArrowKind {
     name.and_then(|name| builtin_arrow_from_block_name(name, dimasz))
         .unwrap_or(ArrowKind::Triangle {
             size: dimasz,
@@ -2637,10 +2787,7 @@ fn arrow_from_block_name(name: Option<&str>, dimasz: f32) -> ArrowKind {
 fn builtin_arrow_from_block_name(name: &str, dimasz: f32) -> Option<ArrowKind> {
     // Built-in arrow block names may carry a leading underscore. Normalize it
     // before matching the canonical names.
-    let n = name
-        .trim()
-        .trim_start_matches('_')
-        .to_ascii_uppercase();
+    let n = name.trim().trim_start_matches('_').to_ascii_uppercase();
     match n.as_str() {
         "" | "CLOSEDFILLED" => Some(ArrowKind::Triangle {
             size: dimasz,
@@ -2734,13 +2881,7 @@ fn custom_arrow_from_block(
     }
 
     let depths = rustc_hash::FxHashMap::default();
-    let graph = crate::scene::render_graph::RenderSceneGraph::new(
-        doc,
-        None,
-        None,
-        true,
-        &depths,
-    );
+    let graph = crate::scene::render_graph::RenderSceneGraph::new(doc, None, None, true, &depths);
     let block_use = crate::scene::render_graph::block_use_from_handle(
         doc,
         record.handle,
@@ -2761,12 +2902,7 @@ fn custom_arrow_from_block(
             }
             let mut placed = entity.clone();
             placed.apply_transform(&context.transform);
-            append_custom_arrow_leaf(
-                doc,
-                &placed,
-                &mut lines,
-                &mut fill,
-            );
+            append_custom_arrow_leaf(doc, &placed, &mut lines, &mut fill);
         },
     );
     if lines.is_empty() && fill.is_empty() && !deferred_hatch {
@@ -2795,12 +2931,7 @@ fn append_custom_arrow_leaf(
         | EntityType::MultiLeader(_)
         | EntityType::Insert(_) => return,
         EntityType::Hatch(hatch) => {
-            append_custom_hatch_geometry(
-                hatch,
-                codec::types::Vector3::ZERO,
-                lines,
-                fill,
-            );
+            append_custom_hatch_geometry(hatch, codec::types::Vector3::ZERO, lines, fill);
             return;
         }
         _ => {}
@@ -2869,16 +3000,8 @@ fn append_custom_hatch_geometry(
             if !lines.is_empty() && !lines.last().is_some_and(|point| point[0].is_nan()) {
                 lines.push([f32::NAN; 3]);
             }
-            lines.push([
-                (start[0] - base.x) as f32,
-                (start[1] - base.y) as f32,
-                z,
-            ]);
-            lines.push([
-                (end[0] - base.x) as f32,
-                (end[1] - base.y) as f32,
-                z,
-            ]);
+            lines.push([(start[0] - base.x) as f32, (start[1] - base.y) as f32, z]);
+            lines.push([(end[0] - base.x) as f32, (end[1] - base.y) as f32, z]);
         }
         return;
     }
@@ -2946,7 +3069,12 @@ fn append_custom_band(wire: &WireModel, fill: &mut Vec<[f32; 3]>) {
         })
     };
     let half = |index: usize| {
-        wire.taper_widths.get(index).copied().unwrap_or(wire.world_width).max(0.0) as f64 * 0.5
+        wire.taper_widths
+            .get(index)
+            .copied()
+            .unwrap_or(wire.world_width)
+            .max(0.0) as f64
+            * 0.5
     };
     for index in 0..wire.points.len().saturating_sub(1) {
         let (Some(a), Some(b)) = (at(index), at(index + 1)) else {
@@ -2960,9 +3088,18 @@ fn append_custom_band(wire: &WireModel, fill: &mut Vec<[f32; 3]>) {
         let (nx, ny) = (-dy / length, dx / length);
         let (ha, hb) = (half(index), half(index + 1));
         let corner = |p: [f64; 3], h: f64, side: f64| {
-            [(p[0] + nx * h * side) as f32, (p[1] + ny * h * side) as f32, p[2] as f32]
+            [
+                (p[0] + nx * h * side) as f32,
+                (p[1] + ny * h * side) as f32,
+                p[2] as f32,
+            ]
         };
-        let quad = [corner(a, ha, 1.0), corner(a, ha, -1.0), corner(b, hb, -1.0), corner(b, hb, 1.0)];
+        let quad = [
+            corner(a, ha, 1.0),
+            corner(a, ha, -1.0),
+            corner(b, hb, -1.0),
+            corner(b, hb, 1.0),
+        ];
         fill.extend([quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]]);
     }
 }
@@ -3031,7 +3168,6 @@ impl DimGeom {
     }
 }
 
-
 /// Convert an opencadcodec `Color` to RGBA, falling back to `inherited` for
 /// `ByLayer` / `ByBlock` (assumes those are already resolved upstream).
 pub(crate) fn color_or_inherit(c: &AcadColor, inherited: [f32; 4]) -> [f32; 4] {
@@ -3043,7 +3179,6 @@ pub(crate) fn color_or_inherit(c: &AcadColor, inherited: [f32; 4]) -> [f32; 4] {
         None => inherited,
     }
 }
-
 
 // ── Entity Z helper ───────────────────────────────────────────────────────
 
@@ -3058,30 +3193,33 @@ pub(crate) fn entity_z(entity: &EntityType) -> f32 {
 
 /// Shader band width, or zero while FILLMODE draws the kernel boundary.
 fn polyline_band_width(entity: &EntityType, fill_mode: bool) -> f32 {
-    if !fill_mode {
-        return 0.0;
-    }
-    let w = match entity {
-        EntityType::LwPolyline(p) if p.thickness.abs() <= 1e-10 => {
-            let mut w = p.constant_width;
-            for v in &p.vertices {
-                w = w.max(v.start_width).max(v.end_width);
-            }
-            w
-        }
-        EntityType::Polyline2D(p) if p.thickness.abs() <= 1e-10 => {
-            let mut w = p.start_width.max(p.end_width);
-            for v in &p.vertices {
-                w = w.max(v.start_width).max(v.end_width);
-            }
-            w
-        }
-        _ => 0.0,
+    let thick = match entity {
+        EntityType::LwPolyline(p) => p.thickness.abs() > 1e-10,
+        EntityType::Polyline2D(p) => p.thickness.abs() > 1e-10,
+        _ => true,
     };
-    if w > 1e-9 {
+    let w = polyline_max_width(entity);
+    if fill_mode && !thick && w > 1e-9 {
         w as f32
     } else {
         0.0
+    }
+}
+
+/// The widest start / end width of a 2-D polyline (0 for other entities).
+fn polyline_max_width(entity: &EntityType) -> f64 {
+    match entity {
+        EntityType::LwPolyline(p) => p
+            .vertices
+            .iter()
+            .fold(p.constant_width, |w, v| w.max(v.start_width).max(v.end_width)),
+        EntityType::Polyline2D(p) => p
+            .vertices
+            .iter()
+            .fold(p.start_width.max(p.end_width), |w, v| {
+                w.max(v.start_width).max(v.end_width)
+            }),
+        _ => 0.0,
     }
 }
 
@@ -3296,6 +3434,36 @@ pub(crate) fn normalized_or(v: Vec3, fallback: Vec3) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrow_name_mapping_covers_preview_kinds() {
+        // Pins the shared name→kind contract the dimstyle preview relies on.
+        assert!(matches!(
+            arrow_from_block_name(Some("OPEN"), 1.0),
+            ArrowKind::Open { .. }
+        ));
+        assert!(matches!(
+            arrow_from_block_name(Some("DOT"), 1.0),
+            ArrowKind::Dot { filled: true, .. }
+        ));
+        assert!(matches!(
+            arrow_from_block_name(Some("ARCHTICK"), 1.0),
+            ArrowKind::Tick { .. }
+        ));
+        assert!(matches!(
+            arrow_from_block_name(Some("NONE"), 1.0),
+            ArrowKind::None
+        ));
+        // Unknown / empty names fall back to the standard filled triangle.
+        assert!(matches!(
+            arrow_from_block_name(Some("NOPE"), 1.0),
+            ArrowKind::Triangle { filled: true, .. }
+        ));
+        assert!(matches!(
+            arrow_from_block_name(None, 1.0),
+            ArrowKind::Triangle { filled: true, .. }
+        ));
+    }
 
     #[test]
     fn test_split_mixed_polyline_straight_lines_have_taper_widths() {

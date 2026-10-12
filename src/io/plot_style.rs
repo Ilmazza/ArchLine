@@ -11,6 +11,7 @@
 use rustc_hash::FxHashMap as HashMap;
 use std::io::Read;
 use std::path::{Component, Path};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -87,6 +88,9 @@ pub fn available_ctb_names() -> Vec<String> {
             })
             .collect();
         names.extend(STANDARD_PLOT_STYLES.iter().map(|name| (*name).to_string()));
+        // Empty on native (nothing registers there); on the web this is
+        // where the tables picked this session surface.
+        names.extend(session_ctb_names());
         names.sort_by_key(|name| name.to_ascii_lowercase());
         names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         names
@@ -95,8 +99,63 @@ pub fn available_ctb_names() -> Vec<String> {
     {
         let mut names = vec![DEFAULT_PLOT_STYLE.into(), MONOCHROME_PLOT_STYLE.into()];
         names.extend(STANDARD_PLOT_STYLES.iter().map(|name| (*name).to_string()));
+        // No folder to scan — the tables picked this session stand in.
+        names.extend(session_ctb_names());
+        names.sort_by_key(|name| name.to_ascii_lowercase());
+        names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         names
     }
+}
+
+// ── Web session registry ────────────────────────────────────────────────────
+
+/// Plot tables picked this session, keyed by file name. The browser keeps
+/// no folder behind a picked name, so the web build remembers the bytes
+/// instead and `load_named` resolves through here before falling back to
+/// the built-ins — the plot-style counterpart of `pdf_raster::register_source`.
+/// Native never writes it, so the lookup is always empty there and the
+/// plot-styles folder stays authoritative.
+fn session_tables() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
+    static TABLES: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    TABLES.get_or_init(|| Mutex::new(HashMap::default()))
+}
+
+/// Remember a picked table's bytes so later `load_named` calls — the Plot
+/// dialog's table list and APPLY, plot settings, display plot style —
+/// resolve its name. Web only; on native, permanently registering a picked
+/// table copies it into the plot-styles folder instead.
+pub fn register_session_table(name: &str, bytes: Arc<Vec<u8>>) {
+    session_tables()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(name.to_string(), bytes);
+}
+
+/// The bytes registered under `name` this session, matched
+/// case-insensitively the way the folder scan matches file names. The web
+/// ARCHIVE/ETRANSMIT packages a drawing's registered plot table into the
+/// transmittal; `None` means the table was not picked this session (the
+/// built-ins ship with the app and need no transmittal copy).
+pub fn session_table(name: &str) -> Option<Arc<Vec<u8>>> {
+    session_tables()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|(registered, _)| registered.eq_ignore_ascii_case(name))
+        .map(|(_, bytes)| Arc::clone(bytes))
+}
+
+/// The colour-dependent (.ctb) names picked this session, for the Plot
+/// dialog's table list. Named (.stb) tables are left out: the plotter is
+/// color-dependent, so they cannot be applied anyway.
+fn session_ctb_names() -> Vec<String> {
+    session_tables()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .keys()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".ctb"))
+        .cloned()
+        .collect()
 }
 
 // ── Standard lineweight table (index → mm) ───────────────────────────────────
@@ -104,8 +163,8 @@ pub fn available_ctb_names() -> Vec<String> {
 /// Lineweight table: index value → mm, matching the stored LWEIGHT codes.
 /// Index 0 = 0.00 mm (hairline), others follow the DXF lineweight enum.
 pub const LW_TABLE: &[f32] = &[
-    0.00, 0.05, 0.09, 0.10, 0.13, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
-    0.53, 0.60, 0.65, 0.70, 0.80, 0.90, 1.00, 1.06, 1.20, 1.40, 1.58, 2.00, 2.11,
+    0.00, 0.05, 0.09, 0.10, 0.13, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.53, 0.60,
+    0.65, 0.70, 0.80, 0.90, 1.00, 1.06, 1.20, 1.40, 1.58, 2.00, 2.11,
 ];
 
 // ── Per-color entry ───────────────────────────────────────────────────────────
@@ -235,8 +294,7 @@ impl PlotStyleTable {
                         let gray = if aci == 7 {
                             0
                         } else {
-                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32)
-                                .round() as u8
+                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).round() as u8
                         };
                         table.aci_entries[aci as usize].color = Some([gray, gray, gray]);
                     }
@@ -274,14 +332,27 @@ impl PlotStyleTable {
         {
             return Err(format!("Invalid plot style name: {name}"));
         }
-        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("stb")) {
-            return Err(crate::tf!(
-                "Named plot style tables (.stb) are not supported yet: {name}"
-            )
-            .into_owned());
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("stb"))
+        {
+            return Err(
+                crate::tf!("Named plot style tables (.stb) are not supported yet: {name}")
+                    .into_owned(),
+            );
         }
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ctb")) {
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ctb"))
+        {
             return Err(format!("Invalid plot style name: {name}"));
+        }
+
+        // A table picked this session resolves through the registry first.
+        // Empty on native, so the folder search below stays authoritative
+        // there; on the web this is the only place a picked table lives.
+        if let Some(bytes) = session_table(name) {
+            return Self::from_bytes(name, &bytes);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -332,9 +403,8 @@ impl PlotStyleTable {
                 if aci == 7 {
                     Some([0.0; 3])
                 } else {
-                    codec::types::aci_to_rgb(aci).map(|(r, g, b)| {
-                        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
-                    })
+                    codec::types::aci_to_rgb(aci)
+                        .map(|(r, g, b)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
                 }
             })?;
             let gray = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
@@ -350,13 +420,16 @@ impl PlotStyleTable {
         if matches!(entry.lineweight, 0 | 255) {
             None
         } else {
-            self.lineweights.get(entry.lineweight as usize).copied().map(|weight| {
-                if self.apply_factor {
-                    weight * self.scale_factor.max(0.0)
-                } else {
-                    weight
-                }
-            })
+            self.lineweights
+                .get(entry.lineweight as usize)
+                .copied()
+                .map(|weight| {
+                    if self.apply_factor {
+                        weight * self.scale_factor.max(0.0)
+                    } else {
+                        weight
+                    }
+                })
         }
     }
 
@@ -423,7 +496,11 @@ impl PlotStyleTable {
                 "  linepattern_size={}\n  linetype={}\n  adaptive_linetype={}\n",
                 entry.linepattern_size,
                 entry.linetype,
-                if entry.adaptive_linetype { "TRUE" } else { "FALSE" }
+                if entry.adaptive_linetype {
+                    "TRUE"
+                } else {
+                    "FALSE"
+                }
             ));
             s.push_str(&format!("  lineweight={}\n", entry.lineweight));
             s.push_str(&format!(
@@ -756,12 +833,8 @@ fn parse_plot_style_text(text: &str, name: String, is_stb: bool) -> Result<PlotS
                 "physical_pen_number" => {
                     style.entry.physical_pen_number = value.parse().unwrap_or(0)
                 }
-                "virtual_pen_number" => {
-                    style.entry.virtual_pen_number = value.parse().unwrap_or(0)
-                }
-                "linepattern_size" => {
-                    style.entry.linepattern_size = value.parse().unwrap_or(0.5)
-                }
+                "virtual_pen_number" => style.entry.virtual_pen_number = value.parse().unwrap_or(0),
+                "linepattern_size" => style.entry.linepattern_size = value.parse().unwrap_or(0.5),
                 "linetype" => style.entry.linetype = value.parse().unwrap_or(31),
                 "adaptive_linetype" => {
                     style.entry.adaptive_linetype = value.eq_ignore_ascii_case("TRUE")
@@ -903,6 +976,48 @@ mod round_trip_tests {
         PlotStyleTable::from_bytes(table.name.clone(), &bytes).expect("reload")
     }
 
+    /// A table registered this session (the web stand-in for the plot-styles
+    /// folder) is what `load_named` returns for its name — matched
+    /// case-insensitively, the way the folder scan matches file names.
+    #[test]
+    fn load_named_resolves_a_session_registered_table() {
+        let mut table = PlotStyleTable::identity("SessionPens.ctb");
+        table.aci_entries[1].lineweight = 13; // 0.50 mm
+        let bytes = compress_ctb(table.to_text().as_bytes()).expect("compress");
+        super::register_session_table("SessionPens.ctb", std::sync::Arc::new(bytes));
+
+        let loaded = PlotStyleTable::load_named("sessionpens.CTB").expect("registry hit");
+        assert_eq!(loaded.name, "sessionpens.CTB");
+        assert_eq!(loaded.resolve_lineweight(1), Some(0.50));
+
+        // A name nothing was registered under still falls back to the built-ins.
+        assert!(PlotStyleTable::load_named(super::MONOCHROME_PLOT_STYLE).is_ok());
+    }
+
+    /// The Plot dialog's table list includes the session-registered colour
+    /// tables, but never a named (.stb) one.
+    #[test]
+    fn available_names_include_session_registered_tables() {
+        let bytes =
+            compress_ctb(PlotStyleTable::identity("x").to_text().as_bytes()).expect("compress");
+        let bytes = std::sync::Arc::new(bytes);
+        super::register_session_table("DialogPens.ctb", std::sync::Arc::clone(&bytes));
+        super::register_session_table("Named.stb", bytes);
+        let names = super::available_ctb_names();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("DialogPens.ctb")),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Named.stb")),
+            "{names:?}"
+        );
+    }
+
     /// Saving a table keeps its global scale factor, which scales every
     /// lineweight while apply_factor is on. It used to be cut to one decimal.
     #[test]
@@ -974,14 +1089,20 @@ mod lenient_loading_tests {
         bytes[52..56].copy_from_slice(&(text_len - 1).to_le_bytes());
         let table = PlotStyleTable::from_bytes("foreign.ctb", &bytes).expect("loads");
         assert_pens_kept(&table);
-        assert!(table.load_warnings.iter().any(|w| w.contains("bytes of text")));
+        assert!(table
+            .load_warnings
+            .iter()
+            .any(|w| w.contains("bytes of text")));
 
         let mut bytes = compressed(&table_with_description("ok"));
         let compressed_len = u32::from_le_bytes(bytes[56..60].try_into().unwrap());
         bytes[56..60].copy_from_slice(&(compressed_len + 100).to_le_bytes());
         let table = PlotStyleTable::from_bytes("foreign.ctb", &bytes).expect("loads");
         assert_pens_kept(&table);
-        assert!(table.load_warnings.iter().any(|w| w.contains("compressed bytes")));
+        assert!(table
+            .load_warnings
+            .iter()
+            .any(|w| w.contains("compressed bytes")));
     }
 
     #[test]
@@ -999,7 +1120,10 @@ mod lenient_loading_tests {
         let table = PlotStyleTable::from_bytes("foreign.ctb", &compressed).expect("loads");
         assert_pens_kept(&table);
         assert_eq!(table.description, "Plumas – señal");
-        assert!(table.load_warnings.iter().any(|w| w.contains("Windows-1252")));
+        assert!(table
+            .load_warnings
+            .iter()
+            .any(|w| w.contains("Windows-1252")));
         // Clean UTF-8 gets no note.
         let (text, note) = decode_plot_style_text("Ελληνικά".as_bytes().to_vec());
         assert_eq!(text, "Ελληνικά");
@@ -1094,7 +1218,10 @@ mod inflate_limit_tests {
             flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&bomb_plaintext()).expect("compress");
         let payload = encoder.finish().expect("finish");
-        assert_ne!(payload[0], 0x78, "raw deflate takes the legacy DeflateDecoder path");
+        assert_ne!(
+            payload[0], 0x78,
+            "raw deflate takes the legacy DeflateDecoder path"
+        );
 
         let mut data = vec![b'\n'];
         data.extend(payload);
