@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+  <Fragment>
+    <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT' Value='!(loc.Launch)' />
+    <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1' />
+    <WixVariable Id='WixUILicenseRtf' Value='$(var.License)' />
+    <CustomAction
+      Id='LaunchApplication'
+      FileKey='ArchLineEXE'
+      ExeCommand=''
+      Execute='immediate'
+      Return='asyncNoWait'
+      Impersonate='yes' />
+
+    <UI Id='ArchLineUI'>
+      <UIRef Id='WixUI_FeatureTree' />
+      <Publish
+        Dialog='ExitDialog'
+        Control='Finish'
+        Event='DoAction'
+        Value='LaunchApplication'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
+    </UI>
+  </Fragment>
+</Wix>

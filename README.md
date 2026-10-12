@@ -102,6 +102,16 @@ L'eseguibile è `target/release/ArchLine` (`ArchLine.exe` su Windows). Solo il b
 
 > Non rimuovere `RUST_MIN_STACK` da [.cargo/config.toml](.cargo/config.toml) (64 MiB): senza, `rustc` va in stack overflow su Windows in release.
 
+### Installer per Windows
+
+Ogni push su `lavoro` o su un branch `claude/**` fa produrre alla CI un MSI (Actions → corsa → Artifacts → `ArchLine-installer-N`). In locale, con [WiX 3.14](https://github.com/wixtoolset/wix3/releases) (basta lo zip dei binari) e ImageMagick:
+
+```powershell
+pwsh packaging\archline-windows\build-msi.ps1 -Wix C:\percorso\wix3 -Out dist
+```
+
+L'MSI installa in `Program Files\ArchLine`, crea collegamenti e associa DWG/DXF. **Non è firmato**: al primo avvio Windows SmartScreen mostra "Windows ha protetto il PC" (Ulteriori informazioni → Esegui comunque). Sorgenti in [packaging/archline-windows/](packaging/archline-windows/), separati da `packaging/windows/` (di upstream).
+
 ## Variabili d'ambiente
 
 | Variabile | Effetto |
