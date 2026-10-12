@@ -261,14 +261,14 @@ mod tests {
         // stops later queueing while control stays enabled (#1349).
         let mut app = OpenCADStudio::new_for_test();
         app.default_assoc_prompted = true;
-        app.queue_startup_prompts();
+        app.queue_startup_prompts_with(true);
         assert_eq!(app.active_modal, Some(ModalKind::DonationPrompt));
         let _ = app.update(Message::CloseModal);
         app.donation_prompt_version = "previous-release".to_string();
         app.pending_startup_modals.push_back(ModalKind::DonationPrompt);
         let _ = app.control_request(serde_json::json!({"op":"state"}));
         assert!(app.pending_startup_modals.is_empty());
-        app.queue_startup_prompts();
+        app.queue_startup_prompts_with(true);
         assert_ne!(app.active_modal, Some(ModalKind::DonationPrompt));
 
         // A still-queued (not yet shown) prompt is dropped on first contact.
@@ -277,14 +277,14 @@ mod tests {
         queued.donation_prompt_version = "previous-release".to_string();
         queued.pending_startup_modals.push_back(ModalKind::DonationPrompt);
         let _ = queued.control_request(serde_json::json!({"op":"state"}));
-        queued.queue_startup_prompts();
+        queued.queue_startup_prompts_with(true);
         assert_ne!(queued.active_modal, Some(ModalKind::DonationPrompt));
 
         // A prompt already on screen is left for its reader; clients close
         // it themselves, and a session with no control traffic still prompts.
         let mut human = OpenCADStudio::new_for_test();
         human.default_assoc_prompted = true;
-        human.queue_startup_prompts();
+        human.queue_startup_prompts_with(true);
         assert_eq!(human.active_modal, Some(ModalKind::DonationPrompt));
     }
 
