@@ -193,16 +193,10 @@ pub(crate) fn swatch_scale(
     hatch_preview_scale(pattern) * user_scale.clamp(low, high)
 }
 
-/// Too fine to draw line by line: the swatch shows a tinted fill instead.
-pub(crate) fn swatch_is_dense(user_scale: f32) -> bool {
-    // Written as a negated `>=` so that NaN also takes the tinted branch.
-    !(user_scale >= SWATCH_MIN_SPACING_PX / SWATCH_BASE_SPACING_PX)
-}
-
 /// Pattern lines for a swatch of `width` x `height` px (y up), at most
-/// `SWATCH_MAX_SEGMENTS`. `None` means "draw the tinted fill instead": the
-/// scale is too fine, an input is not finite, or no line falls on the sample.
-/// A swatch is therefore never left blank.
+/// `SWATCH_MAX_SEGMENTS`. A scale outside 2..64 px of spacing is held at the nearest bound (a
+/// real drawing's 0.125 still shows its pattern). `None` means "draw the tinted fill instead":
+/// an input is not finite, or no line falls on the sample. A swatch is therefore never left blank.
 pub(crate) fn swatch_segments(
     pattern: &crate::scene::model::hatch_model::HatchPattern,
     user_angle: f32,
@@ -212,7 +206,7 @@ pub(crate) fn swatch_segments(
 ) -> Option<Vec<[[f64; 2]; 2]>> {
     use crate::scene::model::hatch_model::HatchModel;
 
-    if swatch_is_dense(user_scale) || !user_scale.is_finite() || !user_angle.is_finite() {
+    if !user_scale.is_finite() || !user_angle.is_finite() {
         return None;
     }
     let pad = 4.0;
@@ -2755,15 +2749,6 @@ mod swatch_tests {
     }
 
     #[test]
-    fn only_a_scale_below_the_floor_is_dense() {
-        assert!(swatch_is_dense(0.01));
-        assert!(swatch_is_dense(0.249));
-        assert!(!swatch_is_dense(0.25));
-        assert!(!swatch_is_dense(1.0));
-        assert!(!swatch_is_dense(1.0e6));
-    }
-
-    #[test]
     fn a_pattern_without_lines_keeps_scale_one() {
         assert_eq!(swatch_scale(&HatchPattern::Solid, 5.0), 1.0);
     }
@@ -2780,11 +2765,6 @@ mod swatch_tests {
     }
 
     #[test]
-    fn nan_scale_is_dense() {
-        assert!(swatch_is_dense(f32::NAN));
-    }
-
-    #[test]
     fn normal_small_and_large_scales_give_bounded_non_empty_segments() {
         let pattern = lines(3.175);
         for scale in [0.25_f32, 1.0, 8.0] {
@@ -2795,9 +2775,21 @@ mod swatch_tests {
         }
     }
 
+    /// Real drawings (metres) use scales like 0.125: below the 2 px floor the swatch still shows
+    /// the pattern, drawn at the floor spacing, instead of a flat grey box.
     #[test]
-    fn too_fine_a_scale_asks_for_the_tint() {
-        assert!(swatch_segments(&lines(3.175), 0.0, 1.0e-6, 120.0, 60.0).is_none());
+    fn too_fine_a_scale_draws_at_the_floor_spacing() {
+        let fine = swatch_segments(&lines(3.175), 0.0, 1.0e-6, 120.0, 60.0).expect("draws lines");
+        let floor = swatch_segments(&lines(3.175), 0.0, 0.25, 120.0, 60.0).expect("draws lines");
+        assert_eq!(fine, floor);
+    }
+
+    #[test]
+    fn the_earth_pattern_at_a_real_drawing_scale_is_not_a_blank_swatch() {
+        let earth = crate::scene::model::hatch_patterns::find("EARTH").expect("in the catalogue");
+        let segments = swatch_segments(&earth.gpu, 45.0_f32.to_radians(), 0.125, 280.0, 55.0)
+            .expect("EARTH at scale 0.125 must draw lines");
+        assert!(!segments.is_empty());
     }
 
     #[test]
