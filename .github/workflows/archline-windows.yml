@@ -35,6 +35,27 @@ jobs:
           $info = "ArchLine build`ncommit: ${{ github.sha }}`nbranch: ${{ github.ref_name }}`n"
           Set-Content -Path dist\BUILD.txt -Value $info
 
+      # Installer MSI (WiX 3), non firmato: Windows SmartScreen avvisa al primo avvio.
+      # Se l'immagine non ha WiX 3 si scarica lo zip dei binari (stessa versione usata in locale).
+      - name: Installer MSI
+        shell: pwsh
+        run: |
+          $wix = $env:WIX
+          if (-not $wix -or -not (Test-Path (Join-Path $wix 'bin\candle.exe'))) {
+            $zip = Join-Path $env:RUNNER_TEMP 'wix314.zip'
+            Invoke-WebRequest https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile $zip
+            $wix = Join-Path $env:RUNNER_TEMP 'wix3'
+            Expand-Archive $zip $wix
+          }
+          pwsh packaging/archline-windows/build-msi.ps1 -Wix $wix -Out installer
+          if ($LASTEXITCODE -ne 0) { throw "build-msi fallito" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArchLine-installer-${{ github.run_number }}
+          path: installer
+          retention-days: 14
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

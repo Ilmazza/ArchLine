@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WixLocalization xmlns="http://schemas.microsoft.com/wix/2006/localization" Culture="it-IT" Codepage="1252">
+  <String Id="Launch">Avvia ArchLine</String>
+  <String Id="InstallerDescription">Programma di installazione di ArchLine</String>
+  <String Id="Installer">Installer</String>
+  <String Id="DwgDrawing">Disegno DWG</String>
+  <String Id="DxfDrawing">Disegno DXF</String>
+  <String Id="DesktopShortcut">Collegamento sul desktop</String>
+  <String Id="DesktopShortcutDescription">Aggiunge un collegamento ad ArchLine sul desktop.</String>
+  <String Id="DowngradeError">Una versione più recente di [ProductName] è già installata. L'installazione verrà interrotta.</String>
+  <String Id="Open">Apri</String>
+  <String Id="Desktop">Desktop</String>
+  <String Id="ApplicationDescription">Programma CAD 2D/3D per disegni DWG e DXF</String>
+</WixLocalization>
