@@ -3,12 +3,18 @@ use crate::scene::pipeline::{GpuAdapter, GpuStatus};
 
 impl OpenCADStudio {
     pub(super) fn queue_startup_prompts(&mut self) {
+        self.queue_startup_prompts_with(crate::privacy::show_promo());
+    }
+
+    /// `promo`: whether the upstream requests (default-app prompt, donation) are asked at all.
+    /// ArchLine hides them by default (`ARCHLINE_PROMO=1` brings them back).
+    pub(super) fn queue_startup_prompts_with(&mut self, promo: bool) {
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.default_assoc_prompted {
+        if promo && !self.default_assoc_prompted {
             self.pending_startup_modals
                 .push_back(ModalKind::AssocPrompt);
         }
-        if self.donation_prompt_version != env!("OCS_APP_VERSION") {
+        if promo && self.donation_prompt_version != env!("OCS_APP_VERSION") {
             self.pending_startup_modals
                 .push_back(ModalKind::DonationPrompt);
         }
@@ -156,6 +162,22 @@ mod tests {
         assert_ne!(software.identity().unwrap(), restarted.gpu_warning_silenced);
     }
 
+    /// ArchLine: the upstream "default app" and donation requests (naming Open CAD Studio) stay
+    /// off unless `ARCHLINE_PROMO=1`; a fresh config must start with no dialog at all.
+    #[test]
+    fn archline_asks_nothing_at_startup_unless_promo_is_on() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.apply_config(serde_json::from_str::<AppConfig>("{}").unwrap());
+        assert!(!app.default_assoc_prompted);
+        assert!(app.donation_prompt_version.is_empty());
+        app.queue_startup_prompts_with(false);
+        assert!(app.active_modal.is_none());
+        assert!(app.pending_startup_modals.is_empty());
+
+        app.queue_startup_prompts_with(true);
+        assert_eq!(app.active_modal, Some(ModalKind::AssocPrompt));
+    }
+
     #[test]
     fn donation_prompt_persists_once_per_version() {
         let mut app = OpenCADStudio::new_for_test();
@@ -164,7 +186,7 @@ mod tests {
         assert!(app.active_modal.is_none());
         assert!(app.pending_startup_modals.is_empty());
         app.default_assoc_prompted = true;
-        app.queue_startup_prompts();
+        app.queue_startup_prompts_with(true);
         assert_eq!(app.active_modal, Some(ModalKind::DonationPrompt));
         assert!(app.donation_prompt_version.is_empty());
 
@@ -175,12 +197,12 @@ mod tests {
 
         let mut restarted = OpenCADStudio::new_for_test();
         restarted.apply_config(serde_json::from_str(&saved).unwrap());
-        restarted.queue_startup_prompts();
+        restarted.queue_startup_prompts_with(true);
         assert_eq!(restarted.donation_prompt_version, env!("OCS_APP_VERSION"));
         assert!(restarted.active_modal.is_none());
 
         restarted.donation_prompt_version = "previous-release".to_string();
-        restarted.queue_startup_prompts();
+        restarted.queue_startup_prompts_with(true);
         assert_eq!(restarted.active_modal, Some(ModalKind::DonationPrompt));
         let _ = restarted.update(Message::CommandEscape);
         assert!(restarted.active_modal.is_none());
@@ -193,7 +215,7 @@ mod tests {
     fn startup_dialogs_wait_their_turn_and_preserve_unseen_prompts() {
         let mut app = OpenCADStudio::new_for_test();
         app.apply_config(AppConfig::default());
-        app.queue_startup_prompts();
+        app.queue_startup_prompts_with(true);
         assert_eq!(app.active_modal, Some(ModalKind::AssocPrompt));
         let _ = app.update(Message::UpdateCheckResult(Some(
             crate::io::update_check::UpdateInfo {
