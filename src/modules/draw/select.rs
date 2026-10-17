@@ -46,6 +46,10 @@ pub struct SelectObjectsCommand {
     keep: Option<fn(&codec::EntityType) -> bool>,
     /// A SEttings keyword at the prompt, and what it does.
     settings: Option<fn() -> CmdResult>,
+    /// The sets gathered before the current one, newest last (the Undo keyword).
+    history: Vec<Vec<Handle>>,
+    /// The Group keyword was given and the next text is the group's name.
+    awaiting_group: bool,
 }
 
 impl SelectObjectsCommand {
@@ -64,6 +68,8 @@ impl SelectObjectsCommand {
             associative_dimensions_only: false,
             keep: None,
             settings: None,
+            history: Vec::new(),
+            awaiting_group: false,
         }
     }
 
@@ -83,6 +89,8 @@ impl SelectObjectsCommand {
             associative_dimensions_only: false,
             keep: None,
             settings: None,
+            history: Vec::new(),
+            awaiting_group: false,
         }
     }
 
@@ -102,6 +110,8 @@ impl SelectObjectsCommand {
             associative_dimensions_only: false,
             keep: None,
             settings: None,
+            history: Vec::new(),
+            awaiting_group: false,
         }
     }
 
@@ -121,6 +131,8 @@ impl SelectObjectsCommand {
             associative_dimensions_only: false,
             keep: None,
             settings: None,
+            history: Vec::new(),
+            awaiting_group: false,
         }
     }
 
@@ -206,6 +218,9 @@ impl CadCommand for SelectObjectsCommand {
             )
             .into_owned();
         }
+        if self.awaiting_group {
+            return t!("%{cmd}  Enter group name:", cmd = self.prompt_cmd).into_owned();
+        }
         if self.commit_on_enter && !self.handles.is_empty() {
             if self.auto_constrain_settings {
                 return t!(
@@ -283,7 +298,12 @@ impl CadCommand for SelectObjectsCommand {
                 CmdOption::new(t!("Remove").as_ref(), "R"),
                 CmdOption::new(t!("Previous").as_ref(), "P"),
                 CmdOption::new(t!("Last").as_ref(), "L"),
+                CmdOption::new(t!("Group").as_ref(), "G"),
             ];
+            let mut options = options;
+            if !self.history.is_empty() {
+                options.push(CmdOption::new(t!("Undo").as_ref(), "U"));
+            }
             options
         } else {
             Vec::new()
@@ -294,7 +314,9 @@ impl CadCommand for SelectObjectsCommand {
         if self.commit_on_enter {
             // Keep gathering: remember the running set and update the prompt.
             // The command is applied when the user presses Enter / right-clicks.
-            self.handles = handles;
+            if handles != self.handles {
+                self.history.push(std::mem::replace(&mut self.handles, handles));
+            }
             return CmdResult::NeedPoint;
         }
         // Single-object variant: apply on the first non-empty selection.
@@ -323,13 +345,36 @@ impl CadCommand for SelectObjectsCommand {
         if !self.commit_on_enter {
             return None;
         }
+        if self.awaiting_group {
+            self.awaiting_group = false;
+            let name = text.trim();
+            return Some(if name.is_empty() {
+                CmdResult::NeedPoint
+            } else {
+                CmdResult::SelectGroup(name.to_string())
+            });
+        }
         let word = text.trim().trim_start_matches('_').to_uppercase();
         if let Some(settings) = self.settings {
             if word.len() >= 2 && "SETTINGS".starts_with(word.as_str()) {
                 return Some(settings());
             }
         }
+        let selection_keywords = self.show_options && !self.auto_constrain_settings;
         match text.trim().to_uppercase().as_str() {
+            "U" | "UNDO" if selection_keywords => {
+                Some(match self.history.pop() {
+                    Some(previous) => {
+                        self.handles = previous.clone();
+                        CmdResult::SelectSet(previous)
+                    }
+                    None => CmdResult::NeedPoint,
+                })
+            }
+            "G" | "GROUP" if selection_keywords => {
+                self.awaiting_group = true;
+                Some(CmdResult::NeedPoint)
+            }
             "S" | "SETTINGS" if self.auto_constrain_settings => {
                 Some(CmdResult::OpenAutoConstrainSettings)
             }
@@ -423,3 +468,69 @@ inventory::submit!(crate::command::CommandRegistration {
         "TXTEXP"
     ]
 }); // SelectObjectsCommand
+
+#[cfg(test)]
+mod keyword_tests {
+    use super::*;
+
+    fn keywords(command: &SelectObjectsCommand) -> Vec<String> {
+        command.options().into_iter().map(|o| o.keyword).collect()
+    }
+
+    fn h(v: u64) -> Handle {
+        Handle::new(v)
+    }
+
+    #[test]
+    fn undo_steps_the_gathered_set_back_one_selection_at_a_time() {
+        let mut command = SelectObjectsCommand::new("ERASE");
+        assert!(!keywords(&command).contains(&"U".to_string()), "nothing to undo yet");
+        command.on_selection_complete(vec![h(1)]);
+        command.on_selection_complete(vec![h(1), h(2)]);
+        assert!(keywords(&command).contains(&"U".to_string()));
+        match command.on_text_input("U") {
+            Some(CmdResult::SelectSet(set)) => assert_eq!(set, vec![h(1)]),
+            _ => panic!("expected the previous set"),
+        }
+        // The host hands the restored set back; that is not a new selection.
+        command.on_selection_complete(vec![h(1)]);
+        match command.on_text_input("undo") {
+            Some(CmdResult::SelectSet(set)) => assert!(set.is_empty()),
+            _ => panic!("expected the empty set"),
+        }
+        command.on_selection_complete(vec![]);
+        assert!(!keywords(&command).contains(&"U".to_string()));
+        assert!(matches!(command.on_text_input("U"), Some(CmdResult::NeedPoint)), "consumed, nothing to undo");
+    }
+
+    #[test]
+    fn a_new_selection_after_undo_replaces_the_undone_one() {
+        let mut command = SelectObjectsCommand::new("ERASE");
+        command.on_selection_complete(vec![h(1)]);
+        command.on_selection_complete(vec![h(1), h(2)]);
+        command.on_text_input("U");
+        command.on_selection_complete(vec![h(1)]);
+        command.on_selection_complete(vec![h(1), h(3)]);
+        match command.on_text_input("U") {
+            Some(CmdResult::SelectSet(set)) => assert_eq!(set, vec![h(1)]),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn group_asks_for_a_name_and_selects_that_group() {
+        let mut command = SelectObjectsCommand::new("ERASE");
+        assert!(keywords(&command).contains(&"G".to_string()));
+        assert!(matches!(command.on_text_input("G"), Some(CmdResult::NeedPoint)));
+        assert!(command.prompt().to_lowercase().contains("group name"), "{}", command.prompt());
+        match command.on_text_input("Walls") {
+            Some(CmdResult::SelectGroup(name)) => assert_eq!(name, "Walls"),
+            _ => panic!("expected the group request"),
+        }
+        assert!(!command.prompt().to_lowercase().contains("group name"), "asked once");
+        assert!(matches!(command.on_text_input("GROUP"), Some(CmdResult::NeedPoint)));
+        // An empty answer drops the question.
+        assert!(matches!(command.on_text_input(""), Some(CmdResult::NeedPoint)));
+        assert!(!command.prompt().to_lowercase().contains("group name"));
+    }
+}

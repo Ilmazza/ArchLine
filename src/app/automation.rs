@@ -4246,6 +4246,66 @@ mod tests {
         assert!(lines.iter().any(|(_, b)| (b[0] - 20.0).abs() < 1e-9), "copy scaled: {lines:?}");
     }
 
+    /// Two lines gathered in the group "Walls" and a third outside it.
+    fn app_with_a_group() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        for line in ["0,0 10,0", "0,5 10,5", "0,20 10,20"] {
+            app.automation_op(&format!(r#"{{"op":"run","cmd":"LINE {line}"}}"#));
+            let _ = app.update(crate::app::Message::CommandEscape);
+        }
+        let mut handles: Vec<_> = app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .map(|e| e.common().handle)
+            .collect();
+        handles.sort_by_key(|h| h.value());
+        app.tabs[0].scene.create_group("Walls".into(), handles[..2].to_vec());
+        app.tabs[0].scene.deselect_all();
+        app
+    }
+
+    fn entity_count(app: &OpenCADStudio) -> usize {
+        app.tabs[0].scene.document.entities().count()
+    }
+
+    #[test]
+    fn erase_group_keyword_selects_the_group_members() {
+        let mut app = app_with_a_group();
+        run_line(&mut app, "ERASE");
+        type_line(&mut app, "G");
+        type_line(&mut app, "Walls");
+        type_line(&mut app, "");
+        assert_eq!(entity_count(&app), 1, "the two lines of the group are erased");
+    }
+
+    #[test]
+    fn erase_unknown_group_changes_nothing_and_says_so() {
+        let mut app = app_with_a_group();
+        run_line(&mut app, "ERASE");
+        type_line(&mut app, "G");
+        let start = app.command_line.history.len();
+        type_line(&mut app, "Nope");
+        let said: String = app.command_line.history[start..].iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("
+");
+        assert!(said.to_uppercase().contains("NOPE"), "got: {said:?}");
+        assert!(app.tabs[0].scene.selected_entities().is_empty());
+        assert_eq!(entity_count(&app), 3);
+    }
+
+    #[test]
+    fn erase_undo_keyword_takes_back_the_last_selection() {
+        let mut app = app_with_a_group();
+        run_line(&mut app, "ERASE");
+        type_line(&mut app, "ALL");
+        assert_eq!(app.tabs[0].scene.selected_entities().len(), 3);
+        type_line(&mut app, "U");
+        assert!(app.tabs[0].scene.selected_entities().is_empty(), "back to nothing selected");
+        type_line(&mut app, "");
+        assert_eq!(entity_count(&app), 3, "nothing selected, nothing erased");
+    }
+
     fn line_with_modifier_none(app: &mut OpenCADStudio) {
         use crate::app::Message;
         app.automation_op(r#"{"op":"new"}"#);

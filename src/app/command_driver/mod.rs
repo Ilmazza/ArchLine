@@ -82,6 +82,7 @@ use iced::Task;
 
 pub(super) mod clipboard;
 mod stretch_grips;
+mod select_sets;
 mod constraint;
 mod dim_edit;
 mod entity_commit;
@@ -929,6 +930,8 @@ impl OpenCADStudio {
                 closed,
                 crossing,
             } => return self.handle_select_by_path(path, closed, crossing),
+            CmdResult::SelectSet(set) => return self.handle_select_set(set),
+            CmdResult::SelectGroup(name) => return self.handle_select_group(name),
             CmdResult::Relaunch(cmd, handles) => {
                 dispatched = self.handle_relaunch(cmd, handles);
             }

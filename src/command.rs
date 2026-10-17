@@ -2286,6 +2286,11 @@ pub enum CmdResult {
         closed: bool,
         crossing: bool,
     },
+    /// Make exactly this the selection set and keep gathering (the Undo keyword
+    /// of a "Select objects" prompt).
+    SelectSet(Vec<Handle>),
+    /// Add the members of the named group to the selection (the Group keyword).
+    SelectGroup(String),
     Relaunch(String, Vec<Handle>),
     /// End the command and dispatch the given command string. Used by an
     /// interactive front-end that gathered its arguments step-by-step and
