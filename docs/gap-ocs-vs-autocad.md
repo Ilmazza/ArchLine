@@ -1,5 +1,8 @@
 # Analisi di gap: ArchLine (Open CAD Studio) rispetto ad AutoCAD classico
 
+> **Superata il 2026-10-17 da [parita-autocad.md](parita-autocad.md)**, che usa l'indice ufficiale dei comandi AutoCAD 2026
+> e guarda cosa fa il codice, non solo i nomi. Il §5 di questo documento sopravvaluta DATAEXTRACTION (vedi lì il §4.4).
+
 Stato: prima stesura, 2026-10-07, su `lavoro` (efff3cfc). Per Mauro Mazzarelli: serve a decidere **cosa fare dopo**,
 non è un elenco di difetti. Le priorità del §7 sono una proposta, la scelta è tua.
 

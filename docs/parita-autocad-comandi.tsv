@@ -1,0 +1,989 @@
+comando	stato_archline	area_se_assente	express	pagina_autodesk_2026
+3DALIGN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-26823DD2-BAA5-4494-81A0-713B746DD94B.htm
+3DARRAY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-824FE05E-A1C8-4944-8092-A73F4A94B646.htm
+3DCLIP	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EB201BB0-E1DD-41C5-AF2D-F7EB97CF666B.htm
+3DCORBIT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-37B17D6B-2B21-4D41-9769-27CDEBD663D2.htm
+3DDISTANCE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-34CE9B45-F3CB-44BE-978B-6450C5D0B194.htm
+3DDWF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8D5FEF23-3399-4948-98FE-B3DDCF50E269.htm
+3DEDITBAR	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5A1D1B60-B9DF-447F-BA38-188EE797EF9B.htm
+3DFACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5E88BB23-9110-45FB-B54A-3FF2E2002585.htm
+3DFLY	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6A1B8B91-AF54-419D-9AD0-0CCE864FC971.htm
+3DFORBIT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8EE0E22A-1D66-40C6-9AEB-78F74AEB47E7.htm
+3DMESH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BA35CABA-6FDF-419C-AE83-9E28690A4B15.htm
+3DMOVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-35FD374D-CD9F-4EC6-B50E-7C368B67DFB5.htm
+3DORBIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-85CE824C-0AF4-4890-8487-ADBC92BF08F1.htm
+3DORBITCTR	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-85427F3B-0880-4B28-9E26-85BE84FFEB80.htm
+3DOSNAP	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D2C4AB61-9F54-4513-9921-B959815C6C5E.htm
+-3DOSNAP	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-94EC3384-D47B-418D-BBF4-FA54CF3BCB93.htm
+3DPAN	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8D216DAA-9C16-4C7C-949A-A244E104B1D3.htm
+3DPOLY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-10E0EDAB-BF4C-442C-93DA-E516F6DEAA7B.htm
+3DPRINT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-117F46FA-AD52-4436-8972-63E419C72F86.htm
+3DPRINTSERVICE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-68587522-C86C-4C41-B973-E68D950C6F76.htm
+3DROTATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A16B7027-1346-480F-AFDC-3A3A89EB08D8.htm
+3DSCALE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DCF3573A-268A-42D3-92F7-7B8A290C8427.htm
+3DSIN	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A28A2118-11C4-49D3-B8E5-A99EE46C1D32.htm
+3DSWIVEL	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D73E5086-144A-42F4-A7AB-2506BFA562EE.htm
+3DWALK	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6AFE55B7-C031-40C7-AB11-A2EE566A65F9.htm
+3DZOOM	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0F2FE0AA-01AD-47B2-9923-06AACECEC8FD.htm
+ABOUT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CDBAD44E-F661-430C-A99E-192B83D41C10.htm
+ACADINFO	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6921516E-3158-43AF-9612-CA7A8BBD6FAC.htm
+ACISIN	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22CE4285-C2BC-437D-BBCC-5E66250C74D7.htm
+ACISOUT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2C08F928-710D-4E3D-B02C-EDFF67C28809.htm
+ACTBASEPOINT	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F2AC63E6-7DA4-4501-A6A7-BC152392256C.htm
+ACTIVITYINSIGHTSCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-236D94C3-FAD9-4F45-832F-A76D71C0EAB6.htm
+ACTIVITYINSIGHTSOPEN	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8FB3681A-F022-466E-B5C6-C13B0758EA3A.htm
+ACTMANAGER	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1DA03958-D894-4FD4-BCA2-42C5517D2FE3.htm
+ACTRECORD	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FC7560BC-9367-49C2-A813-288AC89E8907.htm
+ACTSTOP	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-94B6E003-B7BF-4A65-8E62-AF92D757C43B.htm
+-ACTSTOP	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D90F7325-5000-4CFC-9529-6BCCFFCDA88C.htm
+ACTUSERINPUT	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6E613662-D0B1-4AD2-803A-15C00070FDDE.htm
+ACTUSERMESSAGE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9893C613-2DD1-4E14-B830-1DEF59D971F2.htm
+-ACTUSERMESSAGE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-240E7E85-69FC-4919-863E-4E041B7A460B.htm
+ADCCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5ACFF611-AC97-4EBA-AA23-83530C0EFE26.htm
+ADCENTER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-00527F82-BE93-4E36-AA2E-35B042059347.htm
+ADCNAVIGATE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FE421165-22DD-4030-AEC1-2A5B0934326A.htm
+ADDSELECTED	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-771C0F16-58B6-4752-A05D-792FE5D76050.htm
+ADJUST	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0EB806F7-5FA0-4944-B39D-A7B2A5F6B346.htm
+ALIASEDIT	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-34DAD04D-7CA2-43B6-9287-885E61B7C918.htm
+ALIGN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D0FA10D5-76EE-4B80-A285-43C7F39916DB.htm
+ALIGNSPACE	assente	viste, layer, viewport	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D5F8E293-F8A9-4E45-9441-87A21487A68C.htm
+AMECONVERT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3535641E-8090-41C7-A910-200C559D5720.htm
+ANALYSISCURVATURE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-98134942-122F-4874-BE3D-7EA35A603DA0.htm
+ANALYSISDRAFT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C28E9ECC-289A-4CFF-8D6C-DB2AD004EDBA.htm
+ANALYSISOPTIONS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-975AAD9B-6979-4F72-ADBF-FE30C92E6523.htm
+ANALYSISZEBRA	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-59583A47-B141-42FA-9B8D-E7591CB81F8B.htm
+ANIPATH	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4B806FDB-C6BC-41FF-879B-148F44E09D14.htm
+ANNORESET	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-47705AD0-651E-49AA-B23E-D12529D5BA1F.htm
+ANNOUPDATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-574C4E2C-C261-44EB-8E10-A01E8D1BB0C8.htm
+APERTURE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C8603032-7E55-4EEF-B2DF-CD2FD9EDEF91.htm
+APPAUTOLOADER	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CD3386C1-9E69-4C88-8BE6-046C081AEB41.htm
+APPLOAD	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-47621BB1-F29D-4A69-9C99-A6E1495FBA38.htm
+APPSTORE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-51D7FD80-6761-44CA-99B1-61EC5F5F8218.htm
+ARC	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-30ECFD30-A1D6-4D60-9DD1-B487603F6772.htm
+ARCHIVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BBC54E74-523D-49BF-BA4A-C32847218625.htm
+-ARCHIVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22509544-FC8E-4E87-9BFA-F9D896B96557.htm
+ARCTEXT	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A1031C92-383E-41E7-80E0-9673D987EF2F.htm
+AREA	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0591351F-8750-425C-9F1C-98B1C73D9D55.htm
+ARRAY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E23F6125-E5E9-4645-9615-23717902C33B.htm
+-ARRAY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8336B4CD-5375-4290-BD08-7D9E022741F6.htm
+ARRAYCLASSIC	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-01258C43-66E4-457E-BBD3-F7A670BC5F54.htm
+ARRAYCLOSE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D3E79D10-2151-45F4-AD49-A598DAB80723.htm
+ARRAYEDIT	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BD2D21A1-ED66-4A1A-B1DE-551D41C5D7E3.htm
+ARRAYPATH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D36C46CD-4E17-4A16-A387-C0B158EA5A9E.htm
+ARRAYPOLAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A6E74297-2CB3-4B1C-A07B-69CD08630052.htm
+ARRAYRECT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BB3DA888-0C3A-4C68-A3ED-E0E528781205.htm
+ARX	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-477DDABE-C3D3-47A2-B481-60401C50492F.htm
+ASSISTANTCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2C5BCE28-7CC1-4A0F-8E12-FDC6BDECE2C2.htm
+ASSISTANTOPEN	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-476DD718-E097-40F3-B1D9-765987D7F6FD.htm
+ATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-928B7980-2174-4F1E-8059-9F1B1884E7C8.htm
+-ATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A58A40E8-6586-4025-8F76-E05AA0E67B9A.htm
+ATTACHURL	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-14669460-2D12-46A0-8DA1-DEE70953A58C.htm
+ATTDEF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-19B6B720-B40B-42B6-A521-888C1A383F34.htm
+-ATTDEF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5C99524B-B5BB-4067-AE18-BD3575F29DBF.htm
+ATTDISP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BCFF32DB-6860-4812-BEF1-3BB658126B26.htm
+ATTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AB03D5EE-6B27-492A-8147-671D0F536CB5.htm
+-ATTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B1B9504C-A75A-4CF4-8D12-C193C1D9CDD0.htm
+ATTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6FEA6520-430E-47E2-BA16-305508495156.htm
+-ATTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BE49A430-DACA-4B9C-A0B0-34EB55D0EE26.htm
+ATTIN	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2B54F825-CD42-4707-883A-8EFA97F4AB3F.htm
+ATTIPEDIT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-42CA78B8-1A02-4C1E-97E2-A31F4CD3014B.htm
+ATTOUT	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-899B195A-EFF0-4AEC-B0F8-7444EC75D649.htm
+ATTREDEF	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CB8237C2-EB63-4839-9B84-5B890C979CBB.htm
+ATTSYNC	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-56B14079-250B-4C99-AB3D-F95BA1C32AB7.htm
+AUDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-62DDB935-61B1-49DA-8238-3EF1CC45259B.htm
+AUTOCONSTRAIN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2E53F0A6-640C-4B3A-A650-18F1A5F781E1.htm
+AUTOPUBLISH	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F51F83E2-304F-461F-9EA5-6DDB05321E65.htm
+BACKGROUND	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3CF98FC0-7A2B-4C12-86ED-2A263011598D.htm
+BACTION	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-98CCB318-60F6-46C9-8F90-C2B8614553C4.htm
+BACTIONBAR	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-91A5FCE7-E8B1-495D-8F3E-72BF184A2B63.htm
+BACTIONSET	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6A08174B-1ED3-4BB6-8093-02F3AC92F1B3.htm
+BACTIONTOOL	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-86B3A05A-B637-440D-8310-49915CB09BF2.htm
+BASE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C44D8156-1A45-43A4-B0DC-65DB48371381.htm
+BASSOCIATE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D2B17901-1FF8-4683-B38B-6FF84BCCA6DC.htm
+BATTMAN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-40613EEB-3049-4B39-AD1D-457146EEE0CB.htm
+BATTORDER	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-93CA12A7-41AA-41CB-B84B-6C1C5FC146E7.htm
+BAUTHORPALETTE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F583E874-59A9-43E5-BF71-C313DBAABCEF.htm
+BAUTHORPALETTECLOSE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2A496147-BFF0-4B97-8167-C1D21B9EC1CD.htm
+BCLOSE	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C63C7855-B666-4B99-B371-F58786E1E5A8.htm
+BCONSTRUCTION	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C3E47F1B-C6A0-46A8-BA1E-66801D1F703C.htm
+BCOUNT	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2C2991B4-779F-4FEE-9E55-8B0D6B62DEF8.htm
+BCPARAMETER	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F22AD919-40DF-4AC3-8339-CD212D79EB94.htm
+-BCPARAMETER	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-046DDE9D-A13E-45C9-92EF-62D61B61A02D.htm
+BCYCLEORDER	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DCE0441E-A6F5-4307-B5F2-DD73B0455FA0.htm
+BDETECT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6E72038E-140D-4FDC-8C65-8942DEB03FBC.htm
+BEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D57D4195-72FC-4FA5-B9F4-E021291D808C.htm
+-BEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8140793D-79BF-4A31-B062-3F1F6B6A2EB4.htm
+BESETTINGS	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-86714B3E-3450-48F0-9DB9-C5FDD9897E6E.htm
+BEXTEND	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-ADFAA9DC-B6E9-456C-B5C7-984639963A06.htm
+BGRIPSET	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6795C9A3-CB54-4513-9C77-32C967B49F7E.htm
+BLEND	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9EF74C66-88CA-4C16-B761-CB1119C0F897.htm
+BLOCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B03434BE-0F68-4E31-BA8D-640EEC1D7FC9.htm
+-BLOCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-816B2D9C-F518-4E8B-971F-08E0E43006E7.htm
+BLOCK?	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5DAE4FA4-808E-4E1F-8565-3D115B406226.htm
+BLOCKICON	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-144172C9-FCC6-4326-B69B-39E269DF1F25.htm
+BLOCKREPLACE	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C2E32C55-28E4-4FC5-BCCA-F141D5AAA614.htm
+BLOCKSDATAOPTION	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4B0812A4-DC54-4262-9BAF-1BFAE2FF6252.htm
+BLOCKSPALETTE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-77C0C748-2152-476D-BC78-A7FB193D7330.htm
+BLOCKSPALETTECLOSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5ECF72B1-69E6-434B-BFEB-808E9F721E4A.htm
+BLOCKTOXREF	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C951209B-2844-4618-A4B3-EEBFEBB57868.htm
+BLOOKUPTABLE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C894797E-3FC5-42AB-8C62-2971B68E6EB4.htm
+BMPOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8E2BAC74-5B7E-4A50-A225-3C44AA126509.htm
+BOUNDARY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5072D0D0-5DB7-4649-8B2F-1FD5A3FA3643.htm
+-BOUNDARY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B95DD3D4-BDEA-40C0-85CD-1C1CD61BBDA7.htm
+BOX	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B9B2875-3CA1-448D-ACF2-94C503DA54C6.htm
+BPARAMETER	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E4460179-F0FC-4AC6-85D7-35B05D018D16.htm
+BREAK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-36A1CDE0-3871-4B25-AC98-93235FA83863.htm
+BREAKATPOINT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0439DE0-B2C3-4233-BB4D-5A574A00694B.htm
+BREAKLINE	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-88667D3B-C98B-4C02-85F4-232DD4950841.htm
+BREP	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AE581A57-7045-41AC-B1C4-3E8FDED0ACBA.htm
+BREPLACE	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9856FE72-45DC-4EDC-A808-EB9FD79A9F78.htm
+-BREPLACE	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-06BD6E4D-5060-4628-B4DC-88BE802AD32E.htm
+BROWSER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-261973D6-B582-4584-9175-37500A336A20.htm
+BSAVE	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4571EA8F-A188-4676-9648-8D6F455480DA.htm
+BSAVEAS	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-02A68BE5-AD95-475C-AB10-D3AC806C4DB0.htm
+BSCALE	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-63398207-C02F-480B-BB91-F7AB4C24011C.htm
+BSEARCH	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22BD7584-47CD-4D31-8AA5-52637ABAC3CD.htm
+-BSEARCH	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6C8167C4-2849-4823-8003-37B3C79941F5.htm
+BTABLE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CA2F55B9-5EE2-44FF-A3FD-673B84602BC2.htm
+BTESTBLOCK	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0F0D71D2-99E2-4B57-8AA6-41A0C9F878ED.htm
+BTRIM	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4F925A89-6163-43F4-BB51-B0527E5E9983.htm
+BURST	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B576DFE-377C-408C-B6BE-672EE46AEED2.htm
+BVHIDE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0842E5F-5F7B-4015-B46D-1F9172826958.htm
+BVSHOW	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2E2946C7-0F8F-4592-B398-4EBA2E4250C3.htm
+BVSTATE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D99B6173-7399-40D0-8EDF-F271025E4C43.htm
+-BVSTATE	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-02DEB284-3E53-4AFA-8924-87864CBB330B.htm
+CAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-335A5FC6-7D8F-47CA-B479-26655CDEA1AD.htm
+CAMERA	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DACC085F-C72C-4F7B-9C3A-CDAF972FEF29.htm
+CDORDER	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-06C097F8-0482-4675-8910-664BC87B4AC3.htm
+CENTERDISASSOCIATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-96FD0416-DE6C-4220-990B-7F88A5703166.htm
+CENTERLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D717F995-1A6E-40AA-851A-FF891DE21DED.htm
+CENTERMARK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B9BBA2FD-FEB8-4793-8039-D65CD30D8264.htm
+CENTERREASSOCIATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E2CC39DA-55B6-4108-A394-86707DCFDE01.htm
+CENTERRESET	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F6C8DB68-5A6B-44BB-AAEE-6CFE03909A58.htm
+CHAMFER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B1DCF991-90A7-4DB0-96FC-BDA3FB76337C.htm
+CHAMFEREDGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9CE971E3-1CCF-4212-9CD7-EA2606529206.htm
+CHANGE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0D1BC415-5CDC-449D-8019-885F654FB1B5.htm
+CHECKSTANDARDS	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F47E5F56-88BE-4FC2-A0D6-D35E8DFAC7A6.htm
+CHPROP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-05074362-FC4B-4582-A7A4-B3F6170BB4A7.htm
+CHSPACE	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-343F7917-6CED-4823-8E38-90895FF740EB.htm
+CHURLS	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A12668EB-396F-4637-AC24-9975642E48F5.htm
+CIRCLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C60B6D5D-AAEB-420F-917F-6E6B47E92F48.htm
+CLASSICGROUP	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-12F72970-3EAC-4E83-A237-1EFA73807FF5.htm
+CLASSICIMAGE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C36F6E33-401F-437C-A3A7-449B0162048A.htm
+CLASSICINSERT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C032DA5B-E1FD-4443-BF60-815CABA8733B.htm
+CLASSICLAYER	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-12A5AAE3-65A1-4DB4-98C5-A9675C330481.htm
+CLASSICXREF	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-19675BE4-E59A-450F-8995-01D959CDDEA1.htm
+CLEANSCREENOFF	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C9CDCC6-8B1E-471D-9F6F-E1160F9AC3A8.htm
+CLEANSCREENON	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1D51E778-88BF-4614-9711-D7890B4E79F7.htm
+CLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A8E1834D-2A1F-4C2A-92CF-B6A3424DB1B1.htm
+CLIPIT	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1200C4A7-53EC-43C3-8667-749E83FCDD35.htm
+CLOSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-947A6040-0C95-413C-A1A3-2115D244B246.htm
+CLOSEALL	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E5BAAD2B-C4E5-4DF0-A483-95C8AD89BE91.htm
+CLOSEALLOTHER	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3E5E969F-1546-4B9D-80F0-E46319DCD5EB.htm
+COLOR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F12EF623-7CD3-4864-8130-A3BF718D730D.htm
+-COLOR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-94630133-72B7-4EC7-859C-5798F1ADBB8C.htm
+COMMANDLINE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E2D3C5EC-19AF-4694-84B4-2A36EF6A2E3D.htm
+COMMANDLINEHIDE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7F755A31-02FF-4BCE-B073-CAD39A9B669E.htm
+COMMANDMACROS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F7A4A421-6B72-4005-B9A3-0EB8DCDCF7DF.htm
+COMMANDMACROSCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-72DD30DD-3618-433C-8FA8-1B2521908727.htm
+COMPARE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4B96F5FD-C9CF-4E2E-996E-E00914F8D99E.htm
+-COMPARE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5EBAB3C3-AE1F-42FC-BE56-F018E2E17E0E.htm
+COMPARECLOSE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FC244EA1-6580-46C1-91B4-9F67F6E97929.htm
+COMPAREEXPORT	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-21DDB9BA-29E4-4781-BBC5-D5D800B371BA.htm
+COMPAREIMPORT	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A1EC80D4-173A-4D1B-8922-3B6A9E98FFE9.htm
+COMPAREINFO	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-63CE0EAD-4FCE-49C4-A24B-449CD5787402.htm
+COMPILE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-54F4D0CE-EC71-42DA-A56E-469252287C12.htm
+CONE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EF480870-AE25-4D6E-9E54-4708D711C127.htm
+CONSTRAINTBAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-078525BD-6684-4709-9FB1-E128AFCAB983.htm
+CONSTRAINTSETTINGS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BFDACE2C-1494-4275-B8A4-FAA143BFD5C4.htm
+CONVERT	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-16097276-A292-4AFD-BA08-29F735FDB091.htm
+CONVERTCTB	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4386F6C6-CE6D-4C62-8EC3-E68B8738E537.htm
+CONVERTOLDLIGHTS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-03D2843F-3FB5-488C-BA33-6C45EE1FA299.htm
+CONVERTOLDMATERIALS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-667D8E9E-6F68-4124-8673-76FA8E8B74A0.htm
+CONVERTPOLY	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F3FAA27B-A9E9-46C9-BBED-857A8DCF8409.htm
+CONVERTPSTYLES	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3A68A211-1E6C-4A71-8503-62722A1155A6.htm
+CONVTOMESH	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-810D73BD-1C40-4985-AF31-60D9857F6E64.htm
+CONVTONURBS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0900AE84-39CD-4DC0-8B14-913BC350178B.htm
+CONVTOSOLID	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7A9C2DEA-961C-413D-BC20-D00654457599.htm
+CONVTOSURFACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7AF911DF-986F-4897-8651-921BE8710B14.htm
+COORDINATIONMODELATTACH	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-389266F7-F981-4354-BCDB-369D34FF0EDA.htm
+-COORDINATIONMODELATTACH	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FE727B97-4918-480C-9C90-DF148371BE47.htm
+COPY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1CF9287F-06E8-4D03-8377-2E130862FE02.htm
+COPYBASE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-59113CD3-B5EC-404B-989C-F98F4B70EDB5.htm
+COPYCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8C693775-7BB2-48D6-9A6B-770F8A870707.htm
+COPYFROMTRACE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-982D3DA5-3212-4A0F-8776-57C5B028CF50.htm
+COPYHIST	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2B86E8F7-B846-4113-B9EE-1F5010A8515D.htm
+COPYLINK	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-17979B4A-4887-420D-8658-41AB87460C50.htm
+COPYM	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B850134A-4669-4FCC-8CE6-A233B5337F63.htm
+COPYTOLAYER	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0A1C99AD-53BE-4272-AD32-DAFECAECD6F7.htm
+-COPYTOLAYER	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4327BDE7-58FB-4199-93D4-ECD356C0E89E.htm
+COUNT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3A0C3460-6ABC-4D13-BF1F-D2BFCD399851.htm
+COUNTAREA	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DF9EC102-60A9-46D2-8A8C-7ED08140472E.htm
+COUNTAREACLOSE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CF3BD46E-EFB5-48C1-806A-956A88FC2D98.htm
+COUNTCLOSE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2E02F8AA-DCD8-4AF2-B6C5-93987E250B39.htm
+COUNTFIELD	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A27E1B7C-8D82-480F-A35D-E45CC5AECC1A.htm
+COUNTLIST	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-86778E28-1E40-4C06-80E8-FDEF2F0E3D38.htm
+COUNTLISTCLOSE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-01900DB9-2C5B-4BC7-BD5F-750FA427C2D1.htm
+COUNTNAVNEXT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B077D951-61E2-40BC-8705-61F82F2B8D46.htm
+COUNTNAVPREV	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-58570EEF-5478-4017-AE39-5556BD6D69C6.htm
+COUNTTABLE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EA75F772-B340-4052-930E-9317EFC59DB6.htm
+CUI	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7F8F4B26-EFAF-4033-B7B7-CA39FC4E104A.htm
+CUIEXPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AD49B73D-5534-42CB-8D12-ABA91248642F.htm
+CUIIMPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BF2F3165-E8D7-4A87-863C-F831ACAF1F81.htm
+CUILOAD	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B5969D87-7FE8-47B4-A02F-38E7897A6CB4.htm
+CUIUNLOAD	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-23680536-A347-424E-A583-A9EA40EC9503.htm
+CUSTOMIZE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-82119B43-CCB5-4C52-8B57-D2F479A384F0.htm
+CUTBASE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1383482F-C675-468A-B3C1-75276E3FF9EA.htm
+CUTCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5F5CB4BE-68F7-478A-A41A-7EEC65851BD7.htm
+CVADD	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-84231102-AE32-4C30-814C-D99BD49B11E4.htm
+CVHIDE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-26F8F318-4490-498E-81B4-4A2570284DAD.htm
+CVREBUILD	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-87C4201D-9437-41A8-9954-D27A91D19DD5.htm
+CVREMOVE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7BF8CDE4-9440-4860-9D84-9341006E600A.htm
+CVSHOW	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D2C0E238-992F-4DBD-926B-56466F73C8E4.htm
+CYLINDER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-81157F00-D5A5-4307-AD0C-4332066DE2AE.htm
+DATAEXTRACTION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5A39FFE8-10AC-4AE5-8EF4-D097C8261D1A.htm
+-DATAEXTRACTION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FCF91624-D9DB-4D07-8958-6A8E823E3888.htm
+DATALINK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E6AD1DCE-6A0A-4714-808E-FA4D895C2E7B.htm
+DATALINKUPDATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1F8FE1F0-5229-4A5C-B69F-DA47CC9C25A9.htm
+DBCCLOSE	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-32DF0138-7F5E-4C67-A5F1-89B4C4F2AB1F.htm
+DBCCONFIGURE	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-527B5B1F-9306-4EAF-9DA9-249519E4408F.htm
+DBCDEFINELLT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CE34922F-6149-453C-8975-9234C25B9F6C.htm
+DBCDEFINELT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F0A2A37B-3484-4AF8-9C3A-E48F513CF304.htm
+DBCONNECT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-56352196-BB2D-47A1-B091-5BD367A6F195.htm
+DBLIST	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AD6A2435-FF3C-4A75-BBDF-D335BA2714BC.htm
+DCALIGNED	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-615063B5-1E07-4756-A367-64C743BF3810.htm
+DCANGULAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B62A01C2-4AD5-49EF-AA4F-891A4D681796.htm
+DCCONVERT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4523380B-A6D7-4F08-869B-293277B23BFF.htm
+DCDIAMETER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EE1A1D15-05D3-4459-827A-6E1F07C6611D.htm
+DCDISPLAY	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-09A78C85-9F99-4346-9DB9-F637C4F22D97.htm
+DCFORM	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-15259693-4C27-4B50-8C8B-67AA4F34E418.htm
+DCHORIZONTAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C6410EED-6B06-4139-BD02-217B46675C67.htm
+DCLINEAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E64A038C-0928-4E8E-BC60-356FDF86CFFB.htm
+DCRADIUS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C0FE6334-7C41-4382-8C28-3EB776CDCACB.htm
+DCVERTICAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9ADCF482-CDFE-453E-A48E-BCDDDB801B42.htm
+DELAY	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C352A9F4-0057-43AD-9642-9BAA881224F8.htm
+DELCONSTRAINT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E47B6F79-C7DA-45ED-AFA6-6C0945DB6375.htm
+DETACHURL	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-51D50D97-AA7F-4201-AB57-20424F7F2F07.htm
+DETECTCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-940A6C03-953D-47D7-9CD9-83F5B3078000.htm
+DETECTCONVERT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-90D4816E-58EC-494A-87A0-345FF25A4065.htm
+DETECTPRIMARY	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-91E949ED-F5F7-4375-9CD0-EB27D584E3DF.htm
+DETECTREMOVE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3FE11ECF-E549-49D8-9DC8-88FD69CE6F37.htm
+DETECTREVIEWNEXT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-680E8FEF-540F-46A5-9B68-91ADFE2A4C55.htm
+DETECTREVIEWPREV	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5070F9F4-B6B3-4D08-961B-494734A4C190.htm
+DGNADJUST	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0424CD48-345B-4134-9382-66E65D8E7EF5.htm
+DGNATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-39114E63-84C1-4A5F-BB85-3639E6F04527.htm
+-DGNATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-05666320-4737-4599-9D0A-03165E161657.htm
+-DGNBIND	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-757D2268-C0BB-465D-A304-321FCFEE80A1.htm
+DGNCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5345F9BC-A0AB-489D-95CE-EE5871BFA4FC.htm
+DGNEXPORT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-70E12630-4067-41E0-8D38-E165B5AD139E.htm
+-DGNEXPORT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9E309147-34D2-4222-8D91-BC8AF7383CA1.htm
+DGNIMPORT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0B1EC8D0-A34C-4F4E-8E72-A71656F7EF55.htm
+-DGNIMPORT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9211BFCA-B2AF-42FE-A4E4-5BEA213BBD34.htm
+DGNLAYERS	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DED7F1A9-B176-4188-9807-915C9B0AFA1D.htm
+DGNMAPPING	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0B1BC4E3-A19C-4794-9D35-AA6788C2CDC0.htm
+DIGITALSIGN	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-52550D2E-2F2C-4116-833F-99058BF102E0.htm
+DIM	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-45C1A271-9650-4927-858F-B3BDB19B3E6C.htm
+DIMALIGNED	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D7C05A85-8985-4576-B22C-5A795DD5B179.htm
+DIMANGULAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6AB63ECB-BBCB-4D0F-B7BE-1674349A1FF9.htm
+DIMARC	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-280C95BF-1CD6-451C-8093-C70ECBF8D7E7.htm
+DIMBASELINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-19EA3161-D4A0-4280-9707-0A003C5B8A90.htm
+DIMBREAK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-926915C5-C398-46C6-A5D8-16F0D5791760.htm
+DIMCENTER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A1362329-04E0-4715-B8DA-D1486C80D81F.htm
+DIMCONSTRAINT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3208AA9B-A1D0-4541-B045-3D81CF6336C2.htm
+DIMCONTINUE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-27CF5248-EECB-4F5E-9A25-39ED399EA1EC.htm
+DIMDIAMETER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2E64616D-5C96-46A6-BDA2-9782F9036BE3.htm
+DIMDISASSOCIATE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A4291410-170D-4DB7-96AA-01B18B67B31C.htm
+DIMEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4C422870-32A1-457B-8D1E-BD4AF7967FF1.htm
+DIMEX	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9DD96CAB-D7FE-4018-AA60-6309A2D4F6D3.htm
+DIMIM	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B5EDCC6-0985-4461-860B-E38F7E2C5098.htm
+DIMINSPECT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CC40F9D5-D70D-41D0-8AEC-3775045A502E.htm
+-DIMINSPECT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A8AC3ACB-6722-44E1-B4F8-1E4F1CE45B78.htm
+DIMJOGGED	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3FC7CFBD-DAAC-48E0-8C4E-1DC795A34D12.htm
+DIMJOGLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0FC8D2AB-18BE-4E93-A697-5350FDBC4226.htm
+DIMLINEAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E908848F-4621-43D2-B377-FD3FBC2B8848.htm
+DIMORDINATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7F5C4A2C-117A-486B-A26E-6F8AC2BD9D8A.htm
+DIMOVERRIDE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-07B907AA-C94D-492C-8C4F-D73CB503F59E.htm
+DIMRADIUS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-99EED401-D7DF-4CF3-95ED-BBD107A13855.htm
+DIMREASSOC	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9D2D79DD-D8A9-4856-8459-4361B5A99655.htm
+DIMREASSOCIATE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8CD54B4A-4BA6-40E8-819D-DDBC013114B8.htm
+DIMREGEN	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-02EA1694-1141-45E2-8EEA-274701F00D31.htm
+DIMROTATED	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-79E3EEEE-4F8E-4370-848A-AFD4E0DF17B8.htm
+DIMSPACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-18DF8B02-3E43-4531-ACE0-75FA7161F209.htm
+DIMSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-39D6E54F-E12F-46A4-9DD1-68D9357289E4.htm
+-DIMSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-61AD7FCE-E7C5-401E-BAA4-3059F914FAD9.htm
+DIMTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B70E17BC-E284-4FD3-9F3D-A9F18C022BDE.htm
+DIST	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A72EADC7-EF79-463C-B4F1-862C6139B004.htm
+DISTANTLIGHT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CBFE8B69-3744-4BC0-BEA8-915FAD90532D.htm
+DIVIDE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3427CA9F-831C-4B53-A903-49EB6378335C.htm
+DONUT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-46C0F9F2-6112-415C-AB2C-29EEE5984A6F.htm
+DOWNLOADMANAGER	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-76354652-821C-449D-A950-68FE08CDC2F2.htm
+DRAGMODE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-602C614D-2857-4DC3-98DA-3F1D5623988D.htm
+DRAWINGRECOVERY	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A7CA7E0F-70CB-41D2-8E56-4484A27CB3E6.htm
+DRAWINGRECOVERYHIDE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-707A5EA3-6D36-4CDD-9E43-07B5B188C696.htm
+DRAWORDER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3DC76D6E-8F81-4803-8D0A-AA7541D6357E.htm
+DSETTINGS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22D029BC-354B-4D7D-B800-B5308C377D6C.htm
+DUMPSHX	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CF541EED-CFBA-47EA-9A1A-CDE17D14FB20.htm
+DVIEW	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0078D09-8449-4A0A-A5AD-6984A01CEC33.htm
+DWFADJUST	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-60EDB2E8-046A-4811-B340-6305970D61B9.htm
+DWFATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-28E5C393-E0C3-45DF-A82A-0A78DB916619.htm
+-DWFATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8CBD320C-1A80-43A0-B8C1-BC9A35AC5960.htm
+DWFCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-35C28583-A6F7-4D8F-801A-CB1FE24F72DC.htm
+DWFFORMAT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AED4E528-9976-4716-91F8-A849956F128E.htm
+DWFLAYERS	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3523DCB4-1365-4FAE-AB3B-D7A180ABBAB0.htm
+DWGCONVERT	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1C2163A6-29CC-4EC2-974C-5B6017B948C4.htm
+DWGLOG	assente	file e qualita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B63A635F-DA7D-4D84-8DE6-52861F03A180.htm
+DWGPROPS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2A98E78A-9E43-4DE8-8327-BF1BF803B4B7.htm
+DXBIN	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9EB8FC2A-50E9-4555-8ADD-80DB8D4DE8AB.htm
+EATTEDIT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5878AFFC-100D-4D6E-BFA2-A08BF68A11B1.htm
+EATTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-30D85568-2BCF-4F6C-A95E-FC6F394C5D3A.htm
+-EATTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-912DAC33-2FBA-4830-B94F-5D25EC740AFE.htm
+EDGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7B71EC97-47C1-401B-B1A7-10B47318CE34.htm
+EDGESURF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8AFC0220-D8D8-49B1-8820-4380586364E6.htm
+EDITSHOT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C0F8788-183D-4E24-98C3-1FC152630D4F.htm
+EDITTIME	assente	file e qualita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C2311B0-808D-4605-BE73-0A1500EE28D8.htm
+ELEV	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EE3D7937-2CD7-4F0F-BC8F-0AA0DC306EAE.htm
+ELLIPSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-45F9C588-2BA9-414D-8AFD-FB6B448BF273.htm
+ERASE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-040C580C-63A2-4C98-9964-4573EF8C9514.htm
+ETRANSMIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-413A58AD-C86F-432F-A4AC-A2737237001A.htm
+-ETRANSMIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B6F7102A-4C14-45F0-B3B4-D5E5E4086EE5.htm
+EXOFFSET	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1D9AD685-C0BC-48D8-A978-3BAAFA2E8138.htm
+EXPLAN	assente	viste, layer, viewport	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3FD011D0-2AB5-4C46-8302-19F91DD2EC87.htm
+EXPLODE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E98BCEF4-DED6-48A6-87EB-10FE87188083.htm
+EXPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A72DB257-3410-4792-B548-6B9FC1DED72B.htm
+-EXPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EC98464B-D222-4673-BBE1-AF4B20EBF150.htm
+EXPORTDWF	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5A044F50-C31B-442B-A232-13FF6248A39D.htm
+EXPORTDWFX	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DF787DAC-2A78-43E6-82F2-7604F91C26FC.htm
+EXPORTLAYOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8A07D165-559E-4DF2-B2A9-42BD6AE2DB70.htm
+EXPORTPDF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E9CB4A20-A2AF-4395-A070-610A84853D48.htm
+EXPORTSETTINGS	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F71C40AA-7B9F-4ACC-BC8D-A67C396C58EE.htm
+EXPORTTOAUTOCAD	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-86C80CA1-F237-4AE6-8A43-2E9CA06A03A8.htm
+EXPRESSMENU	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-217A106D-7D26-4960-BDD9-E17EFE427FDD.htm
+EXPRESSTOOLS	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-87BF0045-6446-48C6-8413-DE025596396E.htm
+EXTEND	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-89DD7B0F-F4F1-410D-9A3A-5847CA5F8744.htm
+EXTERNALREFERENCES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7947385D-1A5D-4474-9AB9-FD5E46ADEF53.htm
+EXTERNALREFERENCESCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3E60812F-8EFA-4D94-8DAE-B8A20AC3B411.htm
+EXTRIM	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-06651AD3-F159-430E-81E5-AEB8E775C19E.htm
+EXTRUDE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-85FD1106-8F10-4EE8-B0FB-99F1E3AEE405.htm
+FADEMARKUP	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D8793553-96C2-4177-A082-5359A4A85F45.htm
+FIELD	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-742C92C3-1284-4722-B650-C46F9191C701.htm
+FILETAB	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1A2A6927-5916-4207-A3FB-379A94A27527.htm
+FILETABCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-76F07387-6685-4E07-9843-473AEBCE8D43.htm
+FILL	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A09941AF-919C-4E72-96F4-3DF3C11922DE.htm
+FILLET	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-64F8B700-23B3-4BD6-8C03-66121AA13E8F.htm
+FILLETEDGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0546E8D5-6775-436C-B91A-57A2D8D75A59.htm
+FILTER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-61BA6C74-7C01-49D4-AD9F-180E039AA984.htm
+FIND	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6E9F237C-C93D-4E68-BCBA-31E78B2349A0.htm
+-FIND	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F207F801-0111-49C1-9A79-2AD3C8746EE1.htm
+FINDINCLUDE	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-33B7E791-5910-4260-8A91-EA069AA9138B.htm
+FINDMATCH	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-578736D2-2CC8-4971-9C2B-688771C127B8.htm
+FLATSHOT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-746F10D2-7CFD-412D-B51F-33574C773B95.htm
+FLATTEN	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-84039380-7A83-4969-9465-73C6C8784C1E.htm
+FREESPOT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C1DFCAC8-C52F-4D9A-AA30-C88D13715D2B.htm
+FREEWEB	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3AC71AD8-911F-43FC-8A94-47018B7281F5.htm
+FS	assente	utilita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A4FBF4EC-DE23-46A2-A576-AEED0E9847D4.htm
+GATTE	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EABA451D-1351-416A-88CE-2E5C12C14B44.htm
+GCCOINCIDENT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0309B988-6BDF-4AF5-8386-E04D68DC30D8.htm
+GCCOLLINEAR	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-43FD615E-81AC-4A7F-AC01-3EF28761EFBB.htm
+GCCONCENTRIC	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4591668B-A351-4652-AEF4-6DCF956FAE79.htm
+GCEQUAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EC45334F-107B-4169-882A-447F43762005.htm
+GCFIX	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-99AB929E-9E93-4723-B108-FAE839FA0331.htm
+GCHORIZONTAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CC9A57ED-E3C6-42C3-BED2-BEDC2E17E6F0.htm
+GCPARALLEL	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9C3E2565-FCE9-49D9-BD81-F473DA7932B3.htm
+GCPERPENDICULAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2EA9ED8A-D8EF-4607-9625-8CF064D8C486.htm
+GCSMOOTH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-090F12A3-D325-43A0-BDB3-078947849C6E.htm
+GCSYMMETRIC	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8ACB8055-9288-4063-9F54-8745CD8DF7A2.htm
+GCTANGENT	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5B067A03-9DF0-4143-8444-F62BA90DE5F3.htm
+GCVERTICAL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C0A6EF16-473C-4C63-9A3B-C312520EACF2.htm
+GEOGRAPHICLOCATION	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-10A3B776-A0FA-4438-B29B-EA22C070A27E.htm
+GEOMAP	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DEF7EA7B-6A4B-4520-9A6F-08A944F78218.htm
+GEOMAPIMAGE	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-092F0E5E-BBA9-4A4E-ACF0-4779808C4384.htm
+GEOMAPIMAGEUPDATE	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-79DFA423-8546-4DD4-9A23-1C0F0B9DF607.htm
+GEOMARKLATLONG	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-845EBCCC-5367-4B35-A30A-3E72584C5940.htm
+GEOMARKME	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7FC15721-B9DD-454C-A040-7A25D7E4A28E.htm
+GEOMARKPOINT	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-65CF58B6-A65D-499E-BE43-1DBDA18CAA34.htm
+GEOMARKPOSITION	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C4F3F5A1-B1F1-42A0-BB60-43146278A89A.htm
+GEOMCONSTRAINT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D79452FB-DDA7-44C0-A9EA-F4EA656022D2.htm
+GEOREMOVE	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AF24B18E-6871-486E-A676-14D4DFFA3A80.htm
+GEOREORIENTMARKER	assente	geolocalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8D59534A-43C0-454E-9ABC-FAA46BF0FA05.htm
+GETSEL	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C5227693-40C1-4AB8-A84A-BD53AA6B7963.htm
+GOTOSTART	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E70589F5-35DE-4688-9CE0-EDEA94525740.htm
+GOTOURL	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B5E72B5A-C971-4099-ACC4-76E5EB13645B.htm
+GRADIENT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1AE69094-DFEF-4361-9B1D-E3F5448CCB02.htm
+GRAPHICSCONFIG	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3DCD7A3D-5CE8-413D-80ED-37DE73F607E3.htm
+-GRAPHICSCONFIG	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0A5B89D1-0A3F-4895-8392-4FAF876D5048.htm
+GRAPHSCR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-01D6B038-6372-42D5-BC80-7EB26393E349.htm
+GRID	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7EC38AD6-FA34-4115-9E1C-6F13E1BA033D.htm
+GROUP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-23E1D601-0814-46A4-BC1D-02162957BF7B.htm
+-GROUP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2AED1AD1-95C7-4445-9975-4632D809B53C.htm
+GROUPEDIT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9228E5A6-4929-42DB-8A48-420632E95F28.htm
+HATCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-27C104F2-B687-4025-B50B-A58E37329832.htm
+-HATCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-410ECEBF-7CC2-4000-A45E-18F1F6BEE423.htm
+HATCHEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2424838A-4B9D-4577-84E7-AE7949DA31AF.htm
+-HATCHEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B2F5A812-81A8-48C2-83E1-C21708732CD5.htm
+HATCHGENERATEBOUNDARY	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B441A558-F685-4CE8-950A-C368678B60E1.htm
+HATCHSETBOUNDARY	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7154390E-EF9F-41E6-8DAE-321D6C03A37A.htm
+HATCHSETORIGIN	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-64137838-F62E-461B-BFB1-12A7793A9C8B.htm
+HATCHTOBACK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F4A78D17-6BE6-4906-990C-4446268F4570.htm
+HELIX	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C6FE985E-8978-4D11-8490-D81CFB323CDD.htm
+HELP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-60C67B97-FC11-4FCD-BE40-A16E82D55076.htm
+HIDE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C44F850-51AC-498B-B7A5-DDD361F415CC.htm
+HIDEOBJECTS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-48199A62-90B6-48C6-93E1-5ECF56EAF8B5.htm
+HIDEPALETTES	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0C234107-7EBC-44EE-876A-6A4C0CC17DFE.htm
+HIGHLIGHTNEW	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6D863F55-669A-4A65-807E-E4D305097A1D.htm
+HLSETTINGS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5FE86582-3202-4221-9F90-0022685CE268.htm
+HYPERLINK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-68C8EEED-2FA2-4100-AE03-F8B1C40431E1.htm
+-HYPERLINK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AA172BC1-5402-4884-8697-6EE4490B2FB8.htm
+HYPERLINKOPTIONS	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-657896C5-DD7C-4B42-A595-8B8209EA1F16.htm
+ID	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F258AC00-5E9F-4B6B-A670-33F7708E3FB6.htm
+IGESEXPORT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C3F00D33-08E9-47DB-9608-94A366E48319.htm
+IGESIMPORT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0C73F1E2-B4F6-4F11-BCC4-22631E616693.htm
+IMAGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-97CD5FCC-7ED8-4AA7-93F2-8C60791ED5C6.htm
+-IMAGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-304332F2-A8EE-462A-9FE3-2A265096BA8D.htm
+IMAGEADJUST	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FA5F80B3-1581-40DF-BFEA-E6383A9266CE.htm
+-IMAGEADJUST	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-27E2796C-642F-4649-A903-5FE6597263C4.htm
+IMAGEAPP	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-025B47FE-3A59-4BA4-8853-F9D34B80AE36.htm
+IMAGEASYNCWAIT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BE447BB9-476C-416E-9C0E-773589B02A2B.htm
+IMAGEATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0F75E36F-6138-424C-9510-5847CE1D8852.htm
+IMAGECLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9D652E1A-29F8-49BC-ABCC-37B9F1C7A1D0.htm
+IMAGEEDIT	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D57BD5D4-FA6E-483E-BB72-6747964CC5B5.htm
+IMAGEQUALITY	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-19368CF1-3845-4E62-B408-B5036853C261.htm
+IMPORT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-81A5EE76-39A7-40A4-A5C5-E4921C03B33A.htm
+IMPRINT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E5C27F09-F481-4F18-B1D2-26ACFECB159F.htm
+INPUTSEARCHOPTIONS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8679C971-4CFA-40E7-82BE-5EE281747559.htm
+-INPUTSEARCHOPTIONS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3B84DB63-C960-45CF-A8E1-3BB405CF3A46.htm
+INSERT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B840AB4A-91E2-4FEC-900A-33E40D1E1925.htm
+-INSERT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BB831F94-6385-4490-8DE9-7C565CD1B639.htm
+-INSERTCONTENT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B5D64510-561E-4FA9-8AD6-625445CCD81F.htm
+INSERTOBJ	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-697B4875-F1C5-4C7C-A7C6-4D14DC1123F7.htm
+INTERFERE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FF1ED01E-9AB5-455F-8E84-2F01C2EA3B62.htm
+-INTERFERE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A3EDAAAF-7963-46B6-8EC7-6B0F3E6654C3.htm
+INTERSECT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-904008EB-D92A-4B69-B79F-6C3A033DB3DF.htm
+ISODRAFT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-061FA171-5425-481C-B24C-887C4E195A7B.htm
+ISOLATEOBJECTS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-12C177FC-E8D1-44C0-9199-A9D46FC2DA39.htm
+ISOPLANE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9B1EEA63-BEC1-413E-B69F-541B5865F1A1.htm
+JOIN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4D2A28C3-3E7F-4830-BE6A-7C9907C95488.htm
+JPGOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1A2C1CB7-2323-456E-AF23-1FBA900E5EFC.htm
+JULIAN	assente	utilita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-65FBB1A0-F94D-4F75-A56D-3E5BD055ADF8.htm
+JUSTIFYTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-72F7D0C0-20B3-4F70-998A-794ABEAE431C.htm
+LAYCUR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EA22341E-62F1-4C7D-9B14-F83526433C64.htm
+LAYDEL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A24D1310-E176-4A1E-943C-47211C07F94A.htm
+-LAYDEL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D34784C7-4C6F-4DCE-B0F2-A26E97BD01F0.htm
+LAYER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9123091A-2DCB-4DE8-983C-F7CA38FA67BE.htm
+-LAYER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2C75A883-10CA-4B6C-96AC-BCD7A7794614.htm
+LAYERCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9D0D75C7-3717-4358-9987-66B90DA1F093.htm
+LAYERP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F266407A-0894-4930-9544-8D4087FD66B9.htm
+LAYERPALETTE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DD91EB0C-5D3E-421E-BAB0-F4C2C292FD66.htm
+LAYERPMODE	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-249DBD51-2A59-4932-9E63-591C293D7FE9.htm
+LAYERSTATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F1453A4F-C184-40D9-9EE1-E1149812501A.htm
+LAYERSTATESAVE	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CA2A1FF0-0BF9-4D47-B268-23261B289035.htm
+LAYFRZ	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E7DB1E23-EB54-4DB7-B168-7725DFE6F100.htm
+LAYISO	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E24B9866-9538-43BF-A3DF-AA7E2341C624.htm
+LAYLCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D011ADFD-CB4B-4F29-954A-EF2246C1DFB2.htm
+LAYMCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-73F158B0-8401-4CAE-9204-94C36DF6D409.htm
+-LAYMCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EB2CEB75-FF85-4719-94DF-9A9DC8BFA8A7.htm
+LAYMCUR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E44FA50E-DB98-48C4-AE6B-052ED7287497.htm
+LAYMRG	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7D66940F-EC67-4DEC-89BC-82B887EABD6E.htm
+-LAYMRG	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0976544F-76F9-444C-86D3-91BEAABECCD8.htm
+LAYOFF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BAE680D0-9AD5-4952-A139-B81732D7B5FB.htm
+LAYON	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-575562DA-547E-4247-8616-2F6684838B77.htm
+LAYOUT	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BCE3AD90-9DE0-488C-9CA4-5FDB9401DCE0.htm
+LAYOUTMERGE	assente	stampa e pubblicazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-72D755E1-D065-403F-86CA-7730E539BB82.htm
+LAYOUTWIZARD	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-70FBE671-9B34-436E-A6B0-04C7A58D2057.htm
+LAYTHW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8590F14F-49DE-40B1-AC90-44EB49ECC9AE.htm
+LAYTRANS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-83CFD677-78F3-492F-A5A3-5A0197D2FA2C.htm
+LAYULK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6B23C58C-F9D1-4926-A691-0447EC506E1F.htm
+LAYUNISO	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0795CBC9-7A9D-4A36-B49E-244C146FF6EA.htm
+LAYVPI	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DFCF08D6-5E63-4EC4-85D5-B1BA32008A36.htm
+LAYWALK	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5682CC98-D131-43B0-9E46-3A403E6FC087.htm
+LEADER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BC466DEE-ACD8-419A-B017-AB3065336AD7.htm
+LENGTHEN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-76C74C62-DBAA-41E7-8422-F0EE7E769638.htm
+LIGHT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3239B8C2-E81A-4F08-90FE-C303234EC313.htm
+LIGHTLIST	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-46B14BC9-5EED-4175-ABE4-9D8BB967F111.htm
+LIGHTLISTCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-49126197-1723-47AB-876E-7F652678066B.htm
+LIMITS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6CF82FC7-E1BC-4A8C-A23D-4396E3D99632.htm
+LINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E8C1190C-A26C-484C-ADDD-DDF81666F69F.htm
+LINETYPE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1D3817A0-C5C7-4D52-99A9-F0922F09D4CD.htm
+-LINETYPE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A6089331-227F-44F1-BA0C-06BC1568C3BB.htm
+LIST	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-88FFCF22-5F25-48D9-BD43-4F248EFFCE17.htm
+LIVESECTION	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2913E7CC-0542-45FB-ADEA-06B991C38696.htm
+LOAD	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B372C134-AD7E-4C28-8D3B-602FF2681B57.htm
+LOFT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0A041818-2E32-4212-A3D8-CE0361C3D229.htm
+LOGFILEOFF	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5F7F109E-56A2-4DC2-8641-7478C24EA7EB.htm
+LOGFILEON	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2FB60E75-7926-4344-91DC-B2A1D9F52163.htm
+LSP	assente	LISP/VBA/.NET (fuori scopo)	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5B95C736-E2C4-4FC7-B623-C259A0D2F608.htm
+LSPSURF	assente	LISP/VBA/.NET (fuori scopo)	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6AE44949-5301-424A-A91E-9FD1A824DC3D.htm
+LTSCALE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-47B3793A-37BF-45FC-94CB-670433ADD366.htm
+LWEIGHT	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DFDA9EE3-D303-44AE-973F-1AA57A9BB06E.htm
+-LWEIGHT	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B67E6B06-D2FE-49FB-8289-96DBD74F8A0C.htm
+MAKELISPAPP	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1A8B50AA-1DEA-4853-AAA8-09AF0827A0ED.htm
+MARKUP	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B48AEB0-7BB2-47F9-B09C-90BD5246FB0E.htm
+MARKUPASSIST	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B8F1A10-82C1-4FB8-BC0D-8E22CA25A97F.htm
+-MARKUPASSIST	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-26A9073B-A2E2-4E2C-AB90-53614C9F9795.htm
+MARKUPCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3D73A8F8-13A0-4FBE-A345-034B50291D8D.htm
+MARKUPIMPORT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-193B08A6-74C5-4DB3-A80D-499746344B3B.htm
+-MARKUPIMPORT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5B1F0D89-D858-45DB-89C5-4093037DF959.htm
+MASSPROP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CAA51229-293E-4A0C-BFF3-93226252CF13.htm
+MATBROWSERCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F9F8F880-34BC-4F52-AF98-86EB63E2C360.htm
+MATBROWSEROPEN	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-905808B6-5A00-44D4-9C93-914B41688250.htm
+MATCHCELL	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-20B456B6-921D-4D52-85DD-0457B22160E9.htm
+MATCHPROP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BD476C7C-2CA4-4FB2-8A9E-EAAD5A072445.htm
+MATEDITORCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-07E1F8D5-6840-4428-97CE-37917A5271D8.htm
+MATEDITOROPEN	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-31215BDF-E805-4AAF-A9BA-12CA1B48F62E.htm
+MATERIALASSIGN	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FAB3820A-E322-4056-B13B-5045BA5BA55C.htm
+MATERIALATTACH	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C8761059-E777-46E2-A2F1-AAB0EAF0FF15.htm
+MATERIALMAP	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C9DFF585-97CE-4380-A41F-B632FA8EA9F6.htm
+MATERIALS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6239681A-C4E4-4515-9578-23B6EDFF6A80.htm
+MATERIALSCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6ECF14D2-7642-4997-8FE3-E6F6F6313E22.htm
+MEASURE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-212933E8-BC53-4872-A3DC-32C48DE1B2D0.htm
+MEASUREGEOM	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5D5B0EE1-DD90-47AE-8A55-642FBFF5E4E4.htm
+MENU	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9EF6BC00-4C90-47CB-BF93-6FC382FA9E81.htm
+MESH	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C0251558-62FC-4169-ADA2-DED728278556.htm
+MESHCAP	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A9EC33F4-D6BF-45D4-AF68-DCA81D3B0BBE.htm
+MESHCOLLAPSE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-134A56D9-6F56-4DE0-BF65-96A974E35337.htm
+MESHCREASE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F176266D-C615-4A0B-95ED-E8FBE1D4E392.htm
+MESHEXTRUDE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5F78E17E-06B7-4157-909D-5CBED1570246.htm
+MESHMERGE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-11D222C2-7393-4C5F-97A1-8E0D530D81D0.htm
+MESHOPTIONS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-13AAC2AF-74A1-4717-9BD0-8FC5B955DF37.htm
+MESHPRIMITIVEOPTIONS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-68A76726-05AF-47CF-B219-EFEAF856BE66.htm
+MESHREFINE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-36077075-B5DF-452E-A9C1-8575A4763864.htm
+MESHSMOOTH	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8823F3EB-A053-437A-94DB-081B654B8F3F.htm
+MESHSMOOTHLESS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D8F075B5-3714-4C45-9564-4F2716BE3815.htm
+MESHSMOOTHMORE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FE5AAF13-EC5D-4EDF-A888-A1CF36486B95.htm
+MESHSPIN	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A4B6F1FF-68C3-433C-831A-E184667F4C3F.htm
+MESHSPLIT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-09A02699-5AAB-40E9-B6DE-B8976708D2A8.htm
+MESHUNCREASE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CD7FDDA6-DC23-4E1C-9607-45CB2DDC8434.htm
+MIGRATEMATERIALS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-32007B6A-8B73-4F8C-A7DC-E72B6C646A74.htm
+MINSERT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A780A2FA-4A2E-4574-950F-E788AB71F527.htm
+MIRROR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-595277C8-9B87-4CFB-A3AF-769537A22F3D.htm
+MIRROR3D	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E769E87D-8502-4A1E-B6F8-03889F26F944.htm
+MKLTYPE	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C094008-385C-459D-818A-05A2169D13DF.htm
+MKSHAPE	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-829B0626-36AB-443A-B53C-D7227297C6CE.htm
+MLEADER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-764DA12B-1280-4D1A-8673-F9F8A136CB83.htm
+MLEADERALIGN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-14A45038-97CF-4583-9803-75EECF72CD13.htm
+MLEADERCOLLECT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CFD5E822-9F89-475D-8724-E0843EE4C5D4.htm
+MLEADEREDIT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9B157447-A952-42A2-AF68-98CC7B6F12FD.htm
+MLEADERSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9435FC8D-7811-4C12-A9D7-7FCEF7A149A4.htm
+MLEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BDA85006-C833-4165-85A0-1788A92BC912.htm
+-MLEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-92446C44-2F3B-464B-8F8E-6CD8D96BC8EC.htm
+MLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A6839A41-0D81-44F2-953A-220307F9380A.htm
+MLSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-548AD96E-53E5-4635-B6F8-0317407B843F.htm
+MOCORO	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-385D1161-6A07-432E-B69B-71C7D19409F5.htm
+MODEL	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2FC06AB4-8085-407E-A54B-D44057AEDC3B.htm
+MOVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-47CE7325-84C0-4414-80A3-29DC98392709.htm
+MOVEBAK	assente	file e qualita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7AE17A04-8D2D-4BCE-9FE9-175F5BFEA0B9.htm
+MPEDIT	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-01661FA3-466E-47C6-B6FF-CBF0F29D1CD2.htm
+MREDO	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B7FA1535-51E4-4980-A6F7-CDF98C86B3B6.htm
+MSLIDE	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4AD7EF13-2B81-453B-BB80-9E2BBE7ED2DB.htm
+MSPACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4FFCC0F6-ACA4-4C14-90BA-15A04E5ECA80.htm
+MSTRETCH	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F91739FD-8944-40FD-A243-4BFFA12577CF.htm
+MTEDIT	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-435E2E51-D38D-4717-91F2-8229F32676B6.htm
+MTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E6BCE05D-B9E3-4875-BBBC-29134EA6FD51.htm
+-MTEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F94BE932-DA31-437E-9610-27F46ACD5711.htm
+MULTIPLE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-60331A1C-1CD0-4626-BC56-F33D0A3683E9.htm
+MVIEW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-731B2752-B9E2-443E-816A-9B4851296455.htm
+MVSETUP	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D76CD04B-12FB-4E25-8C8B-B70F4904D1D6.htm
+NAVBAR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-90981580-5028-4E74-A117-21EFA734017F.htm
+NAVSMOTION	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4663E071-6D64-4892-AD27-8E629834535B.htm
+NAVSMOTIONCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D5523743-5292-40A3-A07A-901E462392D5.htm
+NAVSWHEEL	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-07D418EE-9508-41F0-A7A1-46EDED94D10F.htm
+NAVVCUBE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3889B35C-790A-4C95-9DF2-174CB956D227.htm
+NCOPY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-12FCCFDF-9B3B-48D0-AC46-DF1D3519B0E5.htm
+NETLOAD	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D954BCC1-C4F0-488B-8F60-1D02D68940E0.htm
+NEW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-90BE41A2-7FFD-44DB-A927-B7A9277C75C2.htm
+NEWSHEETSET	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2E32E0F4-E351-402A-BFA3-974B14F7B004.htm
+NEWSHOT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AE028758-AF87-474E-ACB9-5E3ED57EFEA6.htm
+NEWVIEW	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F465283F-5208-4E6C-970E-C7460C3ECBB6.htm
+OBJECTSCALE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-96A4233D-438F-467C-A259-7B249C89950E.htm
+-OBJECTSCALE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-56A9DC12-D049-4384-BDD3-E8D60091AF36.htm
+OFFSET	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C0E4246D-C420-42BD-A6FC-8B1852EFD005.htm
+OFFSETEDGE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F18EAB59-3921-429A-80CE-567AB8918E81.htm
+OLECONVERT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3D953E45-345E-4A8A-9E6E-C47056F58236.htm
+OLELINKS	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4D05CD71-D894-4FC4-A7FC-7962159A94E8.htm
+OLEOPEN	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4D4BC523-461A-46C9-A92B-CE3DF7AA7C54.htm
+OLERESET	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DE1FEACE-92AA-4B3C-B896-1A899C79EE5B.htm
+OLESCALE	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-34E48823-4A29-428E-A85C-7B5D6488DED9.htm
+OOPS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0E72CDCD-9ECA-453A-8A04-CA2921740270.htm
+OPEN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3738384A-3047-4532-866C-23D3FFF3AA45.htm
+OPENDWFMARKUP	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D27DCF31-179A-42A4-A59E-FA50C2392B0E.htm
+OPENFROMWEBMOBILE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-79C33702-07E6-4261-92E1-D69595ED1B6D.htm
+OPENSHEETSET	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F22CB49D-7F81-4EBE-A6F0-8EBC55C9721A.htm
+OPTIONS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0504CE1C-7B56-4094-B90B-C8000E680EF9.htm
+ORTHO	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-128AC5D7-72B0-498F-958D-7F619A73EC5F.htm
+OSNAP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CF5780AD-D1AB-4526-9608-83D7952749E7.htm
+OVERKILL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-44B9ECFC-752C-4CC5-9DA3-84DBF3B17CA6.htm
+-OVERKILL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0916FE53-F816-4C40-AA5E-5E8CBFD7F73F.htm
+PAGESETUP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F5AFE4EB-9A1D-4938-AE4F-F37FD5587DE3.htm
+-PAGESETUP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8BCC8A24-E396-4FFB-BA91-10D8DCB3359E.htm
+PAN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2F05DC89-7065-4655-BA49-AC149B0F5E1A.htm
+-PAN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E7E03AF4-6AEA-405E-8FC4-4C271E6F599A.htm
+PARAMETERS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9A7DB9D7-A577-45DB-B176-F1F2297814D6.htm
+-PARAMETERS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-552B93BC-1F01-46B4-8A55-91196EEF909B.htm
+PARAMETERSCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9D53789F-0468-45F9-ABD9-8CA78827878D.htm
+PARTIALOAD	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4AC37B22-86C9-4CF9-9DB7-4B1E511918B5.htm
+-PARTIALOAD	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C72F21B8-5720-43FA-AC4C-E19DA3E37A84.htm
+PARTIALOPEN	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-762EC6D8-29AC-4797-B8BE-8C3AF5BE84FB.htm
+PASTEASHYPERLINK	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E7CA3B34-BE5D-44CB-AFAE-5A220EB5911F.htm
+PASTEBLOCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B5717F8B-096E-4880-9C35-745168992DE8.htm
+PASTECLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F7A49705-42BC-46AC-922A-862EE6836CCF.htm
+PASTEORIG	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7B4B41C4-E9E2-40D5-936F-6BF591E7A2A8.htm
+PASTESPEC	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0223840C-D96F-41E9-8D33-1CEFA8D07B3C.htm
+PCEXTRACTCENTERLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-256B8CF8-AE03-4D76-9A8B-78A39400CFB4.htm
+PCEXTRACTCORNER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-14D33BF5-DA2A-4788-A8B7-86477972977C.htm
+PCEXTRACTEDGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4567D48E-590E-403A-AAC2-0579E4592672.htm
+PCEXTRACTSECTION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8C66CA40-AA84-439F-9A4F-0D675F2578A9.htm
+PDFADJUST	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9C576B12-7544-4ED4-942D-95F3C8585366.htm
+PDFATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-77D6192C-925B-46A3-8717-240702ED5715.htm
+-PDFATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BF58207C-52B7-437B-87F5-5201939A1AC8.htm
+PDFCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FA342EAF-0D4D-4DA2-81D7-5DCA8DF552EC.htm
+PDFIMPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-02D97F82-47EC-4EE8-9429-E9CF6198EF34.htm
+-PDFIMPORT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-ADEE1DE4-3CEF-432D-95F2-014F326E8B2A.htm
+PDFLAYERS	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3BD29D3C-B645-486F-B88A-E282F3F64A22.htm
+PDFSHXTEXT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A0F80ABD-0F1C-47FB-B7E3-E4C699DAEE83.htm
+-PDFSHXTEXT	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-178F4A46-2D7B-419D-BC4D-F7F3BCA87E40.htm
+PEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0C422AA9-23DD-4650-AD66-68E9D7989E3F.htm
+PERFANALYZER	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4D50F190-E406-4548-8847-2F0B96606EE8.htm
+PERFANALYZERCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-58E00F25-8B26-42B1-922B-802C18CD9DB8.htm
+PFACE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4B0667EF-D8E3-4BD2-A3EE-06CFF164A0A6.htm
+PLAN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3779DF52-AA24-47D2-B72C-018D4A9011DD.htm
+PLANESURF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5E36FD08-A8AC-4ADC-B5BF-6162AE64E3BD.htm
+PLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-11883C70-6435-4F80-8FB4-F6E933B8FD94.htm
+PLOT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-89A23BE8-5844-49F1-A7AB-1DBCF2D75A4F.htm
+-PLOT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-625E395D-143A-494F-A1EA-1BF119B927DC.htm
+PLOTSTAMP	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C2A21C73-CCA6-42E6-8D7B-D2B429046FB0.htm
+-PLOTSTAMP	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C137FAE3-04A1-4BDE-8D64-D4C969E52060.htm
+PLOTSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F77C31FE-9266-4293-A251-A8BA1F91D818.htm
+-PLOTSTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-559D1E6D-23CD-4BF3-A6E4-42FF90E9F2C2.htm
+PLOTTERMANAGER	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EC868B37-1C12-40CD-9C26-1983C91D7C3A.htm
+PLT2DWG	assente	stampa e pubblicazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2D2ECCF3-1CD4-4115-A823-E4B7EC165A0F.htm
+PMTOGGLE	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F0ECB5EE-B0DC-4922-A1B7-6B8FAE6434CF.htm
+PNGOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DC273B67-42AC-4A2A-9001-4825FF268E5D.htm
+POINT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3F5861A1-9A63-42A6-8F12-3395771BAA6D.htm
+POINTCLOUDATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E086391C-6CEA-4B70-A788-7630FD75469F.htm
+-POINTCLOUDATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4FA5FD9C-0683-419A-829F-14249AD64A8F.htm
+POINTCLOUDCOLORMAP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8EB71740-97AD-415F-AAC7-F6D8006CDFC9.htm
+POINTCLOUDCROP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BDD08C89-13C3-4AD4-B3F9-D73965DDA28E.htm
+POINTCLOUDCROPSTATE	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E8460430-A6AA-4969-A8B5-056B243EF0D7.htm
+POINTCLOUDMANAGER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A8CA3DA7-E19A-49C9-95C5-46B29235732F.htm
+-POINTCLOUDMANAGER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4A5A0EDB-B741-4E25-BFF0-251770C553B8.htm
+POINTCLOUDMANAGERCLOSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D2D62D65-B03E-4BD9-80E3-6B924E5E7A28.htm
+POINTCLOUDSTYLIZE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D07C9957-EAF1-4BA7-93F9-CF26AE4376EA.htm
+POINTCLOUDUNCROP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5D1081E1-A0CF-4378-BE4E-8E00773F5DAF.htm
+POINTLIGHT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C685641B-3565-40CC-AAC5-E0578EF9F814.htm
+POLYGON	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E5CD464D-C0DC-4464-BFDF-50C4ABEC8B91.htm
+POLYSOLID	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22AE6A38-3404-4BF4-88C2-42CE3822ACD8.htm
+PRESSPULL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9D072BB2-D97F-41DB-8414-41BC83A16EFA.htm
+PREVIEW	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C66B4986-DEB5-46DE-817A-1D5990FC61DA.htm
+PROJECTGEOMETRY	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F884BC67-070F-4BAD-87EF-A8A77E23FB93.htm
+PROPERTIES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DC3674C5-A4C7-4CF6-9148-9B124DF29B78.htm
+PROPERTIESCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6F265AEA-496D-43B6-8643-D1528E8AF0E6.htm
+PROPULATE	assente	utilita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BD03320F-3430-4C2F-80A3-AAC1167AF019.htm
+PSBSCALE	assente	viste, layer, viewport	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-20C3AD1E-34CC-471C-9842-2C8A3F622907.htm
+PSETUPIN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AD4657F5-6F0D-4BE4-B986-1F3ACB64C593.htm
+-PSETUPIN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7F2B9B98-B3DF-4404-BA01-EBB9F8467729.htm
+PSOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EBF19D46-BF5B-41B6-8930-AD98E5E083AD.htm
+PSPACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-38E17265-2CF0-4A9F-8DF5-BC6A317C3683.htm
+PSTSCALE	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7385C843-BA65-4E9D-9FF6-61753E539416.htm
+PTYPE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2ECD656C-989D-40EE-8D1A-AF010A5CD2A2.htm
+PUBLISH	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EE9F55FF-D253-4AEC-B95B-69DA4EBE90E8.htm
+-PUBLISH	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8FA15020-3D44-4ABC-9708-E5194D2A3EFB.htm
+PURGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D68BA47B-A79D-4F58-9715-0569CC24BCEF.htm
+-PURGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C3876E92-3478-449C-8FAB-DA760B2EDD09.htm
+PURGEAECDATA	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-43A97087-BC81-44D3-AFCA-F9FF675A7870.htm
+PUSHTODOCSCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-540D45AB-5039-4231-B0C9-D64721BA75ED.htm
+PUSHTODOCSOPEN	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C5144996-E3D2-4129-98BB-9B226A5D6E61.htm
+PYRAMID	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DA8A78E3-5954-415A-B279-E1C69F465D87.htm
+QCCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B8DF860D-98B6-44A8-9864-375FF028EB86.htm
+QDIM	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1FB628B7-C2AF-4B6D-B83E-20ADDD70614D.htm
+QLATTACH	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9DBD0CA9-187F-41BB-955C-C6F89A837930.htm
+QLATTACHSET	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-50B5F962-00A6-4D84-A472-A397A801B5BE.htm
+QLDETACHSET	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E33A1FCA-3B6D-4FD5-BE6E-FBB0BD7A6A26.htm
+QLEADER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5FEC133A-5EBD-4EFA-9E44-771E85480DAD.htm
+QNEW	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CF3C039B-CF22-4933-928A-93A3AA71C4FA.htm
+QQUIT	assente	file e qualita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1B0C65A9-F5F3-455E-B700-EA4912E3B2A5.htm
+QSAVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-99900C99-230D-4709-B8DD-A44435328A13.htm
+QSELECT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-40893D34-ADBE-406A-8993-9035F2771F1D.htm
+QTEXT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DFBE6C48-893B-4CE1-9B28-0656FABFAAB7.htm
+QUICKCALC	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0797E82E-FE80-43D6-8464-398725546A2A.htm
+QUICKCUI	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F85443FC-B41F-4B6D-AC8F-698EDC96BCB2.htm
+QUICKPROPERTIES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D3D5A070-C448-4D23-86EF-F2069B342F26.htm
+QUIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EEBB22C5-8F6F-495D-80B1-50D991D010FB.htm
+QVDRAWING	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0DEEC79-D8D3-4B27-B1B7-F9E36180C27E.htm
+QVDRAWINGCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2AF12B5B-9812-4239-A648-64996A80A1DB.htm
+QVLAYOUT	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A8128F99-85F5-498C-90EE-766E7787EBA6.htm
+QVLAYOUTCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B597AF81-02AC-4F1A-8131-DDBEFDDB336F.htm
+RAY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A7A32623-24A4-453C-B3DD-877A6E4D6216.htm
+RECOVER	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-78F5B1AB-583F-410F-85DA-6D03768832C8.htm
+RECOVERALL	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3925BB47-5AB2-4BDB-A5D7-54CF8008B18C.htm
+RECTANG	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-188B2DDA-6CD8-4D37-BF26-E6CF27C34C75.htm
+REDEFINE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E2B53E4D-28AE-4F6E-96E4-6FABE3FF823C.htm
+REDIR	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DA60459B-378F-4A27-BD1F-6290ACA7083D.htm
+REDIRMODE	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0E4D49B7-E701-428D-A279-A32797C2811C.htm
+REDO	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BA4CEE11-D8AD-4644-8488-7CEBCA50AFFE.htm
+REDRAW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6AD77E11-D549-47E7-AE4C-EFE372A0F0C4.htm
+REDRAWALL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8CCABD96-4B68-4678-8E69-0335928DAEF9.htm
+REFCLOSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F75E70EF-31EB-4F69-9FB9-9BBA1EC41EEF.htm
+REFEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2DF3CF4E-63AC-45DF-8E8E-E6912215EEFF.htm
+-REFEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C2F74110-2DA4-46DA-99EB-E89CF32D30B9.htm
+REFSET	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B441D1B3-A1F6-49F7-A43F-B74DB39FAAA2.htm
+REGEN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CC98095F-B4C4-4B25-9097-A7B6EF4260B2.htm
+REGEN3	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-811C3544-0660-41C6-AB93-47DC1E86E5BC.htm
+REGENALL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-27B2FFB6-BC98-43F2-AE8B-332E9C547CA9.htm
+REGENAUTO	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A91310A5-C3D2-43DB-9D4E-0BCE7C138FA2.htm
+REGION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-ADD055CD-D351-424C-91F0-B8E5526B106C.htm
+REINIT	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F68C58E5-9C43-447B-85F0-3918CC346DA0.htm
+RENAME	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-99C5072C-C71E-4BF7-9B3B-69B3BEA07940.htm
+-RENAME	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3C68B0FF-A56F-401E-A58B-6174259252A6.htm
+RENDER	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CFBBB85A-820E-4F4D-B36D-4F65361CFC56.htm
+-RENDER	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-318D7E8B-6ECC-421D-84E3-9CA6961742AE.htm
+RENDERCROP	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D5187468-D7BA-49BD-A7FA-6FE7EB5A80C4.htm
+RENDERENVIRONMENT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1DC47F52-39EA-4AD0-9D69-16EBB37FC81A.htm
+RENDERENVIRONMENTCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8C7E6A08-DD5E-4B62-AD35-FAD3F9A26CAE.htm
+RENDEREXPOSURE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2EA90D18-7A8B-41BE-A207-FD392D4B41E9.htm
+RENDEREXPOSURECLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0D3E242-42C9-4681-8CA2-96ED88B4201E.htm
+RENDERONLINE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B752215A-4E9A-40D5-A159-02FFE86C9060.htm
+RENDERPRESETS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A50FEF2A-0FEA-4207-B091-76BEBDED397D.htm
+RENDERPRESETSCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-551FE653-C249-41B4-80A9-8462EB8CD88A.htm
+RENDERWIN	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D9EF46DB-FC82-4EE2-81C1-A8E00F4B907E.htm
+RENDERWINDOW	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A17D4D1E-C814-4EA3-83B5-80EE3FE8C03E.htm
+RENDERWINDOWCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8C78739A-A90D-4A01-B665-77E116D595EC.htm
+REPURLS	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0F9B7467-74F3-4884-8DFA-747F0D6952E2.htm
+RESETBLOCK	assente	blocchi dinamici (authoring)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3845BE0A-3F39-4D63-956E-0BAD7D195516.htm
+RESUME	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-448BF284-F801-485F-BF76-E8888A9359FE.htm
+REVCLOUD	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7BC6D4B1-5279-4B5F-90E0-AC87DA861E78.htm
+REVCLOUDPROPERTIES	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3E6C3A78-D839-4555-8E0D-721C247D67DE.htm
+REVERSE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EAE8C2C3-B780-4501-9CBD-C06346CC9F2E.htm
+REVERT	assente	file e qualita	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0F2A37BE-752F-4812-825D-FAF595192B7A.htm
+REVOLVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6FF936FD-99BA-432A-A43B-4573FD924AF3.htm
+REVSURF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-669D3ECF-99C7-4109-830D-A9D095A46F25.htm
+RIBBON	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EC71B17B-1C58-4060-9EAA-528B93851022.htm
+RIBBONCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A9EE8263-2DCD-4EC5-9CEB-DCB66EEFBE2E.htm
+ROTATE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1C265537-FBAC-48D5-B448-B72E777071E5.htm
+ROTATE3D	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BEA9136E-DE85-4EBD-BC8B-F2911B29A026.htm
+RPREF	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EA823109-6AFA-4993-9911-71C55A408196.htm
+RPREFCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D806BB9F-DE46-4C0C-A8BE-5BB0CC33D53C.htm
+RSCRIPT	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2C697967-C51E-4615-A670-294C2397949F.htm
+RTEDIT	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4133A11F-C914-43F4-8ADB-B4F0E01AEA73.htm
+RTEXT	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-28585C1C-65B8-41E0-90A3-7C043123EF7A.htm
+RTUCS	assente	viste, layer, viewport	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2750036B-5E46-4D54-8023-8CB263294FE8.htm
+RULESURF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-12A94926-9974-464D-BD50-A5279E8B16DE.htm
+SAVE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-155255B4-ADFA-4C21-958F-601DE09260EB.htm
+SAVEALL	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C3E8083E-6C0D-4975-B05F-BCA5E9AE1FA7.htm
+SAVEAS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1FF801F9-7FEE-4494-854D-4704A7784232.htm
+SAVEIMG	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6BD95B59-9613-46BE-9B9C-424BB577C037.htm
+SAVETOWEBMOBILE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A7507398-50B1-4B00-B79B-EB99A068DACA.htm
+SCALE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D4E17E51-5000-4AB6-8D6A-6D2AB4863C75.htm
+SCALELISTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-97BBBAA5-04D2-4CFC-B64D-999A046CCA1B.htm
+-SCALELISTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BF3A0E9D-E009-45C1-A778-C6148C5CAEC8.htm
+SCALETEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A6C97247-F81C-4D83-BF2B-BE9F6BD55EB0.htm
+SCRIPT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DB55FE5C-6B51-40AE-AE3D-4C3A28ADC5D9.htm
+SCRIPTCALL	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-77FF5E24-4ECD-41D6-BD8A-9DD5AAD468EE.htm
+SECTION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C649EE10-5FE3-4703-9301-C97AEF7C5BD7.htm
+SECTIONPLANE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3AC2CA12-2085-4782-B66A-7964B73B55EA.htm
+SECTIONPLANEJOG	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4A6A1386-9247-47A2-9934-F62D328C5460.htm
+SECTIONPLANESETTINGS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D061EB7A-6B8D-4CB9-9C2F-6C68B711FA33.htm
+SECTIONPLANETOBLOCK	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8E2D9A92-5107-41A9-817E-3DA76D01ED21.htm
+SECTIONSPINNERS	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D8F761E3-BA9F-4DAE-8BAA-71170B015F6F.htm
+SECURITYOPTIONS	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2199A941-E183-4CAC-914C-E4538468DE64.htm
+SELECT	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0DD5DA73-9DC5-4424-8FED-7BBE3BE52A4D.htm
+SELECTCOUNT	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-215C571E-0806-45B1-934C-5346EB188CE2.htm
+SELECTSIMILAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C160A9C9-1287-4111-8D27-05AFBAA7C29F.htm
+SETBYLAYER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A9D9FF14-4EF6-4A25-B0F4-506C6B792E9E.htm
+SETVAR	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-01E38833-6D3A-4AA5-A446-C03B44E7AB56.htm
+SHADEMODE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A2D7CD17-516B-42EB-AE65-49D974570B90.htm
+-SHADEMODE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A39F669D-DD11-46DD-BD20-7C41F2FF5326.htm
+SHAPE	assente	disegno e modifica 2D		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9750CDBE-028A-4E6B-AD51-ABB107737A63.htm
+SHARE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6CDBBD68-B8CA-4548-ADF5-84CF8BF9F282.htm
+SHAREDVIEWS	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C9055F88-D079-441F-938B-37A7E0E390D9.htm
+SHAREDVIEWSCLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A0BD1C2B-726A-4D43-A3AD-11339EBB1D99.htm
+SHAREVIEW	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-60AA1F13-40AC-4D5C-A48F-E9D7969DB65B.htm
+-SHAREVIEW	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3CF76D65-DA2D-4FF4-9585-3D99070062E5.htm
+SHEETSET	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EF38E77D-1938-40EC-ACBE-2CC715AEC6E0.htm
+SHEETSETHIDE	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5D092A7D-AC59-42A6-8BDE-08ADEF6F2670.htm
+SHELL	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-675A6BDA-681C-445E-9A32-B8D3713F258A.htm
+SHOWPALETTES	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EEE9EDD3-3A4D-494B-8CA2-F2A86F36D541.htm
+SHOWRENDERGALLERY	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-78DB8222-DCE2-457C-B5DA-0ECCBC15EE91.htm
+SHOWURLS	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3AEBE6CA-E53D-4857-81A6-4FABD9423A02.htm
+SHP2BLK	assente	blocchi e attributi	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-882CCB78-CF99-4E4F-945A-0E46FEC25946.htm
+SIGVALIDATE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C28D46C3-4C3D-4D37-86B9-E0D235F82EC6.htm
+SKETCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EFF06F5D-E8B2-44D9-8CE6-D8C100A37AAA.htm
+SLICE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-27593C5E-4B89-41F2-872B-927D69517CBF.htm
+SNAP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F47F4AAF-4859-45D4-846C-3742268834A9.htm
+SOLDRAW	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C2D29999-EB0D-44E3-9107-2365666F120F.htm
+SOLID	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0998E0EE-7829-4AA4-9282-4FC703F9B1F4.htm
+SOLIDEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D54C266B-2B68-4660-ACA5-0579432F149C.htm
+SOLPROF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-080247BF-BDAB-49F6-A0A5-966412CEDCE9.htm
+SOLVIEW	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-08FE95F0-B91A-424A-B19F-821D5100CCB9.htm
+SPACETRANS	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EF67ED5B-E250-4BA4-834D-61A641DAD8DB.htm
+SPELL	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5FDA1883-8A61-4762-9D83-0432E323729B.htm
+SPHERE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D003D7B2-A309-4C19-9CCF-AB9A7BA8833D.htm
+SPLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5E7D51E2-1595-4E0C-85F8-2D7CBD166A08.htm
+SPLINEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5530922C-6828-48B1-804C-EDD9053535BD.htm
+SPOTLIGHT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B490ADA6-2621-44CC-AC54-0D90EC19DCC4.htm
+SSX	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-386ADF5E-C709-4940-8DB4-909C2760A23F.htm
+STANDARDS	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6AE2A5E5-651F-4C3B-8E3C-DE8DED6AA94C.htm
+STATUS	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FB3C7BE6-BF43-4623-8662-0D42B37DC7FC.htm
+STLOUT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5E9946B5-D769-4881-BC0F-21F54840683D.htm
+STRETCH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F000A502-D39E-4D31-A8E2-4A626473FB72.htm
+STYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F8EA1280-BF0E-4674-ABCF-EEA0D41752D6.htm
+-STYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0496BC60-0D07-4982-A395-B83E39EA5CF4.htm
+STYLESMANAGER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6FA49011-C308-46E7-A288-CC07F6CD3BFD.htm
+SUBTRACT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-14872FC1-8827-4D3B-978E-20936F9A78E5.htm
+SUNPROPERTIES	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DC2FC4DC-9B40-4B3C-9E5C-41E68559A028.htm
+SUNPROPERTIESCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D61D3C53-36E7-4EF2-A042-A2DAFEBC05B6.htm
+SUPERHATCH	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-89FB15FE-28B9-4A51-BACA-A393469EE1A6.htm
+SURFBLEND	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BD4E2F9B-5B2D-462E-AE9B-E0A3B0324E6A.htm
+SURFEXTEND	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A999554C-9AFE-4589-A704-1BB785AC3AD6.htm
+SURFEXTRACTCURVE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D733EC46-4A91-4E9A-9D59-5EC5A7D7DD5A.htm
+SURFFILLET	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-AFDD7F94-A404-4CDC-8E51-A40BE9D712F8.htm
+SURFNETWORK	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FB04C267-5F15-4A63-B33A-ACA65356943E.htm
+SURFOFFSET	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F242D0E4-0D58-4469-AE69-99BC842D0B25.htm
+SURFPATCH	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F594A1AE-71B4-44D4-A867-AC95C43AF1E6.htm
+SURFSCULPT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0436666E-08CB-40CA-81B3-F79BD3447006.htm
+SURFTRIM	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5FF7E92D-8F12-4404-8C1F-AC44377F608A.htm
+SURFUNTRIM	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9EB95641-0E3E-45F3-89E6-0ED6CDCC9B05.htm
+SWEEP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2391CE97-3794-402C-8BC1-E2DCB452DD13.htm
+SYSVARMONITOR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-82BACF96-AC90-446A-8E60-3CC3072F8060.htm
+SYSVDLG	assente	interfaccia e personalizzazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E79F7A56-E373-48EC-AEB7-652CEDBE26D7.htm
+SYSWINDOWS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-34A6D747-B9EC-4D1C-897A-D93F55F1BF2A.htm
+TABLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-367470A6-6E6E-4181-9E53-9B0EC88F50DC.htm
+-TABLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B958B73F-E812-41DC-8AA3-074A1E125BF4.htm
+TABLEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-44D79B63-B21B-4F1D-9E0D-1C3B69970BF3.htm
+TABLEEXPORT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EC760CA9-5BF4-4CF3-90D3-63DB194D43EA.htm
+TABLESTYLE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-64621CE7-B7A2-42CD-897F-67ABE475D684.htm
+TABLET	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6ED485A6-EAF0-47EF-84FC-4975BBAE3DA3.htm
+TABSURF	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-59FB536E-3597-4BFB-B89A-13D9903D3749.htm
+TARGETPOINT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3BB21889-FB21-4DDA-AB15-5E3F6FAF5988.htm
+TASKBAR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C72AE884-5FDE-4F67-8549-0A6183AC04BB.htm
+TCASE	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-085CF0C0-639C-4A4C-A2FC-CD885A7FDA38.htm
+TCIRCLE	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DEB79D5D-671A-437E-9C0F-3DE44F9C92A5.htm
+TCOUNT	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4B92219C-DA94-4D71-B308-D3818D3C6B8F.htm
+TEXT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D1C664DD-63D9-467E-8EC1-2F5A1777A924.htm
+TEXTALIGN	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CC1BE498-4908-434E-8FDA-0DE87E05EA15.htm
+TEXTEDIT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B184DB8A-7566-4756-A78E-3721960D86DE.htm
+TEXTFIT	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9F512EAB-FB32-471F-84F2-5A402FEEE3A5.htm
+TEXTMASK	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C16E8C64-1DB8-4706-A44D-3C5E0655540D.htm
+TEXTSCR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-63EF020A-C718-43A1-8510-CC2FD7EC80E8.htm
+TEXTTOFRONT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DE1673FF-A97E-480A-8BE2-54B52F21D75C.htm
+TEXTUNMASK	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C59A6D3D-C666-42A2-98A4-F856BB2D4A1F.htm
+TFRAMES	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-088EFB42-AA6C-4C0F-8AD7-34C7615D10C4.htm
+THICKEN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-50CAFB97-22BA-4224-9B48-60D6E7ABFCF1.htm
+TIFOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DB78721A-4674-4A24-A2DC-722997E32A1E.htm
+TIME	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-990C8D36-CD20-48C0-A711-4F03B33C084C.htm
+TINSERT	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E38DBD43-22E2-4545-8A55-85D90980FC14.htm
+TJUST	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-41833749-A62B-4696-BF9C-80538DC25485.htm
+TOLERANCE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F83AC6CE-B180-458F-BB88-6EEF424F99C4.htm
+TOOLBAR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B6DFB514-F06E-44A4-99AF-6ACF22F78523.htm
+-TOOLBAR	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0CFBD067-D736-4198-BC09-3A9092ECE005.htm
+TOOLPALETTES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-167A8594-92CB-4FCC-B72C-0F546383E97C.htm
+TOOLPALETTESCLOSE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C72F06BE-BA0D-4BB0-BD61-F11FF734D24B.htm
+TORIENT	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3A9CCCD9-7B1D-4C83-944C-2D66F5FF32DF.htm
+TORUS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F7F2E0D8-58D2-4068-BBC1-60740D1A024A.htm
+TPNAVIGATE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B2C547A7-AB22-475E-948E-9846748333A3.htm
+TRACE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D5D7D88B-6C2F-46F9-84F0-FD7B438BDCED.htm
+TRACEBACK	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B2037E1-D1E3-496F-BF67-ACBC4155AE89.htm
+TRACEEDIT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B830702F-25E9-4548-BE97-BFF2152934B9.htm
+TRACEFRONT	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BA5EED80-4DBB-478E-802B-B1BA933E3FA1.htm
+TRACEPALETTECLOSE	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-189DED05-AFC1-4F83-A616-937D3D50C293.htm
+TRACEPALETTEOPEN	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-13413FA0-13B1-4323-BD6A-CEEE3A688C09.htm
+TRACEVIEW	assente	cloud/IA (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DDDD9D4D-36BC-421F-AA95-1C5846A1FC7A.htm
+TRANSPARENCY	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6F50ABBC-726B-4513-9B2E-89503EEDD54F.htm
+TRAYSETTINGS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-26392CF2-0403-4E6F-BD27-9C2EB4547756.htm
+TREESTAT	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A9337C6A-9153-4D20-8696-7CE9096AAA86.htm
+TREX	assente	disegno e modifica 2D	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-02FCA8B9-55C5-402C-AEA2-D1A6D0FE29B1.htm
+TRIM	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B1A185EF-07C6-4C53-A76F-05ADE11F5C32.htm
+TSCALE	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D0836C0C-FC99-4521-8220-06D42D9F46FE.htm
+TXT2MTXT	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1E68C8B2-520F-4084-BD20-51DC4A32A7E5.htm
+TXTEXP	assente	annotazione	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-80BE94B9-2ECE-438E-AEF8-984F7D27E0F9.htm
+U	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-87AAEC8D-45D9-49F9-8DB8-FBABDAB1BB96.htm
+UCS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0BE49DA1-B323-4758-B49B-4C497D194C7A.htm
+UCSICON	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EA2D8ACA-336A-4656-BFD3-43BC371C6171.htm
+UCSMAN	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-96651DBC-3F2F-4B65-91DF-02AE7F2C4161.htm
+ULAYERS	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-498506C3-7C42-4CFF-BB3E-021B1D050CF4.htm
+UNDEFINE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FC323813-D88D-4507-8665-67B215BF9EAD.htm
+UNDO	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2729A466-B199-4840-B92B-4D8A38A8ADB8.htm
+UNGROUP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8FD85180-69F4-4F4C-8DC1-F072111AF664.htm
+UNION	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C38426A3-B4CA-4788-A6B9-F132DD705CA0.htm
+UNISOLATEOBJECTS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B21B3F6C-7F67-465A-A97E-5E8ADC87B6D4.htm
+UNITS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1DAE2080-84E4-413E-BB4E-F5D2A96CB14A.htm
+-UNITS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D396FBFE-6171-4A89-9E68-6CB082EBE0E1.htm
+UPDATEFIELD	assente	annotazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2B47D62E-19D0-4CA5-9AAC-1946132D2F62.htm
+UPDATETHUMBSNOW	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-99DAEB10-7364-4B0B-809B-1E75DED6981E.htm
+VBAIDE	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-07122CCD-8E45-48BF-A5BB-7E9900E048B9.htm
+VBALOAD	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CA16C415-2CC0-4707-8018-23A464F019AD.htm
+VBAMAN	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E8DE3E52-F249-4147-94E3-C5436319846F.htm
+VBAPREF	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4C071022-BDBC-43EB-824B-9B950AC83DE2.htm
+VBARUN	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-9711DBC3-3A4C-4B38-93B9-AE7CD854CAB8.htm
+-VBARUN	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B63DFE34-A23A-49EB-9380-C87EFCD12444.htm
+VBASTMT	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3B4AAAAB-AFF3-45F6-9B1D-B2AEB7DA658C.htm
+VBAUNLOAD	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F60C4525-DA15-47A1-8107-1C5CF107A958.htm
+VIEW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-157824E8-6791-410F-A412-E183D69F3D71.htm
+-VIEW	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-21738F8B-82B0-4911-A215-227EB54FCE5D.htm
+VIEWBACK	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-67E5CB2D-7CED-4B1D-86E9-988A7E399798.htm
+VIEWBASE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-E0F79E2F-8838-4470-B8D0-8626343A22D2.htm
+VIEWCOMPONENT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-81DE46E8-99C9-43E6-A547-74DF70DFFF20.htm
+VIEWDETAIL	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EDA005E8-85E5-40DB-AB8E-B664B01627C4.htm
+VIEWDETAILSTYLE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-347E3FF9-9E49-499E-9603-08C4A3ACC172.htm
+VIEWEDIT	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3DAE7BC9-8F39-484F-B0F8-C039510E4F22.htm
+VIEWFORWARD	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-13CE1380-83FD-4ADA-8761-B56704220B60.htm
+VIEWGO	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8747BD5F-B7C0-49F7-A2DF-E796BD51A76B.htm
+VIEWPLAY	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-63CB1832-0274-44AB-A8E5-EF6076BEDA52.htm
+VIEWPLOTDETAILS	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-23072042-6A25-448A-8567-0354E5636EF5.htm
+VIEWPROJ	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-DC444927-6392-4F3C-88FC-33BBDF9AC464.htm
+VIEWRES	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-77B1C617-E4BB-4D1E-823A-8E2B055B258E.htm
+VIEWSECTION	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7C281B02-D7D1-47FD-A1D4-0AF9E7544934.htm
+VIEWSECTIONSTYLE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-81DCE438-A0DF-4950-9380-4A190B3E684C.htm
+VIEWSETPROJ	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B99EBA1D-12E4-4907-8163-D4D9931983DC.htm
+VIEWSKETCHCLOSE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-58033C26-764B-40A5-B159-12E266F06F73.htm
+VIEWSTD	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2650ABC3-F838-4911-A19C-C4EC1396DD3D.htm
+VIEWSYMBOLSKETCH	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-35771218-F9F8-432A-85D6-78E644D764F5.htm
+VIEWUPDATE	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8C6FECB1-F8FA-4AD4-8843-A94D02119514.htm
+VISUALSTYLES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-ACA9C52C-47FC-4A21-A7BE-D692F9DA3511.htm
+-VISUALSTYLES	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-080E88D6-89BB-407A-A7B4-08E8A5A4FBEE.htm
+VISUALSTYLESCLOSE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4ED2D58F-043A-4F82-A483-79FA3E0E32B6.htm
+VLISP	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-5601ACC6-C4F6-4375-9C2C-3DBCAE2880B1.htm
+VPCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D5FD4D1A-5785-4A8E-B0D1-D12079C0A4FF.htm
+VPLAYER	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EB4DA3DA-5466-4D48-9AEC-6828B82BDEF9.htm
+VPMAX	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-15D5EEC7-D131-49F6-89A7-424455480935.htm
+VPMIN	assente	viste, layer, viewport		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-A18E5FA1-2A4E-461B-A606-EFF5AB14E0E5.htm
+VPOINT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-82771983-982A-4F34-886E-FDAC966DF16D.htm
+-VPOINT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1E89B0D5-BFE2-4D2C-8396-07929A9416E8.htm
+VPORTS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BF45C5E3-ACA3-436A-B8E9-A17001A6F1D8.htm
+-VPORTS	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BC2E6DC6-2AC3-42AB-A07B-B36E56E4F10A.htm
+VPSCALE	assente	viste, layer, viewport	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D8D8E81C-A6B0-4337-97AA-2CB060DA7659.htm
+VPSYNC	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-1D273873-9F33-422A-95CD-45CD52623A7E.htm
+VSCURRENT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7990D01B-F913-497A-8623-631646AF135B.htm
+VSLIDE	assente	utilita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-255CE777-3419-4AC1-B3AF-C622EE84A78C.htm
+VSSAVE	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-78E5D97A-3A8D-4395-AC7A-BCEA3BF78CB6.htm
+VTOPTIONS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-84A975F9-99B7-4791-9043-5D6FCEAA8FA2.htm
+WALKFLYSETTINGS	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D3AC721E-95BE-4DB7-BF52-BD857B23D9E8.htm
+WBLOCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-297ED4C5-DADC-4C3B-B4FA-94C56A04721B.htm
+-WBLOCK	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F26FC1CE-45C9-4C85-9DB9-19B6A597D87B.htm
+WEBLIGHT	assente	3D render e navigazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-378DF00F-2595-4678-8B18-EA991A267E2F.htm
+WEBLOAD	assente	LISP/VBA/.NET (fuori scopo)		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CFDF041A-ABED-47D7-AC86-50F0419E5474.htm
+WEDGE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-479D1F58-6629-430B-8E8A-901D646A55E6.htm
+WHOHAS	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7E20A4D7-EB74-4354-8ADE-7EF172F0E16D.htm
+WIPEOUT	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-4AD79F4F-A759-4310-A62D-4792FAA7B0EA.htm
+WMFIN	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-EAC08DDA-5D62-4A2A-8A84-37F20779941A.htm
+WMFOPTS	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-22CE1096-6C25-4D2C-8E78-EE8E146AA617.htm
+WMFOUT	assente	stampa e pubblicazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6B7ECC84-F2D5-402C-8719-E8FE2171AE96.htm
+WORKSPACE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-8B5DFCAD-7CE6-4C57-9CA3-5243E54D5EB1.htm
+WSSAVE	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-3821F72C-A62E-4DB7-AEED-EEC09FD9622E.htm
+WSSETTINGS	assente	interfaccia e personalizzazione		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-97AAABD6-8232-43CD-9D97-ED13F13D2D80.htm
+XATTACH	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-BFD18916-9DFE-4FFF-8C98-4AE38A50A7F3.htm
+XBIND	altro nome			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-D4B26149-C3A2-4547-A532-FF7A0D1CB2C9.htm
+-XBIND	assente	riferimenti e import		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C3391298-3F46-4CA3-BFB9-B0EEB75E292D.htm
+XCLIP	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-104EDB9F-F025-4F67-B5C9-B3F174CFE2F3.htm
+XCOMPARE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-C5E21683-DCEB-49CB-88FB-348FAB8DD28F.htm
+XCOMPARECLOSE	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-0FE2EA37-E394-421B-92A3-974D066DEF76.htm
+XCOMPARERCNEXT	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F5E0A078-1B44-440E-BCB6-3F6A56F67A3C.htm
+XCOMPARERCPREV	assente	file e qualita		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-2DACBB2B-FD87-4025-B128-509E9027D94C.htm
+XDATA	registrato		si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-F0299B36-232F-446E-9F81-98F300B36991.htm
+XDLIST	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-B3926E8E-1477-4086-8244-C813EB05FF04.htm
+XEDGES	assente	3D superfici, mesh, viste		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6B6E69D0-62C1-4D96-B568-1818E3C997F4.htm
+XLINE	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-40650DCE-E8CA-483C-8E25-7FA9AB6992C1.htm
+XLIST	assente	riferimenti e import	si	https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-CDEF1C56-AFA4-4DE3-B01E-1662B8C33FBD.htm
+XOPEN	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-6CD56F5F-AB89-482C-B1DC-57A95987ABED.htm
+XPLODE	assente	blocchi e attributi		https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-FC4139AB-D527-4743-8E68-F83DA6E5D192.htm
+XREF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-7DD70C3C-B8AD-40F1-8A69-5D1EECEAB013.htm
+-XREF	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-70599862-DF52-4291-B64B-8A4C45599F39.htm
+ZOOM	registrato			https://help.autodesk.com/cloudhelp/2026/ENU/AutoCAD-Core/files/GUID-66E7DB72-B2A7-4166-9970-9E19CC06F739.htm
