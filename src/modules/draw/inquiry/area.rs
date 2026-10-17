@@ -18,6 +18,12 @@ enum AreaMode {
     Subtract,
 }
 
+/// Area and perimeter of `entity` as the AREA command measures it (the
+/// perimeter is `None` when the object has no length of its own).
+pub(crate) fn measure(entity: &EntityType) -> Option<(f64, Option<f64>)> {
+    AreaCommand::entity_measurement(entity).map(|m| (m.area, m.perimeter))
+}
+
 #[derive(Clone, Copy)]
 struct AreaMeasurement {
     area: f64,

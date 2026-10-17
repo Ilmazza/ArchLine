@@ -355,6 +355,9 @@ impl OpenCADStudio {
             }
             FieldDialogMsg::Named(k) => state.named = Some(k),
             FieldDialogMsg::ObjectProp(p) => state.object_prop = Some(p),
+            FieldDialogMsg::ObjectFormat(k) => state.object_format = k,
+            FieldDialogMsg::ObjectPrecision(k) => state.object_precision = k,
+            FieldDialogMsg::ObjectFactor(v) => state.object_factor = v,
             FieldDialogMsg::Formula(v) => state.formula = v,
             FieldDialogMsg::FormulaFormat(k) => state.formula_format = k,
             FieldDialogMsg::FormulaPrecision(k) => state.formula_precision = k,

@@ -36,9 +36,10 @@ Registrato non vuol dire funzionante: dei 407, almeno una dozzina sono stub o ri
 da me nel codice, oltre che dall'analisi.
 1. **Gli snap digitati al prompt non sono riconosciuti** (`end`, `mid`, `int`, `per`…). Funzionano solo da menu e barra.
    (ricontrollato)
-2. **I campi Area e Lunghezza si calcolano solo su cerchio** (area) **e su linea, cerchio, arco** (lunghezza). Su polilinee
-   e tratteggi il campo mostra il valore memorizzato nel file, senza avvisare. Nel dialogo non c'è il fattore di conversione
-   cm²→m². (ricontrollato)
+2. ~~**I campi Area e Lunghezza si calcolano solo su cerchio e su linea, cerchio, arco.**~~ **Corretto lato app** (voce 9):
+   polilinee, tratteggi, ellissi e spline si misurano in ArchLine con la geometria del comando AREA e il campo si aggiorna;
+   il dialogo ha formato, precisione e fattore di conversione (cm²→m²). Il codec resta com'è: difetto da segnalare a monte
+   (§5, voce 4).
 3. **HATCH non carica `.pat` dello studio.** La tolleranza di chiusura ora c'è (`HPGAPTOL`, fatto in `claude/parita-l1-04-hatch-gap`). (ricontrollato)
 4. **La stampa su plotter passa sempre da un PDF temporaneo.** Se è installato un lettore PDF che gestisce la stampa diretta
    (`printto`), stampa lui e la scala la decide il lettore. Altrimenti ArchLine stampa un raster a 300 DPI, adattato all'area
@@ -219,7 +220,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
-| Campi Area/Lunghezza | **Parziale, difetto** (ricontrollato) | `codec:fields.rs:1053-1082`; anteprima «----» in `src/app/commands/field.rs:112-115` | L'area si calcola solo sul cerchio, la lunghezza su linea, cerchio e arco. Polilinee e tratteggi mostrano il valore memorizzato. Il dialogo non offre formato, precisione né fattore di conversione (`src/ui/window/field_dialog.rs:245-249`), anche se il motore gestisce `%ct` |
+| Campi Area/Lunghezza | **Corretto lato app** | `src/entities/field_measure.rs`; `src/entities/field.rs` (aggancio); `src/ui/window/field_dialog.rs` | Il codec valuta l'area solo del cerchio e la lunghezza di linea, cerchio e arco (`codec:fields.rs:1053`, `:1061-1082`); per il resto ArchLine misura LWPOLYLINE, POLYLINE 2D e 3D, HATCH (solo area), ELLIPSE e SPLINE con la geometria del comando AREA e passa il numero al formattatore del codec, quindi anteprima, testo con campo e celle di tabella si aggiornano. Il dialogo Oggetto ha Formato, Precisione e Fattore di conversione (`%lu`, `%pr`, `%ct8[f]`, `%qf1` per le aree). Limiti: l'area di una polilinea aperta è quella chiusa dalla corda (come AREA; per AutoCAD è dedotto, non provato); l'area dell'arco di ellisse idem; un tratteggio non ha lunghezza; manca il prefisso/suffisso (`%ps`, per esempio «m²»); UPDATEFIELD resta assente (il testo con campo si rivaluta a ogni ridisegno, `src/entities/mtext.rs:88`; non verificato che il valore salvato nel file sia quello nuovo) |
 | HATCH, tolleranza di chiusura | **Presente** (fatto; verificato da test, non a schermo) | `src/app/commands/hatchvars.rs`, `draw.rs` (HATCH e GRADIENT) | `HPGAPTOL n` (0–5000, 0 = chiusura esatta, come AutoCAD) chiude lacune fino a n unità nel contorno, con la stessa `boundary_faces` di BOUNDARY. Vale per la sessione: l'header del codec non ha il campo, quindi non si salva nel disegno. Manca l'opzione nella finestra/prompt di HATCH. Da verificare a schermo: come si vede il tratteggio sulla lacuna chiusa |
 | HATCH, pattern | Parziale | `src/io/patterns.rs:11` | Un solo `.pat` incorporato: 106 pattern di derivazione QCAD. Non si caricano `.pat` dell'utente; `acad.pat` e `acadiso.pat` non sono completi |
 | HATCH da riga di comando | Parziale | `src/modules/draw/draw/hatch.rs:538` | solo P/A/L |
@@ -468,7 +469,8 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 8. ~~ATTSYNC; BEDIT e REFEDIT che aprono la definizione e non il `*U`; REFEDIT bloccato sugli xref finché non salva~~ **fatti**.
 
 **Livello 2 — dati per abachi e cartigli** (ponte verso il plugin architettonico)
-9. Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.
+9. ~~Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.~~ **Fatto lato app**
+    (scelta di Mauro; test in `src/entities/field_measure.rs` e `src/ui/window/field_dialog.rs`; da verificare a schermo: il dialogo Campo su una polilinea e su un tratteggio, e il testo che segue la polilinea quando si sposta un vertice).
 10. ~~DATAEXTRACTION con il nome del blocco e gli attributi come colonne; COUNT e SELECTSIMILAR per nome di blocco.~~ **Fatto**
     (test in `src/app/annotation_data.rs` e `src/app/extraction_blocks.rs`; da verificare a schermo: il wizard con attributi reali).
 11. ~~TABLEEXPORT (`table_to_csv` esiste già).~~ **Fatto** (test in `src/app/commands/table_export.rs`; da verificare a schermo: finestra di salvataggio e file aperto in Excel).

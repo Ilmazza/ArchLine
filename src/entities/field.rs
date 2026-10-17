@@ -139,7 +139,11 @@ pub fn update_fields(
         return (Vec::new(), 0);
     }
     let snapshot = document.clone();
-    document.update_fields(&OcsFieldContext(Some(&snapshot)), event, hosts)
+    let context = OcsFieldContext(Some(&snapshot));
+    let (mut changed, found) = document.update_fields(&context, event, hosts);
+    // What the codec cannot measure (Area/Length of polylines, hatches, ...).
+    changed.extend(super::field_measure::update(document, event, hosts, &context));
+    (changed, found)
 }
 
 /// Recompute a table's cell formulas into its block after the table changed;
@@ -176,13 +180,9 @@ pub fn evaluate(
     objects: &[Handle],
     host: Option<Handle>,
 ) -> Option<String> {
-    codec::fields::evaluate_code(
-        document,
-        code,
-        objects,
-        host,
-        &OcsFieldContext(Some(document)),
-    )
+    let context = OcsFieldContext(Some(document));
+    codec::fields::evaluate_code(document, code, objects, host, &context)
+        .or_else(|| super::field_measure::evaluate(document, code, objects, &context))
 }
 
 /// The system variables the Field dialog lists, in its order (lower case).

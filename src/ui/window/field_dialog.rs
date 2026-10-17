@@ -506,6 +506,11 @@ pub struct FieldDialogState {
     pub object: Option<(codec::Handle, String)>,
     pub object_props: Vec<&'static str>,
     pub object_prop: Option<&'static str>,
+    /// Format, precision and conversion factor of a numeric property
+    /// (indexes into codec FORMULA_FORMATS and FORMULA_PRECISIONS; the factor as typed).
+    pub object_format: usize,
+    pub object_precision: usize,
+    pub object_factor: String,
     pub formula: String,
     /// Indexes into codec FORMULA_FORMATS and FORMULA_PRECISIONS.
     pub formula_format: usize,
@@ -562,6 +567,9 @@ impl FieldDialogState {
             object: None,
             object_props: Vec::new(),
             object_prop: None,
+            object_format: 0,
+            object_precision: 0,
+            object_factor: String::new(),
             formula: String::new(),
             formula_format: 0,
             formula_precision: 0,
@@ -719,13 +727,44 @@ impl FieldDialogState {
                 None => ("\\AcObjProp".into(), vec![]),
             },
             FieldKind::Object => match (&self.object, self.object_prop) {
-                (Some((handle, _)), Some(prop)) => (
-                    format!("\\AcObjProp Object(%<\\_ObjIdx 0>%).{prop}"),
-                    vec![*handle],
-                ),
+                (Some((handle, _)), Some(prop)) => {
+                    let code = format!("\\AcObjProp Object(%<\\_ObjIdx 0>%).{prop}");
+                    match self.object_picture(prop) {
+                        Some(picture) => (format!("{code} \\f \"{picture}\""), vec![*handle]),
+                        None => (code, vec![*handle]),
+                    }
+                }
                 _ => ("\\AcObjProp".into(), vec![]),
             },
         }
+    }
+
+    /// The conversion factor typed for an object property: `None` when blank,
+    /// `Err` when it is not a positive number (a comma is read as a point).
+    pub fn conversion_factor(&self) -> Result<Option<f64>, ()> {
+        let text = self.object_factor.trim().replace(',', ".");
+        if text.is_empty() {
+            return Ok(None);
+        }
+        text.parse::<f64>().ok().filter(|f| f.is_finite() && *f > 0.0).map(Some).ok_or(())
+    }
+
+    /// The `\f` picture of a numeric object property: unit format, precision
+    /// and `%ct8` conversion factor; areas also carry `%qf1`. `None` when
+    /// nothing is chosen (the property shows as it always did) or when the
+    /// property is not a number.
+    fn object_picture(&self, prop: &str) -> Option<String> {
+        if !NUMERIC_PROPERTIES.contains(&prop) {
+            return None;
+        }
+        let format = codec::fields::FORMULA_FORMATS.get(self.object_format).map_or("", |f| f.1);
+        let precision = match self.object_precision {
+            0 => String::new(),
+            n => format!("%pr{}", n - 1),
+        };
+        let factor = self.conversion_factor().ok().flatten().map(|f| format!("%ct8[{f}]")).unwrap_or_default();
+        let picture = format!("{format}{precision}{factor}");
+        (!picture.is_empty()).then(|| if prop == "Area" { format!("{picture}%qf1") } else { picture })
     }
 
     /// The field can be inserted (an object field needs its object and
@@ -733,7 +772,9 @@ impl FieldDialogState {
     pub fn complete(&self) -> bool {
         match kind_of(self.name) {
             FieldKind::NamedObject => self.named.is_some(),
-            FieldKind::Object => self.object.is_some() && self.object_prop.is_some(),
+            FieldKind::Object => {
+                self.object.is_some() && self.object_prop.is_some() && self.conversion_factor().is_ok()
+            }
             FieldKind::Diesel => !self.diesel.trim().is_empty(),
             FieldKind::Formula => !self.formula.trim().is_empty(),
             FieldKind::Hyperlink => !self.hyperlink_url.trim().is_empty(),
@@ -771,6 +812,10 @@ fn indexed_object_ids(formula: &str) -> (String, Vec<codec::Handle>) {
     (out, objects)
 }
 
+/// The object properties that are numbers a unit format, precision and
+/// conversion factor apply to.
+const NUMERIC_PROPERTIES: [&str; 5] = ["Area", "Length", "Circumference", "Diameter", "Radius"];
+
 /// The geometric properties a field can show for an object of this type.
 pub fn object_properties(entity: &codec::EntityType) -> Vec<&'static str> {
     use codec::EntityType as E;
@@ -778,8 +823,9 @@ pub fn object_properties(entity: &codec::EntityType) -> Vec<&'static str> {
         E::Line(_) => vec!["Center", "EndPoint", "Length", "StartPoint"],
         E::Circle(_) => vec!["Area", "Center", "Circumference", "Diameter", "Radius"],
         E::Arc(_) => vec!["Center", "Length", "Radius"],
-        E::Ellipse(_) => vec!["Area", "Center"],
-        E::LwPolyline(_) | E::Polyline2D(_) | E::Spline(_) => vec!["Area", "Length"],
+        E::Ellipse(_) => vec!["Area", "Center", "Length"],
+        E::LwPolyline(_) | E::Polyline(_) | E::Polyline2D(_) | E::Spline(_) => vec!["Area", "Length"],
+        E::Polyline3D(_) => vec!["Length"],
         E::Hatch(_) => vec!["Area"],
         _ => vec![],
     }
@@ -801,6 +847,9 @@ pub enum FieldDialogMsg {
     Named(usize),
     SelectObject,
     ObjectProp(&'static str),
+    ObjectFormat(usize),
+    ObjectPrecision(usize),
+    ObjectFactor(String),
     Formula(String),
     FormulaFormat(usize),
     FormulaPrecision(usize),
@@ -1366,7 +1415,9 @@ fn format_panel<'a>(state: &'a FieldDialogState) -> Element<'a, Message> {
             .spacing(8)
             .into()
         }
-        FieldKind::Object => column![
+        FieldKind::Object => {
+            let numeric = state.object_prop.is_some_and(|p| NUMERIC_PROPERTIES.contains(&p));
+            column![
             row![
                 text(t!("Object type")).size(12).width(Length::Fixed(96.0)),
                 container(
@@ -1400,12 +1451,58 @@ fn format_panel<'a>(state: &'a FieldDialogState) -> Element<'a, Message> {
                         FieldDialogMsg::ObjectProp(p)
                     ))
                     .collect(),
-                180.0,
+                if numeric { 110.0 } else { 180.0 },
             ),
         ]
+        .push(if numeric { object_format_rows(state) } else { Space::new().height(0).into() })
         .spacing(8)
-        .into(),
+        .into()
+        }
     }
+}
+
+/// Format, precision and conversion factor of a numeric object property.
+fn object_format_rows<'a>(state: &'a FieldDialogState) -> Element<'a, Message> {
+    let formats: Vec<Pick> = codec::fields::FORMULA_FORMATS
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| Pick(i, t!(*n).into_owned()))
+        .collect();
+    let precisions: Vec<Pick> = FORMULA_PRECISIONS.iter().enumerate().map(|(i, n)| Pick(i, t!(*n).into_owned())).collect();
+    column![
+        row![
+            text(t!("Format")).size(12).width(Length::Fixed(110.0)),
+            pick_list(Some(formats[state.object_format].clone()), formats.clone(), |p: &Pick| p.1.clone())
+                .on_select(|p| msg(FieldDialogMsg::ObjectFormat(p.0)))
+                .text_size(12)
+                .padding([5, 8])
+                .width(Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        row![
+            text(t!("Precision")).size(12).width(Length::Fixed(110.0)),
+            pick_list(Some(precisions[state.object_precision].clone()), precisions.clone(), |p: &Pick| p.1.clone())
+                .on_select(|p| msg(FieldDialogMsg::ObjectPrecision(p.0)))
+                .text_size(12)
+                .padding([5, 8])
+                .width(Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        row![
+            text(t!("Conversion factor")).size(12).width(Length::Fixed(110.0)),
+            text_input("1", &state.object_factor)
+                .size(12)
+                .padding([5, 8])
+                .style(field_style)
+                .on_input(|v| msg(FieldDialogMsg::ObjectFactor(v))),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    ]
+    .spacing(8)
+    .into()
 }
 
 pub fn view<'a>(
@@ -1577,4 +1674,85 @@ pub fn view<'a>(
     .padding([10, 12])
     .width(sizing.width)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object_field(prop: &'static str) -> FieldDialogState {
+        let mut state = FieldDialogState::new(FieldTarget::NewText);
+        state.name = "Object";
+        state.object = Some((codec::Handle::new(0x2A), "Polyline".into()));
+        state.object_prop = Some(prop);
+        state
+    }
+
+    fn code(state: &FieldDialogState) -> String {
+        state.code().0
+    }
+
+    const AREA: &str = "\\AcObjProp Object(%<\\_ObjIdx 0>%).Area";
+
+    #[test]
+    fn an_object_field_without_a_format_keeps_its_plain_code() {
+        assert_eq!(code(&object_field("Area")), AREA);
+    }
+
+    #[test]
+    fn format_precision_and_factor_make_the_picture_of_an_area() {
+        let mut state = object_field("Area");
+        state.object_format = 2; // Decimal
+        state.object_precision = 3; // 0.00
+        state.object_factor = "0.01".into();
+        assert_eq!(code(&state), format!("{AREA} \\f \"%lu2%pr2%ct8[0.01]%qf1\""));
+    }
+
+    #[test]
+    fn a_length_gets_no_area_flag() {
+        let mut state = object_field("Length");
+        state.object_format = 2;
+        state.object_precision = 3;
+        assert_eq!(code(&state), "\\AcObjProp Object(%<\\_ObjIdx 0>%).Length \\f \"%lu2%pr2\"");
+    }
+
+    #[test]
+    fn a_decimal_comma_in_the_factor_is_read_as_a_point() {
+        let mut state = object_field("Length");
+        state.object_format = 2;
+        state.object_factor = "0,01".into();
+        assert_eq!(code(&state), "\\AcObjProp Object(%<\\_ObjIdx 0>%).Length \\f \"%lu2%ct8[0.01]\"");
+    }
+
+    #[test]
+    fn a_factor_that_is_not_a_positive_number_cannot_be_inserted() {
+        for factor in ["abc", "0", "-2", "1e999"] {
+            let mut state = object_field("Area");
+            state.object_factor = factor.into();
+            assert!(!state.complete(), "{factor:?} should be refused");
+        }
+        let mut state = object_field("Area");
+        state.object_factor = "  ".into();
+        assert!(state.complete(), "a blank factor means no conversion");
+    }
+
+    #[test]
+    fn a_property_that_is_not_a_number_ignores_the_format() {
+        let mut state = object_field("Center");
+        state.object_format = 2;
+        state.object_factor = "0.01".into();
+        assert_eq!(code(&state), "\\AcObjProp Object(%<\\_ObjIdx 0>%).Center");
+    }
+
+    #[test]
+    fn polylines_and_ellipses_offer_their_area_and_length() {
+        use codec::entities::{Ellipse, Hatch, LwPolyline, Polyline2D, Polyline3D, Spline};
+        use codec::EntityType as E;
+        assert_eq!(object_properties(&E::LwPolyline(LwPolyline::new())), vec!["Area", "Length"]);
+        assert_eq!(object_properties(&E::Polyline2D(Polyline2D::new())), vec!["Area", "Length"]);
+        assert_eq!(object_properties(&E::Polyline3D(Polyline3D::new())), vec!["Length"]);
+        assert_eq!(object_properties(&E::Ellipse(Ellipse::new())), vec!["Area", "Center", "Length"]);
+        assert_eq!(object_properties(&E::Spline(Spline::new())), vec!["Area", "Length"]);
+        assert_eq!(object_properties(&E::Hatch(Box::new(Hatch::new()))), vec!["Area"]);
+    }
 }

@@ -9,6 +9,7 @@ pub mod dimension;
 pub mod ellipse;
 pub mod extended;
 pub mod field;
+pub mod field_measure;
 pub mod hatch;
 pub mod hatch_fill;
 pub mod helix;
