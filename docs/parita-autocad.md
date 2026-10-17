@@ -512,7 +512,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 - **Vincoli.** Vincoli parametrici completi; i vincoli nativi DWG vengono conservati.
 - **Node graph** integrato, con circa 100 nodi: AutoCAD base non ce l'ha.
 - **Privacy.** Nessun traffico di rete all'avvio. Eccezione: il download dei font mancanti. Parte su conferma dell'utente ma
-  non dipende da `ARCHLINE_ONLINE` (`src/io/font_repo.rs`): da valutare rispetto alla scelta offline del fork.
+  non dipende da `ARCHLINE_ONLINE` (`src/io/font_repo.rs`). **Decisione di Mauro: resta com'è** (finestra «Missing fonts» con download solo su clic).
 - **Robustezza.** Blocco del file con impronta prima di salvare, utile su un NAS; ripiego automatico se la GPU non va.
 
 ## 8. Documenti da correggere
