@@ -166,7 +166,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | FILLET | Parziale | `src/modules/draw/modify/fillet.rs` | **Fatti** (verificati da test, non a schermo): opzione Trim (T) con Trim/No trim, ricordata per la sessione e condivisa con CHAMFER; Shift sul secondo oggetto = raggio 0. Limiti: con No trim un raccordo su segmenti di polilinea resta tagliato (la polilinea si ricostruisce in un pezzo); `TRIMMODE` non è digitabile come variabile. Mancano: raccordo su cerchi, ellissi, spline |
 | CHAMFER | Parziale | `fillet.rs` | **Fatti** (verificati da test, non a schermo): Angle (lunghezza sulla prima linea e angolo da essa; default sessione 10 e 45°, scelti da me, non da AutoCAD che parte da 0), mEthod (Distance/Angle; D e A lo impostano), Trim/No trim, Polyline (tutti i vertici; i vertici accanto a un arco restano; se le distanze non stanno nei lati, rifiuta tutta l'operazione come fa FILLET). Limiti: ancora solo linee e polilinee (niente archi); le larghezze di vertice delle polilinee vengono copiate dal vertice originale |
 | TRIM/EXTEND | Parziale | `src/modules/draw/modify/trim.rs:2771-2815` | Project, Undo interno, modo Standard (c'è solo Quick). Non taglia i tratteggi; blocchi, testi e tratteggi non fanno da spigolo di taglio |
-| ROTATE, SCALE | Parziale | `rotate.rs:172-177`, `scale.rs:90-114` | opzione Copy; Points nell'opzione Reference |
+| ROTATE, SCALE | Parziale | `rotate.rs`, `scale.rs` | **Copy fatto** (verificato da test e da prova end-to-end con `ROTATE 0,0 C 90` e `SCALE 0,0 C 2`: l'originale resta, nasce la copia, il comando finisce; resta attiva anche con Reference). Manca: Points nell'opzione Reference |
 | ARRAY | Parziale | `array.rs:226`, `:396`, `:736` | non associativo; niente ARRAYEDIT |
 | EXPLODE | Parziale | `explode.rs:87-118` | Tratteggi, regioni, MLeader e tabelle ignorati senza avviso. Niente XPLODE né BURST |
 | MATCHPROP | Parziale | `src/entities/match_props.rs:484-494` | Settings: oggi copia sempre tutto |
@@ -192,8 +192,8 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | POLAR | Parziale | `src/ui/popup/polar_popup.rs:12` | angoli aggiuntivi; misura relativa all'ultimo segmento |
 | Input dinamico | Parziale | `src/app/drafting_settings.rs:51` | DYNMODE 1 e 2 non distinti; prefisso `*` |
 | Comandi trasparenti | Parziale | `src/app/commands/mod.rs:382-384` | solo `'PAN`, `'ZOOM` e gli interruttori |
-| Prompt «Select objects» | Parziale | `src/modules/draw/select.rs:226-237` | Undo, Group, Box, Auto, SIngle |
-| Preselezione | Parziale | `src/app/commands/draw.rs:613-623` | LIST, CHPROP, DRAWORDER, ISOLATE, LAYISO e TCASE danno errore senza preselezione; PICKFIRST non c'è |
+| Prompt «Select objects» | Parziale | `src/modules/draw/select.rs`, `command_driver/select_sets.rs` | **Undo (U) e Group (G) fatti** (verificati da test): U toglie l'ultima selezione, G chiede il nome del gruppo (senza distinzione di maiuscole) e ne aggiunge i membri; un gruppo chiamato come una parola chiave (ALL, P, L…) viene preso dalla parola chiave. Mancano: Box, Auto, SIngle |
+| Preselezione | Parziale | `src/app/commands/inquiry.rs`, `layers.rs` | **Corretto** (verificato da test): LIST, ISOLATEOBJECTS, HIDEOBJECTS e LAYISO senza selezione ora chiedono gli oggetti. **Correzione all'analisi**: CHPROP, DRAWORDER e TCASE lo facevano già. PICKFIRST non c'è |
 | SELECTSIMILAR | Parziale | `src/scene/selection.rs:352-382` | confronta solo tipo e layer: porte e finestre sullo stesso layer vengono prese insieme |
 | Selezione di entità dentro i blocchi | Assente | — | — |
 | UNDO | Parziale | `src/app/commands/fileops.rs:72-85` | Mark/Back/BEgin/End, MREDO |
@@ -460,8 +460,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 3. ~~Tolleranza di chiusura in HATCH~~ **fatta** (`HPGAPTOL`).
 4. ~~FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle, Method e Polyline~~ **fatti**.
 5. ~~STRETCH sui tipi oggi saltati~~ **fatto** (restano tabelle, MULTILEADER, immagini).
-6. ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, CHPROP, DRAWORDER e gli altri
-   comandi del §4.2.
+6. ~~ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, ISOLATEOBJECTS, HIDEOBJECTS, LAYISO~~ **fatti** (CHPROP, DRAWORDER, TCASE non servivano: lo facevano già).
 7. I 14 nomi AutoCAD del §3.3 come alias. Cambiare `T` in MTEXT è una scelta tua: rompe l'abitudine di chi usa già ArchLine.
 8. ATTSYNC; BEDIT e REFEDIT che aprono la definizione e non il `*U`; REFEDIT bloccato sugli xref finché non salva.
 

@@ -615,10 +615,10 @@ impl OpenCADStudio {
                     .map(|(_, e)| e.common().layer.clone())
                     .collect();
                 if sel_layers.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("LAYISO: select entities on the layers to isolate first.")
-                            .as_ref(),
-                    );
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LAYISO");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
                     let names: Vec<String> = self.tabs[i]
                         .scene
@@ -653,9 +653,10 @@ impl OpenCADStudio {
             // ISOLATEOBJECTS — hide every object except the current selection
             "ISOLATEOBJECTS" => {
                 if self.tabs[i].scene.selected.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("ISOLATEOBJECTS: select the objects to isolate first.").as_ref(),
-                    );
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("ISOLATEOBJECTS");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
                     let n = self.tabs[i].scene.selected.len();
                     let before = self.tabs[i].scene.object_isolation.clone();
@@ -676,9 +677,10 @@ impl OpenCADStudio {
             // HIDEOBJECTS — hide the current selection
             "HIDEOBJECTS" => {
                 if self.tabs[i].scene.selected.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("HIDEOBJECTS: select the objects to hide first.").as_ref(),
-                    );
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("HIDEOBJECTS");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
                     let n = self.tabs[i].scene.selected.len();
                     let before = self.tabs[i].scene.object_isolation.clone();

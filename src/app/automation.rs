@@ -4306,6 +4306,69 @@ mod tests {
         assert_eq!(entity_count(&app), 3, "nothing selected, nothing erased");
     }
 
+    /// Commands that work on a selection ask for the objects when none is
+    /// there ("Select objects:") instead of failing.
+    #[test]
+    fn commands_without_a_preselection_ask_for_the_objects() {
+        let mut failing = Vec::new();
+        for cmd in ["LIST", "CHPROP", "DRAWORDER", "ISOLATEOBJECTS", "HIDEOBJECTS", "LAYISO", "TCASE"] {
+            let mut app = app_with_selected_line();
+            app.tabs[0].scene.deselect_all();
+            app.refresh_properties();
+            let out = run_line(&mut app, cmd);
+            let gathering = app.tabs[0]
+                .active_cmd
+                .as_ref()
+                .is_some_and(|c| c.is_selection_gathering());
+            if !gathering || out.contains("✕") {
+                failing.push(format!("{cmd}: {out:?}"));
+            }
+        }
+        assert!(failing.is_empty(), "not asking for objects:
+{}", failing.join("
+"));
+    }
+
+    #[test]
+    fn list_after_picking_objects_lists_them() {
+        let mut app = app_with_selected_line();
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        run_line(&mut app, "LIST");
+        type_line(&mut app, "ALL");
+        let start = app.command_line.history.len();
+        type_line(&mut app, "");
+        let out: String = app.command_line.history[start..].iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("
+");
+        assert!(out.to_uppercase().contains("LINE"), "got: {out:?}");
+    }
+
+    #[test]
+    fn isolateobjects_after_picking_objects_isolates_them() {
+        let mut app = app_with_selected_line();
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,5 10,5"}"#);
+        let _ = app.update(crate::app::Message::CommandEscape);
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        run_line(&mut app, "ISOLATEOBJECTS");
+        type_line(&mut app, "L");
+        type_line(&mut app, "");
+        assert!(app.tabs[0].scene.is_isolation_active(), "the last object is isolated");
+    }
+
+    #[test]
+    fn layiso_after_picking_objects_turns_the_other_layers_off() {
+        let mut app = app_with_selected_line();
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Walls"}"#);
+        app.tabs[0].scene.deselect_all();
+        app.refresh_properties();
+        run_line(&mut app, "LAYISO");
+        type_line(&mut app, "L");
+        type_line(&mut app, "");
+        let walls_off = app.tabs[0].scene.document.layers.get("Walls").unwrap().is_off();
+        assert!(walls_off, "Walls is off, the line's layer stays");
+    }
+
     fn line_with_modifier_none(app: &mut OpenCADStudio) {
         use crate::app::Message;
         app.automation_op(r#"{"op":"new"}"#);

@@ -154,9 +154,10 @@ impl OpenCADStudio {
             "LIST" => {
                 let selected: Vec<_> = self.tabs[i].scene.selected_entities();
                 if selected.is_empty() {
-                    self.command_line.push_error(
-                        crate::t!("LIST: no entities selected. Select entities first.").as_ref(),
-                    );
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("LIST");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
                 } else {
                     for (handle, _) in &selected {
                         if let Some(entity) = self.tabs[i].scene.document.get_entity(*handle) {
