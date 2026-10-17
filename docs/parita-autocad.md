@@ -39,7 +39,7 @@ da me nel codice, oltre che dall'analisi.
 2. **I campi Area e Lunghezza si calcolano solo su cerchio** (area) **e su linea, cerchio, arco** (lunghezza). Su polilinee
    e tratteggi il campo mostra il valore memorizzato nel file, senza avvisare. Nel dialogo non c'è il fattore di conversione
    cm²→m². (ricontrollato)
-3. **HATCH ha la tolleranza di chiusura fissa a 1e-6 e non carica `.pat` dello studio.** (ricontrollato)
+3. **HATCH non carica `.pat` dello studio.** La tolleranza di chiusura ora c'è (`HPGAPTOL`, fatto in `claude/parita-l1-04-hatch-gap`). (ricontrollato)
 4. **La stampa su plotter passa sempre da un PDF temporaneo.** Se è installato un lettore PDF che gestisce la stampa diretta
    (`printto`), stampa lui e la scala la decide il lettore. Altrimenti ArchLine stampa un raster a 300 DPI, adattato all'area
    stampabile e solo della prima pagina. Niente PC3. (ricontrollato)
@@ -200,7 +200,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | UCS | Parziale | `src/app/commands/layerprops.rs:179-560` | Previous, ZAxis, UCSMAN, UCS dinamico |
 | CAL / QUICKCALC | Parziale | `src/app/commands/inquiry.rs:120-141` | solo numeri, niente punti |
 | Palette e finestre di disegno flottanti | Assente | `src/app/config.rs:82` | palette solo ancorate a sinistra o a destra |
-| Variabili di sistema | Parziale | `src/app/commands/styleprops.rs:1095-2725` | Circa 155 gestite, contro 1027 documentate nella guida 2026. Sono una catena di `match`, senza registro. Mancano FILEDIA, CMDDIA, EXPERT, PICKFIRST, PEDITACCEPT, TRIMEXTENDMODE, HPGAPTOL, MSLTSCALE. Otto si salvano ma non hanno effetto: PICKSTYLE, PLINEGEN, DRAGMODE, QTEXTMODE, SORTENTS, BLIPMODE, REGENMODE, TEXTQLTY |
+| Variabili di sistema | Parziale | `src/app/commands/styleprops.rs:1095-2725` | Circa 155 gestite, contro 1027 documentate nella guida 2026. Sono una catena di `match`, senza registro. Mancano FILEDIA, CMDDIA, EXPERT, PICKFIRST, PEDITACCEPT, TRIMEXTENDMODE, MSLTSCALE. HPGAPTOL è stata aggiunta (`src/app/commands/hatchvars.rs`). Otto si salvano ma non hanno effetto: PICKSTYLE, PLINEGEN, DRAGMODE, QTEXTMODE, SORTENTS, BLIPMODE, REGENMODE, TEXTQLTY |
 
 ### 4.3 Annotazione
 
@@ -217,7 +217,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
 | Campi Area/Lunghezza | **Parziale, difetto** (ricontrollato) | `codec:fields.rs:1053-1082`; anteprima «----» in `src/app/commands/field.rs:112-115` | L'area si calcola solo sul cerchio, la lunghezza su linea, cerchio e arco. Polilinee e tratteggi mostrano il valore memorizzato. Il dialogo non offre formato, precisione né fattore di conversione (`src/ui/window/field_dialog.rs:245-249`), anche se il motore gestisce `%ct` |
-| HATCH, tolleranza di chiusura | Assente (ricontrollato) | `src/app/commands/draw.rs:755` | fissa a 1e-6; esiste solo in BOUNDARY |
+| HATCH, tolleranza di chiusura | **Presente** (fatto; verificato da test, non a schermo) | `src/app/commands/hatchvars.rs`, `draw.rs` (HATCH e GRADIENT) | `HPGAPTOL n` (0–5000, 0 = chiusura esatta, come AutoCAD) chiude lacune fino a n unità nel contorno, con la stessa `boundary_faces` di BOUNDARY. Vale per la sessione: l'header del codec non ha il campo, quindi non si salva nel disegno. Manca l'opzione nella finestra/prompt di HATCH. Da verificare a schermo: come si vede il tratteggio sulla lacuna chiusa |
 | HATCH, pattern | Parziale | `src/io/patterns.rs:11` | Un solo `.pat` incorporato: 106 pattern di derivazione QCAD. Non si caricano `.pat` dell'utente; `acad.pat` e `acadiso.pat` non sono completi |
 | HATCH da riga di comando | Parziale | `src/modules/draw/draw/hatch.rs:538` | solo P/A/L |
 | Stili di quota figli | Parziale | `src/entities/dimension.rs:3674-3678` | Non si applicano in creazione né in modifica; il dialogo non ha «Stili per». Esempio: un raggio con freccia sotto uno stile lineare con tick |
@@ -457,7 +457,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 **Livello 1 — difetti e gesti quotidiani, costo basso**
 1. ~~Snap digitati al prompt~~ **Fatto** (test: `typed_snap_token_arms_the_one_shot_override`, `typed_non_token_is_the_none_override`).
 2. ~~LAYUNISO, viste con nome, `ZOOM nXP`~~ **fatti** (voci 2 e 3 della consegna).
-3. Tolleranza di chiusura in HATCH (riusando la logica di BOUNDARY).
+3. ~~Tolleranza di chiusura in HATCH~~ **fatta** (`HPGAPTOL`).
 4. FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle e Polyline.
 5. STRETCH sui tipi oggi saltati.
 6. ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, CHPROP, DRAWORDER e gli altri

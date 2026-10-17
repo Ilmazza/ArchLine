@@ -29,6 +29,7 @@ mod pdf_dialogs;
 pub(crate) mod pdf_import;
 mod pdf_shx_text;
 mod pdf_underlay;
+mod hatchvars;
 mod plotvars;
 mod point_cloud;
 mod refedit;
@@ -498,6 +499,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_blockvars(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_hatchvars(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_styleprops(cmd, i) {
             return Some(t);
         }
@@ -832,6 +836,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "DELOBJ",
         "PLINEGEN",
         "PSLTSCALE",
+        // Hatch variables (commands/hatchvars.rs).
+        "HPGAPTOL",
         // Plot preferences and the current-layout variables (commands/plotvars.rs).
         "PLOTOFFSET",
         "PAPERUPDATE",

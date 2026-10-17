@@ -154,13 +154,22 @@ pub fn object_regions(
     sources: &rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
     handles: &[Handle],
 ) -> Vec<HatchRegion> {
+    object_regions_within(sources, handles, 1.0e-6)
+}
+
+/// [`object_regions`] closing gaps up to `tolerance` (`HPGAPTOL`).
+pub fn object_regions_within(
+    sources: &rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
+    handles: &[Handle],
+    tolerance: f64,
+) -> Vec<HatchRegion> {
     let mut segments = Vec::new();
     for handle in handles {
         if let Some(source) = sources.get(handle) {
             segments.extend(source.segments.iter().copied());
         }
     }
-    bounded_faces(&segments, Tolerance::new(1.0e-6))
+    bounded_faces(&segments, Tolerance::new(tolerance))
         .into_iter()
         .map(|ring| HatchRegion { rings: vec![ring] })
         .collect()
@@ -290,6 +299,8 @@ pub struct HatchCommand {
     creation_style: Option<(codec::types::Color, codec::types::Transparency)>,
     /// The RGBA the preview of a pattern or solid is drawn with.
     preview_color: Option<[f32; 4]>,
+    /// Largest gap in a boundary still treated as closed (`HPGAPTOL`).
+    gap_tolerance: f64,
 }
 
 impl HatchCommand {
@@ -338,6 +349,7 @@ impl HatchCommand {
             gradient: None,
             creation_style: None,
             preview_color: None,
+            gap_tolerance: 1.0e-6,
         };
         command.set_object_selection(selected_objects);
         command
@@ -346,6 +358,13 @@ impl HatchCommand {
     /// HPASSOC: whether the hatch starts out associative.
     pub fn with_associative(mut self, associative: bool) -> Self {
         self.associative = associative;
+        self
+    }
+
+    /// Close boundary gaps up to `tolerance` (`HPGAPTOL`); the caller built `outlines` with it.
+    pub fn with_gap_tolerance(mut self, tolerance: f64) -> Self {
+        self.gap_tolerance = tolerance;
+        self.set_object_selection(self.selected_objects.clone());
         self
     }
 
@@ -538,7 +557,7 @@ impl HatchCommand {
     }
 
     fn set_object_selection(&mut self, handles: Vec<Handle>) {
-        self.object_regions = object_regions(&self.boundary_sources, &handles)
+        self.object_regions = object_regions_within(&self.boundary_sources, &handles, self.gap_tolerance)
             .into_iter()
             .map(|region| region.rings)
             .collect();
@@ -613,12 +632,13 @@ impl HatchCommand {
             .into_iter()
             .map(|depth| depth == 0)
             .collect();
-        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, 1.0e-6);
+        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.gap_tolerance);
         let mut boundary_sources: Vec<Vec<Handle>> = rings
             .iter()
             .map(|ring| crate::scene::ring_source_handles(ring, &near))
             .collect();
-        let mut boundary_paths = crate::scene::exact_hatch_paths(&rings, &exterior, &near, 1.0e-6);
+        let mut boundary_paths =
+            crate::scene::exact_hatch_paths(&rings, &exterior, &near, self.gap_tolerance);
 
         if !self.associative {
             for handles in &mut boundary_sources {
@@ -1053,7 +1073,7 @@ impl CadCommand for HatchCommand {
                     &rings,
                     self.plane,
                     &self.boundary_sources,
-                    1.0e-6,
+                    self.gap_tolerance,
                 ),
                 entity_style: self.entity_style(),
             }
@@ -1252,6 +1272,8 @@ pub struct GradientCommand {
     kind: crate::scene::model::hatch_model::GradientKind,
     /// Swap the two colour stops.
     invert: bool,
+    /// Largest gap in a boundary still treated as closed (`HPGAPTOL`).
+    gap_tolerance: f64,
 }
 
 impl GradientCommand {
@@ -1267,7 +1289,14 @@ impl GradientCommand {
             missed: false,
             kind: crate::scene::model::hatch_model::GradientKind::Linear,
             invert: false,
+            gap_tolerance: 1.0e-6,
         }
+    }
+
+    /// Close boundary gaps up to `tolerance` (`HPGAPTOL`); the caller built `outlines` with it.
+    pub fn with_gap_tolerance(mut self, tolerance: f64) -> Self {
+        self.gap_tolerance = tolerance;
+        self
     }
 
     fn make_hatch(&self, rings: Vec<Vec<[f64; 2]>>) -> HatchModel {
@@ -1276,12 +1305,12 @@ impl GradientCommand {
             .into_iter()
             .map(|depth| depth == 0)
             .collect();
-        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, 1.0e-6);
+        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.gap_tolerance);
         let boundary_sources = rings
             .iter()
             .map(|ring| crate::scene::ring_source_handles(ring, &near))
             .collect();
-        let boundary_paths = crate::scene::exact_hatch_paths(&rings, &exterior, &near, 1.0e-6);
+        let boundary_paths = crate::scene::exact_hatch_paths(&rings, &exterior, &near, self.gap_tolerance);
         HatchModel {
             pattern_origin: None,
             render_instance: None,

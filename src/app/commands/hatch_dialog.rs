@@ -5,7 +5,7 @@ use iced::Task;
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::command::{CadCommand, WorkingPlane};
-use crate::modules::draw::draw::hatch::{object_regions, HatchCommand};
+use crate::modules::draw::draw::hatch::HatchCommand;
 use crate::modules::draw::draw::hatch_settings::{add_region, FillTab, OriginMode, RegionOrigin};
 use crate::ui::window::hatch_dialog::{Field, State};
 use crate::ui::window::hatch_palette::{Palette, PaletteAction, PALETTE_SEARCH_ID};
@@ -30,6 +30,7 @@ pub(in crate::app) fn hatch_command_from_state(
             None,
             state.plane,
         )
+        .with_gap_tolerance(super::hatchvars::gap_tolerance())
         .with_origin(origin)
         .with_settings(&resolved)
         .with_regions(
@@ -81,7 +82,9 @@ impl OpenCADStudio {
             glam::DVec3::from_array(storage.y_axis),
         );
         let boundary_sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
-        let outlines = crate::scene::boundary_faces(&boundary_sources, 1.0e-6);
+        // HPGAPTOL: a gap up to it still closes the outline.
+        let outlines =
+            crate::scene::boundary_faces(&boundary_sources, super::hatchvars::gap_tolerance());
         (plane, boundary_sources, outlines)
     }
 
@@ -110,7 +113,11 @@ impl OpenCADStudio {
         // Closed (or together closing) objects already selected seed the first
         // collection, as they used to skip the pick step.
         if !selected.is_empty() {
-            let seeded = object_regions(&state.boundary_sources, &selected);
+            let seeded = crate::modules::draw::draw::hatch::object_regions_within(
+                &state.boundary_sources,
+                &selected,
+                super::hatchvars::gap_tolerance(),
+            );
             if seeded.is_empty() {
                 self.command_line.push_info(
                     crate::t!("HATCH: the selected objects form no closed boundary.").as_ref(),
@@ -652,6 +659,7 @@ impl OpenCADStudio {
             plane,
             kind == AddKind::Objects,
         )
+        .with_gap_tolerance(super::hatchvars::gap_tolerance())
         .with_origin(origin)
         .with_settings(&resolved);
         if let Some(state) = self.hatch_dialog.as_mut() {

@@ -762,6 +762,7 @@ impl OpenCADStudio {
                 });
                 let new_cmd =
                     HatchCommand::new(outlines, boundary_sources, selected, inherited, plane)
+                        .with_gap_tolerance(super::hatchvars::gap_tolerance())
                         .with_origin(self.tabs[i].scene.document.hatch_origin())
                         .with_associative(self.hatch_associative);
                 self.command_line.push_info(&new_cmd.prompt());
@@ -835,8 +836,10 @@ impl OpenCADStudio {
                 let boundary_sources = self.tabs[i]
                     .scene
                     .boundary_sources_on_plane(crate::command::WorkingPlane::default(), 1.0e-6);
-                let outlines = crate::scene::boundary_faces(&boundary_sources, 1.0e-6);
-                let new_cmd = GradientCommand::new(outlines, boundary_sources);
+                let gap = super::hatchvars::gap_tolerance();
+                let outlines = crate::scene::boundary_faces(&boundary_sources, gap);
+                let new_cmd =
+                    GradientCommand::new(outlines, boundary_sources).with_gap_tolerance(gap);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
