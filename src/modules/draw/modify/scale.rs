@@ -59,6 +59,8 @@ pub struct ScaleCommand {
     wire_models: Vec<WireModel>,
     step: Step,
     default_factor: f64,
+    /// `Copy` option: scale a copy and keep the originals.
+    copy: bool,
 }
 
 impl ScaleCommand {
@@ -68,19 +70,22 @@ impl ScaleCommand {
             wire_models,
             step: Step::Base,
             default_factor: defaults::get_scale_factor(),
+            copy: false,
         }
     }
 
     /// Commit a uniform scale about `base` and end the command.
     fn commit(&self, base: DVec3, factor: f64) -> CmdResult {
         defaults::set_scale_factor(factor);
-        CmdResult::TransformSelected(
-            self.handles.clone(),
-            EntityTransform::Scale {
-                center: base,
-                factor,
-            },
-        )
+        let transform = EntityTransform::Scale {
+            center: base,
+            factor,
+        };
+        if self.copy {
+            CmdResult::BatchCopy(self.handles.clone(), vec![transform])
+        } else {
+            CmdResult::TransformSelected(self.handles.clone(), transform)
+        }
     }
 }
 
@@ -98,7 +103,11 @@ impl CadCommand for ScaleCommand {
             .into_owned(),
             Step::Factor { .. } => {
                 let f = format!("{:.4}", self.default_factor);
-                t!("SCALE  Specify scale factor  <%{f}>:", f = f).into_owned()
+                if self.copy {
+                    t!("SCALE  Specify scale factor (a copy is scaled)  <%{f}>:", f = f).into_owned()
+                } else {
+                    t!("SCALE  Specify scale factor  <%{f}>:", f = f).into_owned()
+                }
             }
             Step::RefFirst { .. } => {
                 t!("SCALE  Specify first reference point or type reference length:").into_owned()
@@ -119,7 +128,10 @@ impl CadCommand for ScaleCommand {
         use crate::command::CmdOption;
         match &self.step {
             // The reference-scaling keyword is only offered at the factor step.
-            Step::Factor { .. } => vec![CmdOption::new(t!("Reference").as_ref(), "R")],
+            Step::Factor { .. } => vec![
+                CmdOption::new(t!("Copy").as_ref(), "C"),
+                CmdOption::new(t!("Reference").as_ref(), "R"),
+            ],
             _ => vec![],
         }
     }
@@ -182,6 +194,10 @@ impl CadCommand for ScaleCommand {
                 let base = *base;
                 // `R` / `Reference` switches to reference scaling.
                 let low = t.to_ascii_lowercase();
+                if low == "c" || low == "copy" {
+                    self.copy = true;
+                    return Some(CmdResult::NeedPoint);
+                }
                 if low == "r" || low == "reference" {
                     self.step = Step::RefFirst { base };
                     return Some(CmdResult::NeedPoint);
@@ -292,5 +308,57 @@ impl CadCommand for ScaleCommand {
             Step::Factor { base } | Step::RefNew { base, .. } => Some(base.distance(cursor)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    fn at_factor_step() -> ScaleCommand {
+        let mut command = ScaleCommand::new(vec![Handle::new(1)], vec![]);
+        assert!(matches!(command.on_point(DVec3::ZERO), CmdResult::NeedPoint));
+        command
+    }
+
+    #[test]
+    fn scale_without_copy_transforms_the_selection_itself() {
+        let mut command = at_factor_step();
+        assert!(matches!(
+            command.on_text_input("2"),
+            Some(CmdResult::TransformSelected(_, EntityTransform::Scale { .. }))
+        ));
+    }
+
+    #[test]
+    fn scale_copy_scales_a_copy_and_keeps_the_original() {
+        let mut command = at_factor_step();
+        let keywords: Vec<_> = command.options().into_iter().map(|o| o.keyword).collect();
+        assert_eq!(keywords, ["C", "R"]);
+        assert!(matches!(command.on_text_input("C"), Some(CmdResult::NeedPoint)));
+        assert!(matches!(&command.step, Step::Factor { .. }), "still asking for the factor");
+        match command.on_text_input("2") {
+            Some(CmdResult::BatchCopy(handles, transforms)) => {
+                assert_eq!(handles, vec![Handle::new(1)]);
+                assert!(matches!(transforms[..], [EntityTransform::Scale { .. }]));
+            }
+            _ => panic!("expected a scaled copy"),
+        }
+    }
+
+    #[test]
+    fn scale_copy_is_kept_through_the_reference_option() {
+        let mut command = at_factor_step();
+        command.on_text_input("C");
+        command.on_text_input("R");
+        command.on_text_input("4");
+        assert!(matches!(command.on_text_input("8"), Some(CmdResult::BatchCopy(..))));
+    }
+
+    #[test]
+    fn scale_copy_by_enter_uses_the_stored_factor_on_a_copy() {
+        let mut command = at_factor_step();
+        command.on_text_input("C");
+        assert!(matches!(command.on_enter(), CmdResult::BatchCopy(..)));
     }
 }

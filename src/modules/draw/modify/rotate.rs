@@ -67,6 +67,8 @@ pub struct RotateCommand {
     spatial: bool,
     /// The plane is the one square to the chosen axis, not the UCS.
     axis_chosen: bool,
+    /// `Copy` option: rotate a copy and keep the originals.
+    copy: bool,
 }
 
 impl RotateCommand {
@@ -79,6 +81,7 @@ impl RotateCommand {
             plane: WorkingPlane::default(),
             spatial: false,
             axis_chosen: false,
+            copy: false,
         }
     }
 
@@ -111,14 +114,16 @@ impl RotateCommand {
 
     fn commit(&self, center: DVec3, angle_rad: f64) -> CmdResult {
         defaults::set_rotate_angle(angle_rad.to_degrees());
-        CmdResult::TransformSelected(
-            self.handles.clone(),
-            EntityTransform::Rotate {
-                center,
-                axis: self.plane.z,
-                angle_rad,
-            },
-        )
+        let transform = EntityTransform::Rotate {
+            center,
+            axis: self.plane.z,
+            angle_rad,
+        };
+        if self.copy {
+            CmdResult::BatchCopy(self.handles.clone(), vec![transform])
+        } else {
+            CmdResult::TransformSelected(self.handles.clone(), transform)
+        }
     }
 
     fn angle_arc(center: [f64; 2], radius: f64, angle: f64) -> Option<(geom2d::Arc, bool)> {
@@ -214,7 +219,11 @@ impl CadCommand for RotateCommand {
             }
             Step::Angle { .. } => {
                 let a = format!("{:.4}", self.default_angle);
-                t!("ROTATE  Specify rotation angle  <%{a}>:", a = a).into_owned()
+                if self.copy {
+                    t!("ROTATE  Specify rotation angle (a copy is rotated)  <%{a}>:", a = a).into_owned()
+                } else {
+                    t!("ROTATE  Specify rotation angle  <%{a}>:", a = a).into_owned()
+                }
             }
             Step::RefFirst { .. } => {
                 t!("ROTATE  Specify first reference point or type reference angle:").into_owned()
@@ -233,7 +242,10 @@ impl CadCommand for RotateCommand {
             Step::Axis { .. } => ["X", "Y", "Z"]
                 .map(|axis| CmdOption::new(axis, axis))
                 .to_vec(),
-            Step::Angle { .. } => vec![CmdOption::new(t!("Reference").as_ref(), "R")],
+            Step::Angle { .. } => vec![
+                CmdOption::new(t!("Copy").as_ref(), "C"),
+                CmdOption::new(t!("Reference").as_ref(), "R"),
+            ],
             _ => vec![],
         }
     }
@@ -315,6 +327,10 @@ impl CadCommand for RotateCommand {
             Step::Angle { center } => {
                 let center = *center;
                 let low = t.to_ascii_lowercase();
+                if low == "c" || low == "copy" {
+                    self.copy = true;
+                    return Some(CmdResult::NeedPoint);
+                }
                 if low == "r" || low == "reference" {
                     self.step = Step::RefFirst { center };
                     return Some(CmdResult::NeedPoint);
@@ -452,6 +468,59 @@ impl CadCommand for RotateCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at_angle_step() -> RotateCommand {
+        let mut command = RotateCommand::new(vec![Handle::new(1)], vec![]);
+        assert!(matches!(command.on_point(DVec3::ZERO), CmdResult::NeedPoint));
+        command
+    }
+
+    fn keywords(command: &RotateCommand) -> Vec<String> {
+        command.options().into_iter().map(|o| o.keyword).collect()
+    }
+
+    #[test]
+    fn rotate_without_copy_transforms_the_selection_itself() {
+        let mut command = at_angle_step();
+        assert!(matches!(
+            command.on_text_input("90"),
+            Some(CmdResult::TransformSelected(_, EntityTransform::Rotate { .. }))
+        ));
+    }
+
+    #[test]
+    fn rotate_copy_rotates_a_copy_and_keeps_the_original() {
+        let mut command = at_angle_step();
+        assert_eq!(keywords(&command), ["C", "R"]);
+        assert!(matches!(command.on_text_input("C"), Some(CmdResult::NeedPoint)));
+        assert!(matches!(&command.step, Step::Angle { .. }), "still asking for the angle");
+        match command.on_text_input("90") {
+            Some(CmdResult::BatchCopy(handles, transforms)) => {
+                assert_eq!(handles, vec![Handle::new(1)]);
+                assert!(matches!(transforms[..], [EntityTransform::Rotate { .. }]));
+            }
+            _ => panic!("expected a rotated copy"),
+        }
+    }
+
+    #[test]
+    fn rotate_copy_is_kept_through_the_reference_option() {
+        let mut command = at_angle_step();
+        command.on_text_input("C");
+        command.on_text_input("R");
+        command.on_text_input("10");
+        assert!(matches!(
+            command.on_text_input("55"),
+            Some(CmdResult::BatchCopy(..))
+        ));
+    }
+
+    #[test]
+    fn rotate_copy_by_enter_uses_the_stored_angle_on_a_copy() {
+        let mut command = at_angle_step();
+        command.on_text_input("C");
+        assert!(matches!(command.on_enter(), CmdResult::BatchCopy(..)));
+    }
 
     #[test]
     fn angle_label_uses_the_working_plane_arc_midpoint() {

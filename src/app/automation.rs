@@ -4193,6 +4193,66 @@ mod tests {
         assert!(out.contains("0"), "zero is not a scale; got: {out:?}");
     }
 
+    /// A line from the origin to (10, 0), selected, in a new drawing.
+    fn app_with_selected_line() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let _ = app.update(crate::app::Message::CommandEscape);
+        let handle = app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .find_map(|e| match e {
+                codec::EntityType::Line(l) => Some(l.common.handle),
+                _ => None,
+            })
+            .expect("a line");
+        app.tabs[0].scene.select_entities(&[handle]);
+        app.refresh_properties();
+        app
+    }
+
+    fn line_ends(app: &OpenCADStudio) -> Vec<([f64; 2], [f64; 2])> {
+        app.tabs[0]
+            .scene
+            .document
+            .entities()
+            .filter_map(|e| match e {
+                codec::EntityType::Line(l) => Some(([l.start.x, l.start.y], [l.end.x, l.end.y])),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rotate_copy_leaves_the_original_and_adds_the_rotated_line() {
+        let mut app = app_with_selected_line();
+        run_line(&mut app, "ROTATE 0,0 C 90");
+        let lines = line_ends(&app);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().any(|(a, b)| a[0].abs() < 1e-9 && a[1].abs() < 1e-9 && (b[0] - 10.0).abs() < 1e-9 && b[1].abs() < 1e-9), "original stays: {lines:?}");
+        assert!(lines.iter().any(|(_, b)| b[0].abs() < 1e-6 && (b[1] - 10.0).abs() < 1e-6), "copy rotated: {lines:?}");
+        assert!(app.tabs[0].active_cmd.is_none(), "the command ends");
+    }
+
+    #[test]
+    fn scale_copy_leaves_the_original_and_adds_the_scaled_line() {
+        let mut app = app_with_selected_line();
+        run_line(&mut app, "SCALE 0,0 C 2");
+        let lines = line_ends(&app);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().any(|(_, b)| (b[0] - 10.0).abs() < 1e-9), "original stays: {lines:?}");
+        assert!(lines.iter().any(|(_, b)| (b[0] - 20.0).abs() < 1e-9), "copy scaled: {lines:?}");
+    }
+
+    fn line_with_modifier_none(app: &mut OpenCADStudio) {
+        use crate::app::Message;
+        app.automation_op(r#"{"op":"new"}"#);
+        let _ = app.update(Message::CommandInput("LINE".to_string()));
+        let _ = app.update(Message::CommandSubmit);
+    }
+
     fn line_with_modifier(app: &mut OpenCADStudio, token: &str) {
         use crate::app::Message;
         app.automation_op(r#"{"op":"new"}"#);
