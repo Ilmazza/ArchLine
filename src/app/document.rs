@@ -260,6 +260,9 @@ pub(super) struct DocumentTab {
     /// LAYERP stack: for each recorded change to layer settings, the layers as they were before
     /// (name, whole layer). Newest last; bounded by `LAYER_PREVIOUS_LIMIT`.
     pub(super) layer_prev: Vec<Vec<(String, codec::tables::Layer)>>,
+    /// Layers LAYISO turned off, so LAYUNISO turns back on exactly those (layers that were
+    /// already off before LAYISO stay off). Empty when no isolation is active.
+    pub(super) layiso_off: Vec<String>,
     /// References attached with a relative path while the drawing had no
     /// file yet: stored full until the first save, then made relative.
     pub(super) xref_relative_on_save: rustc_hash::FxHashSet<String>,
@@ -698,6 +701,7 @@ impl DocumentTab {
             last_synced_camera_gen: 0,
             xref_unloaded: crate::io::xref_model::UnloadSet::default(),
             layer_prev: Vec::new(),
+            layiso_off: Vec::new(),
             xref_relative_on_save: rustc_hash::FxHashSet::default(),
             xref_stat_cache: crate::io::xref_model::RefStatCache::default(),
             xref_missing: 0,

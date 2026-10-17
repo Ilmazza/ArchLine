@@ -56,7 +56,7 @@ da me nel codice, oltre che dall'analisi.
     Trim/No trim, e CHAMFER lavora solo su linee.
 
 **Difetti** (funzioni presenti ma sbagliate), elenco completo al §5:
-- LAYUNISO accende tutti i layer;
+- ~~LAYUNISO accende tutti i layer~~ **Fatto** (`claude/parita-l1-02-layuniso`): riaccende solo i layer che LAYISO ha spento;
 - le viste con nome si salvano quadrate;
 - cambiare la visibilità di un blocco dinamico tocca tutte le copie, o la definizione;
 - accenti corrotti nei DXF R2000;
@@ -273,7 +273,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
-| LAYUNISO | **Difetto** (ricontrollato) | `src/app/commands/layers.rs:690-708` | accende tutti i layer invece di ripristinare lo stato di prima |
+| LAYUNISO | **Corretto** (verificato da test) | `src/app/commands/layers.rs` (`layiso_off` in `DocumentTab`) | riaccende solo i layer spenti da LAYISO; senza LAYISO precedente avvisa e non tocca nulla. Limite: lo stato è per sessione e non entra nell'undo; dopo un UNDO di LAYISO, LAYUNISO riaccende comunque quei layer |
 | LAYISO | Parziale | `layers.rs:588-622` | solo Off; vuole una preselezione |
 | Filtri layer | Assente | `src/ui/window/layers.rs:451` | per proprietà, di gruppo, invertiti (c'è solo la ricerca per nome) |
 | Gestore layer | Parziale | `src/ui/window/layers.rs:386-420` | Mancano le colonne Descrizione, stile di stampa, New VP Freeze e override per viewport. Elimina un layer in uso con i suoi oggetti, previo avviso (`src/app/update/command.rs:1361`); AutoCAD invece rifiuta |
@@ -422,7 +422,7 @@ una prova a schermo.
 
 | # | Difetto | Evidenza | Fonte | Costo |
 |---|---|---|---|---|
-| 1 | LAYUNISO accende tutti i layer | `src/app/commands/layers.rs:690-708` | ricontrollato | basso |
+| 1 | ~~LAYUNISO accende tutti i layer~~ **corretto** | `src/app/commands/layers.rs` | ricontrollato | basso |
 | 2 | Viste con nome salvate quadrate: l'area «View» in PLOT è sbagliata | `src/scene/camera_ops.rs:222-251` | ricontrollato | basso |
 | 3 | STRETCH lascia fermi i tipi «generici», contro il suo stesso commento | `src/app/command_driver/transform.rs:527-530` | ricontrollato | basso-medio |
 | 4 | Campi area/lunghezza su polilinee e tratteggi: valore vecchio, senza avviso | `codec:fields.rs:1053-1082` | ricontrollato | basso-medio (codec MPL: patch da proporre a upstream, oppure aggancio lato app) |
@@ -455,8 +455,8 @@ Criteri:
 Ogni voce dei livelli 1–2 è una PR piccola, con test.
 
 **Livello 1 — difetti e gesti quotidiani, costo basso**
-1. Snap digitati al prompt (`PointModifier::from_token`).
-2. LAYUNISO, viste con nome, `ZOOM nXP`.
+1. ~~Snap digitati al prompt~~ **Fatto** (test: `typed_snap_token_arms_the_one_shot_override`, `typed_non_token_is_the_none_override`).
+2. ~~LAYUNISO~~ **fatto**; viste con nome, `ZOOM nXP` (da fare).
 3. Tolleranza di chiusura in HATCH (riusando la logica di BOUNDARY).
 4. FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle e Polyline.
 5. STRETCH sui tipi oggi saltati.

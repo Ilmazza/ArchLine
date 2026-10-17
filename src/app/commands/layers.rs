@@ -630,7 +630,12 @@ impl OpenCADStudio {
                     let undo = self.begin_layer_undo(i, "LAYISO", &names);
                     for name in &names {
                         if !sel_layers.contains(name) {
-                            if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(name) {
+                            let tab = &mut self.tabs[i];
+                            if let Some(dl) = tab.scene.document.layers.get_mut(name) {
+                                // Only what this call switches off is LAYUNISO's to restore.
+                                if !dl.is_off() && !tab.layiso_off.contains(name) {
+                                    tab.layiso_off.push(name.clone());
+                                }
                                 dl.turn_off();
                             }
                         }
@@ -707,27 +712,30 @@ impl OpenCADStudio {
                 }
             }
 
-            // LAYUNISO — restore all layers that were turned off by LAYISO (turn all on)
+            // LAYUNISO — turn back on the layers the last LAYISO turned off
             "LAYUNISO" => {
-                let names: Vec<String> = self.tabs[i]
-                    .scene
-                    .document
-                    .layers
-                    .iter()
-                    .map(|l| l.name.clone())
+                let tab = &mut self.tabs[i];
+                let names: Vec<String> = std::mem::take(&mut tab.layiso_off)
+                    .into_iter()
+                    .filter(|n| tab.scene.document.layers.get(n).is_some())
                     .collect();
-                let undo = self.begin_layer_undo(i, "LAYUNISO", &names);
-                for name in &names {
-                    if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(&name) {
-                        dl.turn_on();
+                if names.is_empty() {
+                    self.command_line
+                        .push_info(crate::t!("LAYUNISO: no isolated layers to restore.").as_ref());
+                } else {
+                    let undo = self.begin_layer_undo(i, "LAYUNISO", &names);
+                    for name in &names {
+                        if let Some(dl) = self.tabs[i].scene.document.layers.get_mut(name) {
+                            dl.turn_on();
+                        }
                     }
+                    self.tabs[i].scene.invalidate_layer_visibility(&names);
+                    self.tabs[i].dirty = true;
+                    self.commit_layer_undo(i, undo);
+                    self.refresh_layer_panel();
+                    self.command_line
+                        .push_info(crate::t!("LAYUNISO: all layers restored.").as_ref());
                 }
-                self.tabs[i].scene.invalidate_layer_visibility(&names);
-                self.tabs[i].dirty = true;
-                self.commit_layer_undo(i, undo);
-                self.refresh_layer_panel();
-                self.command_line
-                    .push_info(crate::t!("LAYUNISO: all layers restored.").as_ref());
             }
 
             "QLAYER" => {
@@ -1447,6 +1455,50 @@ mod tests {
         assert_eq!(active.name(), "SELECT");
         assert!(active.is_selection_gathering());
         assert_eq!(layer_of(&app, line), "0", "nothing moves before the selection is confirmed");
+    }
+
+    // ── LAYISO / LAYUNISO ────────────────────────────────────────────────────
+
+    fn is_off(app: &OpenCADStudio, layer: &str) -> bool {
+        app.tabs[0].scene.document.layers.get(layer).expect("layer").is_off()
+    }
+
+    /// Layers "0" (holding the selected line), "Walls" on, "Doors" already off.
+    fn app_with_doors_off() -> (OpenCADStudio, Handle) {
+        let (mut app, line) = app_with_line();
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Doors"}"#);
+        app.tabs[0].scene.document.layers.get_mut("Doors").unwrap().turn_off();
+        select(&mut app, line);
+        (app, line)
+    }
+
+    #[test]
+    fn layuniso_turns_back_on_only_what_layiso_turned_off() {
+        let (mut app, _line) = app_with_doors_off();
+        let _ = run(&mut app, "LAYISO");
+        assert!(is_off(&app, "Walls") && is_off(&app, "Doors") && !is_off(&app, "0"));
+        let _ = run(&mut app, "LAYUNISO");
+        assert!(!is_off(&app, "Walls"), "LAYISO turned Walls off, LAYUNISO restores it");
+        assert!(is_off(&app, "Doors"), "Doors was off before LAYISO and stays off");
+    }
+
+    #[test]
+    fn layuniso_twice_in_a_row_restores_the_state_before_the_first_layiso() {
+        let (mut app, line) = app_with_doors_off();
+        let _ = run(&mut app, "LAYISO");
+        select(&mut app, line);
+        let _ = run(&mut app, "LAYISO");
+        let _ = run(&mut app, "LAYUNISO");
+        assert!(!is_off(&app, "Walls"));
+        assert!(is_off(&app, "Doors"));
+    }
+
+    #[test]
+    fn layuniso_without_a_layiso_changes_nothing() {
+        let (mut app, _line) = app_with_doors_off();
+        let out = run(&mut app, "LAYUNISO");
+        assert!(is_off(&app, "Doors"), "no isolation to undo: Doors stays off");
+        assert!(out.contains("no isolated layers"), "got: {out:?}");
     }
 
     // ── LAYERP ───────────────────────────────────────────────────────────────
