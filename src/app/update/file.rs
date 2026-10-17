@@ -5333,7 +5333,7 @@ impl OpenCADStudio {
         }
     }
 
-    fn print_all_pages(&mut self) -> Result<Vec<crate::io::pdf_export::PdfPageInput>, String> {
+    fn print_all_pages(&mut self) -> Result<Vec<(String, crate::io::pdf_export::PdfPageInput)>, String> {
         self.stamp_plot_fields();
         let available = self.tabs[self.active_tab].scene.layout_names();
         let selected: Vec<String> = self
@@ -5418,7 +5418,7 @@ impl OpenCADStudio {
                         crate::tf!("Layout '{name}' plot area is empty.").into_owned()
                     })?
                 };
-                pages.push(page);
+                pages.push((name, page));
             }
             Ok(pages)
         })();
@@ -5455,19 +5455,12 @@ impl OpenCADStudio {
             }
         };
         let worker_path = path.clone();
+        let per_sheet = self.print_all_per_sheet;
         let fallback_style = self.dialog_plot_style(&dialog);
         self.save_config();
         self.close_active_modal();
         let work = move || {
-            crate::io::pdf_export::export_pdf_pages(&pages, &worker_path, fallback_style.as_ref())
-                .map(|_| {
-                    crate::tf!(
-                        "Exported {} layouts to {}",
-                        pages.len(),
-                        worker_path.display()
-                    )
-                    .into_owned()
-                })
+            crate::io::publish::publish_pdf(pages, &worker_path, per_sheet, fallback_style.as_ref())
                 .map_err(|error| crate::tf!("Export failed: {error}").into_owned())
         };
         self.run_print_all_work(dialog.background_publish, work)
@@ -5509,6 +5502,7 @@ impl OpenCADStudio {
             let temp_path = crate::io::print_to_printer::temp_pdf_path("print_all");
             self.command_line
                 .push_info(crate::t!("Sending selected layouts to the system printer…").as_ref());
+            let pages: Vec<_> = pages.into_iter().map(|(_, page)| page).collect();
             let work = move || {
                 crate::io::pdf_export::export_pdf_pages(&pages, &temp_path, fallback_style.as_ref())
                     .and_then(|_| {

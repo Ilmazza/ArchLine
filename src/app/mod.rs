@@ -1386,6 +1386,8 @@ pub(super) struct OpenCADStudio {
     plot_setup_template: Option<codec::objects::PlotSettings>,
     /// Paper layouts shown by Print All, in tab order with their selection.
     print_all_layouts: Vec<(String, bool)>,
+    /// Print All to PDF writes one file per layout instead of one file.
+    print_all_per_sheet: bool,
     /// True while the Plot dialog is editing settings for Print All.
     print_all_options: bool,
     /// True when Print All should override each layout's page setup.
@@ -4325,6 +4327,8 @@ pub enum Message {
     PrintAllOpen,
     /// Toggle one paper layout in the batch.
     PrintAllToggle(String),
+    /// One PDF per layout (sheet-by-sheet) instead of a single PDF.
+    PrintAllPerSheet(bool),
     /// Select or clear every paper layout in the batch.
     PrintAllSelectAll,
     PrintAllSelectNone,
@@ -5134,6 +5138,7 @@ impl OpenCADStudio {
             plot_reconcile_printer_media: None,
             plot_setup_template: None,
             print_all_layouts: Vec::new(),
+            print_all_per_sheet: false,
             print_all_options: false,
             print_all_settings_override: false,
             print_all_options_prev: None,

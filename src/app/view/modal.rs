@@ -631,13 +631,19 @@ impl OpenCADStudio {
                 }
             }
             super::super::ModalKind::Plot => self.plot_modal_content(ex),
-            super::super::ModalKind::PrintAll => sized_flow(ex, 520, 420, |flow| {
-                crate::ui::window::print_all::view_window(
-                    &self.print_all_layouts,
-                    self.plot_dialog.printer.as_deref(),
-                    flow,
-                )
-            }),
+            super::super::ModalKind::PrintAll => sized_flow(
+                ex,
+                520,
+                420,
+                |flow| {
+                    crate::ui::window::print_all::view_window(
+                        &self.print_all_layouts,
+                        self.print_all_per_sheet,
+                        self.plot_dialog.printer.as_deref(),
+                        flow,
+                    )
+                },
+            ),
             super::super::ModalKind::LayoutManager => {
                 let i = self.active_tab;
                 let layouts = self.tabs[i].scene.layout_names();

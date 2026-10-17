@@ -301,7 +301,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 |---|---|---|---|
 | Stampante o plotter Windows | Parziale (ricontrollato) | `src/io/print_to_printer.rs:583-590`, `:1176-1205` | §1 punto 4: scala esatta, più pagine, uscita vettoriale |
 | PC3, PLOTTERMANAGER | Assente | `src/io/plot_device.rs:56-81` | — |
-| PUBLISH | Parziale | `src/ui/window/print_all.rs`; `src/app/update/file.rs:3724-3967` | PRINTALL fa solo il disegno attivo, in un unico PDF. Un PDF per foglio c'è solo dall'API (`src/app/control/actions.rs:688`). Niente `.dsd` |
+| PUBLISH | Parziale | `src/ui/window/print_all.rs`; `src/app/update/file.rs:3724-3967`; `src/io/publish.rs` | PRINTALL fa solo il disegno attivo. **Un PDF per tavola** ora c'è anche dal dialogo (casella «One PDF per sheet», file `nome-Layout.pdf`, nomi che collidono numerati `-2`, `-3`; API e dialogo usano lo stesso codice). Mancano più disegni in un colpo e l'elenco salvabile (niente `.dsd`) |
 | PREVIEW | Parziale | `src/app/update/file.rs:5383` | apre un PDF temporaneo nel lettore esterno |
 | CTB | Parziale (dedotto) | `src/io/pdf_export.rs:744-770`; `src/app/update/file.rs:410-435` | Il tipo di linea del CTB è ignorato. Blocchi e xref prendono la penna dell'INSERT; true color e ByBlock restano senza penna |
 | Stampa senza CTB | Difetto | `src/io/pdf_export.rs:772-791` | §5 |
@@ -476,7 +476,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 11. ~~TABLEEXPORT (`table_to_csv` esiste già).~~ **Fatto** (test in `src/app/commands/table_export.rs`; da verificare a schermo: finestra di salvataggio e file aperto in Excel).
 
 **Livello 3 — consegna delle tavole**
-12. PUBLISH: un PDF per tavola, più disegni, elenco salvabile. I pezzi ci sono già: PRINTALL e `per_page`.
+12. PUBLISH: un PDF per tavola, più disegni, elenco salvabile. **Fatto: un PDF per tavola dal dialogo «Print all»** (test in `src/io/publish.rs`; da verificare a schermo: casella e file scritti). **Aperti: più disegni e elenco salvabile.**
 13. Fedeltà dei CTB su blocchi, xref e true color. Prima va misurata, estendendo il banco di conformità al PDF.
 14. Stampa su plotter in scala 1:1: prima il raster GDI senza adattamento all'area stampabile, poi l'uscita vettoriale
     (costo alto).

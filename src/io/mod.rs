@@ -24,6 +24,7 @@ pub mod patterns;
 pub mod pdf_export;
 pub mod plot;
 pub mod plot_device;
+pub mod publish;
 pub mod plot_style;
 pub mod print_to_printer;
 pub mod recovery;

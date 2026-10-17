@@ -11099,6 +11099,10 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Message::PrintAllPerSheet(on) => {
+                self.print_all_per_sheet = on;
+                Task::none()
+            }
             Message::PrintAllSelectAll => {
                 for (_, selected) in &mut self.print_all_layouts {
                     *selected = true;

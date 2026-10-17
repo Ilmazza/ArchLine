@@ -6,6 +6,7 @@ use iced::{Background, Border, Element, Length, Theme};
 
 pub fn view_window<'a>(
     layouts: &'a [(String, bool)],
+    per_sheet: bool,
     printer: Option<&'a str>,
     sizing: crate::ui::modal::ModalSizing,
 ) -> Element<'a, Message> {
@@ -96,6 +97,11 @@ pub fn view_window<'a>(
             .spacing(6)
             .align_y(iced::Center),
             list_panel,
+            checkbox(per_sheet)
+                .label(t!("One PDF per sheet (name-Layout.pdf)"))
+                .on_toggle(Message::PrintAllPerSheet)
+                .size(16)
+                .text_size(12),
             row![
                 text(format!("{}: {printer}", t!("Printer")))
                     .size(11)
