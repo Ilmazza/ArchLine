@@ -386,9 +386,16 @@ impl Default for DataExtractionState {
                     category: "Geometry".into(),
                     checked: true,
                 },
+                ExtractionProperty {
+                    key: "block_name".into(),
+                    name: "Block name".into(),
+                    category: "Block".into(),
+                    checked: false,
+                },
             ],
-            categories: ["General".to_string(), "Geometry".to_string()]
+            categories: ["General", "Geometry", "Block", "Attributes"]
                 .into_iter()
+                .map(str::to_string)
                 .collect(),
             combine_identical: false,
             show_count: true,
@@ -1026,7 +1033,7 @@ pub fn data_extraction_view(
         }
         ExtractionPage::Properties => {
             let mut categories = row![].spacing(10);
-            for category in ["General", "Geometry"] {
+            for category in ["General", "Geometry", "Block", "Attributes"] {
                 let checked = state.categories.contains(category);
                 let key = category.to_string();
                 categories = categories.push(

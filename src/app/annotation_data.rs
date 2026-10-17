@@ -25,6 +25,8 @@ struct ExtractionRecord {
     color: String,
     linetype: String,
     details: String,
+    block_name: String,
+    attributes: BTreeMap<String, String>,
 }
 
 // ── In-session picked-file registries (web) ───────────────────────────────
@@ -165,7 +167,12 @@ impl ExtractionRecord {
             "color" => self.color.clone(),
             "linetype" => self.linetype.clone(),
             "details" => self.details.clone(),
-            _ => String::new(),
+            super::extraction_blocks::BLOCK_NAME_KEY => self.block_name.clone(),
+            _ => key
+                .strip_prefix(super::extraction_blocks::ATTRIBUTE_PREFIX)
+                .and_then(|tag| self.attributes.get(tag))
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -643,10 +650,7 @@ fn collect_records(
     allowed_types: &BTreeSet<String>,
     out: &mut Vec<ExtractionRecord>,
 ) {
-    for entity in doc.entities() {
-        if matches!(entity, EntityType::Block(_) | EntityType::BlockEnd(_)) {
-            continue;
-        }
+    for entity in super::extraction_blocks::drawing_entities(doc) {
         if allowed_handles.is_some_and(|handles| !handles.contains(&entity.common().handle)) {
             continue;
         }
@@ -661,6 +665,8 @@ fn collect_records(
             color: entity.common().color.to_string(),
             linetype: entity.common().linetype.clone(),
             details: entity_details(entity),
+            block_name: super::extraction_blocks::block_name(doc, entity),
+            attributes: super::extraction_blocks::attribute_values(entity),
         });
     }
 }
@@ -742,10 +748,7 @@ fn collect_type_counts(
     allowed_handles: Option<&BTreeSet<Handle>>,
     counts: &mut BTreeMap<String, usize>,
 ) {
-    for entity in doc.entities() {
-        if matches!(entity, EntityType::Block(_) | EntityType::BlockEnd(_)) {
-            continue;
-        }
+    for entity in super::extraction_blocks::drawing_entities(doc) {
         if allowed_handles.is_some_and(|handles| !handles.contains(&entity.common().handle)) {
             continue;
         }
@@ -972,6 +975,7 @@ fn load_extraction_settings(state: &mut DataExtractionState) -> Result<(), Strin
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
+    super::extraction_blocks::restore_attribute_properties(&mut state.properties, &properties);
     for item in &mut state.properties {
         item.checked = properties.is_empty() || properties.contains(item.key.as_str());
     }
@@ -1681,21 +1685,29 @@ impl OpenCADStudio {
             .copied()
             .collect::<BTreeSet<_>>();
         let mut counts = BTreeMap::new();
+        let mut tags = BTreeSet::new();
         let current = &self.tabs[self.active_tab].scene.document;
         match state.source {
-            ExtractionSource::CurrentDrawing => collect_type_counts(current, None, &mut counts),
+            ExtractionSource::CurrentDrawing => {
+                collect_type_counts(current, None, &mut counts);
+                super::extraction_blocks::collect_attribute_tags(current, None, &mut tags);
+            }
             ExtractionSource::CurrentSelection => {
-                collect_type_counts(current, Some(&selected), &mut counts)
+                collect_type_counts(current, Some(&selected), &mut counts);
+                super::extraction_blocks::collect_attribute_tags(current, Some(&selected), &mut tags);
             }
             ExtractionSource::DrawingsAndFolders => {
                 if state.include_current {
                     collect_type_counts(current, None, &mut counts);
+                    super::extraction_blocks::collect_attribute_tags(current, None, &mut tags);
                 }
                 for_each_extraction_document(&state, |document| {
                     collect_type_counts(document, None, &mut counts);
+                    super::extraction_blocks::collect_attribute_tags(document, None, &mut tags);
                 })?;
             }
         }
+        super::extraction_blocks::merge_attribute_properties(&mut self.data_extraction.properties, &tags);
         let previous = self
             .data_extraction
             .objects
@@ -2250,5 +2262,63 @@ mod tests {
     #[test]
     fn workbook_metadata_bytes_rejects_non_workbooks() {
         assert!(workbook_metadata_bytes(b"not a workbook").is_err());
+    }
+
+    fn insert_with(doc: &mut CadDocument, block: &str, x: f64, attributes: &[(&str, &str)]) {
+        let mut insert = codec::entities::Insert::new(block, Vector3::new(x, 0.0, 0.0));
+        for (tag, value) in attributes {
+            insert.attributes.push(codec::entities::AttributeEntity::new((*tag).into(), (*value).into()));
+        }
+        doc.add_entity(EntityType::Insert(insert)).unwrap();
+    }
+
+    fn schedule_state(keys: &[(&str, &str)]) -> DataExtractionState {
+        let mut state = DataExtractionState::default();
+        state.objects = vec![crate::ui::window::annotation_data::ExtractionObject { name: "INSERT".into(), checked: true, count: 0 }];
+        state.properties = keys
+            .iter()
+            .map(|(key, name)| crate::ui::window::annotation_data::ExtractionProperty {
+                key: (*key).into(),
+                name: (*name).into(),
+                category: "Block".into(),
+                checked: true,
+            })
+            .collect();
+        state.show_name = false;
+        state.show_count = true;
+        state.combine_identical = true;
+        state
+    }
+
+    fn row(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn block_name_column_groups_references_of_the_same_block() {
+        let mut doc = CadDocument::new();
+        insert_with(&mut doc, "PORTA", 0.0, &[]);
+        insert_with(&mut doc, "PORTA", 5.0, &[]);
+        insert_with(&mut doc, "FINESTRA", 10.0, &[]);
+        let rows = extraction_preview(&schedule_state(&[("block_name", "Block name")]), &doc).unwrap();
+        assert_eq!(rows, vec![row(&["Block name", "Count"]), row(&["FINESTRA", "1"]), row(&["PORTA", "2"])]);
+    }
+
+    #[test]
+    fn attribute_columns_carry_the_value_of_each_reference() {
+        let mut doc = CadDocument::new();
+        insert_with(&mut doc, "PORTA", 0.0, &[("LARGHEZZA", "90"), ("TIPO", "P1")]);
+        insert_with(&mut doc, "PORTA", 5.0, &[("LARGHEZZA", "90"), ("TIPO", "P1")]);
+        insert_with(&mut doc, "PORTA", 9.0, &[("LARGHEZZA", "80")]);
+        let state = schedule_state(&[("block_name", "Block name"), ("attr:LARGHEZZA", "LARGHEZZA"), ("attr:TIPO", "TIPO")]);
+        let rows = extraction_preview(&state, &doc).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                row(&["Block name", "LARGHEZZA", "TIPO", "Count"]),
+                row(&["PORTA", "80", "", "1"]),
+                row(&["PORTA", "90", "P1", "2"]),
+            ]
+        );
     }
 }

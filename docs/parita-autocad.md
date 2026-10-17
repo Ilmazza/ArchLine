@@ -45,8 +45,9 @@ da me nel codice, oltre che dall'analisi.
    stampabile e solo della prima pagina. Niente PC3. (ricontrollato)
 5. **Non c'è una pubblicazione vera**: PRINTALL fa un solo PDF del disegno attivo. Mancano un PDF per tavola, più disegni,
    un elenco salvabile.
-6. **Estrazione dati e conteggi non servono per gli abachi.** DATAEXTRACTION non dà né il nome del blocco né gli attributi;
-   COUNT conta per tipo o layer, non per blocco; SELECTSIMILAR non distingue i blocchi.
+6. ~~**Estrazione dati e conteggi non servono per gli abachi.**~~ **Corretto per i blocchi** (voce 10): DATAEXTRACTION ha le
+   colonne «Block name» e una per ogni attributo, `COUNT BLOCK` conta per blocco, SELECTSIMILAR non mescola più i blocchi.
+   Restano fuori le proprietà dinamiche, i MINSERT espansi e i blocchi annidati (§4.4).
 7. **Dei blocchi dinamici si cambia solo la visibilità**, e con un difetto (§5). Niente maniglie stretch, flip, rotate,
    lookup; le proprietà dinamiche si leggono ma non si modificano.
 8. **Non ci sono percorsi di supporto.** `.pat` e `.lin` esterni non si caricano, gli SHX si cercano solo vicino al disegno,
@@ -196,7 +197,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | Comandi trasparenti | Parziale | `src/app/commands/mod.rs:382-384` | solo `'PAN`, `'ZOOM` e gli interruttori |
 | Prompt «Select objects» | Parziale | `src/modules/draw/select.rs`, `command_driver/select_sets.rs` | **Undo (U) e Group (G) fatti** (verificati da test): U toglie l'ultima selezione, G chiede il nome del gruppo (senza distinzione di maiuscole) e ne aggiunge i membri; un gruppo chiamato come una parola chiave (ALL, P, L…) viene preso dalla parola chiave. Mancano: Box, Auto, SIngle |
 | Preselezione | Parziale | `src/app/commands/inquiry.rs`, `layers.rs` | **Corretto** (verificato da test): LIST, ISOLATEOBJECTS, HIDEOBJECTS e LAYISO senza selezione ora chiedono gli oggetti. **Correzione all'analisi**: CHPROP, DRAWORDER e TCASE lo facevano già. PICKFIRST non c'è |
-| SELECTSIMILAR | Parziale | `src/scene/selection.rs:352-382` | confronta solo tipo e layer: porte e finestre sullo stesso layer vengono prese insieme |
+| SELECTSIMILAR | ~~Parziale~~ **Corretto per i blocchi** | `src/scene/selection.rs:352-382` | confronta tipo, layer e, per i riferimenti a blocco, il nome della definizione (senza distinguere maiuscole; un blocco dinamico conta col nome della definizione, non della copia `*U`) |
 | Selezione di entità dentro i blocchi | Assente | — | — |
 | UNDO | Parziale | `src/app/commands/fileops.rs:72-85` | Mark/Back/BEgin/End, MREDO |
 | UCS | Parziale | `src/app/commands/layerprops.rs:179-560` | Previous, ZAxis, UCSMAN, UCS dinamico |
@@ -247,8 +248,8 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
-| DATAEXTRACTION / EATTEXT | **Parziale, inutile per gli abachi** | `src/app/annotation_data.rs:391-436`, `:1371-1405` | Le colonne sono fisse. Il nome del blocco sta nel campo «dettagli» insieme alle coordinate, quindi «combina identici» non raggruppa. Mancano attributi e proprietà dinamiche. Esce solo CSV/TXT, e la tabella non è collegata |
-| COUNT / BCOUNT | Assente per i blocchi | `src/app/commands/inquiry.rs:1220-1255` | conta per tipo o per layer |
+| DATAEXTRACTION / EATTEXT | **Parziale; utile per gli abachi di blocchi** | `src/app/annotation_data.rs`, `src/app/extraction_blocks.rs` | Nuove proprietà: «Block name» (nome della definizione, anche per i blocchi dinamici) e una colonna per ogni tag di attributo trovato nella sorgente (categoria «Attributes», spente di default; si ricordano nelle impostazioni salvate). Con «combina identici» e senza Handle/Details le righe si raggruppano per blocco e attributi. Gli oggetti estratti sono solo quelli di spazio modello e layout, non la geometria dentro le definizioni di blocco (prima si contava anche quella). Mancano le proprietà dinamiche, l'espansione dei blocchi annidati e dei MINSERT (un MINSERT è un riferimento). Esce solo CSV/TXT, e la tabella non è collegata |
+| COUNT / BCOUNT | ~~Assente per i blocchi~~ **`COUNT BLOCK`** | `src/app/commands/inquiry.rs:1244-1290` | Conta i riferimenti a blocco di spazio modello e layout per nome di definizione (non quelli annidati nelle definizioni; un MINSERT conta 1). `COUNT` per tipo o layer conta ancora tutto il documento, definizioni di blocco comprese: stesso difetto di prima, non toccato |
 | Blocchi dinamici, uso | Parziale | `src/app/visibility.rs:179-219`; `src/entities/object_data.rs:719-790` | Funziona solo la visibilità; le altre proprietà si vedono in sola lettura. Mancano le maniglie lineare, polare, XY, rotazione, flip, lookup e le loro azioni |
 | Blocchi dinamici, authoring | Assente | — | BPARAMETER, BACTION, BVSTATE, BTABLE, BTESTBLOCK |
 | BEDIT | Parziale | `src/app/commands/inquiry.rs:463-660` | Niente parametri. Si entra solo scegliendo un riferimento: un blocco mai inserito non si modifica. **Corretto**: su un riferimento dinamico apre la definizione, non il `*U` (verificato da test con una rappresentazione sintetica, non con un blocco dinamico reale: da provare a schermo con un blocco della libreria) |
@@ -468,7 +469,8 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 
 **Livello 2 — dati per abachi e cartigli** (ponte verso il plugin architettonico)
 9. Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.
-10. DATAEXTRACTION con il nome del blocco e gli attributi come colonne; COUNT e SELECTSIMILAR per nome di blocco.
+10. ~~DATAEXTRACTION con il nome del blocco e gli attributi come colonne; COUNT e SELECTSIMILAR per nome di blocco.~~ **Fatto**
+    (test in `src/app/annotation_data.rs` e `src/app/extraction_blocks.rs`; da verificare a schermo: il wizard con attributi reali).
 11. TABLEEXPORT (`table_to_csv` esiste già).
 
 **Livello 3 — consegna delle tavole**

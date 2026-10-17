@@ -23,6 +23,7 @@ mod block_test;
 #[cfg(test)]
 mod block_test_tests;
 mod block_visibility;
+pub(crate) mod extraction_blocks;
 mod command_driver;
 pub(crate) use command_driver::{
     copy_to_clipboard_kernel, define_block_raw_doc, paste_entities_kernel, PasteSpace,

@@ -358,11 +358,12 @@ impl Scene {
         if self.selected.is_empty() {
             return 0;
         }
-        let pairs: rustc_hash::FxHashSet<(&str, String)> = self
+        let block = |e: &EntityType| crate::app::extraction_blocks::block_identity(&self.document, e);
+        let pairs: rustc_hash::FxHashSet<(&str, String, String)> = self
             .selected
             .iter()
             .filter_map(|h| self.document.get_entity(*h))
-            .map(|e| (entity_type_name(e), e.as_entity().layer().to_string()))
+            .map(|e| (entity_type_name(e), e.as_entity().layer().to_string(), block(e)))
             .collect();
         let handles = self.current_layout_entity_handles();
         let mut added = 0;
@@ -371,7 +372,7 @@ impl Scene {
                 continue;
             }
             if let Some(e) = self.document.get_entity(h) {
-                let key = (entity_type_name(e), e.as_entity().layer().to_string());
+                let key = (entity_type_name(e), e.as_entity().layer().to_string(), block(e));
                 if pairs.contains(&key) {
                     self.selected.insert(h);
                     self.selected_order.push(h);
