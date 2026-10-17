@@ -99,7 +99,7 @@ La colonna di destra elenca i comandi che contano per uno studio di architettura
 |---|---|---|
 | Interfaccia e personalizzazione | 77 | `WORKSPACE`, `WSSAVE`, `CUSTOMIZE`, `ACTRECORD` (Action Recorder), `TOOLBAR`. Molti degli altri sono comandi di chiusura palette (`…CLOSE`): impatto basso |
 | Riferimenti, immagini, import | 52 | `IMAGEADJUST`, `IMAGEQUALITY`, `PDFSHXTEXT`, `-XBIND`, `DGNIMPORT`/`DGNEXPORT`, `INSERTOBJ` e `OLE*`, hyperlink (`ATTACHURL`…), Express `XLIST` |
-| Annotazione | 41 | `DIM` (quota unica), `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT`, `DIMOVERRIDE`, `TEXTALIGN`, `SPELL`, `TABLEEXPORT`, `TXT2MTXT`, `TXTEXP`, `UPDATEFIELD`, la famiglia `COUNT*` (palette, tabella, campo), `HATCHSETORIGIN`, `HATCHGENERATEBOUNDARY` |
+| Annotazione | 41 | `DIM` (quota unica), `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT`, `DIMOVERRIDE`, `TEXTALIGN`, `SPELL`, `TXT2MTXT`, `TXTEXP`, `UPDATEFIELD`, la famiglia `COUNT*` (palette, tabella, campo), `HATCHSETORIGIN`, `HATCHGENERATEBOUNDARY` |
 | File e qualità | 37 | `RECOVER`, `RECOVERALL`, `DRAWINGRECOVERY`, `COMPARE`, `XCOMPARE`, `QNEW`, `CLOSEALL`, `PARTIALOPEN`, `STANDARDS`/`CHECKSTANDARDS`, `EXPORTTOAUTOCAD`/`PURGEAECDATA` (file di AutoCAD Architecture), `DWGCONVERT` |
 | Disegno e modifica 2D | 33 | `CHANGE`, `COPYTOLAYER`, `ARRAYEDIT`, `CUTBASE`, `PASTESPEC`, `PTYPE`; Express `BREAKLINE`, `COPYM`, `MPEDIT`, `SUPERHATCH`, `EXOFFSET` |
 | Stampa e pubblicazione | 29 | `PUBLISH`, `PREVIEW`, `PLOTTERMANAGER`, `PLOTSTAMP`, `CONVERTCTB`/`CONVERTPSTYLES`, `EXPORTLAYOUT`, `PNGOUT`/`JPGOUT`, `NEWSHEETSET`/`OPENSHEETSET`, `MVSETUP`, `LAYOUTWIZARD` |
@@ -232,7 +232,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | FIND/REPLACE | Parziale | `src/app/find_replace.rs:205-245` | Non cerca in quote, MLEADER e tabelle. Mancano maiuscole/minuscole, parola intera e caratteri jolly |
 | SPELL | Assente nella GUI | `src/app/control/text_ops.rs:967` | solo dall'API (`text_audit`) |
 | TXTEXP, TEXTALIGN; QTEXT | Assenti; QTEXT senza effetto | — | — |
-| Tabelle | Parziale | `src/modules/annotate/table_cmd.rs:764`; `src/app/commands/display.rs:14-133` | Si modificano solo da riga di comando o da Proprietà: non si selezionano celle col mouse. L'interruzione su più parti non si gestisce. TABLEEXPORT assente; Excel solo in lettura |
+| Tabelle | Parziale | `src/modules/annotate/table_cmd.rs:764`; `src/app/commands/display.rs:14-133` | Si modificano solo da riga di comando o da Proprietà: non si selezionano celle col mouse. L'interruzione su più parti non si gestisce. **TABLEEXPORT** (`src/app/commands/table_export.rs`): scrive la tabella scelta (selezionata o indicata) in un CSV con virgola, lo stesso testo di `DATALINKUPDATE WRITE`, quindi rileggibile con DATALINK; senza BOM (con il BOM la rilettura da DATALINK metterebbe U+FEFF nella prima cella), quindi Excel in italiano può richiedere «Dati → Da testo/CSV» e la codifica UTF-8; le celle unite non sono espanse (dedotto dal codice). Excel solo in lettura |
 | LEADER / QLEADER | Parziale | `src/modules/annotate/leader_cmd.rs:202-218` | annotazione solo MText o nessuna; QLEADER senza impostazioni |
 | Bolle MLEADER con blocco | Parziale (dedotto) | `src/entities/multileader.rs:1703-1760` | Gli attributi del blocco vengono ignorati: probabilmente il numero nella bolla non si vede. Non ci sono blocchi a bolla predefiniti |
 | MLEADERALIGN | Parziale | `src/modules/annotate/mleader_edit.rs:320-366` | Distribute, Parallel, Spacing |
@@ -471,7 +471,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 9. Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.
 10. ~~DATAEXTRACTION con il nome del blocco e gli attributi come colonne; COUNT e SELECTSIMILAR per nome di blocco.~~ **Fatto**
     (test in `src/app/annotation_data.rs` e `src/app/extraction_blocks.rs`; da verificare a schermo: il wizard con attributi reali).
-11. TABLEEXPORT (`table_to_csv` esiste già).
+11. ~~TABLEEXPORT (`table_to_csv` esiste già).~~ **Fatto** (test in `src/app/commands/table_export.rs`; da verificare a schermo: finestra di salvataggio e file aperto in Excel).
 
 **Livello 3 — consegna delle tavole**
 12. PUBLISH: un PDF per tavola, più disegni, elenco salvabile. I pezzi ci sono già: PRINTALL e `per_page`.

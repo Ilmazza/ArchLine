@@ -38,6 +38,7 @@ mod refedit;
 pub(crate) mod sheet_set;
 mod styleprops;
 mod ucsfollow;
+mod table_export;
 mod view;
 mod view_presets;
 mod xclip;
@@ -505,6 +506,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_hatchvars(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_table_export(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_styleprops(cmd, i) {

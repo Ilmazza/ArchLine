@@ -4662,6 +4662,8 @@ pub enum Message {
     DataExtractionClearSources,
     DataExtractionBrowseOutput,
     DataExtractionBrowseOutputResult(Option<std::path::PathBuf>),
+    /// TABLEEXPORT: the save dialog's answer for the table with this handle.
+    TableExportPath(codec::Handle, Option<std::path::PathBuf>),
     DataExtractionFinish,
     /// Save the pre-built CSV string to a file chosen by the user.
     DataExtractionSave(String),
