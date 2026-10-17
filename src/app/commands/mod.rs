@@ -29,6 +29,7 @@ mod pdf_dialogs;
 pub(crate) mod pdf_import;
 mod pdf_shx_text;
 mod pdf_underlay;
+mod autocad_names;
 mod hatchvars;
 mod plotvars;
 mod point_cloud;
@@ -178,6 +179,9 @@ impl OpenCADStudio {
         };
         let resolved = self.resolve_alias(cmd);
         let cmd = resolved.as_deref().unwrap_or(cmd);
+        // AutoCAD names ArchLine has under another one (commands/autocad_names.rs).
+        let renamed = autocad_names::rename(cmd);
+        let cmd = renamed.as_deref().unwrap_or(cmd);
         if cmd == "BACTIONSET" {
             if let Some(error) = self.action_set_error() {
                 self.command_line.push_error(crate::t!(error).as_ref());
