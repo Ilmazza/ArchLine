@@ -133,13 +133,15 @@ La colonna di destra elenca i comandi che contano per uno studio di architettura
 | AutoCAD | ArchLine |
 |---|---|
 | `GCPARALLEL` / `GCTANGENT` / `GCSYMMETRIC` / `GCCOLLINEAR` | `PCONSTRAINT` / `TCONSTRAINT` / `SYCONSTRAINT` / `LCONSTRAINT` |
-| `BSAVE` / `BCLOSE` | `BEDIT_SAVE` / `BEDIT_DISCARD` |
+| `BSAVE` / `BCLOSE` | `BEDIT_SAVE` (**alias fatto**) / `BEDIT_DISCARD` (**non fatto**: AutoCAD chiede prima di scartare le modifiche, `BEDIT_DISCARD` no) |
 | `MTEDIT` | `TEXTEDIT` |
 | `LAYERSTATESAVE` | `LAYERSTATE` |
 | `NEWVIEW` | `VIEW` |
-| `XBIND` | `XREF` → Bind |
+| `XBIND` | `XREF` → Bind (**non fatto**: XBIND lega simboli scelti, `XREF Bind` l'intero riferimento) |
 | `LAYOUT`, `MODEL` | schede e `LAYOUTMANAGER` (manca il comando `LAYOUT` con le sue opzioni) |
-| `ULAYERS`, `PDFADJUST` | gestiti nel dispatch ma non registrati: non compaiono nell'autocompletamento |
+| `ULAYERS`, `PDFADJUST` | **registrati** (compaiono nell'autocompletamento) |
+
+**Fatti** in `claude/parita-l1-08-alias-attsync` (`src/app/commands/autocad_names.rs`, verificati da test: stesso esito del comando di destinazione): `GCPARALLEL`, `GCTANGENT`, `GCSYMMETRIC`, `GCCOLLINEAR`, `BSAVE`, `MTEDIT`, `LAYERSTATESAVE` (→ `LAYERSTATE SAVE`), `NEWVIEW` (→ `VIEW`, che offre Save). Funzionano anche con il tuo `ocad.pgp` già copiato, perché sono nel codice. **Non fatti**, per i motivi sopra o perché il comando di destinazione non fa la stessa cosa: `BCLOSE`, `XBIND`, `LAYOUT`, `MODEL`.
 
 Ci sono anche differenze negli alias di `assets/ocad.pgp`, da controllare una per una prima di cambiarle:
 - `T` apre TEXT, mentre in AutoCAD apre MTEXT;
@@ -249,9 +251,9 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | COUNT / BCOUNT | Assente per i blocchi | `src/app/commands/inquiry.rs:1220-1255` | conta per tipo o per layer |
 | Blocchi dinamici, uso | Parziale | `src/app/visibility.rs:179-219`; `src/entities/object_data.rs:719-790` | Funziona solo la visibilità; le altre proprietà si vedono in sola lettura. Mancano le maniglie lineare, polare, XY, rotazione, flip, lookup e le loro azioni |
 | Blocchi dinamici, authoring | Assente | — | BPARAMETER, BACTION, BVSTATE, BTABLE, BTESTBLOCK |
-| BEDIT | Parziale | `src/app/commands/inquiry.rs:463-660` | Niente parametri. Si entra solo scegliendo un riferimento: un blocco mai inserito non si modifica. Su un blocco dinamico apre il blocco anonimo `*U` (`:498`) |
-| REFEDIT | Parziale | `inquiry.rs:764-880` | ATTDEF esclusi; niente REFSET |
-| ATTSYNC | Parziale, difetto | `src/app/commands/blocks.rs:565-660` | §5 |
+| BEDIT | Parziale | `src/app/commands/inquiry.rs:463-660` | Niente parametri. Si entra solo scegliendo un riferimento: un blocco mai inserito non si modifica. **Corretto**: su un riferimento dinamico apre la definizione, non il `*U` (verificato da test con una rappresentazione sintetica, non con un blocco dinamico reale: da provare a schermo con un blocco della libreria) |
+| REFEDIT | Parziale | `inquiry.rs`, `blockedit_target.rs` | ATTDEF esclusi; niente REFSET. Su un riferimento dinamico apre la definizione; su un xref rifiuta con un messaggio (verificato da test) |
+| ATTSYNC | Parziale | `src/app/commands/blocks.rs` | **Difetto corretto** (verificato da test): l'attributo nuovo prende posizione, altezza, rotazione, stile e layer dalla definizione, con la trasformazione dell'inserimento; i valori degli attributi già presenti non cambiano |
 | BATTMAN | Assente (rimanda all'editor) | `blocks.rs:716-725` | gestione delle definizioni |
 | ATTDIA | Assente | `styleprops.rs:2091` | salvato, mai letto: niente finestra dei valori all'inserimento |
 | -ATTEDIT globale, ATTIPEDIT, GATTE | Parziale / Assenti | `src/app/commands/draw.rs:82-180` | -ATTEDIT lavora solo su inserti già selezionati |
@@ -323,7 +325,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 |---|---|---|---|
 | Xref annidati | **Non visualizzati** (ricontrollato) | `src/ui/window/xref_manager.rs:1797` | la palette li marca «nested — not rendered» |
 | Unload | Parziale | `src/io/xref.rs:27-30` | non si salva nel file |
-| REFEDIT su un xref | Rischio (dedotto) | `src/io/xref.rs:2044` | le modifiche non arrivano al file dell'xref |
+| REFEDIT su un xref | **Bloccato** (verificato da test) | `inquiry.rs` | rifiuta con un messaggio; scrivere sul file dell'xref non è implementato |
 | XOPEN | Parziale | `src/app/commands/blocks.rs:1671` | percorso non risolto: con un percorso relativo probabilmente fallisce |
 | Bind | Parziale | `src/io/xref.rs:1708` | solo il tipo Bind: niente Insert né XBIND |
 | Reload da riga di comando | Parziale | `src/app/commands/blocks.rs:1058` | rifiuta PDF, DWF, DGN (la palette invece li ricarica) |
@@ -429,9 +431,9 @@ una prova a schermo.
 | 5 | Accenti nei DXF prima del 2007: sempre UTF-8 | `codec:io/dxf/writer/text_writer.rs:144-175` | ricontrollato | basso (codec) |
 | 6 | Polilinee con 100.000 vertici o più scartate e perse | `src/io/mod.rs:2371-2400` | ricontrollato | basso (distinguere un dato valido da uno corrotto) |
 | 7 | Cambiare la visibilità di un blocco dinamico tocca tutte le copie che condividono il `*U`, o la definizione se il riferimento è nello stato predefinito | `src/app/visibility.rs:179-219` | analisi | medio (il codec offre `copy_evaluated_block_metadata`) |
-| 8 | ATTSYNC crea gli attributi nuovi all'origine WCS, altezza 2,5, stile Standard, senza la trasformazione del blocco | `src/app/commands/blocks.rs:649` | analisi | basso |
-| 9 | BEDIT e REFEDIT su un blocco dinamico aprono il `*U` invece della definizione | `src/app/commands/inquiry.rs:498` | analisi | basso |
-| 10 | REFEDIT su un xref: le modifiche non arrivano al file | `src/io/xref.rs:2044` | dedotto | basso per bloccarlo, alto per implementarlo |
+| 8 | ~~ATTSYNC crea gli attributi nuovi all'origine WCS, altezza 2,5, stile Standard, senza la trasformazione del blocco~~ **corretto** | `src/app/commands/blocks.rs:649` | analisi | basso |
+| 9 | ~~BEDIT e REFEDIT su un blocco dinamico aprono il `*U` invece della definizione~~ **corretto** | `src/app/commands/inquiry.rs:498` | analisi | basso |
+| 10 | REFEDIT su un xref: ~~le modifiche non arrivano al file~~ **ora è bloccato con un messaggio** | `src/io/xref.rs:2044` | dedotto | basso per bloccarlo, alto per implementarlo |
 | 11 | Stampa senza CTB: giallo diventa nero, ciano blu scuro; gli spessori fino a 0,25 mm escono a circa 0,26 mm | `src/io/pdf_export.rs:772-791`; `src/scene/view/render.rs:3604` | analisi | basso |
 | 12 | Il timbro di stampa scrive «Open CAD Studio» e i secondi Unix | `src/io/pdf_export.rs:1318` | analisi | basso |
 | 13 | ~~`ZOOM S 1/100xp` non fa nulla e non dà errore~~ **corretto** | `src/app/commands/dim.rs:914` | analisi | basso |
@@ -461,8 +463,8 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 4. ~~FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle, Method e Polyline~~ **fatti**.
 5. ~~STRETCH sui tipi oggi saltati~~ **fatto** (restano tabelle, MULTILEADER, immagini).
 6. ~~ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, ISOLATEOBJECTS, HIDEOBJECTS, LAYISO~~ **fatti** (CHPROP, DRAWORDER, TCASE non servivano: lo facevano già).
-7. I 14 nomi AutoCAD del §3.3 come alias. Cambiare `T` in MTEXT è una scelta tua: rompe l'abitudine di chi usa già ArchLine.
-8. ATTSYNC; BEDIT e REFEDIT che aprono la definizione e non il `*U`; REFEDIT bloccato sugli xref finché non salva.
+7. ~~I 14 nomi AutoCAD del §3.3 come alias~~ **8 alias fatti, 2 registrati, 4 non fatti con motivo** (vedi §3.3). Cambiare `T` in MTEXT resta una scelta tua: rompe l'abitudine di chi usa già ArchLine.
+8. ~~ATTSYNC; BEDIT e REFEDIT che aprono la definizione e non il `*U`; REFEDIT bloccato sugli xref finché non salva~~ **fatti**.
 
 **Livello 2 — dati per abachi e cartigli** (ponte verso il plugin architettonico)
 9. Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.

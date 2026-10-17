@@ -30,6 +30,7 @@ pub(crate) mod pdf_import;
 mod pdf_shx_text;
 mod pdf_underlay;
 mod autocad_names;
+pub(crate) mod blockedit_target;
 mod hatchvars;
 mod plotvars;
 mod point_cloud;
