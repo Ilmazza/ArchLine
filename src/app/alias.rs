@@ -81,8 +81,9 @@ const WEB_ALIAS_KEY: &str = "opencadstudio.aliases";
 /// migrated forward (see `introduced_at` / `migrate_aliases`). Version 1 shipped
 /// the pre-REDRAW table; version 2 introduced the REDRAW-family aliases; version 3
 /// introduced HB (HATCHTOBACK); version 4 introduced ER (EXTERNALREFERENCES);
-/// version 10 the block command-line forms and block editor shortcuts.
-const DEFAULT_ALIASES_VERSION: u32 = 10;
+/// version 10 the block command-line forms and block editor shortcuts; version 11
+/// retargeted T from TEXT to MTEXT (see `retargeted_at`).
+const DEFAULT_ALIASES_VERSION: u32 = 11;
 
 #[cfg(target_arch = "wasm32")]
 const WEB_ALIAS_VERSION_KEY: &str = "opencadstudio.aliases.version";
@@ -119,6 +120,17 @@ fn introduced_at(version: u32) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// Defaults whose target changed in a given version: `(alias, old, new)`. A
+/// profile that last saw an earlier version and still has `alias` on `old` (so
+/// the user never chose anything else) is moved to `new`; any other target is
+/// the user's and stays.
+fn retargeted_at(version: u32) -> &'static [(&'static str, &'static str, &'static str)] {
+    match version {
+        11 => &[("T", "TEXT", "MTEXT")],
+        _ => &[],
+    }
+}
+
 /// Fold the defaults introduced after `from_version` into `stored`, adding only
 /// aliases the user does not already define (so overrides and custom targets
 /// are preserved, and nothing already present is overwritten). Returns whether
@@ -136,6 +148,12 @@ fn migrate_aliases(stored: &mut FxHashMap<String, String>, from_version: u32) ->
             }
             stored.insert(key, cmd.to_uppercase());
             changed = true;
+        }
+        for (alias, old, new) in retargeted_at(version) {
+            if stored.get(*alias).map(String::as_str) == Some(*old) {
+                stored.insert((*alias).to_string(), (*new).to_string());
+                changed = true;
+            }
         }
     }
     changed
@@ -558,5 +576,35 @@ mod tests {
         assert!(changed);
         assert_eq!(stored.get("R"), None);
         assert_eq!(stored.get("HB").map(String::as_str), Some("HATCHTOBACK"));
+    }
+    /// `T` opens MTEXT, as in AutoCAD: the shipped default says so.
+    #[test]
+    fn the_shipped_t_alias_is_mtext() {
+        assert_eq!(default_map().get("T").map(String::as_str), Some("MTEXT"));
+    }
+
+    /// A profile seeded when `T` meant TEXT is moved to MTEXT.
+    #[test]
+    fn migration_moves_the_old_default_t_to_mtext() {
+        let mut stored = map(&[("T", "TEXT"), ("L", "LINE")]);
+        assert!(migrate_aliases(&mut stored, 5));
+        assert_eq!(stored.get("T").map(String::as_str), Some("MTEXT"));
+        assert_eq!(stored.get("L").map(String::as_str), Some("LINE"));
+    }
+
+    /// A `T` the user pointed at something else is theirs and stays.
+    #[test]
+    fn migration_leaves_a_custom_t_alone() {
+        let mut stored = map(&[("T", "LINE")]);
+        migrate_aliases(&mut stored, 5);
+        assert_eq!(stored.get("T").map(String::as_str), Some("LINE"));
+    }
+
+    /// A profile that already has the new `T` is not touched again.
+    #[test]
+    fn migration_does_not_repeat_the_t_change() {
+        let mut stored = map(&[("T", "TEXT")]);
+        assert!(!migrate_aliases(&mut stored, DEFAULT_ALIASES_VERSION));
+        assert_eq!(stored.get("T").map(String::as_str), Some("TEXT"));
     }
 }

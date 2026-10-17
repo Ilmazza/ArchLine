@@ -144,7 +144,7 @@ La colonna di destra elenca i comandi che contano per uno studio di architettura
 **Fatti** in `claude/parita-l1-08-alias-attsync` (`src/app/commands/autocad_names.rs`, verificati da test: stesso esito del comando di destinazione): `GCPARALLEL`, `GCTANGENT`, `GCSYMMETRIC`, `GCCOLLINEAR`, `BSAVE`, `MTEDIT`, `LAYERSTATESAVE` (→ `LAYERSTATE SAVE`), `NEWVIEW` (→ `VIEW`, che offre Save). Funzionano anche con il tuo `ocad.pgp` già copiato, perché sono nel codice. **Non fatti**, per i motivi sopra o perché il comando di destinazione non fa la stessa cosa: `BCLOSE`, `XBIND`, `LAYOUT`, `MODEL`.
 
 Ci sono anche differenze negli alias di `assets/ocad.pgp`, da controllare una per una prima di cambiarle:
-- `T` apre TEXT, mentre in AutoCAD apre MTEXT;
+- ~~`T` apre TEXT, mentre in AutoCAD apre MTEXT~~ **Cambiato su tua decisione** (`claude/parita-l1-09-alias-t`): `T` apre MTEXT. Chi ha già l'`ocad.pgp` con `T` su TEXT viene portato su MTEXT alla prima apertura (migrazione v6); un `T` personalizzato non si tocca. `DT` resta TEXT;
 - mancano `LW` e `QSE`;
 - Ctrl+F e Ctrl+H aprono FIND, mentre in AutoCAD commutano OSNAP e PICKSTYLE.
 
@@ -480,7 +480,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 
 **Livello 4 — risorse dello studio**
 16. Percorsi di supporto per `.pat`, `.lin` e SHX (per esempio la cartella Fonts di AutoCAD). Template `.dwt` dalla GUI e
-    QNEW. Decidere l'unità del disegno nuovo: oggi metri.
+    QNEW. Unità del disegno nuovo: **decisione: restano i metri** (nessuna modifica).
 17. Python nella build ArchLine; forme «-» e FILEDIA per gli script `.scr`.
 18. Menu e barre classiche per i comandi dei plugin: **prerequisito del plugin architettonico**.
 
