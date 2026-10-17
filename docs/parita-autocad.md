@@ -52,8 +52,8 @@ da me nel codice, oltre che dall'analisi.
 8. **Non ci sono percorsi di supporto.** `.pat` e `.lin` esterni non si caricano, gli SHX si cercano solo vicino al disegno,
    la GUI non offre template (NEW crea un disegno vuoto in metri).
 9. **Gli xref annidati non si vedono nel disegno** (ricontrollato) e lo stato Unload non si salva.
-10. **STRETCH lascia fermi tratteggi, spline, punti, MLine e wipeout** (ricontrollato). FILLET e CHAMFER non hanno
-    Trim/No trim, e CHAMFER lavora solo su linee.
+10. ~~STRETCH lascia fermi tratteggi, spline, punti, MLine e wipeout~~ **Corretto** in `claude/parita-l1-06-stretch` (tranne tabelle e leader multiplo). FILLET e CHAMFER ora hanno
+    Trim/No trim (`claude/parita-l1-05-fillet-chamfer`); CHAMFER lavora ancora solo su linee e polilinee.
 
 **Difetti** (funzioni presenti ma sbagliate), elenco completo al §5:
 - ~~LAYUNISO accende tutti i layer~~ **Fatto** (`claude/parita-l1-02-layuniso`): riaccende solo i layer che LAYISO ha spento;
@@ -162,9 +162,9 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
-| STRETCH | Parziale, difetto (ricontrollato) | `src/app/command_driver/transform.rs:527-530` | Restano fermi, anche se interamente dentro la finestra: tratteggi non associativi, spline, punti, wipeout, MLine, leader, tabelle. Archi e cerchi si spostano interi solo se il centro è dentro. Il commento in `src/modules/draw/modify/stretch.rs:16` dice il contrario |
-| FILLET | Parziale | `src/modules/draw/modify/fillet.rs:1500-1516` | Trim/No trim, Shift per raggio 0, raccordo su cerchi, ellissi, spline |
-| CHAMFER | Parziale | `fillet.rs:2075-2088` | Angle, Method, Trim, Polyline; oggi solo linee |
+| STRETCH | Parziale | `src/app/command_driver/stretch_grips.rs`, `transform.rs` | **Ora si spostano** (verificato da test, non a schermo) i vertici dentro la finestra di punti, spline, leader, MLine, wipeout e tratteggi non associativi, con la stessa logica dei grip. Un tratteggio associativo segue il suo contorno e non si stira da solo. Restano fermi: tabelle, MULTILEADER, immagini, solidi. Archi e cerchi si spostano interi solo se il centro è dentro. Limite: nel leader l'annotazione (MTEXT) non segue la finestra; il gomito trascina il tratto finale come col grip. Commento di `stretch.rs` corretto |
+| FILLET | Parziale | `src/modules/draw/modify/fillet.rs` | **Fatti** (verificati da test, non a schermo): opzione Trim (T) con Trim/No trim, ricordata per la sessione e condivisa con CHAMFER; Shift sul secondo oggetto = raggio 0. Limiti: con No trim un raccordo su segmenti di polilinea resta tagliato (la polilinea si ricostruisce in un pezzo); `TRIMMODE` non è digitabile come variabile. Mancano: raccordo su cerchi, ellissi, spline |
+| CHAMFER | Parziale | `fillet.rs` | **Fatti** (verificati da test, non a schermo): Angle (lunghezza sulla prima linea e angolo da essa; default sessione 10 e 45°, scelti da me, non da AutoCAD che parte da 0), mEthod (Distance/Angle; D e A lo impostano), Trim/No trim, Polyline (tutti i vertici; i vertici accanto a un arco restano; se le distanze non stanno nei lati, rifiuta tutta l'operazione come fa FILLET). Limiti: ancora solo linee e polilinee (niente archi); le larghezze di vertice delle polilinee vengono copiate dal vertice originale |
 | TRIM/EXTEND | Parziale | `src/modules/draw/modify/trim.rs:2771-2815` | Project, Undo interno, modo Standard (c'è solo Quick). Non taglia i tratteggi; blocchi, testi e tratteggi non fanno da spigolo di taglio |
 | ROTATE, SCALE | Parziale | `rotate.rs:172-177`, `scale.rs:90-114` | opzione Copy; Points nell'opzione Reference |
 | ARRAY | Parziale | `array.rs:226`, `:396`, `:736` | non associativo; niente ARRAYEDIT |
@@ -424,7 +424,7 @@ una prova a schermo.
 |---|---|---|---|---|
 | 1 | ~~LAYUNISO accende tutti i layer~~ **corretto** | `src/app/commands/layers.rs` | ricontrollato | basso |
 | 2 | ~~Viste con nome salvate quadrate~~ **corretto per le nuove** (le già salvate restano quadrate) | `src/scene/camera_ops.rs:222-251` | ricontrollato | basso |
-| 3 | STRETCH lascia fermi i tipi «generici», contro il suo stesso commento | `src/app/command_driver/transform.rs:527-530` | ricontrollato | basso-medio |
+| 3 | ~~STRETCH lascia fermi i tipi «generici»~~ **corretto** per punti, spline, leader, MLine, wipeout e tratteggi liberi | `src/app/command_driver/stretch_grips.rs` | ricontrollato | basso-medio |
 | 4 | Campi area/lunghezza su polilinee e tratteggi: valore vecchio, senza avviso | `codec:fields.rs:1053-1082` | ricontrollato | basso-medio (codec MPL: patch da proporre a upstream, oppure aggancio lato app) |
 | 5 | Accenti nei DXF prima del 2007: sempre UTF-8 | `codec:io/dxf/writer/text_writer.rs:144-175` | ricontrollato | basso (codec) |
 | 6 | Polilinee con 100.000 vertici o più scartate e perse | `src/io/mod.rs:2371-2400` | ricontrollato | basso (distinguere un dato valido da uno corrotto) |
@@ -458,8 +458,8 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 1. ~~Snap digitati al prompt~~ **Fatto** (test: `typed_snap_token_arms_the_one_shot_override`, `typed_non_token_is_the_none_override`).
 2. ~~LAYUNISO, viste con nome, `ZOOM nXP`~~ **fatti** (voci 2 e 3 della consegna).
 3. ~~Tolleranza di chiusura in HATCH~~ **fatta** (`HPGAPTOL`).
-4. FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle e Polyline.
-5. STRETCH sui tipi oggi saltati.
+4. ~~FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle, Method e Polyline~~ **fatti**.
+5. ~~STRETCH sui tipi oggi saltati~~ **fatto** (restano tabelle, MULTILEADER, immagini).
 6. ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, CHPROP, DRAWORDER e gli altri
    comandi del §4.2.
 7. I 14 nomi AutoCAD del §3.3 come alias. Cambiare `T` in MTEXT è una scelta tua: rompe l'abitudine di chi usa già ArchLine.

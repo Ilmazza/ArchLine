@@ -15,6 +15,7 @@
 //     Circle      : move the whole entity if its center is inside the window.
 //     Insert      : move the whole entity if its insertion point is inside.
 //     Spline      : control and fit points inside move.
+//     Leader / MLine / Wipeout / free Hatch: vertices inside move (command_driver/stretch_grips.rs).
 //     All others  : left as they are.
 
 use crate::t;

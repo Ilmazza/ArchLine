@@ -81,6 +81,7 @@ use codec::Handle;
 use iced::Task;
 
 pub(super) mod clipboard;
+mod stretch_grips;
 mod constraint;
 mod dim_edit;
 mod entity_commit;

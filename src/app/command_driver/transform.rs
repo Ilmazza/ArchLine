@@ -339,8 +339,13 @@ impl OpenCADStudio {
             let Some(entity) = self.tabs[i].scene.document.get_entity_mut(*handle) else {
                 continue;
             };
-            let stretched =
+            let mut stretched =
                 crate::modules::draw::modify::stretch::stretch_entity(entity, &windows, delta);
+            // What stretch_entity leaves alone: leaders, multilines, wipeouts and free
+            // hatches move the vertices inside the window (stretch_grips.rs).
+            if !stretched {
+                stretched = super::stretch_grips::stretch_by_grips(entity, &in_win, delta);
+            }
             if stretched && matches!(entity, codec::EntityType::Dimension(_)) {
                 stretched_dims.push(*handle);
             }
