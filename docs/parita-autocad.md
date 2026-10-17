@@ -281,8 +281,8 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | LAYFRZ dentro una viewport | Parziale | `layers.rs` | congela ovunque |
 | Layer states `.las` | Assente | — | import/export |
 | LAYWALK, COPYTOLAYER, LAYVPI, LAYERNOTIFY, LAYLOCKFADECTL | Assenti | — | — |
-| Viste con nome | **Parziale, difetto** (ricontrollato) | `src/scene/camera_ops.rs:222-251`; `src/app/commands/layerprops.rs:766-875` | Si salvano quadrate (larghezza = altezza), quindi l'area «View» in PLOT è sbagliata. Solo model space e solo da riga di comando; non conservano prospettiva, stile, layer |
-| ZOOM | Parziale | `src/app/commands/dim.rs:829-938` | Center, nX/nXP: `ZOOM S 1/100xp` non fa nulla e non dà errore (`:914`) |
+| Viste con nome | **Parziale** | `src/scene/camera_ops.rs:222-251`; `src/app/commands/layerprops.rs:766-875` | **Larghezza ora corretta** (aspetto della finestra attiva; verificato da test, non a schermo: le viste già salvate restano quadrate). Solo model space e solo da riga di comando; non conservano prospettiva, stile, layer |
+| ZOOM | Parziale | `src/app/commands/dim.rs:829-938` | Center. `ZOOM S` capisce `n`, `nX` e `nXP` (anche frazioni, `1/100XP`): `nXP` imposta la scala del viewport di layout attivo; senza viewport attivo o con viewport bloccato dice perché non cambia nulla; un valore illeggibile dà errore. In model space `nXP` non ha effetto (errore esplicito). Il nome in minuscolo funziona dalla GUI, non da `run_command_line` |
 | VPORTS in model space | Parziale | `src/app/commands/view.rs:561-605` | solo SINGLE, 2H, 2V, 4 |
 
 ### 4.6 Layout, stampa, pubblicazione
@@ -423,7 +423,7 @@ una prova a schermo.
 | # | Difetto | Evidenza | Fonte | Costo |
 |---|---|---|---|---|
 | 1 | ~~LAYUNISO accende tutti i layer~~ **corretto** | `src/app/commands/layers.rs` | ricontrollato | basso |
-| 2 | Viste con nome salvate quadrate: l'area «View» in PLOT è sbagliata | `src/scene/camera_ops.rs:222-251` | ricontrollato | basso |
+| 2 | ~~Viste con nome salvate quadrate~~ **corretto per le nuove** (le già salvate restano quadrate) | `src/scene/camera_ops.rs:222-251` | ricontrollato | basso |
 | 3 | STRETCH lascia fermi i tipi «generici», contro il suo stesso commento | `src/app/command_driver/transform.rs:527-530` | ricontrollato | basso-medio |
 | 4 | Campi area/lunghezza su polilinee e tratteggi: valore vecchio, senza avviso | `codec:fields.rs:1053-1082` | ricontrollato | basso-medio (codec MPL: patch da proporre a upstream, oppure aggancio lato app) |
 | 5 | Accenti nei DXF prima del 2007: sempre UTF-8 | `codec:io/dxf/writer/text_writer.rs:144-175` | ricontrollato | basso (codec) |
@@ -434,7 +434,7 @@ una prova a schermo.
 | 10 | REFEDIT su un xref: le modifiche non arrivano al file | `src/io/xref.rs:2044` | dedotto | basso per bloccarlo, alto per implementarlo |
 | 11 | Stampa senza CTB: giallo diventa nero, ciano blu scuro; gli spessori fino a 0,25 mm escono a circa 0,26 mm | `src/io/pdf_export.rs:772-791`; `src/scene/view/render.rs:3604` | analisi | basso |
 | 12 | Il timbro di stampa scrive «Open CAD Studio» e i secondi Unix | `src/io/pdf_export.rs:1318` | analisi | basso |
-| 13 | `ZOOM S 1/100xp` non fa nulla e non dà errore | `src/app/commands/dim.rs:914` | analisi | basso |
+| 13 | ~~`ZOOM S 1/100xp` non fa nulla e non dà errore~~ **corretto** | `src/app/commands/dim.rs:914` | analisi | basso |
 | 14 | IMAGEADJUST salva luminosità e contrasto ma non li applica | `src/scene/model/image_model.rs:192` | analisi | basso |
 | 15 | Impostazioni salvate senza effetto: PICKSTYLE, QTEXTMODE, PLINEGEN, DRAGMODE, SORTENTS, BLIPMODE, REGENMODE, TEXTQLTY, ATTDIA, «Verifica» di ATTDEF, «Auto-Placement», «scala uniforme» | vari, §4 | analisi | basso, ciascuna |
 | 16 | CUIIMPORT e CUILOAD non leggono `.cuix` | `src/app/commands/view.rs:352-396` | analisi | basso (almeno un messaggio onesto) |
@@ -456,7 +456,7 @@ Ogni voce dei livelli 1–2 è una PR piccola, con test.
 
 **Livello 1 — difetti e gesti quotidiani, costo basso**
 1. ~~Snap digitati al prompt~~ **Fatto** (test: `typed_snap_token_arms_the_one_shot_override`, `typed_non_token_is_the_none_override`).
-2. ~~LAYUNISO~~ **fatto**; viste con nome, `ZOOM nXP` (da fare).
+2. ~~LAYUNISO, viste con nome, `ZOOM nXP`~~ **fatti** (voci 2 e 3 della consegna).
 3. Tolleranza di chiusura in HATCH (riusando la logica di BOUNDARY).
 4. FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle e Polyline.
 5. STRETCH sui tipi oggi saltati.

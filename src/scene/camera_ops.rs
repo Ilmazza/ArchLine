@@ -2124,3 +2124,22 @@ pub fn copy_background(document: &mut codec::CadDocument, handle: Handle) -> Han
         _ => Handle::NULL,
     }
 }
+
+#[cfg(test)]
+mod named_view_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_named_view_has_the_window_aspect_not_a_square() {
+        let scene = Scene::new();
+        scene.last_render_aspect.set(2.0);
+        let view = scene.current_as_named_view("A");
+        assert!(view.height > 0.0);
+        assert!(
+            (view.width / view.height - 2.0).abs() < 1e-6,
+            "width {} height {}",
+            view.width,
+            view.height
+        );
+    }
+}

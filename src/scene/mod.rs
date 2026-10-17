@@ -6779,7 +6779,7 @@ impl Scene {
             .or_else(|| self.first_viewport_handle())
     }
 
-    fn explicit_viewport_handle(&self) -> Option<Handle> {
+    pub(crate) fn explicit_viewport_handle(&self) -> Option<Handle> {
         if self.current_layout == "Model" {
             return None;
         }

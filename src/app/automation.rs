@@ -4117,6 +4117,82 @@ mod tests {
         );
     }
 
+    /// A layout "Sheet" with one 100 x 100 viewport that is entered (active),
+    /// returning the viewport handle.
+    fn app_in_viewport(locked: bool) -> (OpenCADStudio, codec::types::Handle) {
+        use codec::entities::Viewport;
+        use codec::types::Vector3;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let scene = &mut app.tabs[0].scene;
+        scene.document.add_layout("Sheet").unwrap();
+        scene.set_current_layout("Sheet".into());
+        let mut vp = Viewport::new();
+        vp.id = 2;
+        vp.center = Vector3::new(50.0, 50.0, 0.0);
+        vp.width = 100.0;
+        vp.height = 100.0;
+        vp.view_height = 1000.0;
+        vp.custom_scale = 0.1;
+        vp.view_direction = Vector3::UNIT_Z;
+        vp.status.is_on = true;
+        vp.status.locked = locked;
+        let handle = scene.add_entity(codec::EntityType::Viewport(Box::new(vp)));
+        scene.active_viewport = Some(handle);
+        (app, handle)
+    }
+
+    fn viewport_scale(app: &OpenCADStudio, h: codec::types::Handle) -> (f64, f64) {
+        match app.tabs[0].scene.document.get_entity(h) {
+            Some(codec::EntityType::Viewport(vp)) => (vp.custom_scale, vp.view_height),
+            _ => panic!("viewport"),
+        }
+    }
+
+    fn run_line(app: &mut OpenCADStudio, cmd: &str) -> String {
+        let start = app.command_line.history.len();
+        let _ = app.run_command_line(cmd);
+        app.command_line.history[start..]
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("
+")
+    }
+
+    #[test]
+    fn zoom_scale_xp_sets_the_active_viewport_scale() {
+        let (mut app, vp) = app_in_viewport(false);
+        run_line(&mut app, "ZOOM S 1/100XP");
+        let (scale, view_h) = viewport_scale(&app, vp);
+        assert!((scale - 0.01).abs() < 1e-12, "scale {scale}");
+        assert!((view_h - 10000.0).abs() < 1e-6, "view height {view_h}");
+        run_line(&mut app, "ZOOM S 0.5XP");
+        assert!((viewport_scale(&app, vp).0 - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn zoom_scale_xp_says_why_it_did_nothing() {
+        let (mut app, vp) = app_in_viewport(true);
+        let out = run_line(&mut app, "ZOOM S 1/100XP");
+        assert!(out.contains("locked"), "got: {out:?}");
+        assert!((viewport_scale(&app, vp).0 - 0.1).abs() < 1e-12, "locked viewport unchanged");
+
+        let (mut app, _vp) = app_in_viewport(false);
+        app.tabs[0].scene.active_viewport = None;
+        let out = run_line(&mut app, "ZOOM S 1/100XP");
+        assert!(out.contains("viewport"), "got: {out:?}");
+    }
+
+    #[test]
+    fn zoom_scale_with_an_unreadable_value_reports_it() {
+        let (mut app, _vp) = app_in_viewport(false);
+        let out = run_line(&mut app, "ZOOM S abc");
+        assert!(out.contains("abc"), "got: {out:?}");
+        let out = run_line(&mut app, "ZOOM S 0");
+        assert!(out.contains("0"), "zero is not a scale; got: {out:?}");
+    }
+
     fn line_with_modifier(app: &mut OpenCADStudio, token: &str) {
         use crate::app::Message;
         app.automation_op(r#"{"op":"new"}"#);

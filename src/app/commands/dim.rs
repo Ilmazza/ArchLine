@@ -898,7 +898,8 @@ impl OpenCADStudio {
                 // nXP scales the active viewport against paper space, nX (or
                 // a bare n) the current view (#1465). n may be an expression
                 // such as 1/50.
-                let rest = rest.trim().to_ascii_uppercase();
+                let typed = rest.trim().to_string();
+                let rest = typed.to_ascii_uppercase();
                 let (number, xp) = match rest.strip_suffix("XP") {
                     Some(n) => (n, true),
                     None => (rest.strip_suffix('X').unwrap_or(&rest), false),
@@ -911,13 +912,32 @@ impl OpenCADStudio {
                         self.command_line
                             .push_output(crate::tf!("Zoom Scale ×{factor:.3}").as_ref());
                     }
+                    // nXP with nothing to scale says why, instead of zooming the view.
+                    Some(_) if xp => {
+                        let scene = &self.tabs[i].scene;
+                        let locked = scene
+                            .explicit_viewport_handle()
+                            .and_then(|handle| scene.document.get_entity(handle))
+                            .is_some_and(|entity| {
+                                matches!(entity, codec::EntityType::Viewport(vp) if vp.status.locked)
+                            });
+                        let why = if locked {
+                            crate::t!("the viewport is locked")
+                        } else {
+                            crate::t!("no active layout viewport")
+                        };
+                        self.command_line
+                            .push_error(crate::tf!("ZOOM nXP: {why}; nothing changed.").as_ref());
+                    }
                     Some(factor) => {
                         self.tabs[i].scene.remember_current_view();
                         self.tabs[i].scene.zoom_camera(1.0 / factor as f32);
                         self.command_line
                             .push_output(crate::tf!("Zoom Scale ×{factor:.3}").as_ref());
                     }
-                    None => {}
+                    None => self.command_line.push_error(
+                        crate::tf!("ZOOM Scale: \"{typed}\" is not a scale (use n, nX or nXP).").as_ref(),
+                    ),
                 }
             }
 
