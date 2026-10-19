@@ -236,3 +236,40 @@ fn print_all_without_the_option_writes_a_single_pdf() {
     assert_eq!(files, ["tavole.pdf"]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn attsync_gives_a_new_attribute_the_definitions_place_and_height() {
+    use codec::entities::{AttributeDefinition, Line};
+    use codec::types::Transform;
+    let mut app = fresh_app();
+    let i = app.active_tab;
+    let scene = &mut app.tabs[i].scene;
+    let mut definition = AttributeDefinition::new("NUM".into(), "Numero".into(), "1".into());
+    definition.insertion_point = Vector3::new(1.0, 2.0, 0.0);
+    definition.height = 3.0;
+    let line = scene.add_entity(EntityType::Line(Line::from_points(Vector3::ZERO, Vector3::new(5.0, 0.0, 0.0))));
+    let attdef = scene.add_entity(EntityType::AttributeDefinition(definition));
+    let identity = Transform::identity();
+    scene.create_block_from_entities(&[line, attdef], "PORTA", &identity, &identity).expect("the block");
+    // A reference far from the origin, made before the attribute existed.
+    scene.add_entity(EntityType::Insert(Insert::new("PORTA", Vector3::new(100.0, 50.0, 0.0))));
+
+    let _ = app.run_command_line("_ATTSYNCBLOCK PORTA");
+
+    let far = app.tabs[i]
+        .scene
+        .document
+        .entities()
+        .find_map(|entity| match entity {
+            EntityType::Insert(insert) if insert.insert_point.x > 50.0 => Some(insert.clone()),
+            _ => None,
+        })
+        .expect("the reference");
+    let attribute = far.attributes.iter().find(|a| a.tag == "NUM").expect("the attribute was created");
+    assert!(
+        (attribute.insertion_point.x - 101.0).abs() < 1e-9 && (attribute.insertion_point.y - 52.0).abs() < 1e-9,
+        "it sits at the definition's point on the reference: {:?}",
+        attribute.insertion_point
+    );
+    assert!((attribute.height - 3.0).abs() < 1e-9, "height {}", attribute.height);
+}
