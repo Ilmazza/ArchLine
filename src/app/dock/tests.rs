@@ -5,6 +5,17 @@ use crate::app::{Message, OpenCADStudio};
 fn fresh() -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
     app.automation_op(r#"{"op":"new"}"#);
+    // These tests drive dock controls, not the hardware warning dialog.
+    // Software snapshots intentionally have no scene GPU adapter.
+    app.gpu_warning_silenced = crate::scene::pipeline::gpu_status()
+        .identity()
+        .or_else(|| crate::scene::pipeline::GpuStatus::NoRenderer.identity())
+        .unwrap();
+    app.pending_startup_modals
+        .retain(|modal| *modal != crate::app::ModalKind::GpuWarning);
+    if app.active_modal == Some(crate::app::ModalKind::GpuWarning) {
+        app.active_modal = None;
+    }
     app
 }
 
@@ -28,7 +39,9 @@ fn blockpalette_pin_toggles_autocollapse_and_close_hides() {
 /// One at a time: two headless renderers made in parallel crash the process.
 fn with_stack(f: impl FnOnce() + Send + 'static) {
     static REAL_VIEW: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = REAL_VIEW.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _one = REAL_VIEW
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(f)
@@ -392,6 +405,30 @@ fn dock_hover_reveals_groups_only_on_an_auto_hiding_edge() {
 }
 
 #[test]
+fn dock_auto_hide_waits_for_an_open_layer_color_dropdown() {
+    use crate::ui::dock::{DockGroup, DockMsg, PanelId};
+    let mut app = dock_app();
+    app.dock.left.push(DockGroup::single(PanelId::Layers));
+    let _ = app.on_dock(DockMsg::AutoCollapseToggle(PanelId::Layers));
+    let _ = app.on_dock(DockMsg::Hover(PanelId::Layers));
+    let _ = app.on_dock(DockMsg::HoverSettled(app.dock_hover_gen));
+    assert_eq!(app.dock_peek, Some(PanelId::Layers));
+    // Opening a row's colour swatch, then moving onto its dropdown, reads
+    // as the pointer leaving the edge: the panel must stay out.
+    let _ = app.update(Message::LayerColorPickerToggle("0".to_string()));
+    assert!(app.tabs[app.active_tab].layers.color_picker_row.is_some());
+    let _ = app.on_dock(DockMsg::HoverExit);
+    let _ = app.on_dock(DockMsg::HoverSettled(app.dock_hover_gen));
+    assert_eq!(app.dock_peek, Some(PanelId::Layers));
+    let _ = app.on_dock(DockMsg::HoverSettled(app.dock_hover_gen));
+    assert_eq!(app.dock_peek, Some(PanelId::Layers));
+    // Once the dropdown closes with the pointer still away, it hides.
+    let _ = app.update(Message::LayerColorPickerToggle("0".to_string()));
+    let _ = app.on_dock(DockMsg::HoverSettled(app.dock_hover_gen));
+    assert_eq!(app.dock_peek, None);
+}
+
+#[test]
 fn dock_float_resize_grows_the_panel() {
     use crate::ui::dock::{DockMsg, FloatPanel, PanelId};
     let mut app = dock_app();
@@ -556,13 +593,149 @@ fn drive_view(app: &mut OpenCADStudio, at: iced::Point, events: &[iced::Event]) 
     }
 }
 
+/// The hover messages an open dropdown inside a hover zone (`zone`) or a
+/// `mouse_area` publishes as the pointer goes from the field onto the
+/// dropdown's list, then out of the area, each tagged with where the pointer
+/// was.
+fn hover_messages_over_an_open_dropdown(zone: bool) -> Vec<(&'static str, &'static str)> {
+    use crate::ui::dock::DockMsg;
+    use iced::widget::{button, column, container, mouse_area, text};
+    use iced_test::core::{mouse, shell, window};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    let view = || -> iced::Element<'static, Message> {
+        let field = button(text("ByLayer")).width(120).height(20);
+        // A pointer-wanting list, like a linetype combo's, under the field.
+        let list = button(column![text("Continuous"), text("Dashed")])
+            .on_press(Message::Dock(DockMsg::HoverEnd(
+                crate::ui::dock::PanelId::Layers,
+            )))
+            .width(120)
+            .height(100);
+        let dd = iced_aw::DropDown::new(field, list, true)
+            .alignment(iced_aw::drop_down::Alignment::Bottom);
+        let area = container(dd).width(300).height(400);
+        let (enter, exit) = (
+            Message::Dock(DockMsg::HoverStay),
+            Message::Dock(DockMsg::HoverExit),
+        );
+        if zone {
+            crate::ui::hover_zone::hover_zone(area, enter, exit)
+        } else {
+            mouse_area(area).on_enter(enter).on_exit(exit).into()
+        }
+    };
+    let mut renderer = headless_renderer();
+    let mut cache = Cache::default();
+    let mut seen = Vec::new();
+    // On the field, on the open list (both inside the area), then outside.
+    for (place, x, y) in [
+        ("field", 60.0, 10.0),
+        ("list", 60.0, 70.0),
+        ("list", 60.0, 90.0),
+        ("outside", 500.0, 70.0),
+    ] {
+        let at = iced::Point::new(x, y);
+        let mut messages = Vec::new();
+        let mut ui = UserInterface::build(view(), VIEW_SIZE, cache, &mut renderer);
+        let _ = ui.update(
+            &window::Headless,
+            &shell::Waker::noop(),
+            &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: at,
+            })],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut messages,
+        );
+        cache = ui.into_cache();
+        seen.extend(messages.into_iter().filter_map(|m| match m {
+            Message::Dock(DockMsg::HoverStay) => Some(("enter", place)),
+            Message::Dock(DockMsg::HoverExit) => Some(("exit", place)),
+            _ => None,
+        }));
+    }
+    seen
+}
+
+#[test]
+fn an_open_dropdown_in_a_hover_zone_does_not_read_as_leaving() {
+    with_stack(|| {
+        // The bug: a mouse area reads the pointer on the list as gone.
+        assert_eq!(
+            hover_messages_over_an_open_dropdown(false),
+            [("enter", "field"), ("exit", "list")]
+        );
+        assert_eq!(
+            hover_messages_over_an_open_dropdown(true),
+            [("enter", "field"), ("exit", "outside")]
+        );
+    });
+}
+
+/// Bounds of the field (text `ByLayer`) and of its open list (text `Opaque`)
+/// for a `drop_down_below` in a scrollable that, like a pallet, sits away
+/// from the window's top-left corner.
+fn drop_down_below_in_an_offset_scrollable() -> (iced::Rectangle, iced::Rectangle) {
+    use iced::widget::{button, column, container, row, scrollable, text, Space};
+    use iced_test::core::widget;
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use iced_test::Selector;
+    let view = || -> iced::Element<'static, Message> {
+        let field = container(text("ByLayer")).width(200).height(20);
+        let list = column![
+            button(text("Opaque")).width(iced::Fill),
+            button(text("50")).width(iced::Fill),
+        ];
+        let dd = crate::ui::color_select::drop_down_below(
+            field.into(),
+            list.into(),
+            None,
+            iced::Length::Shrink,
+            Message::PropEditChoiceToggle,
+        );
+        let pallet = scrollable(column![Space::new().height(300), dd]).height(500);
+        row![
+            Space::new().width(1000),
+            container(pallet).width(300).height(iced::Fill)
+        ]
+        .into()
+    };
+    let mut renderer = headless_renderer();
+    let mut ui = UserInterface::build(view(), VIEW_SIZE, Cache::default(), &mut renderer);
+    let mut find = |label: &str| {
+        let mut find = Selector::find(label);
+        ui.operate(&renderer, &mut widget::operation::black_box(&mut find));
+        match widget::Operation::finish(&find) {
+            widget::operation::Outcome::Some(Some(target)) => target.bounds(),
+            _ => panic!("{label} not found"),
+        }
+    };
+    (find("ByLayer"), find("Opaque"))
+}
+
+#[test]
+fn a_drop_down_in_a_pallet_opens_right_below_its_field() {
+    with_stack(|| {
+        let (field, item) = drop_down_below_in_an_offset_scrollable();
+        assert!(
+            item.y >= field.y + field.height && item.y < field.y + field.height + 20.0,
+            "list starts below the field: field {field:?}, first item {item:?}"
+        );
+        assert!(
+            item.x >= field.x - 1.0 && item.x < field.x + field.width,
+            "list lines up with the field: field {field:?}, first item {item:?}"
+        );
+    });
+}
+
 #[test]
 fn docked_title_bar_double_click_floats_the_pallet_in_the_real_view() {
     // Building the real view is deeper than a default test thread's stack.
     with_stack(|| {
         use crate::ui::dock::PanelId;
         let mut app = dock_app();
-        let press = iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        let press =
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
         let release = iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
             iced::mouse::Button::Left,
         ));
@@ -694,4 +867,994 @@ fn floating_menu_docks_and_allow_docking_keeps_a_drag_floating() {
         app.dock.location(PanelId::BlockPalette).map(|(s, _)| s),
         Some(DockSide::Left)
     );
+}
+
+#[test]
+fn visibility_ribbon_real_controls_disable_enable_and_open_manager() {
+    // This drives the upstream ribbon, which the classic workspace (ArchLine's
+    // default) does not draw: run with ARCHLINE_WORKSPACE=ribbon to exercise it.
+    if crate::workspace::is_classic() {
+        return;
+    }
+    with_stack(|| {
+        use crate::ui::window::block_visibility::Action as A;
+        let mut app = authoring_app();
+        app.ribbon.set_block_editing(true);
+        app.ribbon
+            .set_collapse_mode(crate::ui::ribbon::CollapseMode::Compact);
+        let i = app.active_tab;
+        let before = app.tabs[i].scene.document.clone();
+        let point = authoring_control(&app, "BVSTATE_MANAGER");
+        authoring_click(&mut app, point);
+        assert!(app.block_visibility.is_none());
+        assert_eq!(app.tabs[i].scene.document, before);
+        authoring_capture(&app, "visibility-ribbon-disabled");
+        let _ = app.run_command_line("BPARAMETER VISIBILITY 0.5,0.5");
+        let target = app.block_visibility_context().unwrap().target;
+        let point = authoring_control(&app, "BVSTATE_MANAGER");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.active_modal,
+            Some(crate::app::ModalKind::BlockVisibility)
+        );
+        let _ = app.update(Message::BlockVisibility(A::Name("Alternate".into())));
+        let _ = app.update(Message::BlockVisibility(A::New));
+        authoring_capture(&app, "visibility-states-dialog");
+        let point = find_in_view(&app, "OK");
+        authoring_click(&mut app, point);
+        assert!(app.block_visibility.is_none());
+        assert_eq!(app.block_visibility_context().unwrap().names.len(), 2);
+        let messages = {
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                VIEW_SIZE,
+                app.view_main(),
+            );
+            let target = simulator
+                .click(iced::widget::Id::new("BVSTATE_CURRENT"))
+                .expect("current-state selector");
+            let bounds = target.visible_bounds().unwrap();
+            authoring_snapshot(
+                &mut simulator,
+                &app.active_theme,
+                "visibility-state-dropdown",
+            );
+            // Native pick-list options are painted text, not Text widgets.
+            // Pick the second row using the measured selector/row height.
+            let position = iced::Point::new(bounds.center_x(), bounds.y + bounds.height * 2.5);
+            simulator.point_at(position);
+            simulator.simulate([
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )),
+            ]);
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert_eq!(
+            app.block_visibility_context().unwrap().current.as_deref(),
+            Some("Alternate")
+        );
+        let point = authoring_control(&app, "BVMODE_TOGGLE");
+        authoring_click(&mut app, point);
+        assert!(app.block_visibility_mode);
+        authoring_capture(&app, "visibility-ribbon-enabled");
+        app.ribbon
+            .set_collapse_mode(crate::ui::ribbon::CollapseMode::Collapsed);
+        let point = find_in_view(&app, "Visibility ▾");
+        authoring_click(&mut app, point);
+        let messages = {
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                VIEW_SIZE,
+                app.view_main(),
+            );
+            simulator
+                .click("Visibility States")
+                .expect("manager in flyout");
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert_eq!(app.block_visibility.as_ref().unwrap().target, target);
+    });
+}
+
+#[test]
+fn point_parameter_placement_starts_from_the_actual_palette_row() {
+    with_stack(|| {
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let i = app.active_tab;
+        let before = app.tabs[i].scene.document.clone();
+        let point = authoring_control(&app, "authoring-tool-point");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[i].active_cmd.as_ref().unwrap().name(),
+            "BPARAMETER"
+        );
+        let _ = app.update(Message::CommandInput("0.25,0.25".into()));
+        let _ = app.update(Message::CommandSubmit);
+        assert_eq!(app.tabs[i].scene.document, before);
+        let _ = app.update(Message::CommandInput("0.65,0.15".into()));
+        let _ = app.update(Message::CommandSubmit);
+        assert!(
+            app.tabs[i].scene.preview_wires.is_empty(),
+            "placement clears its rubber-band preview"
+        );
+        let definition = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+        assert_eq!(
+            crate::scene::block_point_parameter::parameters(
+                &app.tabs[i].scene.document,
+                definition
+            )
+            .len(),
+            1
+        );
+        assert!(
+            app.visibility_placement_error().is_none(),
+            "Visibility can join the Point graph"
+        );
+        assert_eq!(app.tabs[i].history.undo_stack.len(), 1);
+        authoring_capture(&app, "point-parameter-placed");
+        let point = authoring_control(&app, "authoring-tool-point");
+        authoring_click(&mut app, point);
+        let _ = app.update(Message::CommandEscape);
+        assert_eq!(app.tabs[i].history.undo_stack.len(), 1);
+    });
+}
+
+#[test]
+fn distance_parameter_batch_starts_from_actual_palette_rows() {
+    with_stack(|| {
+        for (id, name) in [
+            ("authoring-tool-linear", "linear"),
+            ("authoring-tool-polar", "polar"),
+            ("authoring-tool-xy", "xy"),
+        ] {
+            let mut app = authoring_app();
+            let _ = app.dispatch_command("BAUTHORPALETTE");
+            let point = authoring_control(&app, id);
+            authoring_click(&mut app, point);
+            let i = app.active_tab;
+            let before = app.tabs[i].scene.document.clone();
+            for text in ["0.25,-0.15", "0.65,0.15"] {
+                let _ = app.update(Message::CommandInput(text.into()));
+                let _ = app.update(Message::CommandSubmit);
+                assert_eq!(app.tabs[i].scene.document, before);
+            }
+            let _ = app.update(Message::CommandInput("0.3,0.2".into()));
+            let _ = app.update(Message::CommandSubmit);
+            let definition = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+            let found = crate::scene::block_distance_parameter::parameters(
+                &app.tabs[i].scene.document,
+                definition,
+            );
+            assert_eq!(found.len(), 1);
+            assert!(found[0].kind.name().eq_ignore_ascii_case(name));
+            assert_eq!(app.tabs[i].history.undo_stack.len(), 1);
+            assert!(app.tabs[i].scene.preview_wires.is_empty());
+            let _ = app.run_command_line("ZOOM E");
+            authoring_capture(&app, &format!("{name}-parameter-placed"));
+        }
+    });
+}
+
+#[test]
+fn orientation_parameter_batch_starts_from_actual_palette_rows() {
+    with_stack(|| {
+        for (id, name, inputs) in [
+            (
+                "authoring-tool-rotation",
+                "rotation",
+                vec!["0.35,-0.12", "0.65,-0.12", "0.35,0.2"],
+            ),
+            (
+                "authoring-tool-alignment",
+                "alignment",
+                vec!["0.25,-0.1", "0.6,0.15"],
+            ),
+            (
+                "authoring-tool-flip",
+                "flip",
+                vec!["0.35,-0.15", "0.35,0.15", "0.6,0.15"],
+            ),
+        ] {
+            let mut app = authoring_app();
+            let _ = app.dispatch_command("BAUTHORPALETTE");
+            let point = authoring_control(&app, id);
+            authoring_click(&mut app, point);
+            let i = app.active_tab;
+            let before = app.tabs[i].scene.document.clone();
+            for text in &inputs[..inputs.len() - 1] {
+                let _ = app.update(Message::CommandInput((*text).into()));
+                let _ = app.update(Message::CommandSubmit);
+                assert_eq!(app.tabs[i].scene.document, before);
+            }
+            let _ = app.update(Message::CommandInput(inputs.last().unwrap().to_string()));
+            let _ = app.update(Message::CommandSubmit);
+            let definition = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+            let found = crate::scene::block_orientation_parameter::parameters(
+                &app.tabs[i].scene.document,
+                definition,
+            );
+            assert_eq!(found.len(), 1);
+            assert!(found[0].kind.name().eq_ignore_ascii_case(name));
+            assert!(app.tabs[i].scene.preview_wires.is_empty());
+            assert_eq!(app.tabs[i].history.undo_stack.len(), 1);
+            let _ = app.run_command_line("ZOOM E");
+            authoring_capture(&app, &format!("{name}-parameter-placed"));
+        }
+    });
+}
+
+fn authoring_app() -> OpenCADStudio {
+    use codec::{
+        entities::{Insert, Line},
+        types::Vector3,
+        EntityType,
+    };
+    let mut app = dock_app();
+    let i = app.active_tab;
+    app.tabs[i].scene.define_block_raw(
+        "AUTHOR",
+        Vector3::ZERO,
+        vec![EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::UNIT_X,
+        ))],
+    );
+    let reference = app.tabs[i]
+        .scene
+        .document
+        .add_entity(EntityType::Insert(Insert::new("AUTHOR", Vector3::ZERO)))
+        .unwrap();
+    let _ = app.dispatch_command(&format!("BEDIT_BEGIN:{}", reference.value()));
+    app
+}
+
+#[test]
+fn block_actions_palette_controls_require_compatible_parameters_and_start_commands() {
+    with_stack(|| {
+        use crate::ui::window::authoring_palettes::Tab;
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let point = authoring_control(&app, Tab::Actions.widget_id());
+        authoring_click(&mut app, point);
+        for id in ["authoring-tool-move-action", "authoring-tool-scale-action"] {
+            let point = authoring_control(&app, id);
+            authoring_click(&mut app, point);
+            assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        }
+        let _ = app.run_command_line("BPARAMETER POINT 0.5,0.5 0.7,0.7");
+        let point = authoring_control(&app, "authoring-tool-scale-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let point = authoring_control(&app, "authoring-tool-move-action");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[app.active_tab].active_cmd.as_ref().unwrap().name(),
+            "BACTION"
+        );
+        let _ = app.update(Message::CommandEscape);
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 1,0 0.5,0.3");
+        let point = authoring_control(&app, "authoring-tool-scale-action");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[app.active_tab].active_cmd.as_ref().unwrap().name(),
+            "BACTION"
+        );
+        let _ = app.update(Message::CommandEscape);
+        authoring_capture(&app, "move-scale-actions-enabled");
+        let i = app.active_tab;
+        let targets = app.tabs[i]
+            .scene
+            .document
+            .block_records
+            .get("AUTHOR")
+            .unwrap()
+            .entity_handles
+            .clone();
+        let point = authoring_control(&app, "authoring-tool-scale-action");
+        authoring_click(&mut app, point);
+        let _ = app.feed_command(crate::command::StepInput::Point(glam::DVec3::X));
+        assert!(
+            app.tabs[i]
+                .active_cmd
+                .as_ref()
+                .unwrap()
+                .is_selection_gathering(),
+            "picking the parameter endpoint starts object selection"
+        );
+        let _ = app.feed_command(crate::command::StepInput::SelectionComplete(targets));
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let _ = app.update(Message::CommandInput("0.8,0.5".into()));
+        let _ = app.update(Message::CommandSubmit);
+        assert!(app.tabs[i].active_cmd.is_none());
+        let _ = app.run_command_line("ZOOM E");
+        authoring_capture(&app, "scale-action-placed");
+        let _ = app.dispatch_command("BTESTBLOCK");
+        let i = app.active_tab;
+        app.tabs[i].scene.selection.borrow_mut().view.vp_size = (1600., 900.);
+        app.tabs[i].scene.camera.borrow_mut().fit_to_bounds_f64(
+            glam::DVec3::new(-0.2, -0.4, 0.),
+            glam::DVec3::new(1.2, 0.6, 0.),
+            1600. / 900.,
+        );
+        let insert = app.tabs[i].block_test.as_ref().unwrap().insert;
+        app.tabs[i].scene.select_entity(insert, true);
+        app.refresh_properties();
+        assert!(app.tabs[i]
+            .selected_grips
+            .iter()
+            .any(|g| crate::app::block_actions::is_test_grip(g.id)));
+        authoring_capture(&app, "scale-action-test-grip");
+        // Drawing a software snapshot updates the canvas size. Use the same
+        // current tile as the viewport input path, including when captures run.
+        let (vw, vh) = app.tabs[i].scene.selection.borrow().view.vp_size;
+        let tile = app.tabs[i].scene.active_model_tile_bounds(vw, vh);
+        let bounds = iced::Rectangle {
+            x: 0.,
+            y: 0.,
+            width: tile.width,
+            height: tile.height,
+        };
+        let grip = app.tabs[i]
+            .selected_grips
+            .iter()
+            .find(|g| crate::app::block_actions::is_test_grip(g.id))
+            .unwrap();
+        let screen = app.tabs[i]
+            .scene
+            .camera
+            .borrow()
+            .project(grip.world, bounds)
+            .unwrap();
+        app.cursor_pos = iced::Point::new(screen.x + tile.x, screen.y + tile.y);
+        app.tabs[i].scene.selection.borrow_mut().input.last_move_pos = Some(app.cursor_pos);
+        assert!(
+            app.tabs[i].active_cmd.is_none(),
+            "a running command consumes the test grip"
+        );
+        let hit = crate::scene::pick::grip::find_hit_grip(
+            iced::Point::new(screen.x, screen.y),
+            &app.tabs[i].selected_grips,
+            &app.tabs[i].scene.camera.borrow(),
+            bounds,
+        );
+        assert!(
+            hit.is_some_and(|(_, id, _, _)| crate::app::block_actions::is_test_grip(id)),
+            "test grip hit failed: {hit:?}; bounds={bounds:?}, cursor={:?}",
+            app.cursor_pos
+        );
+        let _ = app.update(Message::ViewportLeftPressAt(app.cursor_pos));
+        assert_eq!(
+            app.tabs[i].active_cmd.as_ref().map(|c|c.name()),
+            Some("BTESTBLOCK"),
+            "viewport click routes the parameter grip to the test command: modal={:?}, active grip={:?}, selected={:?}, navigation={:?}, ucs={}",app.active_modal,app.tabs[i].active_grip,app.tabs[i].selected_handle,(app.tabs[i].orbit_mode,app.tabs[i].pan_mode,app.tabs[i].zoom_dynamic_mode),app.ucs_icon_selected
+        );
+        let _ = app.update(Message::CommandInput("2,0".into()));
+        let _ = app.update(Message::CommandSubmit);
+        let line = app.tabs[i]
+            .scene
+            .document
+            .entities_in_block("AUTHOR")
+            .find_map(|e| {
+                if let codec::EntityType::Line(l) = e {
+                    Some(l)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(line.end, codec::types::Vector3::new(2., 0., 0.));
+    });
+}
+
+#[test]
+fn block_actions_set_ribbon_flyout_starts_action_selection_and_uses_preselected_marker() {
+    // This drives the upstream ribbon, which the classic workspace (ArchLine's
+    // default) does not draw: run with ARCHLINE_WORKSPACE=ribbon to exercise it.
+    if crate::workspace::is_classic() {
+        return;
+    }
+    with_stack(|| {
+        use crate::scene::block_actions::{self as actions, Kind};
+        let mut app = authoring_app();
+        let i = app.active_tab;
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 10,0 5,2");
+        let def = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+        let p = actions::parameters(&app.tabs[i].scene.document, def, Kind::Move)[0].handle;
+        let targets = app.tabs[i]
+            .scene
+            .document
+            .block_records
+            .get("AUTHOR")
+            .unwrap()
+            .entity_handles
+            .clone();
+        let a = actions::create(
+            &mut app.tabs[i].scene.document,
+            def,
+            Kind::Move,
+            p,
+            &targets,
+            glam::DVec3::new(3., 4., 0.),
+        )
+        .unwrap();
+        app.tabs[i].selected_authoring = Some(a);
+        app.ribbon
+            .set_collapse_mode(crate::ui::ribbon::CollapseMode::Collapsed);
+        // The top-level Manage tab has the same label as this panel opener.
+        // Open the existing panel, then click the new command in its real flyout.
+        let _ = app.update(Message::ToggleRibbonPanel("Manage".into()));
+        assert_eq!(app.ribbon.collapsed_open.as_deref(), Some("Manage"));
+        let messages = {
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                VIEW_SIZE,
+                app.view_main(),
+            );
+            simulator
+                .click("Action Selection")
+                .expect("action selection in Manage flyout");
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert_eq!(
+            app.tabs[i].active_cmd.as_ref().unwrap().name(),
+            "BACTIONSET"
+        );
+        assert!(app.tabs[i]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .prompt()
+            .contains("New/Add/Remove"));
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        assert!(app.tabs[i]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .is_selection_gathering());
+        let before = app.tabs[i].scene.document.clone();
+        let _ = app.update(Message::CommandEscape);
+        assert_eq!(app.tabs[i].scene.document, before);
+    });
+}
+
+#[test]
+fn block_actions_stretch_palette_requires_distance_parameter() {
+    with_stack(|| {
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        app.authoring_palette_tab = crate::ui::window::authoring_palettes::Tab::Actions;
+        let point = authoring_control(&app, "authoring-tool-stretch-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 10,0 5,2");
+        let point = authoring_control(&app, "authoring-tool-stretch-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .prompt()
+            .contains("Stretch"));
+    });
+}
+
+#[test]
+fn block_actions_array_palette_requires_distance_parameter() {
+    with_stack(|| {
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        app.authoring_palette_tab = crate::ui::window::authoring_palettes::Tab::Actions;
+        let point = authoring_control(&app, "authoring-tool-array-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let _ = app.run_command_line("BPARAMETER POINT 0.5,0.5 0.7,0.7");
+        let point = authoring_control(&app, "authoring-tool-array-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 10,0 5,2");
+        let point = authoring_control(&app, "authoring-tool-array-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .prompt()
+            .contains("Array"));
+    });
+}
+
+#[test]
+fn block_actions_rotate_flip_palette_requires_matching_parameters() {
+    with_stack(|| {
+        use crate::ui::window::authoring_palettes::Tab;
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let point = authoring_control(&app, Tab::Actions.widget_id());
+        authoring_click(&mut app, point);
+        for id in ["authoring-tool-rotate-action", "authoring-tool-flip-action"] {
+            let point = authoring_control(&app, id);
+            authoring_click(&mut app, point);
+            assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        }
+        let _ = app.run_command_line("BPARAMETER ROTATION 0,0 2 0");
+        let point = authoring_control(&app, "authoring-tool-flip-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+        let point = authoring_control(&app, "authoring-tool-rotate-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .prompt()
+            .contains("Rotate"));
+        let _ = app.update(Message::CommandEscape);
+        let _ = app.run_command_line("BPARAMETER FLIP 0,0 2,0 -1,1");
+        let point = authoring_control(&app, "authoring-tool-flip-action");
+        authoring_click(&mut app, point);
+        assert!(app.tabs[app.active_tab]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .prompt()
+            .contains("Flip"));
+    });
+}
+
+#[test]
+fn lookup_basepoint_palette_and_table_dialog_real_controls() {
+    with_stack(|| {
+        use crate::ui::window::{authoring_palettes::Tab, block_lookup::Action as A};
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        for (id, point_text) in [
+            ("authoring-tool-basepoint", "0.2,0.1"),
+            ("authoring-tool-lookup", "0.5,0.2"),
+        ] {
+            let point = authoring_control(&app, id);
+            authoring_click(&mut app, point);
+            assert_eq!(
+                app.tabs[app.active_tab].active_cmd.as_ref().unwrap().name(),
+                "BPARAMETER"
+            );
+            let _ = app.update(Message::CommandInput(point_text.into()));
+            let _ = app.update(Message::CommandSubmit);
+        }
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 1,0 0,0.3");
+        authoring_capture(&app, "lookup-basepoint-placed");
+        let point = authoring_control(&app, Tab::Actions.widget_id());
+        authoring_click(&mut app, point);
+        let point = authoring_control(&app, "authoring-tool-lookup-table");
+        authoring_click(&mut app, point);
+        assert_eq!(app.active_modal, Some(crate::app::ModalKind::BlockLookup));
+        let _ = app.update(Message::BlockLookup(A::Property(0)));
+        let point = find_in_view(&app, "Add Property");
+        authoring_click(&mut app, point);
+        let point = find_in_view(&app, "Add Row");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.block_lookup.as_ref().unwrap().drafts[0]
+                .edited
+                .row_count,
+            1
+        );
+        let _ = app.update(Message::BlockLookup(A::Cell(0, 1, "Small".into())));
+        let point = find_in_view(&app, "Audit");
+        authoring_click(&mut app, point);
+        assert!(app.block_lookup.as_ref().unwrap().notice.is_some());
+        authoring_capture(&app, "lookup-property-table");
+        let point = find_in_view(&app, "OK");
+        authoring_click(&mut app, point);
+        assert!(app.block_lookup.is_none());
+        let i = app.active_tab;
+        let definition = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+        let parameter =
+            crate::scene::block_lookup::parameters(&app.tabs[i].scene.document, definition)[0].0;
+        assert!(crate::scene::block_lookup::table(
+            &app.tabs[i].scene.document,
+            definition,
+            parameter
+        )
+        .unwrap()
+        .is_some());
+    });
+}
+
+#[test]
+fn block_properties_table_palette_dialog_authors_rows() {
+    with_stack(|| {
+        use crate::ui::window::{authoring_palettes::Tab, block_properties_table::Action as A};
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 1,0 0,0.3");
+        let point = authoring_control(&app, Tab::Actions.widget_id());
+        authoring_click(&mut app, point);
+        let point = authoring_control(&app, "authoring-tool-properties-table");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.active_modal,
+            Some(crate::app::ModalKind::BlockPropertiesTable)
+        );
+        let _ = app.update(Message::BlockPropertiesTable(A::Property(0)));
+        let point = find_in_view(&app, "Add Property");
+        authoring_click(&mut app, point);
+        let point = find_in_view(&app, "Add Row");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.block_properties_table.as_ref().unwrap().rows.len(),
+            1
+        );
+        let _ = app.update(Message::BlockPropertiesTable(A::Cell(0, 0, "2.5".into())));
+        let point = find_in_view(&app, "OK");
+        authoring_click(&mut app, point);
+        assert!(app.block_properties_table.is_none());
+        assert!(app.active_modal.is_none());
+        let i = app.active_tab;
+        let definition = app.tabs[i].active_block_edit_session().unwrap().br_handle;
+        let view =
+            crate::scene::block_properties_table::table(&app.tabs[i].scene.document, definition)
+                .unwrap()
+                .expect("the table was written");
+        assert_eq!(view.columns.len(), 1);
+        assert_eq!(view.rows, vec![vec![2.5]]);
+    });
+}
+
+#[test]
+fn block_properties_table_apply_writes_undo_once_and_stale_edits_stay_open() {
+    with_stack(|| {
+        use crate::ui::window::block_properties_table::Action as A;
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let _ = app.run_command_line("BPARAMETER LINEAR 0,0 1,0 0,0.3");
+        let i = app.active_tab;
+        let history = app.tabs[i].history.undo_stack.len();
+        let _ = app.dispatch_command("BPROPERTIESTABLE");
+        assert_eq!(
+            app.active_modal,
+            Some(crate::app::ModalKind::BlockPropertiesTable)
+        );
+        let _ = app.update(Message::BlockPropertiesTable(A::Property(0)));
+        let _ = app.update(Message::BlockPropertiesTable(A::AddProperty));
+        let _ = app.update(Message::BlockPropertiesTable(A::AddRow));
+        let _ = app.update(Message::BlockPropertiesTable(A::Apply));
+        assert!(app.block_properties_table.is_none());
+        assert_eq!(app.tabs[i].history.undo_stack.len(), history + 1);
+        let _ = app.dispatch_command("BPROPERTIESTABLE");
+        assert!(app.block_properties_table.is_some());
+        let _ = app.update(Message::BlockPropertiesTable(A::Apply));
+        assert!(app.block_properties_table.is_none());
+        assert_eq!(app.tabs[i].history.undo_stack.len(), history + 1);
+        let _ = app.dispatch_command("BPROPERTIESTABLE");
+        app.tabs[i].scene.bump_geometry();
+        let _ = app.update(Message::BlockPropertiesTable(A::AddRow));
+        let _ = app.update(Message::BlockPropertiesTable(A::Apply));
+        assert!(app.block_properties_table.is_some());
+        assert!(app.block_properties_table.as_ref().unwrap().error.is_some());
+        let _ = app.update(Message::CloseModal);
+        assert!(app.block_properties_table.is_none());
+        assert!(app.active_modal.is_none());
+    });
+}
+
+#[test]
+fn authoring_palettes_ribbon_toggle_and_dock_close_leave_document_and_history_unchanged() {
+    use crate::ui::dock::{DockMsg, PanelId};
+    let mut app = authoring_app();
+    let i = app.active_tab;
+    let before = app.tabs[i].scene.document.clone();
+    let history = app.tabs[i].history.undo_stack.len();
+    let click = || Message::RibbonToolClick {
+        tool_id: "BAUTHORPALETTE".into(),
+        event: crate::modules::ModuleEvent::Command("BAUTHORPALETTE".into()),
+    };
+    let _ = app.update(click());
+    assert!(app.dock_panel_visible(PanelId::AuthoringPalettes));
+    assert!(app.ribbon.show_authoring_palettes);
+    assert!(app.dock.is_placed(PanelId::AuthoringPalettes));
+    let _ = app.update(click());
+    assert!(!app.dock_panel_visible(PanelId::AuthoringPalettes));
+    assert!(!app.ribbon.show_authoring_palettes);
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    let _ = app.on_dock(DockMsg::Close(PanelId::AuthoringPalettes));
+    assert!(!app.show_authoring_palettes);
+    assert!(!app.ribbon.show_authoring_palettes);
+    assert_eq!(app.tabs[i].scene.document, before);
+    assert_eq!(app.tabs[i].history.undo_stack.len(), history);
+    assert!(!app.block_edit_dirty(i));
+}
+
+#[test]
+fn authoring_palettes_follow_editor_context_and_keep_the_docked_placement() {
+    use crate::app::config::DockSide;
+    use crate::ui::dock::{DockMsg, PanelId};
+    let mut app = authoring_app();
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    let _ = app.on_dock(DockMsg::DockTo(PanelId::AuthoringPalettes, DockSide::Left));
+    let placement = app.dock.location(PanelId::AuthoringPalettes);
+    let _ = app.dispatch_command("BTESTBLOCK");
+    assert!(!app.dock_panel_visible(PanelId::AuthoringPalettes));
+    let _ = app.dispatch_command("BCLOSETESTBLOCK");
+    assert!(app.dock_panel_visible(PanelId::AuthoringPalettes));
+    let _ = app.dispatch_command("BTESTBLOCK");
+    assert!(!app.dock_panel_visible(PanelId::AuthoringPalettes));
+    let _ = app.dispatch_command("BAUTHORPALETTECLOSE");
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    assert!(!app.show_authoring_palettes);
+    assert!(!app.dock_panel_visible(PanelId::AuthoringPalettes));
+    let _ = app.dispatch_command("BCLOSETESTBLOCK");
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    assert!(app.dock_panel_visible(PanelId::AuthoringPalettes));
+    assert_eq!(app.dock.location(PanelId::AuthoringPalettes), placement);
+    let _ = app.dispatch_command("BEDIT_DISCARD");
+    assert!(!app.dock_panel_visible(PanelId::AuthoringPalettes));
+    let _ = app.dispatch_command("BAUTHORPALETTECLOSE");
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    assert!(!app.show_authoring_palettes);
+}
+
+#[test]
+fn authoring_palettes_toggle_keeps_the_running_drawing_command() {
+    let mut app = authoring_app();
+    let _ = app.dispatch_command("LINE");
+    assert!(app.tabs[app.active_tab].active_cmd.is_some());
+    let _ = app.update(Message::RibbonToolClick {
+        tool_id: "BAUTHORPALETTE".into(),
+        event: crate::modules::ModuleEvent::Command("BAUTHORPALETTE".into()),
+    });
+    assert!(app.tabs[app.active_tab].active_cmd.is_some());
+    let _ = app.dispatch_command("BAUTHORPALETTECLOSE");
+    assert!(app.tabs[app.active_tab].active_cmd.is_some());
+}
+
+#[test]
+fn authoring_palettes_unwired_move_action_does_not_start_a_command() {
+    with_stack(|| {
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        app.authoring_palette_tab = crate::ui::window::authoring_palettes::Tab::Actions;
+        let point = find_in_view(&app, "Move");
+        let before = app.tabs[app.active_tab].scene.document.clone();
+        drive_view(
+            &mut app,
+            point,
+            &[
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )),
+            ],
+        );
+        assert_eq!(app.tabs[app.active_tab].scene.document, before);
+        assert!(app.tabs[app.active_tab].active_cmd.is_none());
+    });
+}
+
+/// Locate rotated category controls by their stable widget IDs.
+fn authoring_control(app: &OpenCADStudio, id: &'static str) -> iced::Point {
+    use iced_test::core::widget;
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use iced_test::Selector;
+    let mut renderer = headless_renderer();
+    let mut ui = UserInterface::build(app.view_main(), VIEW_SIZE, Cache::default(), &mut renderer);
+    let mut find = widget::Id::new(id).find();
+    ui.operate(&renderer, &mut widget::operation::black_box(&mut find));
+    match widget::Operation::finish(&find) {
+        widget::operation::Outcome::Some(Some(target)) => {
+            target.visible_bounds().expect("visible").center()
+        }
+        _ => panic!("{id} not found"),
+    }
+}
+
+fn authoring_click(app: &mut OpenCADStudio, point: iced::Point) {
+    drive_view(
+        app,
+        point,
+        &[
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+        ],
+    );
+}
+
+#[test]
+fn authoring_palettes_real_tabs_switch_catalogs_and_unavailable_rows_stay_inert() {
+    with_stack(|| {
+        use crate::ui::window::authoring_palettes::Tab;
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let i = app.active_tab;
+        let before = app.tabs[i].scene.document.clone();
+        let history = app.tabs[i].history.undo_stack.len();
+        let _ = app.dispatch_command("LINE");
+        for (tab, row) in [
+            (Tab::Actions, "Block Properties Table"),
+            (Tab::ParameterSets, "Point Move"),
+            (Tab::Parameters, "Basepoint"),
+        ] {
+            let point = authoring_control(&app, tab.widget_id());
+            authoring_click(&mut app, point);
+            assert_eq!(app.authoring_palette_tab, tab);
+            authoring_capture(&app, tab.widget_id());
+            let point = find_in_view(&app, row);
+            authoring_click(&mut app, point);
+            if tab == Tab::ParameterSets {
+                let mut simulator = iced_test::Simulator::with_size(
+                    iced::Settings::default(),
+                    VIEW_SIZE,
+                    app.view_main(),
+                );
+                simulator.point_at(point);
+                simulator.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+                    delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -100.0 },
+                })]);
+                simulator
+                    .click("Lookup Set")
+                    .expect("last set is reachable by scrolling");
+                authoring_snapshot(&mut simulator, &app.active_theme, "parameter-sets-bottom");
+                let messages = simulator.into_messages().collect::<Vec<_>>();
+                for message in messages {
+                    let _ = app.update(message);
+                }
+            }
+            assert_eq!(
+                app.tabs[i]
+                    .active_cmd
+                    .as_ref()
+                    .map(|command| command.name()),
+                Some(if tab == Tab::Parameters {
+                    "BPARAMETER"
+                } else {
+                    "LINE"
+                })
+            );
+        }
+        assert_eq!(app.tabs[i].scene.document, before);
+        assert_eq!(app.tabs[i].history.undo_stack.len(), history);
+        assert!(!app.block_edit_dirty(i));
+    });
+}
+
+#[test]
+fn authoring_palettes_constraints_start_the_existing_commands_from_real_rows() {
+    with_stack(|| {
+        use crate::ui::window::authoring_palettes::Tab;
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let point = authoring_control(&app, Tab::Constraints.widget_id());
+        authoring_click(&mut app, point);
+        assert_eq!(app.authoring_palette_tab, Tab::Constraints);
+        authoring_capture(&app, Tab::Constraints.widget_id());
+        // The palette row is distinct from the ribbon's Coincident button.
+        let point = authoring_control(&app, "authoring-tool-CCONSTRAINT");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[app.active_tab]
+                .active_cmd
+                .as_ref()
+                .map(|command| command.name()),
+            Some("GCCOINCIDENT")
+        );
+        let messages = {
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                VIEW_SIZE,
+                app.view_main(),
+            );
+            simulator.point_at(point);
+            simulator.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -100.0 },
+            })]);
+            simulator
+                .click(iced_test::core::widget::Id::new(
+                    "authoring-tool-DCDIAMETER",
+                ))
+                .expect("last dimensional constraint is reachable by scrolling");
+            authoring_snapshot(&mut simulator, &app.active_theme, "constraints-bottom");
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert_eq!(
+            app.tabs[app.active_tab]
+                .active_cmd
+                .as_ref()
+                .map(|command| command.name()),
+            Some("DCDIAMETER")
+        );
+        assert!(!app.block_edit_dirty(app.active_tab));
+    });
+}
+
+#[test]
+fn authoring_palettes_selected_page_survives_test_block_and_close_and_ignores_hidden_input() {
+    use crate::ui::window::authoring_palettes::Tab;
+    let mut app = authoring_app();
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    let _ = app.update(Message::AuthoringPaletteTabSelected(Tab::ParameterSets));
+    let _ = app.dispatch_command("BTESTBLOCK");
+    let _ = app.update(Message::AuthoringPaletteTabSelected(Tab::Constraints));
+    assert_eq!(app.authoring_palette_tab, Tab::ParameterSets);
+    let _ = app.dispatch_command("BCLOSETESTBLOCK");
+    assert_eq!(app.authoring_palette_tab, Tab::ParameterSets);
+    let _ = app.dispatch_command("BAUTHORPALETTECLOSE");
+    let _ = app.update(Message::AuthoringPaletteTabSelected(Tab::Actions));
+    assert_eq!(app.authoring_palette_tab, Tab::ParameterSets);
+    let _ = app.dispatch_command("BAUTHORPALETTE");
+    assert_eq!(app.authoring_palette_tab, Tab::ParameterSets);
+}
+
+/// Optional rendered evidence when reviewing palette layout changes.
+fn authoring_capture(app: &OpenCADStudio, name: &str) {
+    if std::env::var_os("OCS_AUTHORING_PALETTE_CAPTURES").is_none() {
+        return;
+    }
+    let mut simulator =
+        iced_test::Simulator::with_size(iced::Settings::default(), VIEW_SIZE, app.view_main());
+    authoring_snapshot(&mut simulator, &app.active_theme, name);
+}
+
+fn authoring_snapshot(
+    simulator: &mut iced_test::Simulator<'_, Message>,
+    theme: &iced::Theme,
+    name: &str,
+) {
+    let Some(directory) = std::env::var_os("OCS_AUTHORING_PALETTE_CAPTURES") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(directory).join(format!("{name}.png"));
+    assert!(simulator
+        .snapshot(theme)
+        .expect("render palette")
+        .matches_image(path)
+        .expect("write palette evidence"));
+}
+
+#[test]
+fn visibility_parameter_placement_starts_from_the_actual_palette_row() {
+    with_stack(|| {
+        let mut app = authoring_app();
+        let _ = app.dispatch_command("BAUTHORPALETTE");
+        let before = app.tabs[app.active_tab].scene.document.clone();
+        let point = authoring_control(&app, "authoring-tool-visibility");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[app.active_tab].active_cmd.as_ref().unwrap().name(),
+            "BPARAMETER"
+        );
+        assert_eq!(app.tabs[app.active_tab].scene.document, before);
+        let _ = app.update(Message::CommandInput("0.25,0.25,0".into()));
+        let _ = app.update(Message::CommandSubmit);
+        assert!(app
+            .visibility_placement_error()
+            .unwrap()
+            .contains("already"));
+        let before = app.tabs[app.active_tab].scene.document.clone();
+        let _ = app.dispatch_command("LINE");
+        let point = authoring_control(&app, "authoring-tool-visibility");
+        authoring_click(&mut app, point);
+        assert_eq!(
+            app.tabs[app.active_tab].active_cmd.as_ref().unwrap().name(),
+            "LINE"
+        );
+        assert_eq!(app.tabs[app.active_tab].scene.document, before);
+        authoring_capture(&app, "visibility-parameter-placed");
+    });
 }

@@ -361,6 +361,11 @@ pub struct ModelSpaceThemeConfig {
     pub selection_crossing_color: u8,
     /// SELECTIONEFFECTCOLOR: ACI index for selected entities highlight (0 = Theme Primary, 1..=255 = ACI).
     pub selection_highlight_color: u8,
+    /// Selection highlight opacity in percent (10–100); below 100 the
+    /// object's own colour shows through.
+    pub selection_highlight_opacity: u8,
+    /// Extra screen pixels the selection highlight is drawn wider (0–6).
+    pub selection_highlight_widen: u8,
     /// SELECTIONEFFECT: whether selected objects glow with solid highlight (true) or dash (false).
     pub selection_effect: bool,
     /// SELECTIONPREVIEW bitmask: 1 = idle, 2 = during a command, 3 = both.
@@ -373,6 +378,8 @@ pub struct ModelSpaceThemeConfig {
     pub grip_hot: u8,
     /// GRIPHOVER: hovered/warm grip ACI color (0 = Theme Primary Strong, 1..=255 = ACI).
     pub grip_hover: u8,
+    /// SNAPMARKERSIZE: object-snap marker half-size in pixels (1–20, default 5).
+    pub snap_marker_size: u8,
 }
 
 impl Default for ModelSpaceThemeConfig {
@@ -388,12 +395,15 @@ impl Default for ModelSpaceThemeConfig {
             selection_window_color: 0,
             selection_crossing_color: 0,
             selection_highlight_color: 0,
+            selection_highlight_opacity: 100,
+            selection_highlight_widen: 0,
             selection_effect: true,
             selection_preview: 3,
             grip_size: 5,
             grip_color: 0,
             grip_hot: 0,
             grip_hover: 0,
+            snap_marker_size: 5,
         }
     }
 }
@@ -438,15 +448,13 @@ impl ModelSpaceThemeConfig {
 
     /// Resolve active selection highlight overlay color as [f32; 4].
     pub fn resolve_selection_color(&self) -> [f32; 4] {
-        if self.selection_highlight_color == 0 {
-            crate::scene::model::wire_model::WireModel::SELECTED
-        } else if let Some((r, g, b)) =
-            codec::types::aci_table::aci_to_rgb(self.selection_highlight_color)
-        {
-            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
-        } else {
-            crate::scene::model::wire_model::WireModel::SELECTED
-        }
+        let mut color = codec::types::aci_table::aci_to_rgb(self.selection_highlight_color)
+            .filter(|_| self.selection_highlight_color != 0)
+            .map_or(crate::scene::model::wire_model::WireModel::SELECTED, |(r, g, b)| {
+                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+            });
+        color[3] = f32::from(self.selection_highlight_opacity.clamp(10, 100)) / 100.0;
+        color
     }
 }
 
@@ -525,6 +533,8 @@ pub struct RecentConfig {
     pub files: Vec<String>,
     /// How many recent files to keep.
     pub limit: usize,
+    /// List, icons or large previews.
+    pub view: super::RecentView,
 }
 
 impl Default for RecentConfig {
@@ -532,6 +542,7 @@ impl Default for RecentConfig {
         Self {
             files: Vec::new(),
             limit: super::recent::RECENT_DEFAULT,
+            view: super::RecentView::default(),
         }
     }
 }

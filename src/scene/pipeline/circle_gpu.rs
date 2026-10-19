@@ -264,7 +264,7 @@ pub fn extract_circle_instance_from_geom_indexed(
     }
 
     let (ch, cl) = split_ds_xyz(center[0], center[1], center[2]);
-    let hw = wire.line_weight_px * 0.5;
+    let hw = wire.line_weight_px.max(1.0) * 0.5;
     let pat0 = [
         wire.pattern[0],
         wire.pattern[1],
@@ -588,6 +588,7 @@ mod tests {
         let h = doc.add_entity(donut).unwrap();
         let entity = doc.get_entity(h).unwrap();
         let selected = rustc_hash::FxHashSet::default();
+        let reference_only = rustc_hash::FxHashSet::default();
         let wires = crate::scene::convert::tess::tessellate_entity(
             &doc,
             &selected,
@@ -600,6 +601,7 @@ mod tests {
             None,
             None,
             false,
+            &reference_only,
         );
         assert_eq!(
             wires.len(),

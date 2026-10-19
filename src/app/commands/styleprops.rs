@@ -205,6 +205,11 @@ impl OpenCADStudio {
                             } else if name.eq_ignore_ascii_case("BYBLOCK") {
                                 Some(("ByBlock".to_string(), codec::types::Handle::NULL))
                             } else {
+                                // A catalog linetype loads on first use.
+                                crate::io::linetypes::ensure_catalog_linetype(
+                                    &mut self.tabs[i].scene.document,
+                                    name,
+                                );
                                 self.tabs[i]
                                     .scene
                                     .document
@@ -1148,6 +1153,9 @@ impl OpenCADStudio {
                     | "SHORTCUTMENUDURATION"
                     | "CURSORSIZE"
                     | "PICKBOX"
+                    | "HPASSOC"
+                    | "COMMANDLINEOPACITY"
+                    | "MENUBAR"
                     | "CURSORTYPE"
                     | "SNAPANG"
                     | "TEXTFILL"
@@ -1210,13 +1218,22 @@ impl OpenCADStudio {
                     | "DGNOSNAP"
                     | "UOSNAP"
                     | "FIELDDISPLAY"
+                    | "FILEDIA"
+                    | "TRIMEXTENDMODE"
+                    | "SELECTIONCYCLING"
+                    | "UCSDETECT"
                     | "SURFACEASSOCIATIVITY"
+                    | "DGNIMPORTMODE"
                     | "UCSORTHO"
                     | "UCSVIEW"
+                    | "LAYOUTCREATEVIEWPORT"
                     | "PDFIMPORTMODE"
                     | "PDFIMPORTFILTER"
                     | "PDFIMPORTLAYERS"
                     | "PDFIMPORTIMAGEPATH"
+                    | "PDFSHXLAYER"
+                    | "PDFSHXBESTFONT"
+                    | "PDFSHXTEXTSETTINGS"
                     | "XDWGFADECTL"
                     | "POINTCLOUDCLIPFRAME"
                     | "POINTCLOUDDENSITY"
@@ -1274,6 +1291,10 @@ impl OpenCADStudio {
                     | "DYNCONSTRAINTDISPLAY"
                     | "CCONSTRAINTFORM"
                     | "DYNMODE"
+                    | "TXT2MTXTCOMBINEMTEXT"
+                    | "TXT2MTXTTEXTORDER"
+                    | "TXT2MTXTWORDWRAP"
+                    | "TXT2MTXTLINESPACING"
             ) =>
             {
                 return self.dispatch_styleprops(&format!("SETVAR {cmd}"), i);
@@ -1297,6 +1318,7 @@ impl OpenCADStudio {
                 if name.is_empty() || name == "?" {
                     self.command_line
                         .push_info(&super::plotvars::setvar_listing());
+                    self.command_line.push_info("SETVAR (view): UCSFOLLOW");
                     self.command_line
                         .push_info(&super::blockvars::setvar_listing());
                     self.command_line.push_info(
@@ -1346,9 +1368,15 @@ impl OpenCADStudio {
                         if let Some(value) = &value {
                             match value.parse::<i32>().ok().filter(|v| (-90..=90).contains(v)) {
                                 Some(fade) => self.set_xref_fade(fade),
-                                None => self
-                                    .command_line
-                                    .push_error("Requires an integer between -90 and 90."),
+                                // Refused: say why and ask again.
+                                None => {
+                                    self.command_line
+                                        .push_error("Requires an integer between -90 and 90.");
+                                    self.command_line.push_output(&format!(
+                                        "Enter new value for XDWGFADECTL <{current}>:"
+                                    ));
+                                    self.pending_setvar = Some(name.clone());
+                                }
                             }
                         } else {
                             self.command_line.push_output(&format!(
@@ -1451,10 +1479,123 @@ impl OpenCADStudio {
                         }
                         return Some(self.finish_dispatch(cmd));
                     }
+                    // PDFSHXTEXT's profile switches, taken as 1 / 0 or ON / OFF;
+                    // PDFSHXTEXTSETTINGS shows its value as a number.
+                    if matches!(
+                        name.as_str(),
+                        "PDFSHXLAYER" | "PDFSHXBESTFONT" | "PDFSHXTEXTSETTINGS"
+                    ) {
+                        use crate::modules::insert::pdf_shx_text::{set_settings, settings};
+                        let mut s = settings();
+                        let on = match name.as_str() {
+                            "PDFSHXLAYER" => s.current_layer,
+                            "PDFSHXBESTFONT" => s.best_font,
+                            _ => s.show_settings,
+                        };
+                        let current = if name == "PDFSHXTEXTSETTINGS" {
+                            i16::from(on).to_string()
+                        } else if on {
+                            "ON".to_string()
+                        } else {
+                            "OFF".to_string()
+                        };
+                        let parsed = value.as_deref().map(|v| {
+                            match v
+                                .trim()
+                                .trim_start_matches('_')
+                                .to_ascii_uppercase()
+                                .as_str()
+                            {
+                                "1" | "ON" => Some(true),
+                                "0" | "OFF" => Some(false),
+                                _ => None,
+                            }
+                        });
+                        match parsed {
+                            Some(Some(v)) => {
+                                if v != on {
+                                    match name.as_str() {
+                                        "PDFSHXLAYER" => s.current_layer = v,
+                                        "PDFSHXBESTFONT" => s.best_font = v,
+                                        _ => s.show_settings = v,
+                                    }
+                                    set_settings(s);
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line.push_error(
+                                    crate::t!("Requires 0 or 1 only, or option keyword.").as_ref(),
+                                );
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "LAYOUTCREATEVIEWPORT" {
+                        // A profile switch shown and taken as ON / OFF or 1 / 0.
+                        let current = if crate::scene::layout_create_viewport() {
+                            "ON"
+                        } else {
+                            "OFF"
+                        };
+                        let parsed = value.as_deref().map(|v| {
+                            match v
+                                .trim()
+                                .trim_start_matches('_')
+                                .to_ascii_uppercase()
+                                .as_str()
+                            {
+                                "1" | "ON" => Some(true),
+                                "0" | "OFF" => Some(false),
+                                _ => None,
+                            }
+                        });
+                        match parsed {
+                            Some(Some(on)) => {
+                                if crate::scene::layout_create_viewport() != on {
+                                    crate::scene::set_layout_create_viewport(on);
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line.push_error(
+                                    crate::t!("Requires 0 or 1 only, or option keyword.").as_ref(),
+                                );
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
                     if matches!(name.as_str(), "UCSORTHO" | "UCSVIEW") {
                         use crate::modules::view::view_cmd;
-                        let current = i16::from(if name == "UCSORTHO" { view_cmd::ucs_ortho() } else { view_cmd::ucs_view() });
-                        match value.as_deref().map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v))) {
+                        let current = i16::from(if name == "UCSORTHO" {
+                            view_cmd::ucs_ortho()
+                        } else {
+                            view_cmd::ucs_view()
+                        });
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v)))
+                        {
                             Some(Some(mode)) => {
                                 if current != mode {
                                     if name == "UCSORTHO" {
@@ -1466,12 +1607,52 @@ impl OpenCADStudio {
                                 }
                             }
                             Some(None) => {
-                                self.command_line.push_error(crate::t!("Requires 0 or 1 only.").as_ref());
-                                self.command_line.push_output(&format!("Enter new value for {name} <{current}>:"));
+                                self.command_line
+                                    .push_error(crate::t!("Requires 0 or 1 only.").as_ref());
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
                                 self.pending_setvar = Some(name.clone());
                             }
                             None => {
-                                self.command_line.push_output(&format!("Enter new value for {name} <{current}>:"));
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "DGNIMPORTMODE" {
+                        // Where DGNIMPORT puts the model: 0 a new drawing, 1 the
+                        // current one keeping its definitions, 2 the current one
+                        // with prefixed names.
+                        use crate::modules::insert::dgn_import::{set_settings, settings};
+                        let mut s = settings();
+                        let current = s.mode;
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<u8>().ok().filter(|v| *v <= 2))
+                        {
+                            Some(Some(mode)) => {
+                                if current != mode {
+                                    s.mode = mode;
+                                    set_settings(s);
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line
+                                    .push_error("Requires an integer between 0 and 2.");
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for DGNIMPORTMODE <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for DGNIMPORTMODE <{current}>:"
+                                ));
                                 self.pending_setvar = Some(name.clone());
                             }
                         }
@@ -1501,6 +1682,50 @@ impl OpenCADStudio {
                             None => {
                                 self.command_line.push_output(&format!(
                                     "Enter new value for SURFACEASSOCIATIVITY <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if let Some(field) = match name.as_str() {
+                        "TXT2MTXTCOMBINEMTEXT" => Some(0),
+                        "TXT2MTXTTEXTORDER" => Some(1),
+                        "TXT2MTXTWORDWRAP" => Some(2),
+                        "TXT2MTXTLINESPACING" => Some(3),
+                        _ => None,
+                    } {
+                        // TXT2MTXT's profile settings: 0 / 1 (TEXTORDER 1 =
+                        // selection order).
+                        let s = &mut self.txt2mtxt_settings;
+                        let slot = match field {
+                            0 => &mut s.combine,
+                            1 => &mut s.select_order,
+                            2 => &mut s.word_wrap,
+                            _ => &mut s.uniform_spacing,
+                        };
+                        let current = i16::from(*slot);
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v)))
+                        {
+                            Some(Some(mode)) => {
+                                if current != mode {
+                                    *slot = mode == 1;
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line
+                                    .push_error(crate::t!("Requires 0 or 1 only.").as_ref());
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for {name} <{current}>:"
                                 ));
                                 self.pending_setvar = Some(name.clone());
                             }
@@ -1553,6 +1778,117 @@ impl OpenCADStudio {
                             None => {
                                 self.command_line.push_output(&format!(
                                     "Enter new value for FIELDDISPLAY <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "TRIMEXTENDMODE" {
+                        use crate::modules::draw::modify::trim;
+                        let current = i16::from(trim::quick_mode());
+                        let prompt = format!("Enter new value for TRIMEXTENDMODE <{current}>:");
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v)))
+                        {
+                            Some(Some(mode)) => {
+                                if current != mode {
+                                    trim::set_quick_mode(mode == 1);
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line
+                                    .push_error(crate::t!("Requires 0 or 1 only.").as_ref());
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "UCSDETECT" {
+                        let current = i16::from(self.dynamic_ucs);
+                        let prompt = format!("Enter new value for UCSDETECT <{current}>:");
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v)))
+                        {
+                            Some(Some(mode)) => {
+                                self.dynamic_ucs = mode == 1;
+                                self.persist_settings_if_changed();
+                            }
+                            Some(None) => {
+                                self.command_line
+                                    .push_error(crate::t!("Requires 0 or 1 only.").as_ref());
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "SELECTIONCYCLING" {
+                        // 1 and 2 both turn cycling on; the candidate list
+                        // always shows.
+                        let current = if self.selection_cycling { 2 } else { 0 };
+                        let prompt = format!("Enter new value for SELECTIONCYCLING <{current}>:");
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=2).contains(v)))
+                        {
+                            Some(Some(mode)) => {
+                                if self.selection_cycling != (mode != 0) {
+                                    self.selection_cycling = mode != 0;
+                                    self.cycle_candidates = None;
+                                    self.persist_settings_if_changed();
+                                }
+                            }
+                            Some(None) => {
+                                let (min, max) = (0, 2);
+                                self.command_line.push_error(&crate::tf!(
+                                    "Requires an integer between {min} and {max}."
+                                ));
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&prompt);
+                                self.pending_setvar = Some(name.clone());
+                            }
+                        }
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                    if name == "FILEDIA" {
+                        let current = i16::from(crate::sys::file_dia());
+                        match value
+                            .as_deref()
+                            .map(|v| v.trim().parse::<i16>().ok().filter(|v| (0..=1).contains(v)))
+                        {
+                            Some(Some(mode)) => {
+                                if current != mode {
+                                    crate::sys::set_file_dia(mode == 1);
+                                    self.save_config();
+                                }
+                            }
+                            Some(None) => {
+                                self.command_line
+                                    .push_error(crate::t!("Requires 0 or 1 only.").as_ref());
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for FILEDIA <{current}>:"
+                                ));
+                                self.pending_setvar = Some(name.clone());
+                            }
+                            None => {
+                                self.command_line.push_output(&format!(
+                                    "Enter new value for FILEDIA <{current}>:"
                                 ));
                                 self.pending_setvar = Some(name.clone());
                             }
@@ -2154,6 +2490,28 @@ impl OpenCADStudio {
                                 },
                                 None => Ok((format!("PICKBOX = {}", self.pick_box), false)),
                             },
+                            "MENUBAR" => match value.as_deref() {
+                                Some(v @ ("0" | "1")) => {
+                                    self.show_menu_bar = v == "1";
+                                    Ok((format!("MENUBAR = {v}"), true))
+                                }
+                                Some(_) => Err("SETVAR: 0 or 1 required.".into()),
+                                None => Ok((
+                                    format!("MENUBAR = {}", u8::from(self.show_menu_bar)),
+                                    false,
+                                )),
+                            },
+                            "HPASSOC" => match value.as_deref() {
+                                Some(v @ ("0" | "1")) => {
+                                    self.hatch_associative = v == "1";
+                                    Ok((format!("HPASSOC = {v}"), true))
+                                }
+                                Some(_) => Err("SETVAR: 0 or 1 required.".into()),
+                                None => Ok((
+                                    format!("HPASSOC = {}", u8::from(self.hatch_associative)),
+                                    false,
+                                )),
+                            },
                             "CURSORTYPE" => match &value {
                                 Some(v) => match v.as_str() {
                                     "0" => {
@@ -2488,6 +2846,22 @@ impl OpenCADStudio {
                                 },
                                 None => Ok((
                                     format!("CLIPROMPTLINES = {}", self.cliprompt_lines),
+                                    false,
+                                )),
+                            },
+                            "COMMANDLINEOPACITY" => match &value {
+                                Some(v) => match v.parse::<u8>() {
+                                    Ok(n) if (20..=100).contains(&n) => {
+                                        self.command_line.set_opacity_percent(n);
+                                        Ok((format!("COMMANDLINEOPACITY = {n}"), true))
+                                    }
+                                    _ => Err("SETVAR: integer from 20 to 100 required.".into()),
+                                },
+                                None => Ok((
+                                    format!(
+                                        "COMMANDLINEOPACITY = {}",
+                                        self.command_line.opacity_percent()
+                                    ),
                                     false,
                                 )),
                             },
@@ -3088,6 +3462,10 @@ impl OpenCADStudio {
                                 self.delete_objects = value;
                             }
                             if changed {
+                                if name == "INSUNITS" {
+                                    self.tabs[i].scene.sync_annotation_scale_from_header();
+                                    self.tabs[i].scene.invalidate_annotation_dependencies();
+                                }
                                 if matches!(
                                     name.as_str(),
                                     "ZOOMWHEEL"
@@ -3096,6 +3474,9 @@ impl OpenCADStudio {
                                         | "SHORTCUTMENUDURATION"
                                         | "CURSORSIZE"
                                         | "PICKBOX"
+                                        | "HPASSOC"
+                                        | "COMMANDLINEOPACITY"
+                                        | "MENUBAR"
                                         | "CURSORTYPE"
                                         | "SNAPANG"
                                         | "CLIPROMPTLINES"
@@ -3253,53 +3634,99 @@ impl OpenCADStudio {
             // Read-only scan: flags entities on undefined layers and block
             // references to undefined block definitions. Reports only; it does
             // not auto-repair (so it can never make the drawing worse).
-            "AUDIT" => {
-                use std::collections::BTreeSet;
-                let mut undefined_layers: BTreeSet<String> = BTreeSet::new();
-                let mut undefined_blocks: BTreeSet<String> = BTreeSet::new();
-                let mut total = 0usize;
-                {
-                    let doc = &self.tabs[i].scene.document;
-                    for e in doc.entities() {
-                        total += 1;
-                        let layer = &e.common().layer;
-                        if !layer.is_empty() && doc.layers.get(layer).is_none() {
-                            undefined_layers.insert(layer.clone());
-                        }
-                        if let codec::EntityType::Insert(ins) = e {
-                            if doc.block_records.get(&ins.block_name).is_none() {
-                                undefined_blocks.insert(ins.block_name.clone());
-                            }
-                        }
+            // COMPARE — overlay what differs from another drawing. Bare picks
+            // the drawing; with a path it compares at once.
+            "COMPARE" => {
+                return Some(Task::perform(
+                    async {
+                        crate::sys::file_dialog()
+                            .set_title(crate::t!("Compare with drawing").as_ref())
+                            .add_filter(crate::t!("Drawing").as_ref(), &["dwg", "dxf"])
+                            .pick_file()
+                            .await
+                            .map(|handle| crate::sys::handle_path(&handle))
+                    },
+                    |path| match path {
+                        Some(path) => Message::Command(format!("COMPARE {}", path.display())),
+                        None => Message::Noop,
+                    },
+                ));
+            }
+            cmd if cmd.starts_with("COMPARE ") => {
+                let path = std::path::PathBuf::from(cmd.trim_start_matches("COMPARE").trim());
+                match crate::io::load_file(&path) {
+                    Ok(other) => {
+                        let comparison = crate::scene::compare::compare(&self.tabs[i].scene, other);
+                        // The overlay shows at once, before the cursor moves.
+                        self.tabs[i]
+                            .scene
+                            .set_preview_wires(comparison.overlay.clone());
+                        let command =
+                            crate::modules::manage::compare::CompareCommand::new(comparison);
+                        self.command_line.push_info(&command.prompt());
+                        self.tabs[i].active_cmd = Some(Box::new(command));
                     }
+                    Err(error) => self
+                        .command_line
+                        .push_error(crate::tf!("COMPARE: {error}").as_ref()),
                 }
+            }
+            // AUDIT runs the codec's audit; `AUDIT Yes` also applies its
+            // repair, undoable as one step.
+            "AUDIT" => {
+                use crate::command::KeywordCommand;
+                let c = KeywordCommand::new(
+                    "AUDIT",
+                    "AUDIT  Fix any errors detected? [Yes / No] <No>:",
+                    vec![("Yes", "YES", None), ("No", "NO", None)],
+                )
+                .with_default("NO");
+                self.command_line.push_info(&c.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(c));
+            }
+            cmd if cmd.starts_with("AUDIT ") => {
+                let fix = cmd[6..].trim().to_uppercase().starts_with('Y');
+                let report = self.tabs[i].scene.document.audit();
+                let total = {
+                    let doc = &self.tabs[i].scene.document;
+                    doc.entities().count() + doc.objects.len()
+                };
                 self.command_line
                     .push_output(crate::tf!("AUDIT: scanned {total} object(s).").as_ref());
-                if undefined_layers.is_empty() && undefined_blocks.is_empty() {
+                if report.is_clean() {
                     self.command_line
                         .push_output(crate::t!("AUDIT: no issues found.").as_ref());
-                } else {
-                    if !undefined_layers.is_empty() {
-                        self.command_line.push_error(
-                            crate::tf!(
-                                "AUDIT: reference(s) to undefined layer(s): {}",
-                                undefined_layers.into_iter().collect::<Vec<_>>().join(", ")
-                            )
-                            .as_ref(),
-                        );
-                    }
-                    if !undefined_blocks.is_empty() {
-                        self.command_line.push_error(
-                            crate::tf!(
-                                "AUDIT: reference(s) to undefined block(s): {}",
-                                undefined_blocks.into_iter().collect::<Vec<_>>().join(", ")
-                            )
-                            .as_ref(),
-                        );
-                    }
-                    self.command_line.push_info(
-                        crate::t!("AUDIT: report only — no automatic repair performed.").as_ref(),
+                    return Some(Task::none());
+                }
+                self.command_line.push_error(
+                    crate::tf!(
+                        "AUDIT: {} error(s), {} warning(s) found.",
+                        report.error_count(),
+                        report.warning_count()
+                    )
+                    .as_ref(),
+                );
+                // ponytail: first 50 issues only; the counts above cover the rest.
+                for issue in report.issues.iter().take(50) {
+                    self.command_line
+                        .push_info(&format!("  {:?}: {}", issue.code, issue.message));
+                }
+                if fix {
+                    self.push_undo_snapshot(i, "AUDIT");
+                    let repair = self.tabs[i].scene.document.repair();
+                    self.command_line.push_output(
+                        crate::tf!(
+                            "AUDIT: {} repair(s) applied, {} issue(s) left unresolved.",
+                            repair.actions.len(),
+                            repair.unresolved.len()
+                        )
+                        .as_ref(),
                     );
+                    if !repair.actions.is_empty() {
+                        self.tabs[i].dirty = true;
+                        self.tabs[i].scene.rebuild_derived_caches();
+                        self.refresh_layer_panel();
+                    }
                 }
             }
 
@@ -3727,13 +4154,7 @@ impl OpenCADStudio {
                 }
             }
             cmd if cmd == "DDPTYPE" || cmd == "PTYPE" => {
-                // The dialog shows the magnitude; the sign (relative/absolute)
-                // is driven by the radio buttons. A positive PDSIZE is absolute;
-                // zero or negative is relative.
-                let pdsize = self.tabs[i].scene.document.header.point_display_size;
-                self.point_size_relative = pdsize <= 0.0;
-                self.point_size_buf = format!("{}", pdsize.abs());
-                self.active_modal = Some(super::super::ModalKind::PointStyle);
+                self.begin_point_style_dialog();
             }
             "LWDISPLAY" => {
                 use crate::command::ValuePromptCommand;
@@ -4403,11 +4824,12 @@ mod scale_validation_tests {
 }
 
 impl OpenCADStudio {
-    /// XDWGFADECTL: store it, show it on the ribbon and redraw every tab's
-    /// referenced drawings.
+    /// XDWGFADECTL: store it in the profile, show it on the ribbon and redraw
+    /// every tab's referenced drawings.
     pub(in crate::app) fn set_xref_fade(&mut self, fade: i32) {
         crate::scene::cache::block_cache::set_xref_fade_ctl(fade);
         self.ribbon.xref_fade = crate::scene::cache::block_cache::xref_fade_ctl();
+        self.save_config();
         for tab in &mut self.tabs {
             if !tab.is_start {
                 tab.scene.recolor_meshes();

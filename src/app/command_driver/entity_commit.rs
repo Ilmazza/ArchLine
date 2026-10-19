@@ -39,10 +39,8 @@ impl OpenCADStudio {
         let delta_safe = self.delta_add_safe(i, &entity);
         let pending = self.begin_undo(i, label, 1, delta_safe);
         let is_associative_dimension = matches!(
-            entity,
-            codec::EntityType::Dimension(
-                codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_)
-            )
+            crate::entities::dimension::as_dimension(&entity),
+            Some(codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_))
         );
         let association_enabled = self.tabs[i].scene.document.header.dimension_associativity == 2;
         let committed = if preserve_commit_layer {
@@ -257,10 +255,8 @@ impl OpenCADStudio {
         };
         let pending = self.begin_undo(i, label, 1, delta_safe);
         let is_associative_dimension = matches!(
-            entity,
-            codec::EntityType::Dimension(
-                codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_)
-            )
+            crate::entities::dimension::as_dimension(&entity),
+            Some(codec::entities::Dimension::Linear(_) | codec::entities::Dimension::Aligned(_))
         );
         let association_enabled = self.tabs[i].scene.document.header.dimension_associativity == 2;
         let committed = if preserve_commit_layer {
@@ -324,8 +320,8 @@ impl OpenCADStudio {
         let label = self.history_label_from_active_cmd(i, "DIMENSION");
         let association_mode = self.tabs[i].scene.document.header.dimension_associativity;
         let single_source_dimension = matches!(
-            &entity,
-            codec::EntityType::Dimension(codec::entities::Dimension::Ordinate(_))
+            crate::entities::dimension::as_dimension(&entity),
+            Some(codec::entities::Dimension::Ordinate(_))
         );
         // A dimension placed on the sheet but measuring model geometry
         // through a viewport carries the compensation as a negative
@@ -358,7 +354,11 @@ impl OpenCADStudio {
                 if layer != "0" || entity.as_entity().layer().is_empty() {
                     entity.as_entity_mut().set_layer(layer);
                 }
-                crate::scene::view::dispatch::apply_color(&mut entity, self.ribbon.active_color);
+                crate::scene::view::dispatch::apply_named_color(
+                    &mut entity,
+                    self.ribbon.active_color,
+                    self.ribbon.active_color_name(),
+                );
                 crate::scene::view::dispatch::apply_common_prop(
                     &mut entity,
                     "linetype",
@@ -476,7 +476,11 @@ impl OpenCADStudio {
                 if layer != "0" || entity.as_entity().layer().is_empty() {
                     entity.as_entity_mut().set_layer(layer);
                 }
-                crate::scene::view::dispatch::apply_color(&mut entity, self.ribbon.active_color);
+                crate::scene::view::dispatch::apply_named_color(
+                    &mut entity,
+                    self.ribbon.active_color,
+                    self.ribbon.active_color_name(),
+                );
                 crate::scene::view::dispatch::apply_common_prop(
                     &mut entity,
                     "linetype",
@@ -764,16 +768,26 @@ impl OpenCADStudio {
         mut options: Box<crate::scene::CreateBlockOptions>,
     ) -> Option<Task<Message>> {
         let i = self.active_tab;
+        // No objects at all defines an empty block; objects that were all on
+        // locked layers define nothing.
+        let picked = options.handles.len();
         options
             .handles
             .retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
-        if options.handles.is_empty() {
+        if picked > 0 && options.handles.is_empty() {
             self.command_line
                 .push_info(crate::t!("No editable objects selected.").as_ref());
             return Some(Task::none());
         }
         self.push_undo_snapshot(i, "BLOCK");
         let name = options.name.clone();
+        let redefined = options.redefine
+            && self.tabs[i]
+                .scene
+                .document
+                .block_records
+                .get(&name)
+                .is_some();
         match self.tabs[i].scene.create_block_with_options(*options) {
             Ok(insert_handle) => {
                 self.tabs[i].dirty = true;
@@ -784,11 +798,22 @@ impl OpenCADStudio {
                 self.tabs[i].scene.clear_preview_wire();
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
-                self.command_line
-                    .push_output(crate::tf!("Block \"{name}\" created.").as_ref());
+                // A new definition is not reported; a redefinition is.
+                if redefined {
+                    self.command_line
+                        .push_output(&format!("Block \"{name}\" redefined"));
+                }
                 self.refresh_properties();
                 self.note_recent_block(&name);
                 self.refresh_block_palette();
+                // The Block Definition dialog asked to edit the new block.
+                if self
+                    .block_definition_open_editor
+                    .take()
+                    .is_some_and(|wanted| wanted.eq_ignore_ascii_case(&name))
+                {
+                    return Some(self.dispatch_command(&format!("BEDIT_OPEN:{name}")));
+                }
             }
             Err(err) => {
                 self.discard_last_undo_entry(i);
@@ -982,6 +1007,35 @@ impl OpenCADStudio {
 
     pub(super) fn handle_attreq_needed(&mut self, block_name: String) -> Option<Task<Message>> {
         let i = self.active_tab;
+        // When active space is a block editor session (BEDIT), refuse inserting
+        // any block that would create a circular nesting dependency.
+        if let Some(edit_handle) = self.tabs[i].scene.block_edit_block {
+            let container_name = self.tabs[i]
+                .scene
+                .document
+                .block_records
+                .iter()
+                .find(|br| br.handle == edit_handle)
+                .map(|br| br.name.clone());
+            if let Some(container) = container_name {
+                if crate::scene::block_service::would_create_cycle(
+                    &self.tabs[i].scene.document,
+                    &container,
+                    &block_name,
+                ) {
+                    self.command_line.push_error(
+                        &crate::scene::block_service::circular_dependency_error(
+                            &container,
+                            &block_name,
+                        ),
+                    );
+                    self.tabs[i].active_cmd = None;
+                    self.tabs[i].snap_result = None;
+                    self.tabs[i].scene.clear_preview_wire();
+                    return None;
+                }
+            }
+        }
         // Collect the full AttributeDefinitions owned by this block
         // record so each created attribute keeps its geometry (#255).
         let mut attdefs: Vec<codec::entities::AttributeDefinition> = {

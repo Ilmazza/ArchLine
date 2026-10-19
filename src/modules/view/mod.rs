@@ -2,6 +2,7 @@
 
 mod cascade;
 mod count_palette;
+pub mod dview;
 mod file_tabs;
 mod graphic_attributes_palette;
 mod layout_tabs;
@@ -18,8 +19,8 @@ mod tile_horiz;
 mod tile_vert;
 mod tool_palettes;
 pub mod ucs_cmd;
-pub mod view_cmd;
 mod ucs_icon;
+pub mod view_cmd;
 mod view_front;
 mod view_iso;
 mod view_right;

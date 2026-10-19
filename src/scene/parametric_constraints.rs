@@ -435,6 +435,13 @@ pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
 /// dimensional constraint sits on an ordinary layer instead.
 pub(crate) const DYNAMIC_DIMENSION_LAYER: &str = "*ADSK_CONSTRAINTS";
 
+/// Whether `layer` holds dynamic dimensions. Drawings from the first
+/// parametric release keep them on `*LayerNameForDynamicConstraint`.
+pub(crate) fn is_dynamic_dimension_layer(layer: &str) -> bool {
+    layer.eq_ignore_ascii_case(DYNAMIC_DIMENSION_LAYER)
+        || layer.eq_ignore_ascii_case("*LayerNameForDynamicConstraint")
+}
+
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
 /// 1 = value, 2 = name=value, the value with its trailing zeros dropped
 /// (`d9=80`, `d1=111.8034`). A parameter defined by a formula shows the
@@ -689,7 +696,7 @@ fn dynamic_dimension_follow_points(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -787,7 +794,7 @@ fn dynamic_dimension_follow_radial(
     let Some(codec::EntityType::Dimension(mut rebuilt)) = rebuilt else {
         return false;
     };
-    let unchanged = match (&*dimension, &rebuilt) {
+    let unchanged = match (&*dimension, &*rebuilt) {
         (Dimension::Radius(old), Dimension::Radius(new)) => {
             same(old.angle_vertex, new.angle_vertex)
                 && same(old.definition_point, new.definition_point)
@@ -801,7 +808,7 @@ fn dynamic_dimension_follow_radial(
     if unchanged {
         return false;
     }
-    match &mut rebuilt {
+    match &mut *rebuilt {
         Dimension::Radius(new) => new.leader_length = leader,
         Dimension::Diameter(new) => new.leader_length = leader,
         _ => {}
@@ -814,7 +821,7 @@ fn dynamic_dimension_follow_radial(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -874,7 +881,7 @@ fn dynamic_dimension_follow_angle(
     target.attachment_point = base.attachment_point;
     target.line_spacing_style = base.line_spacing_style;
     target.line_spacing_factor = base.line_spacing_factor;
-    *dimension = rebuilt;
+    *dimension = *rebuilt;
     true
 }
 
@@ -2257,10 +2264,14 @@ impl super::Scene {
                 });
                 let measured = points.filter(|_| !angular).map(|(first, second)| {
                     let delta = second - first;
-                    let axis = match self.document.get_entity(*dimension) {
-                        Some(codec::EntityType::Dimension(codec::entities::Dimension::Linear(
-                            linear,
-                        ))) => Some((linear.rotation.cos(), linear.rotation.sin())),
+                    let axis = match self
+                        .document
+                        .get_entity(*dimension)
+                        .and_then(crate::entities::dimension::as_dimension)
+                    {
+                        Some(codec::entities::Dimension::Linear(linear)) => {
+                            Some((linear.rotation.cos(), linear.rotation.sin()))
+                        }
                         _ => None,
                     };
                     match (constraint.kind, axis) {
@@ -2499,12 +2510,9 @@ impl super::Scene {
     /// form: on an ordinary layer instead of the reference's constraints
     /// layer, drawn with its style, plotted, never rescaled to the screen.
     pub(crate) fn dimension_is_annotational(&self, handle: Handle) -> bool {
-        self.document.get_entity(handle).is_some_and(|entity| {
-            !entity
-                .common()
-                .layer
-                .eq_ignore_ascii_case(DYNAMIC_DIMENSION_LAYER)
-        })
+        self.document
+            .get_entity(handle)
+            .is_some_and(|entity| !is_dynamic_dimension_layer(&entity.common().layer))
     }
 
     /// The document as written to a file: a dynamic dimension's screen-size
@@ -2535,6 +2543,9 @@ impl super::Scene {
         }
         crate::io::xref::strip_resolved_xref_content(&mut document);
         crate::entities::field::stamp_save_dates(&mut document);
+        for name in &self.unopened_layouts {
+            crate::scene::write_layout_unopened(&mut document, name);
+        }
         document
     }
 
@@ -2598,7 +2609,7 @@ impl super::Scene {
             // line, which breaks around the text, so the text is centred on
             // it rather than lifted above it.
             let radial = matches!(
-                dimension,
+                &**dimension,
                 codec::entities::Dimension::Radius(_) | codec::entities::Dimension::Diameter(_)
             );
             let centred = !radial || ov::int(xdata, ov::DIMTAD) == Some(0);
@@ -2608,7 +2619,7 @@ impl super::Scene {
             // The reference draws dynamic distance text horizontally; an
             // angle's text keeps its style's alignment.
             let angular = matches!(
-                dimension,
+                &**dimension,
                 codec::entities::Dimension::Angular2Ln(_)
                     | codec::entities::Dimension::Angular3Pt(_)
             );
@@ -2666,7 +2677,24 @@ impl super::Scene {
     /// DYNCONSTRAINTDISPLAY 0 for all of them) and redraws the ones that
     /// changed.
     pub(crate) fn refresh_hidden_dynamic_dimensions(&mut self) {
-        let desired: rustc_hash::FxHashSet<Handle> = self
+        let linked: rustc_hash::FxHashSet<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.dimensions.values().copied())
+            .collect();
+        // A dynamic dimension whose constraint did not load cannot be driven
+        // or placed on screen; like a viewer, leave it undrawn.
+        let orphans: Vec<Handle> = self
+            .document
+            .entities()
+            .filter(|entity| {
+                matches!(entity, codec::EntityType::Dimension(_))
+                    && is_dynamic_dimension_layer(&entity.common().layer)
+                    && !linked.contains(&entity.common().handle)
+            })
+            .map(|entity| entity.common().handle)
+            .collect();
+        let mut desired: rustc_hash::FxHashSet<Handle> = self
             .parametric_constraints
             .iter()
             .flat_map(|set| {
@@ -2678,6 +2706,7 @@ impl super::Scene {
                 })
             })
             .collect();
+        desired.extend(orphans);
         if desired == self.hidden_dynamic_dimensions {
             return;
         }

@@ -36,6 +36,10 @@ impl OpenCADStudio {
                 // Checked = open and docked on this edge.
                 let checked: Vec<_> = crate::ui::dock::PanelId::ALL
                     .iter()
+                    .filter(|p| {
+                        **p != crate::ui::dock::PanelId::AuthoringPalettes
+                            || tab.active_block_edit_session().is_some()
+                    })
                     .map(|p| {
                         let here = self.dock.location(*p).map(|(s, _)| s) == Some(side);
                         (*p, here && self.dock_panel_visible(*p))
@@ -160,12 +164,13 @@ impl OpenCADStudio {
                 children.push(strip);
             }
         }
-        Some(
-            mouse_area(row(children).height(Fill))
-                .on_enter(Message::Dock(crate::ui::dock::DockMsg::HoverStay))
-                .on_exit(Message::Dock(crate::ui::dock::DockMsg::HoverExit))
-                .into(),
-        )
+        // Not a `mouse_area`: the pointer on one of the pallet's own
+        // dropdowns must not read as leaving the edge.
+        Some(crate::ui::hover_zone::hover_zone(
+            row(children).height(Fill),
+            Message::Dock(crate::ui::dock::DockMsg::HoverStay),
+            Message::Dock(crate::ui::dock::DockMsg::HoverExit),
+        ))
     }
 
     /// An edge's vertical icon strip: per group its open pallets' icons in a
@@ -381,20 +386,41 @@ impl OpenCADStudio {
         };
         match id {
             crate::ui::dock::PanelId::Properties => tab.properties.view(width, chrome),
-            crate::ui::dock::PanelId::GraphicAttributes => crate::ui::window::graphic_attributes::view(
-                &self.graphic_attributes,
-                &tab.scene,
-                &tab.properties,
-                width,
-                chrome,
-                self.dock
-                    .location(id)
-                    .map_or(crate::app::config::DockSide::Right, |(side, _)| side),
-                matches!(
-                    self.color_pick_target,
-                    Some((crate::app::ColorPickTarget::Gradient(_), _))
-                ),
-            ),
+            crate::ui::dock::PanelId::GraphicAttributes => {
+                crate::ui::window::graphic_attributes::view(
+                    &self.graphic_attributes,
+                    &tab.scene,
+                    &tab.properties,
+                    width,
+                    chrome,
+                    self.dock
+                        .location(id)
+                        .map_or(crate::app::config::DockSide::Right, |(side, _)| side),
+                    matches!(
+                        self.color_picker.as_ref().map(|picker| &picker.target),
+                        Some(crate::app::ColorPickTarget::Gradient(_))
+                    ),
+                )
+            }
+            crate::ui::dock::PanelId::AuthoringPalettes => {
+                crate::ui::window::authoring_palettes::view(
+                    self.authoring_palette_tab,
+                    width,
+                    chrome,
+                    self.visibility_placement_error(),
+                    self.point_parameter_placement_error(),
+                    self.parameter_placement_error("FLIP"),
+                    self.lookup_table_error(),
+                    self.properties_table_error(),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Move)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Scale)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Rotate)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Flip)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Stretch)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::PolarStretch)),
+                    self.action_error(Some(crate::scene::block_actions::Kind::Array)),
+                )
+            }
             crate::ui::dock::PanelId::BlockPalette => {
                 crate::ui::window::block_palette::view(&self.block_palette, width, chrome)
             }
@@ -539,10 +565,14 @@ impl OpenCADStudio {
         // on its empty areas don't fall through to the drawing below.
         let panel = mouse_area(framed)
             .on_press(Message::Dock(DockMsg::FloatRaise(f.id)))
-            .on_enter(Message::Dock(DockMsg::Hover(f.id)))
-            .on_exit(Message::Dock(DockMsg::HoverExit))
             .interaction(iced::mouse::Interaction::Idle);
-        place_at(panel.into(), x, y)
+        // Enter / leave as on a docked edge: its dropdowns keep it shown.
+        let panel = crate::ui::hover_zone::hover_zone(
+            panel,
+            Message::Dock(DockMsg::Hover(f.id)),
+            Message::Dock(DockMsg::HoverExit),
+        );
+        place_at(panel, x, y)
     }
 
     /// Where floating panel `f` draws.
@@ -884,44 +914,6 @@ fn dock_icon_ghost(icons: &[crate::ui::dock::PanelId]) -> Element<'static, Messa
         .into()
 }
 
-/// Canvas that draws a floating title bar's label, reading upward from the
-/// bar's bottom end.
-struct VBarLabel {
-    text: String,
-}
-
-impl canvas::Program<Message> for VBarLabel {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &iced::Renderer,
-        theme: &Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::advanced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.with_save(|frame| {
-            frame.translate(iced::Vector::new(bounds.width / 2.0, bounds.height / 2.0));
-            frame.rotate(iced::Radians(-std::f32::consts::FRAC_PI_2));
-            // After the rotation the text runs along local +x (upward), so
-            // the bar's bottom end sits at -height/2.
-            frame.fill_text(canvas::Text {
-                content: self.text.clone(),
-                position: iced::Point::new(-bounds.height / 2.0, 0.0),
-                color: theme.palette().background.base.text.scale_alpha(0.72),
-                size: iced::Pixels(13.0),
-                align_x: iced::advanced::text::Alignment::Left,
-                align_y: iced::alignment::Vertical::Center,
-                shaping: iced::advanced::text::Shaping::Advanced,
-                ..Default::default()
-            });
-        });
-        vec![frame.into_geometry()]
-    }
-}
-
 /// Width of a floating panel's vertical title bar.
 const DOCK_FLOAT_BAR_W: f32 = 28.0;
 
@@ -972,7 +964,7 @@ fn floating_title_bar(
     } else {
         iced::widget::tooltip::Position::Right
     };
-    let title = canvas(VBarLabel {
+    let title = canvas(crate::ui::dock::VerticalLabel {
         text: t!(id.title()).into_owned(),
     })
     .width(Fill)

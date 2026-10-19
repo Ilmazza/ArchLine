@@ -785,7 +785,8 @@ impl OpenCADStudio {
             // the command one by one, as typed.
             "-VIEW" => {
                 use crate::command::CadCommand;
-                let c = crate::modules::view::view_cmd::DashViewCommand::new(self.dash_view_names(i));
+                let c =
+                    crate::modules::view::view_cmd::DashViewCommand::new(self.dash_view_names(i));
                 self.command_line.push_info(&c.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(c));
             }
@@ -891,7 +892,11 @@ impl OpenCADStudio {
                             self.command_line
                                 .push_error(crate::t!("Usage: VIEW DELETE <name>").as_ref());
                         } else {
-                            if self.tabs[i].scene.document.views.remove(&name).is_some() {
+                            if let Some(view) = self.tabs[i].scene.document.views.remove(&name) {
+                                crate::scene::erase_background(
+                                    &mut self.tabs[i].scene.document,
+                                    view.background_handle,
+                                );
                                 self.command_line
                                     .push_output(crate::tf!("View '{}' deleted.", name).as_ref());
                             } else {
@@ -909,6 +914,7 @@ impl OpenCADStudio {
                             let found = self.tabs[i].scene.document.views.get(&name).cloned();
                             if let Some(v) = found {
                                 self.tabs[i].scene.restore_named_view(&v);
+                                self.apply_view_render_mode(i, &v);
                                 self.command_line.push_output(
                                     crate::tf!("View '{}' restored.", v.name).as_ref(),
                                 );
@@ -921,7 +927,8 @@ impl OpenCADStudio {
                     // Standard orientation presets: the world views -VIEW sets,
                     // with the orthographic UCS while UCSORTHO is on. These
                     // names take precedence over a same-named saved view.
-                    "TOP" | "FRONT" | "BACK" | "LEFT" | "RIGHT" | "BOTTOM" | "SWISO" | "SEISO" | "NEISO" | "NWISO" => {
+                    "TOP" | "FRONT" | "BACK" | "LEFT" | "RIGHT" | "BOTTOM" | "SWISO" | "SEISO"
+                    | "NEISO" | "NWISO" => {
                         return Some(self.apply_view_preset(&sub));
                     }
                     // ISO alone is the south-west one.
@@ -932,6 +939,7 @@ impl OpenCADStudio {
                         let found = self.tabs[i].scene.document.views.get(&name).cloned();
                         if let Some(v) = found {
                             self.tabs[i].scene.restore_named_view(&v);
+                            self.apply_view_render_mode(i, &v);
                             self.command_line
                                 .push_output(crate::tf!("View '{}' restored.", v.name).as_ref());
                         } else {
@@ -1764,7 +1772,7 @@ impl OpenCADStudio {
         }
     }
 
-    fn plan_snap(&mut self, i: usize, r_ucs: glam::Mat4) {
+    pub(in crate::app) fn plan_snap(&mut self, i: usize, r_ucs: glam::Mat4) {
         let eye_dir = r_ucs.transform_vector3(
             crate::scene::CubeRegion::Face(crate::scene::pipeline::viewcube::FACE_TOP)
                 .snap_direction(),

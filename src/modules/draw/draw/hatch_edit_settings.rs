@@ -711,6 +711,7 @@ mod tests {
         hatch.gradient_color.colors.push(codec::entities::hatch::GradientColorEntry {
             value: 0.0,
             color: Color::Index(3),
+            ..Default::default()
         });
         let target = EditTarget::from_hatch(Handle::new(1), &hatch);
         assert_eq!(target.initial.gradient.color1, Color::Index(3));

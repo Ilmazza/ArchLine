@@ -1,6 +1,7 @@
 // GPU rendering primitives, shader::Program / shader::Primitive impls,
 // and entity render-style helpers for the Scene.
 
+use crate::io::plot_style::PlotStyleTableExt as _;
 use codec::tables::LineType;
 use codec::types::{Color as AcadColor, LineWeight};
 use codec::{CadDocument, EntityType, Handle};
@@ -269,6 +270,8 @@ pub struct Primitive {
     pub(in crate::scene) selection_color: [f32; 4],
     /// Whether selection visual effect (glow/highlight) is enabled.
     pub(in crate::scene) selection_effect: bool,
+    /// Extra screen pixels the selection highlight is drawn wider.
+    pub(in crate::scene) selection_widen: f32,
     /// One input-to-render sample, carried only when PERF tracing is enabled.
     pub(in crate::scene) nav_perf: Option<NavPerfSample>,
 }
@@ -385,6 +388,7 @@ impl shader::Primitive for Primitive {
             pipeline.gpu_error_epoch = errors_at_entry;
         }
         let scale = viewport.scale_factor() as f32;
+        DEVICE_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let instance_ids: Vec<u64> = self.viewports.iter().map(|vp| vp.instance_id).collect();
         let slots = pipeline.resolve_slots(device, queue, &instance_ids);
         for (i, vp) in self.viewports.iter().enumerate() {
@@ -431,7 +435,14 @@ impl shader::Primitive for Primitive {
                 vp.background_image.as_ref(),
                 vp.environment_image.as_ref(),
             );
-            inner.upload_uniforms(device, queue, &vp.uniforms);
+            // The scene works in logical pixels; an image background keeps
+            // its size in device pixels.
+            let mut uniforms = vp.uniforms;
+            // The image's size and offset are in device pixels.
+            for value in &mut uniforms.background_image_transform {
+                *value /= scale.max(1e-3);
+            }
+            inner.upload_uniforms(device, queue, &uniforms);
 
             // ── Scene-render cache ────────────────────────────────────────
             // A pure cursor move — or any frame where the view, geometry,
@@ -2035,6 +2046,12 @@ text_atlas={:.1} wire_arena={:.1} block_geometry={:.1}",
 }
 
 impl Scene {
+    /// The model-space viewport record of the active tile.
+    pub(crate) fn active_tile_vport_handle(&self) -> Option<Handle> {
+        self.model_tile_vport(self.active_model_tile.get())
+            .map(|value| value.handle)
+    }
+
     fn model_tile_vport(&self, index: usize) -> Option<&codec::tables::VPort> {
         let rect = self.model_tiles.borrow().get(index)?.rect;
         let lower_left = [rect.x as f64, (1.0 - rect.y - rect.height) as f64];
@@ -2548,30 +2565,45 @@ impl Scene {
         if viewport.paper_sheet {
             let handle = self.current_layout_sheet_viewport_handle();
             if let Some(EntityType::Viewport(value)) = self.document.get_entity(handle) {
+                // The sheet keeps its page and desk: a paper-space view's
+                // background is kept with the layout but not drawn.
                 return build(
                     value.visual_style_handle,
                     value.brightness,
                     value.contrast,
-                    value.background_handle,
+                    Handle::NULL,
                 );
             }
         } else if viewport.handle.is_valid() {
             if let Some(EntityType::Viewport(value)) = self.document.get_entity(viewport.handle) {
+                let flat = value.render_mode == codec::entities::ViewportRenderMode::Wireframe2D;
                 return build(
                     value.visual_style_handle,
                     value.brightness,
                     value.contrast,
-                    value.background_handle,
+                    if flat {
+                        Handle::NULL
+                    } else {
+                        value.background_handle
+                    },
                 );
             }
         } else if self.current_layout == "Model" {
             let index = viewport.tile_idx.unwrap_or(0);
             if let Some(value) = self.model_tile_vport(index) {
+                // A 2D wireframe view shows no background, as in the reference.
+                let flat = self.model_tiles.borrow().get(index).is_some_and(|tile| {
+                    tile.render_mode == codec::entities::ViewportRenderMode::Wireframe2D
+                });
                 return build(
                     value.visual_style_handle,
                     value.brightness,
                     value.contrast,
-                    value.background_handle,
+                    if flat {
+                        Handle::NULL
+                    } else {
+                        value.background_handle
+                    },
                 );
             }
         }
@@ -2974,7 +3006,8 @@ impl Scene {
                     2.0,
                     background.horizon as f32,
                     background.height as f32,
-                    background.rotation as f32,
+                    // Stored in degrees.
+                    (background.rotation as f32).to_radians(),
                 ];
                 result
             }
@@ -3000,11 +3033,13 @@ impl Scene {
                         background.use_tiling as u8 as f32,
                         image.width as f32 / image.height.max(1) as f32,
                     ];
+                    // Offset, then the image's size in pixels at its scale:
+                    // an image not fitted to the screen keeps its pixel size.
                     result.image_transform = [
                         background.offset.x as f32,
                         background.offset.y as f32,
-                        background.scale.x as f32,
-                        background.scale.y as f32,
+                        background.scale.x as f32 * image.width as f32,
+                        background.scale.y as f32 * image.height as f32,
                     ];
                     result.params[0] = 4.0;
                     result.image = Some(image);
@@ -3416,6 +3451,32 @@ pub(in crate::scene) fn render_style_for(
     render_style_for_viewport(document, e, None)
 }
 
+/// A viewport layer colour override as the format packs it (code 420): the
+/// top byte says what follows — 0xC3 an index colour in the low byte, 0xC2 a
+/// 24-bit true colour, 0xC0 / 0xC1 ByLayer / ByBlock. A bare 24-bit value is
+/// read as true colour.
+pub(crate) fn layer_override_color(value: i32) -> AcadColor {
+    match (value as u32) >> 24 {
+        0xC0 => AcadColor::ByLayer,
+        0xC1 => AcadColor::ByBlock,
+        0xC3 => AcadColor::Index((value & 0xFF) as u8),
+        _ => AcadColor::from_true_color_value(value),
+    }
+}
+
+/// [`layer_override_color`] the other way round; `None` for a colour an
+/// override cannot hold.
+pub(crate) fn pack_layer_override_color(color: &AcadColor) -> Option<i32> {
+    let packed = match color {
+        AcadColor::Index(index) => 0xC300_0000u32 | *index as u32,
+        AcadColor::Rgb { r, g, b } => {
+            0xC200_0000u32 | (*r as u32) << 16 | (*g as u32) << 8 | *b as u32
+        }
+        _ => return None,
+    };
+    Some(packed as i32)
+}
+
 fn viewport_override(
     document: &CadDocument,
     layer_name: &str,
@@ -3456,7 +3517,7 @@ pub(crate) fn render_style_for_common_viewport(
                         codec::objects::KnownXRecordKind::LayerViewportColorOverride,
                     )
                     .and_then(|value| value.as_i32())
-                    .map(AcadColor::from_true_color_value)
+                    .map(layer_override_color)
                 })
                 .flatten();
         let resolved = if *ec == AcadColor::ByLayer {
@@ -3572,9 +3633,11 @@ pub struct InheritStyle {
 }
 
 /// Convert a concrete (already layer-resolved) lineweight to display pixels.
+/// Kept below 1 px for thin weights so plots and SVG get the true width;
+/// the GPU paths draw at least 1 px (#1749).
 pub(crate) fn lineweight_to_px(lw: &LineWeight) -> f32 {
     lw.millimeters()
-        .map(|mm| (mm as f32 * MM_TO_PX).max(1.0))
+        .map(|mm| mm as f32 * MM_TO_PX)
         .unwrap_or(1.0)
 }
 
@@ -3603,7 +3666,7 @@ pub(crate) fn layer_render_style_viewport(
             codec::objects::KnownXRecordKind::LayerViewportColorOverride,
         )
         .and_then(|value| value.as_i32())
-        .map(AcadColor::from_true_color_value)
+        .map(layer_override_color)
     } else {
         None
     };
@@ -4039,6 +4102,18 @@ impl Scene {
             } else {
                 WireModel::HOVER
             };
+            if let Some(points) = selected
+                .then(|| self.picked_segment_points(handle))
+                .flatten()
+            {
+                wires.push(WireModel::solid_f64(
+                    handle.value().to_string(),
+                    points,
+                    tint,
+                    true,
+                ));
+                continue;
+            }
             for set in interaction_meshes
                 .iter()
                 .filter(|set| set.entity_handle() == Some(handle))
@@ -4146,6 +4221,7 @@ impl Scene {
                     None,
                     None,
                     content_viewport,
+                    self.reference_only.handles(),
                 );
                 for wire in &mut context_wires {
                     wire.color = tint;
@@ -4225,6 +4301,7 @@ impl Scene {
             viewcube_text_color,
             selection_color: self.selection_color,
             selection_effect: self.selection_effect,
+            selection_widen: self.selection_widen,
             nav_perf: perf_nav,
         }
     }
@@ -4257,6 +4334,7 @@ impl Scene {
                 viewcube_text_color,
                 selection_color: self.selection_color,
                 selection_effect: self.selection_effect,
+                selection_widen: self.selection_widen,
                 nav_perf: None,
             };
         };
@@ -4319,6 +4397,7 @@ impl Scene {
             viewcube_text_color,
             selection_color: self.selection_color,
             selection_effect: self.selection_effect,
+            selection_widen: self.selection_widen,
             nav_perf: perf_nav,
         }
     }
@@ -4615,6 +4694,7 @@ impl Scene {
         uniforms.viewport_size = [visible_w, visible_h];
         uniforms.flat_shade = if flags.flat_shade { 1.0 } else { 0.0 };
         uniforms.transparency_enable = if self.transparency_display { 1.0 } else { 0.0 };
+        uniforms.highlight_widen = self.selection_widen;
         uniforms.viewport_background = display.background.base;
         uniforms.view_tone = [display.brightness, display.contrast, 0.0, 0.0];
         uniforms.background_top = display.background.colors[0];
@@ -4891,13 +4971,23 @@ impl Scene {
             // (hatched) frame once it settles. Only applied to the on-screen
             // Model / paper content — the paper *sheet* keeps its fills.
             skip_hatch: self.hatch_lod_enabled() && navigating,
-            skip_background: !inst.paper_sheet && self.current_layout != "Model",
+            // A floating viewport shows the page behind it unless it has a
+            // background of its own.
+            skip_background: !inst.paper_sheet
+                && self.current_layout != "Model"
+                && display.background.params[0] < 0.5,
             geometry_epoch: self.geometry_epoch,
             camera_generation: self.camera_generation,
             wire_content_id,
             wire_patch,
             selected_handles: Arc::new(if show_interaction {
-                self.selected.iter().copied().collect()
+                // A partly picked polyline lights only its picked segments,
+                // drawn with the highlight wires.
+                self.selected
+                    .iter()
+                    .copied()
+                    .filter(|handle| self.picked_segments(*handle).is_none())
+                    .collect()
             } else {
                 rustc_hash::FxHashSet::default()
             }),
@@ -5419,4 +5509,12 @@ mod layer0_inherit_tests {
         // Cache must be populated
         assert!(scene.document_render_env_cache.borrow().is_some());
     }
+}
+
+/// The display's device pixels per logical pixel, as the viewport last drew.
+static DEVICE_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Device pixels per logical pixel of the drawing viewport.
+pub fn device_scale() -> f32 {
+    f32::from_bits(DEVICE_SCALE.load(std::sync::atomic::Ordering::Relaxed))
 }

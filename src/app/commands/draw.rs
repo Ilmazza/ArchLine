@@ -599,9 +599,13 @@ impl OpenCADStudio {
                 }
             }
 
-            "MEASUREGEOM" => {
+            "MEASUREGEOM" | "MEASURERADIUS" | "MEASUREANGLE" => {
                 use crate::modules::draw::inquiry::measuregeom::MeasureGeomCommand;
-                let new_cmd = MeasureGeomCommand::new();
+                let new_cmd = match cmd {
+                    "MEASURERADIUS" => MeasureGeomCommand::radius(),
+                    "MEASUREANGLE" => MeasureGeomCommand::angle(),
+                    _ => MeasureGeomCommand::new(),
+                };
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
@@ -758,7 +762,8 @@ impl OpenCADStudio {
                 });
                 let new_cmd =
                     HatchCommand::new(outlines, boundary_sources, selected, inherited, plane)
-                        .with_origin(self.tabs[i].scene.document.hatch_origin());
+                        .with_origin(self.tabs[i].scene.document.hatch_origin())
+                        .with_associative(self.hatch_associative);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
                 self.refresh_area_preview(i);
@@ -2148,6 +2153,11 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(subtract));
             }
 
+            // SECTIONCULL — erase what lies outside a section object.
+            "SECTIONCULL" => {
+                return Some(self.section_cull());
+            }
+
             // INTERFERE — non-destructive intersect: solid from the overlap.
             "INTERFERE" => {
                 return Some(self.solid_interfere());
@@ -2308,6 +2318,9 @@ impl OpenCADStudio {
                         self.tabs[i].scene.erase_entities(&sources);
                         self.refresh_properties();
                     }
+                    // The command consumes the selection, kept sources included.
+                    self.tabs[i].scene.deselect_all();
+                    self.refresh_properties();
                     self.tabs[i].dirty = true;
                     self.command_line
                         .push_output(crate::tf!("REGION: created {count} region(s).").as_ref());
@@ -2541,16 +2554,37 @@ impl OpenCADStudio {
                         .filter(|handle| {
                             matches!(
                                 scene.document.get_entity(*handle),
-                                Some(codec::EntityType::Solid3D(_) | codec::EntityType::Surface(_))
+                                Some(
+                                    codec::EntityType::Solid3D(_)
+                                        | codec::EntityType::Surface(_)
+                                        | codec::EntityType::Mesh(_)
+                                        | codec::EntityType::PolygonMesh(_)
+                                        | codec::EntityType::PolyfaceMesh(_)
+                                )
                             )
                         })
                         .collect::<Vec<_>>();
                     scene.restore_solid_models(&targets);
-                    targets.retain(|handle| scene.solid_models.contains_key(handle));
+                    let mesh_extent = |handle: &codec::Handle| {
+                        let entity = scene.document.get_entity(*handle)?;
+                        let (vertices, _) = crate::entities::mesh::mesh_polygons(entity)?;
+                        vertices.iter().fold(None, |bounds, point| {
+                            let (mut min, mut max) = bounds.unwrap_or((*point, *point));
+                            for axis in 0..3 {
+                                min[axis] = f64::min(min[axis], point[axis]);
+                                max[axis] = f64::max(max[axis], point[axis]);
+                            }
+                            Some((min, max))
+                        })
+                    };
+                    targets.retain(|handle| {
+                        scene.solid_models.contains_key(handle) || mesh_extent(handle).is_some()
+                    });
                     let bounds = targets
                         .iter()
-                        .filter_map(|handle| {
-                            crate::scene::model::solid_model::extent(&scene.solid_models[handle])
+                        .filter_map(|handle| match scene.solid_models.get(handle) {
+                            Some(body) => crate::scene::model::solid_model::extent(body),
+                            None => mesh_extent(handle),
                         })
                         .fold(None::<([f64; 3], [f64; 3])>, |bounds, (low, high)| {
                             Some(match bounds {
@@ -2664,6 +2698,16 @@ impl OpenCADStudio {
                     .header
                     .current_text_style_name
                     .clone();
+                // An annotative style's default height is on paper; the editor
+                // and the entity work in the model height of this scale.
+                let height = if crate::scene::annotative::text_style_is_annotative(
+                    &self.tabs[i].scene.document,
+                    &style,
+                ) {
+                    height * self.tabs[i].scene.creation_annotation_multiplier()
+                } else {
+                    height
+                };
                 let new_cmd = MTextCommand::with_defaults(height, style);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));

@@ -69,7 +69,7 @@ static COMPLEX_CATALOG: OnceLock<HashMap<String, ComplexLt>> = OnceLock::new();
 /// Returns `None` for simple (dash-only) linetypes or unknown names.
 pub fn complex_lt(name: &str) -> Option<&'static ComplexLt> {
     COMPLEX_CATALOG
-        .get_or_init(|| parse_complex(LIN_SOURCE))
+        .get_or_init(|| parse_complex(lin_source()))
         .get(&name.to_ascii_uppercase())
 }
 
@@ -232,6 +232,17 @@ pub fn resolve_complex_lt(document: &CadDocument, name: &str) -> Option<ComplexL
 
 const LIN_SOURCE: &str = include_str!("../../assets/linetypes/OpenCADStudio.lin");
 
+/// The bundled linetypes followed by the user's own `.lin` files.
+fn lin_source() -> &'static str {
+    static SOURCE: OnceLock<String> = OnceLock::new();
+    SOURCE.get_or_init(|| {
+        format!(
+            "{LIN_SOURCE}\n{}",
+            crate::io::patterns::user_definitions("linetypes", "lin")
+        )
+    })
+}
+
 // ── Pattern art extraction ────────────────────────────────────────────────
 
 /// Extract the ASCII-art portion of a LIN description.
@@ -257,7 +268,41 @@ pub fn extract_pattern(desc: &str) -> String {
 
 /// Add all standard OpenCADStudio linetypes to `doc`, skipping existing ones.
 pub fn populate_document(doc: &mut CadDocument) {
-    populate_document_from_source(doc, LIN_SOURCE);
+    populate_document_from_source(doc, lin_source());
+}
+
+/// Repair the catalog linetypes `doc` already has (see
+/// [`populate_document_from_source`]) without adding any: an opened drawing
+/// keeps exactly its own linetypes, so a purged one stays purged.
+pub fn repair_document(doc: &mut CadDocument) {
+    populate_matching(doc, lin_source(), |_| false);
+}
+
+/// The catalog linetypes `doc` does not have, as (name, description): what a
+/// picker offers beside the drawing's own. Picking one loads it with
+/// [`ensure_catalog_linetype`].
+pub fn catalog_missing_from(doc: &CadDocument) -> Vec<(String, String)> {
+    static CATALOG: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            parse(lin_source())
+                .into_iter()
+                .map(|lt| (lt.name, lt.description))
+                .collect()
+        })
+        .iter()
+        .filter(|(name, _)| !doc.line_types.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// Load catalog linetype `name` into `doc` when the drawing lacks it.
+/// Returns whether it was added.
+pub fn ensure_catalog_linetype(doc: &mut CadDocument, name: &str) -> bool {
+    !doc.line_types.contains(name)
+        && populate_matching(doc, lin_source(), |candidate| {
+            candidate.eq_ignore_ascii_case(name)
+        }) > 0
 }
 
 /// Add the linetypes of a caller-supplied `.lin` source, embedded shapes and
@@ -269,6 +314,12 @@ pub fn populate_document(doc: &mut CadDocument) {
 /// and so saved) gets its shapes and text back when its dashes match the
 /// source's exactly.
 pub fn populate_document_from_source(doc: &mut CadDocument, source: &str) -> usize {
+    populate_matching(doc, source, |_| true)
+}
+
+/// [`populate_document_from_source`], adding only the missing linetypes
+/// `add` accepts by name; existing ones are repaired either way.
+fn populate_matching(doc: &mut CadDocument, source: &str, add: impl Fn(&str) -> bool) -> usize {
     let complex = parse_complex(source);
     let mut added = 0;
     for mut lt in parse(source) {
@@ -290,6 +341,9 @@ pub fn populate_document_from_source(doc: &mut CadDocument, source: &str) -> usi
                     }
                 }
             }
+            continue;
+        }
+        if !add(&lt.name) {
             continue;
         }
         if let Some(elements) = segments.and_then(|s| complex_elements(doc, s, &lt.elements)) {
@@ -418,6 +472,7 @@ fn complex_elements(
                     scale: decimal(*scale),
                     rotation: decimal(*rot_deg).to_radians(),
                     absolute_rotation: false,
+                    source_flags: 0,
                     offset: [decimal(*x), decimal(*y)],
                 }
             }
@@ -438,6 +493,7 @@ fn complex_elements(
                 scale: decimal(*scale),
                 rotation: decimal(*rot_deg).to_radians(),
                 absolute_rotation: false,
+                source_flags: 0,
                 offset: [decimal(*x), decimal(*y)],
             },
         };

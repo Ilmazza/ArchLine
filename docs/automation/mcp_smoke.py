@@ -114,6 +114,56 @@ def legacy(server: Path) -> None:
     })
     assert missing_batch["result"]["isError"] is True
     assert "absent or expired" in missing_batch["result"]["content"][0]["text"]
+    guides = request(process, {
+        "jsonrpc": "2.0", "id": "guides", "method": "resources/list",
+    })
+    guide_uris = {r["uri"] for r in guides["result"]["resources"]
+                  if r["uri"].startswith("cad://guides/")}
+    assert guide_uris == {f"cad://guides/{name}" for name in
+                          ("workflow", "architecture", "capture", "batch-bindings")}
+    for uri in sorted(guide_uris):
+        resource = request(process, {
+            "jsonrpc": "2.0", "id": uri, "method": "resources/read", "params": {"uri": uri},
+        })
+        assert resource["result"]["contents"][0]["text"].startswith("# ")
+    guide_tool = request(process, {
+        "jsonrpc": "2.0", "id": "guide-tool", "method": "tools/call",
+        "params": {"name": "ocs_read", "arguments": {
+            "ocs_session_id": "offline", "op": "guide", "parameters": {"name": "capture"},
+        }},
+    })
+    assert not guide_tool["result"].get("isError"), guide_tool
+    assert guide_tool["result"]["structuredContent"]["ok"] is True
+    assert "resource_link" in guide_tool["result"]["structuredContent"]["contents"][0]["text"]
+    entity_schema = request(process, {
+        "jsonrpc": "2.0", "id": "entity-schema", "method": "tools/call",
+        "params": {"name": "ocs_read", "arguments": {
+            "op": "entity_schema", "parameters": {"type": "Circle"},
+        }},
+    })
+    assert not entity_schema["result"].get("isError"), entity_schema
+    contract = entity_schema["result"]["structuredContent"]["schema"]
+    assert contract["required"] == ["type", "center", "radius"]
+    validated = request(process, {
+        "jsonrpc": "2.0", "id": "preflight", "method": "tools/call",
+        "params": {"name": "ocs_read", "arguments": {
+            "op": "validate", "parameters": {"request": {
+                "op": "entities_create", "entities": contract["examples"],
+            }},
+        }},
+    })
+    assert validated["result"]["structuredContent"]["valid"] is True
+    assert validated["result"]["structuredContent"]["executed"] is False
+    rejected = request(process, {
+        "jsonrpc": "2.0", "id": "bad-preflight", "method": "tools/call",
+        "params": {"name": "ocs_read", "arguments": {
+            "op": "validate", "parameters": {"request": {
+                "op": "entities_create", "entities": [{"type": "Circle", "center": ["bad", 0], "radius": 5}],
+            }},
+        }},
+    })
+    assert rejected["result"]["isError"] is True
+    assert "/entities/0/center/0" in rejected["result"]["content"][0]["text"]
     close(process)
 
 

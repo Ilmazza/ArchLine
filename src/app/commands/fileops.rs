@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_arch = "wasm32")]
+use crate::io::plot_style::PlotStyleTableExt as _;
 
 impl OpenCADStudio {
     pub(super) fn dispatch_fileops(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
@@ -7,9 +9,20 @@ impl OpenCADStudio {
             // asks which template to start from (#1635).
             "QNEW" => return Some(Task::done(Message::TabNew)),
             "NEW" => {
+                // Open where the default template lives, so its neighbours in
+                // a template folder are one click away (#1836).
+                let template_dir = std::path::Path::new(self.qnew_template.trim())
+                    .parent()
+                    .filter(|dir| dir.is_dir())
+                    .map(std::path::Path::to_path_buf);
                 return Some(Task::perform(
-                    async {
-                        crate::sys::file_dialog()
+                    async move {
+                        let dialog = crate::sys::file_dialog();
+                        let dialog = match template_dir {
+                            Some(dir) => dialog.set_directory(dir),
+                            None => dialog,
+                        };
+                        dialog
                             .set_title(crate::t!("Select Template").as_ref())
                             .add_filter(
                                 crate::t!("Drawing Template (*.dwt)").as_ref(),
@@ -38,7 +51,7 @@ impl OpenCADStudio {
                     let mut saved = 0usize;
                     let mut skipped = 0usize;
                     for t in 0..self.tabs.len() {
-                        if self.tabs[t].is_start {
+                        if self.tabs[t].is_start || self.tabs[t].block_test.is_some() {
                             continue;
                         }
                         if let Some(path) = self.tabs[t].current_path.clone() {
@@ -443,7 +456,8 @@ impl OpenCADStudio {
                                 Ok(text) => return Some(self.run_script(clean_path, &text)),
                                 Err(e) => {
                                     self.command_line.push_error(
-                                        crate::tf!("SCRIPT: cannot read {clean_path}: {e}").as_ref(),
+                                        crate::tf!("SCRIPT: cannot read {clean_path}: {e}")
+                                            .as_ref(),
                                     );
                                 }
                             }
@@ -733,9 +747,8 @@ impl OpenCADStudio {
         let drawing = match result {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.command_line.push_error(
-                    crate::tf!("{cmd}: cannot package the drawing ({e}).").as_ref(),
-                );
+                self.command_line
+                    .push_error(crate::tf!("{cmd}: cannot package the drawing ({e}).").as_ref());
                 return Task::none();
             }
         };
@@ -752,16 +765,18 @@ impl OpenCADStudio {
                     crate::tf!("{cmd}: packaged {copied} file(s) into {}", zip_name).as_ref(),
                 );
             }
-            Err(e) => self.command_line.push_error(
-                crate::tf!("{cmd}: cannot build the transmittal ZIP ({e}).").as_ref(),
-            ),
+            Err(e) => self
+                .command_line
+                .push_error(crate::tf!("{cmd}: cannot build the transmittal ZIP ({e}).").as_ref()),
         }
         if !skipped.is_empty() {
             let n = skipped.len();
             let names = skipped.join(", ");
             self.command_line.push_output(
-                crate::tf!("{cmd}: skipped {n} referenced file(s) not loaded in this session: {names}")
-                    .as_ref(),
+                crate::tf!(
+                    "{cmd}: skipped {n} referenced file(s) not loaded in this session: {names}"
+                )
+                .as_ref(),
             );
         }
         Task::none()

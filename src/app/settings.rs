@@ -108,6 +108,34 @@ impl AutoConstrainSettings {
     }
 }
 
+/// TXT2MTXT (Combine Text) settings, the profile values
+/// TXT2MTXTCOMBINEMTEXT, TXT2MTXTTEXTORDER, TXT2MTXTWORDWRAP and
+/// TXT2MTXTLINESPACING.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Txt2MtxtSettings {
+    /// Combine everything into one MTEXT (else each TEXT becomes its own).
+    pub combine: bool,
+    /// Keep the selection order (else sort top-down).
+    pub select_order: bool,
+    /// Run the lines on separated by spaces in a computed width (else one
+    /// paragraph per object).
+    pub word_wrap: bool,
+    /// Force uniform line spacing (always on while word-wrap is).
+    pub uniform_spacing: bool,
+}
+
+impl Default for Txt2MtxtSettings {
+    fn default() -> Self {
+        Self {
+            combine: true,
+            select_order: false,
+            word_wrap: true,
+            uniform_spacing: true,
+        }
+    }
+}
+
 /// Cursor shown over the drawing viewport.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorType {
@@ -202,6 +230,33 @@ pub fn zoom_notch_percent(factor: i32) -> f32 {
     let ratio = crate::scene::view::camera::Camera::ZOOM_STEP
         .powf(zoom_notch_steps(clamp_zoom_factor(factor)));
     (1.0 - ratio) * 100.0
+}
+
+/// Which mouse gestures pan and orbit the model view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationStyle {
+    /// Middle button pans; Shift + middle button orbits.
+    #[default]
+    Cad,
+    /// Middle button orbits; Shift + middle button pans.
+    Blender,
+    /// Middle button pans; middle and left buttons together orbit.
+    Catia,
+}
+
+impl NavigationStyle {
+    pub const ALL: [NavigationStyle; 3] = [Self::Cad, Self::Blender, Self::Catia];
+}
+
+impl std::fmt::Display for NavigationStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&match self {
+            Self::Cad => crate::t!("CAD: Shift + middle button orbits"),
+            Self::Blender => crate::t!("Blender: middle button orbits, Shift pans"),
+            Self::Catia => crate::t!("CATIA: middle + left button orbits"),
+        })
+    }
 }
 
 /// Active pair of axes while isometric drafting is enabled.
@@ -388,6 +443,10 @@ pub struct UserSettings {
     pub polar: bool,
     pub polar_increment_deg: f32,
     pub zoom_wheel_reversed: bool,
+    pub navigation_style: NavigationStyle,
+    /// UCSDETECT: a command's first point on a planar solid face sets the
+    /// UCS to that face until the command ends.
+    pub dynamic_ucs: bool,
     /// Scrolling pans and Ctrl+scroll (a touchpad pinch) zooms, for a
     /// touchpad that reports two-finger drags as wheel scrolls.
     pub touchpad_pan: bool,
@@ -398,6 +457,12 @@ pub struct UserSettings {
     pub cursor_size: i32,
     /// PICKBOX: normalized visible-box and click-aperture size.
     pub pick_box: i32,
+    /// HPASSOC: new hatches follow their boundary objects.
+    pub hatch_associative: bool,
+    /// MENUBAR: the classic pull-down menus show above the ribbon.
+    pub show_menu_bar: bool,
+    /// RIBBONCLOSE hid the ribbon; RIBBON brings it back.
+    pub ribbon_closed: bool,
     /// When true, double-clicking a block reference starts REFEDIT instead of BEDIT.
     pub double_click_block_refedit: bool,
     /// When true, double-clicking a block with attributes opens ATTEDIT.
@@ -415,14 +480,47 @@ pub struct UserSettings {
     pub image_frame: i16,
     /// The Attribute Definition dialog's "Specify on-screen" choice.
     pub attdef_on_screen: bool,
+    /// Block Definition dialog: base point "Specify On-screen".
+    pub block_base_on_screen: bool,
+    /// Block Definition dialog: objects "Specify On-screen".
+    pub block_objects_on_screen: bool,
+    /// Block Definition dialog / -BLOCK object conversion (0 Retain,
+    /// 1 Convert, 2 Delete).
+    pub block_object_mode: u8,
+    /// Block Definition dialog: "Allow exploding".
+    pub block_allow_exploding: bool,
+    /// Block Definition dialog: open the new block in the block editor.
+    pub block_open_in_editor: bool,
+    /// Write Block dialog / -WBLOCK object conversion (0 Retain, 1 Convert,
+    /// 2 Delete).
+    pub wblock_object_mode: u8,
     /// FIELDDISPLAY: fields show on a gray background.
     pub field_display: bool,
+    /// XDWGFADECTL: how much referenced drawings fade (-90..=90; negative is off).
+    pub xref_fade: i32,
+    /// FILEDIA: file dialogs of commands that have a command-line form.
+    pub file_dia: bool,
+    /// TRIMEXTENDMODE: TRIM and EXTEND start in Quick mode (else Standard).
+    pub trim_extend_quick: bool,
+    /// Fonts and plot styles kept in a chosen folder (`None`: the default).
+    pub fonts_folder: Option<String>,
+    pub plot_styles_folder: Option<String>,
+    /// The file type ATTACH's picker was last left on (1-based).
+    pub attach_filter: u32,
     /// SURFACEASSOCIATIVITY: new surfaces stay associative to their sources.
     pub surface_associativity: bool,
     /// UCSORTHO: an orthographic view preset also sets its orthographic UCS.
     pub ucs_ortho: bool,
     /// UCSVIEW: a saved named view keeps the current UCS.
     pub ucs_view: bool,
+    /// LAYOUTCREATEVIEWPORT: a layout opened for the first time gets a
+    /// viewport.
+    pub layout_create_viewport: bool,
+    /// PDFSHXTEXT's recognition settings (fonts, threshold, PDFSHXLAYER,
+    /// PDFSHXBESTFONT, PDFSHXTEXTSETTINGS).
+    pub pdf_shx_text: crate::modules::insert::pdf_shx_text::ShxTextSettings,
+    /// DGNIMPORTMODE and the DGN Import window's last choices.
+    pub dgn_import: crate::modules::insert::dgn_import::DgnImportSettings,
     /// Nested-copy symbol handling: false inserts, true binds.
     pub ncopy_bind: bool,
     /// Last Options page; unknown saved names fall back without rejecting the config.
@@ -534,6 +632,9 @@ pub struct UserSettings {
     /// the Auto Constrain command.
     #[serde(default)]
     pub auto_constrain: AutoConstrainSettings,
+    /// TXT2MTXT settings (Text to MText Settings dialog).
+    #[serde(default)]
+    pub txt2mtxt: Txt2MtxtSettings,
     /// Keep existing geometry size while solving after a constraint edit.
     #[serde(default = "default_constraint_solve_mode")]
     pub constraint_solve_mode: bool,
@@ -582,6 +683,8 @@ pub struct UserSettings {
         deserialize_with = "deserialize_commandline_fade_ms"
     )]
     pub commandline_fade_ms: i32,
+    /// COMMANDLINEOPACITY: command-line panel opacity in percent (20–100).
+    pub command_line_opacity: u8,
     /// SNAPUNIT X/Y spacing used by grid snap. 10 matches the Drafting
     /// Settings dialog defaults; older configs without these keys fall
     /// back via `default_snap_spacing`.
@@ -603,6 +706,9 @@ pub struct UserSettings {
     /// Display grid beyond LIMITS (default on, matches dialog).
     #[serde(default = "default_true")]
     pub grid_beyond_limits: bool,
+    /// Draw the coloured X/Y axis lines through the grid origin.
+    #[serde(default = "default_true")]
+    pub grid_axes: bool,
     /// Most-recently-inserted block names, most recent first, capped to 20.
     /// Used to rank INSERT suggestions without touching the drawing file.
     #[serde(default)]
@@ -635,6 +741,12 @@ pub struct UserSettings {
     /// BLOCKNAVIGATE (default ".").
     #[serde(default = "default_block_navigate")]
     pub block_navigate: String,
+    /// The Edit Reference dialog's settings.
+    #[serde(default)]
+    pub refedit: RefEditOptions,
+    /// XFADECTL: how far objects outside the REFEDIT working set fade (0–90, default 70).
+    #[serde(default = "default_xfadectl")]
+    pub xfadectl: u8,
     /// COUNTCOLOR (default 3).
     #[serde(default = "default_count_color")]
     pub count_color: i16,
@@ -665,6 +777,30 @@ pub struct PaletteBlockRef {
     pub time: u64,
     #[serde(default)]
     pub drawing: bool,
+}
+
+/// The Edit Reference dialog's settings, remembered between sessions: give
+/// an external reference's clashing named objects unique names, check out
+/// attribute definitions, lock what is outside the working set, pick the
+/// working set's objects in the drawing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RefEditOptions {
+    pub unique_names: bool,
+    pub attributes: bool,
+    pub lock: bool,
+    pub nested: bool,
+}
+
+impl Default for RefEditOptions {
+    fn default() -> Self {
+        Self {
+            unique_names: true,
+            attributes: false,
+            lock: true,
+            nested: false,
+        }
+    }
 }
 
 /// The Blocks palette's insertion options.
@@ -703,6 +839,10 @@ impl Default for BlockInsertOptions {
 
 fn default_block_view() -> u8 {
     1
+}
+
+fn default_xfadectl() -> u8 {
+    70
 }
 
 fn default_block_mru_list() -> u8 {
@@ -821,11 +961,16 @@ impl Default for UserSettings {
             polar: false,
             polar_increment_deg: 45.0,
             zoom_wheel_reversed: false,
+            navigation_style: NavigationStyle::Cad,
+            dynamic_ucs: true,
             touchpad_pan: false,
             ui_scale_percent: 100,
             zoom_factor: 60,
             cursor_size: 5,
             pick_box: 3,
+            hatch_associative: true,
+            show_menu_bar: false,
+            ribbon_closed: false,
             options_tab: crate::ui::window::options::OptionsTab::General,
             show_viewcube: true,
             show_ucs_icon: true,
@@ -838,10 +983,25 @@ impl Default for UserSettings {
             grip_object_limit: DEFAULT_GRIP_OBJECT_LIMIT,
             image_frame: 1,
             attdef_on_screen: true,
+            block_base_on_screen: false,
+            block_objects_on_screen: false,
+            block_object_mode: 1,
+            block_allow_exploding: true,
+            block_open_in_editor: false,
+            wblock_object_mode: 0,
             field_display: true,
+            xref_fade: 50,
+            file_dia: true,
+            trim_extend_quick: true,
+            fonts_folder: None,
+            plot_styles_folder: None,
+            attach_filter: 7,
             surface_associativity: true,
             ucs_ortho: true,
             ucs_view: true,
+            layout_create_viewport: true,
+            pdf_shx_text: Default::default(),
+            dgn_import: Default::default(),
             ncopy_bind: false,
             cursor_type: CursorType::Crosshair,
             crosshair_color: None,
@@ -876,6 +1036,7 @@ impl Default for UserSettings {
             file_assoc_enabled: true,
             show_constraint_values: true,
             auto_constrain: AutoConstrainSettings::default(),
+            txt2mtxt: Txt2MtxtSettings::default(),
             constraint_solve_mode: true,
             constraint_infer: false,
             constraint_bar_display: 3,
@@ -889,6 +1050,7 @@ impl Default for UserSettings {
             language: crate::i18n::Language::default(),
             cliprompt_lines: 3,
             commandline_fade_ms: 3000,
+            command_line_opacity: 80,
             snap_spacing_x: 10.0,
             snap_spacing_y: 10.0,
             grid_spacing_x: 10.0,
@@ -896,6 +1058,7 @@ impl Default for UserSettings {
             grid_major_every: 5,
             grid_adaptive: true,
             grid_beyond_limits: true,
+            grid_axes: true,
             block_mru: Vec::new(),
             block_freq: std::collections::HashMap::new(),
             block_recent: Vec::new(),
@@ -906,6 +1069,8 @@ impl Default for UserSettings {
             block_mru_list: 50,
             block_redefine_mode: 1,
             block_navigate: ".".to_string(),
+            refedit: RefEditOptions::default(),
+            xfadectl: 70,
             count_color: 3,
             count_error_color: 1,
             count_service: true,

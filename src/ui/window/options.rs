@@ -53,8 +53,18 @@ pub struct AppPrefs {
     pub cliprompt_lines: i32,
     /// COMMANDLINEFADETIME: how long overlay history lines stay visible, in ms.
     pub commandline_fade_ms: i32,
+    /// COMMANDLINEOPACITY: command-line panel opacity in percent.
+    pub command_line_opacity: u8,
+    /// MENUBAR: the pull-down menus show above the ribbon.
+    pub show_menu_bar: bool,
+    /// The ribbon shows (RIBBON / RIBBONCLOSE).
+    pub show_ribbon: bool,
+    /// HPASSOC: new hatches follow their boundary objects.
+    pub hatch_associative: bool,
     /// ZOOMWHEEL: reverse the mouse-wheel zoom direction.
     pub zoom_wheel_reversed: bool,
+    /// Which mouse gestures pan and orbit the model view.
+    pub navigation_style: crate::app::settings::NavigationStyle,
     /// Scroll pans and Ctrl+scroll zooms (touchpads).
     pub touchpad_pan: bool,
     /// Interface scale in percent.
@@ -87,7 +97,14 @@ pub struct AppPrefs {
     pub page_setup_on_new_layout: bool,
 }
 
-/// The fixed locations the Files page lists.
+/// A Files-page location the user may move elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovableFolder {
+    Fonts,
+    PlotStyles,
+}
+
+/// The locations the Files page lists.
 ///
 /// `None` where the platform could not give one — the row then says so and
 /// its button is disabled rather than opening nothing.
@@ -100,6 +117,11 @@ pub struct Folders {
     /// Where `.shx` / `.ttf` fonts dropped in by the user (or downloaded for
     /// a drawing) are found.
     pub fonts: Option<String>,
+    /// Where `.acb` colour books are kept and loaded ones copied to.
+    pub color_books: Option<String>,
+    /// The fonts / plot styles folder was chosen in Options.
+    pub fonts_moved: bool,
+    pub plot_styles_moved: bool,
 }
 
 /// Values read from the current drawing's header rather than from preferences.
@@ -157,22 +179,17 @@ impl<T> fmt::Display for Labelled<T> {
     }
 }
 
-/// A background swatch that opens the colour wheel when clicked.
+/// A colour swatch that opens the Select Color panel when clicked.
 ///
-/// The wheel sits alongside the hex field rather than replacing it: typing
+/// The swatch sits beside the hex field rather than replacing it: typing
 /// `#1E1E1E` stays the fastest way to reproduce an exact colour, while the
-/// wheel is for choosing one by eye.
-fn bg_swatch_picker<'a>(
-    target: crate::app::BgTarget,
-    rgb: [u8; 3],
-    open: Option<crate::app::BgTarget>,
-) -> Element<'a, Message> {
-    let colour = iced::Color::from_rgb8(rgb[0], rgb[1], rgb[2]);
+/// panel is for choosing one by eye.
+fn color_swatch<'a>(target: crate::app::UiColor, [r, g, b]: [u8; 3]) -> Element<'a, Message> {
     let swatch = container(Space::new())
         .width(28)
         .height(22)
         .style(move |theme: &Theme| container::Style {
-            background: Some(Background::Color(colour)),
+            background: Some(Background::Color(iced::Color::from_rgb8(r, g, b))),
             border: Border {
                 color: theme.palette().background.strong.color,
                 width: 1.0,
@@ -180,18 +197,14 @@ fn bg_swatch_picker<'a>(
             },
             ..Default::default()
         });
-    let underlay = button(swatch)
-        .on_press(Message::BgPickerOpen(target))
+    button(swatch)
+        .on_press(Message::OpenColorWindow(
+            crate::app::ColorPickTarget::Interface(target),
+            codec::types::Color::Rgb { r, g, b },
+        ))
         .padding(0)
-        .style(button::text);
-    iced_aw::ColorPicker::new(
-        open == Some(target),
-        colour,
-        underlay,
-        Message::BgPickerCancel,
-        Message::BgPickerSubmit,
-    )
-    .into()
+        .style(button::text)
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,7 +240,6 @@ pub fn view_window<'a>(
     model_bg_input: &'a str,
     paper_bg_input: &'a str,
     desk_bg_input: &'a str,
-    bg_picker: Option<crate::app::BgTarget>,
     dirty: bool,
     close_confirm: bool,
     sizing: crate::ui::modal::ModalSizing,
@@ -307,18 +319,8 @@ pub fn view_window<'a>(
 
     let mut color_controls = column![].spacing(8);
     for (index, (label, color)) in colors.into_iter().enumerate() {
-        let swatch = container(Space::new())
-            .width(28)
-            .height(22)
-            .style(move |theme: &Theme| container::Style {
-                background: Some(Background::Color(color)),
-                border: Border {
-                    color: theme.palette().background.strong.color,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..Default::default()
-            });
+        let [r, g, bl, _] = color.into_rgba8();
+        let swatch = color_swatch(crate::app::UiColor::Theme(index), [r, g, bl]);
         color_controls = color_controls.push(
             row![
                 text(label).size(12).width(110),
@@ -528,61 +530,18 @@ pub fn view_window<'a>(
     .spacing(0)
     .width(sizing.width);
 
-    let crosshair_rgb = crosshair_color.unwrap_or([255, 255, 255]);
-    let crosshair_swatch =
-        container(Space::new())
-            .width(28)
-            .height(22)
-            .style(move |theme: &Theme| container::Style {
-                background: Some(Background::Color(iced::Color::from_rgb8(
-                    crosshair_rgb[0],
-                    crosshair_rgb[1],
-                    crosshair_rgb[2],
-                ))),
-                border: Border {
-                    color: theme.palette().background.strong.color,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..Default::default()
-            });
-
-    let command_rgb = command_text_color.unwrap_or([220, 220, 220]);
-    let command_swatch =
-        container(Space::new())
-            .width(28)
-            .height(22)
-            .style(move |theme: &Theme| container::Style {
-                background: Some(Background::Color(iced::Color::from_rgb8(
-                    command_rgb[0],
-                    command_rgb[1],
-                    command_rgb[2],
-                ))),
-                border: Border {
-                    color: theme.palette().background.strong.color,
-                    width: 1.0,
-                    radius: 3.0.into(),
-                },
-                ..Default::default()
-            });
-
-    let snap_rgb = snap_marker_color.unwrap_or([255, 230, 26]);
-    let snap_swatch = container(Space::new())
-        .width(28)
-        .height(22)
-        .style(move |theme: &Theme| container::Style {
-            background: Some(Background::Color(iced::Color::from_rgb8(
-                snap_rgb[0],
-                snap_rgb[1],
-                snap_rgb[2],
-            ))),
-            border: Border {
-                color: theme.palette().background.strong.color,
-                width: 1.0,
-                radius: 3.0.into(),
-            },
-            ..Default::default()
-        });
+    let crosshair_swatch = color_swatch(
+        crate::app::UiColor::Crosshair,
+        crosshair_color.unwrap_or([255, 255, 255]),
+    );
+    let command_swatch = color_swatch(
+        crate::app::UiColor::CommandText,
+        command_text_color.unwrap_or([220, 220, 220]),
+    );
+    let snap_swatch = color_swatch(
+        crate::app::UiColor::SnapMarker,
+        snap_marker_color.unwrap_or([255, 230, 26]),
+    );
 
     let model_bg_rgb = model_space
         .custom_bg
@@ -742,7 +701,7 @@ pub fn view_window<'a>(
         display = display.push(Space::new().height(10)).push(
             row![
                 text(crate::t!("Model background")).size(12).width(140),
-                bg_swatch_picker(crate::app::BgTarget::Model, model_bg_rgb, bg_picker),
+                color_swatch(crate::app::UiColor::ModelBackground, model_bg_rgb),
                 text_input("#RRGGBB", model_bg_input)
                     .on_input(Message::ModelSpaceBgChanged)
                     .width(150),
@@ -755,7 +714,7 @@ pub fn view_window<'a>(
     display = display.push(Space::new().height(10)).push(
         row![
             text(crate::t!("Paper background")).size(12).width(140),
-            bg_swatch_picker(crate::app::BgTarget::Paper, paper_bg_rgb, bg_picker),
+            color_swatch(crate::app::UiColor::PaperBackground, paper_bg_rgb),
             text_input("#RRGGBB", paper_bg_input)
                 .on_input(Message::PaperSpaceBgChanged)
                 .width(150),
@@ -767,7 +726,7 @@ pub fn view_window<'a>(
     display = display.push(Space::new().height(10)).push(
         row![
             text(crate::t!("Desk surround")).size(12).width(140),
-            bg_swatch_picker(crate::app::BgTarget::Desk, desk_bg_rgb, bg_picker),
+            color_swatch(crate::app::UiColor::DeskBackground, desk_bg_rgb),
             text_input("#RRGGBB", desk_bg_input)
                 .on_input(Message::DeskSpaceBgChanged)
                 .width(150),
@@ -918,6 +877,30 @@ pub fn view_window<'a>(
             .align_y(iced::Center),
         )
         .push(Space::new().height(24))
+        .push(text(crate::t!("Window Elements")).size(15))
+        .push(Space::new().height(10))
+        .push(
+            row![
+                iced::widget::checkbox(prefs.show_menu_bar)
+                    .on_toggle(Message::MenuBarChanged)
+                    .size(15),
+                text(crate::t!("Show the menu bar (MENUBAR)")).size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .push(Space::new().height(8))
+        .push(
+            row![
+                iced::widget::checkbox(prefs.show_ribbon)
+                    .on_toggle(Message::RibbonVisibleChanged)
+                    .size(15),
+                text(crate::t!("Show the ribbon (RIBBON / RIBBONCLOSE)")).size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .push(Space::new().height(24))
         .push(text(crate::t!("Command Line")).size(15))
         .push(Space::new().height(10))
         .push(
@@ -974,6 +957,22 @@ pub fn view_window<'a>(
             ))
             .size(11)
             .width(sizing.width),
+        )
+        .push(Space::new().height(12))
+        .push(
+            row![
+                text(crate::t!("Command line opacity")).size(12).width(140),
+                slider(
+                    20..=100,
+                    prefs.command_line_opacity.clamp(20, 100),
+                    Message::CommandLineOpacityChanged,
+                )
+                .step(5u8)
+                .width(Fill),
+                text(format!("{}%", prefs.command_line_opacity)).size(11).width(44),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
         );
 
     let display_element = display.spacing(0).width(sizing.width);
@@ -1118,6 +1117,38 @@ pub fn view_window<'a>(
             )
             .on_select(|choice| Message::SelectionHighlightColorChanged(choice.value))
             .width(Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        Space::new().height(10),
+        row![
+            text(crate::t!("Selection highlight opacity")).size(12).width(140),
+            slider(
+                10..=100,
+                model_space.selection_highlight_opacity.clamp(10, 100),
+                Message::SelectionHighlightOpacityChanged,
+            )
+            .step(5)
+            .width(Fill),
+            text(format!("{}%", model_space.selection_highlight_opacity.clamp(10, 100)))
+                .size(11)
+                .width(44),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        Space::new().height(10),
+        row![
+            text(crate::t!("Selection highlight extra width")).size(12).width(140),
+            slider(
+                0..=6,
+                model_space.selection_highlight_widen.min(6),
+                Message::SelectionHighlightWidenChanged,
+            )
+            .step(1)
+            .width(Fill),
+            text(format!("{} px", model_space.selection_highlight_widen.min(6)))
+                .size(11)
+                .width(44),
         ]
         .spacing(10)
         .align_y(iced::Center),
@@ -1276,6 +1307,16 @@ pub fn view_window<'a>(
         text(crate::t!("User Preferences")).size(15),
         Space::new().height(10),
         spacemouse,
+        Space::new().height(12),
+        text(crate::t!("Navigation style")).size(15),
+        Space::new().height(10),
+        iced::widget::pick_list(
+            Some(prefs.navigation_style),
+            crate::app::settings::NavigationStyle::ALL,
+            |style| style.to_string(),
+        )
+        .on_select(Message::NavigationStyleChanged)
+        .text_size(12),
         Space::new().height(12),
         text(crate::t!("Zoom")).size(15),
         Space::new().height(10),
@@ -1461,6 +1502,17 @@ pub fn view_window<'a>(
         ]
         .spacing(10)
         .align_y(iced::Center),
+        Space::new().height(24),
+        text(crate::t!("Hatch")).size(15),
+        Space::new().height(10),
+        row![
+            iced::widget::checkbox(prefs.hatch_associative)
+                .on_toggle(Message::HatchAssociativeChanged)
+                .size(15),
+            text(crate::t!("New hatches follow their boundaries (HPASSOC)")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
     ]
     .spacing(0)
     .width(sizing.width);
@@ -1516,6 +1568,22 @@ pub fn view_window<'a>(
             })
             .on_select(|choice| Message::PolarIncrementChanged(choice.value))
             .width(Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        Space::new().height(14),
+        row![
+            text(crate::t!("Snap marker size")).size(12).width(150),
+            slider(
+                1..=20,
+                model_space.snap_marker_size.clamp(1, 20),
+                Message::SnapMarkerSizeChanged,
+            )
+            .step(1)
+            .width(Fill),
+            text(format!("{} px", model_space.snap_marker_size.clamp(1, 20)))
+                .size(11)
+                .width(44),
         ]
         .spacing(10)
         .align_y(iced::Center),
@@ -1736,11 +1804,13 @@ pub fn view_window<'a>(
 
     let modeling = modeling.spacing(0).width(sizing.width);
 
-    // The application has no support-file search path, so this page does not
-    // pretend to offer one. It shows where things actually live and opens the
-    // folder — which is the question people are really asking when they go
-    // looking for a Files page.
-    let folder_row = |label: std::borrow::Cow<'a, str>, path: Option<String>| {
+    // The page shows where things live and opens the folder — which is the
+    // question people are really asking when they go looking for a Files
+    // page. Fonts and plot styles can move elsewhere, such as a share on the
+    // office network that a whole team uses.
+    let folder_row = |label: std::borrow::Cow<'a, str>,
+                      path: Option<String>,
+                      movable: Option<(MovableFolder, bool)>| {
         let shown = path
             .clone()
             .unwrap_or_else(|| crate::t!("Not available").into_owned());
@@ -1750,34 +1820,67 @@ pub fn view_window<'a>(
         if let Some(path) = path {
             open = open.on_press(Message::OpenFolder(path));
         }
+        let mut buttons = row![open].spacing(6);
+        if let Some((folder, moved)) = movable {
+            buttons = buttons.push(
+                button(text(crate::t!("Change...")).size(11))
+                    .padding([4, 10])
+                    .style(button::secondary)
+                    .on_press(Message::ChooseFolder(folder)),
+            );
+            if moved {
+                buttons = buttons.push(
+                    button(text(crate::t!("Default")).size(11))
+                        .padding([4, 10])
+                        .style(button::secondary)
+                        .on_press(Message::FolderChosen(folder, None)),
+                );
+            }
+        }
         row![
             column![text(label).size(12), text(shown).size(11),]
                 .spacing(2)
                 .width(Fill),
-            open,
+            buttons,
         ]
         .spacing(10)
         .align_y(iced::Center)
+    };
+    // Browsers have no folder picker.
+    let movable = |folder: MovableFolder, moved: bool| {
+        (!cfg!(target_arch = "wasm32")).then_some((folder, moved))
     };
 
     let files = column![
         text(crate::t!("Files")).size(15),
         Space::new().height(6),
-        text(crate::t!(
-            "Where the application keeps its own files. These locations are fixed."
-        ))
-        .size(11)
-        .width(sizing.width),
+        text(crate::t!("Where the application keeps its own files."))
+            .size(11)
+            .width(sizing.width),
         Space::new().height(16),
-        folder_row(crate::t!("Configuration"), folders.config.clone()),
+        folder_row(crate::t!("Configuration"), folders.config.clone(), None),
         Space::new().height(12),
-        folder_row(crate::t!("Plot styles"), folders.plot_styles.clone()),
+        folder_row(
+            crate::t!("Plot styles"),
+            folders.plot_styles.clone(),
+            movable(MovableFolder::PlotStyles, folders.plot_styles_moved),
+        ),
         Space::new().height(12),
-        folder_row(crate::t!("Plugins"), folders.plugins.clone()),
+        folder_row(crate::t!("Plugins"), folders.plugins.clone(), None),
         Space::new().height(12),
-        folder_row(crate::t!("Autosave files"), folders.autosave.clone()),
+        folder_row(crate::t!("Autosave files"), folders.autosave.clone(), None),
         Space::new().height(12),
-        folder_row(crate::t!("Fonts"), folders.fonts.clone()),
+        folder_row(
+            crate::t!("Fonts"),
+            folders.fonts.clone(),
+            movable(MovableFolder::Fonts, folders.fonts_moved),
+        ),
+        Space::new().height(12),
+        folder_row(
+            crate::t!("Color book locations"),
+            folders.color_books.clone(),
+            None,
+        ),
         Space::new().height(16),
         text(crate::t!("Default template for new drawings")).size(12),
         Space::new().height(4),

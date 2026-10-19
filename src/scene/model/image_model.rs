@@ -252,7 +252,12 @@ impl ImageModel {
         Some(Self {
             render_instance: None,
             file_path: img.file_path.clone(),
-            pixels: decoded.pixels,
+            pixels: adjusted_image_pixels(
+                &img.file_path,
+                &decoded.pixels,
+                img.brightness,
+                img.contrast,
+            ),
             width: decoded.width,
             height: decoded.height,
             opacity,
@@ -661,6 +666,95 @@ pub fn invalidate_image(path: &str) {
         .remove(path);
 }
 
+/// Brightness and contrast (0–100, 50 = unchanged) as one lookup table per
+/// colour channel. Measured against the reference's display of a gradient:
+/// brightness is a power curve x^g with g = ((100 − B) / B)^0.72 (0 is black,
+/// 100 white); contrast bends lightness around one half the same way,
+/// 0.5 ± 0.5·|2x − 1|^h with h = ((100 − C) / C)^0.72 (0 is flat grey, 100 a
+/// hard step). Brightness is applied first. Fade is the model's opacity.
+pub(crate) fn brightness_contrast_lut(brightness: u8, contrast: u8) -> [u8; 256] {
+    // ponytail: the 0.72 exponent is a least-squares fit of seven measured
+    // levels (within about 10/255); refine with more reference samples.
+    let curve = |v: u8| -> f64 {
+        let v = v.min(100);
+        (f64::from(100 - v) / f64::from(v.max(1))).powf(0.72)
+    };
+    let mut lut = [0u8; 256];
+    for (i, out) in lut.iter_mut().enumerate() {
+        let mut x = i as f64 / 255.0;
+        x = match brightness.min(100) {
+            0 => 0.0,
+            100 => {
+                if i == 0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            b => x.powf(curve(b)),
+        };
+        x = match contrast.min(100) {
+            0 => 0.5,
+            100 => {
+                if x >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            c => {
+                let d = 2.0 * x - 1.0;
+                0.5 + 0.5 * d.signum() * d.abs().powf(curve(c))
+            }
+        };
+        *out = (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    lut
+}
+
+/// The decoded raster with the entity's brightness and contrast applied,
+/// memoised per source and setting (the GPU keeps textures per pixel buffer).
+/// An entry holds its source buffer, so the address in its key cannot be
+/// handed to another decode (a reloaded file) while the entry lives.
+fn adjusted_image_pixels(
+    path: &str,
+    pixels: &Arc<Vec<u8>>,
+    brightness: u8,
+    contrast: u8,
+) -> Arc<Vec<u8>> {
+    if brightness == 50 && contrast == 50 {
+        return Arc::clone(pixels);
+    }
+    type Key = (String, usize, u8, u8);
+    type Entry = (Arc<Vec<u8>>, Arc<Vec<u8>>);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Entry>>> = OnceLock::new();
+    let key = (
+        path.to_string(),
+        Arc::as_ptr(pixels) as usize,
+        brightness,
+        contrast,
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((_, hit)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Arc::clone(hit);
+    }
+    let lut = brightness_contrast_lut(brightness, contrast);
+    let mut out = pixels.as_ref().clone();
+    for px in out.chunks_exact_mut(4) {
+        for c in &mut px[..3] {
+            *c = lut[*c as usize];
+        }
+    }
+    let out = Arc::new(out);
+    let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
+    // ponytail: cleared wholesale past 64 entries; an LRU if many images are adjusted.
+    if cache.len() > 64 {
+        cache.clear();
+    }
+    cache.insert(key, (Arc::clone(pixels), Arc::clone(&out)));
+    out
+}
+
 /// Resolve an image reference to decoded pixels, memoised per path. Handles a
 /// local file and an `http`/`https` URL (fetched synchronously natively; on
 /// the web the first resolve kicks a background fetch and returns `None` —
@@ -782,7 +876,10 @@ struct NativeFootprint {
     codec_factor: u64,
 }
 
-fn native_footprint(format: Option<image::ImageFormat>, color: Option<image::ColorType>) -> NativeFootprint {
+fn native_footprint(
+    format: Option<image::ImageFormat>,
+    color: Option<image::ColorType>,
+) -> NativeFootprint {
     let native_bpp = color.map_or(4u64, |color| match color {
         image::ColorType::L8 => 1,
         image::ColorType::La8 => 2,
@@ -815,19 +912,17 @@ fn native_footprint(format: Option<image::ImageFormat>, color: Option<image::Col
     // chunk scratch (a TOTAL cap), so no multiplier is needed: the honest
     // peak is the coexisting native+RGBA pair, already in peak_bpp.
     let codec_factor = 1;
-    NativeFootprint { peak_bpp, codec_factor }
+    NativeFootprint {
+        peak_bpp,
+        codec_factor,
+    }
 }
 
 /// Budget decision for probed pixel dimensions. Pure and cfg-independent
 /// when the budgets are passed explicitly, so tests can probe arbitrary
 /// budgets; the decode path always passes this target's constants.
 #[cfg_attr(not(test), allow(dead_code))]
-fn tier_for(
-    width: u32,
-    height: u32,
-    max_decode_bytes: u64,
-    max_display_pixels: u64,
-) -> DecodeTier {
+fn tier_for(width: u32, height: u32, max_decode_bytes: u64, max_display_pixels: u64) -> DecodeTier {
     tier_for_native(width, height, 4, 1, max_decode_bytes, max_display_pixels)
 }
 
@@ -843,11 +938,7 @@ fn tier_for_native(
     max_display_pixels: u64,
 ) -> DecodeTier {
     let pixels = width as u64 * height as u64;
-    if pixels
-        .saturating_mul(peak_bpp)
-        .saturating_mul(codec_factor)
-        > max_decode_bytes
-    {
+    if pixels.saturating_mul(peak_bpp).saturating_mul(codec_factor) > max_decode_bytes {
         return DecodeTier::OverBudget;
     }
     if pixels <= max_display_pixels {
@@ -1032,7 +1123,10 @@ fn decode_with_budgets<R: std::io::BufRead + std::io::Seek>(
     limits.max_alloc = Some(match reader.format() {
         Some(image::ImageFormat::Gif) => probed
             .map(|(width, height, _, _)| {
-                (width as u64).saturating_mul(height as u64).saturating_mul(4) + 64 * 1024 * 1024
+                (width as u64)
+                    .saturating_mul(height as u64)
+                    .saturating_mul(4)
+                    + 64 * 1024 * 1024
             })
             .unwrap_or(max_decode_bytes)
             .min(max_decode_bytes),
@@ -1068,7 +1162,12 @@ fn decode_with_budgets<R: std::io::BufRead + std::io::Seek>(
         }
     };
     let rgba = if target_w != width || target_h != height {
-        image::imageops::resize(&rgba, target_w, target_h, image::imageops::FilterType::Lanczos3)
+        image::imageops::resize(
+            &rgba,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         rgba
     };
@@ -1124,7 +1223,10 @@ fn refusal_message(path: &str, width: u32, height: u32) -> String {
         )
         .into_owned();
     }
-    let decoded_mb = (width as u64).saturating_mul(height as u64).saturating_mul(4) / (1024 * 1024);
+    let decoded_mb = (width as u64)
+        .saturating_mul(height as u64)
+        .saturating_mul(4)
+        / (1024 * 1024);
     let limit_mb = MAX_DECODE_BYTES / (1024 * 1024);
     crate::tf!(
         "\"{name}\" is {width}×{height} px and would decode to {decoded} MB, over the {limit} MB image limit of this build — it cannot be attached. Images within the limit are attached at a reduced display resolution when needed.",
@@ -1157,7 +1259,9 @@ pub fn decode_refusals() -> Vec<String> {
 /// Take and clear — for the drains that own every queued note (the poll and
 /// the open-settle paths).
 pub fn take_decode_refusals() -> Vec<String> {
-    let mut notes = refusal_notes().lock().unwrap_or_else(|error| error.into_inner());
+    let mut notes = refusal_notes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     std::mem::take(&mut *notes)
 }
 
@@ -1171,7 +1275,9 @@ fn decode_or_note(attempt: DecodeAttempt, path: &str) -> Option<DecodedImage> {
             // one note per distinct message so the command line is not
             // spammed by a drawing that inserts it repeatedly.
             let message = refusal_message(path, width, height);
-            let mut notes = refusal_notes().lock().unwrap_or_else(|error| error.into_inner());
+            let mut notes = refusal_notes()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if notes.last() != Some(&message) {
                 notes.push(message);
             }
@@ -1339,7 +1445,9 @@ mod web_fetch {
             // No stream API (or already consumed): fall back to buffering,
             // with the received-length check still applying after.
             let buffer = JsFuture::from(
-                response.array_buffer().map_err(|_| RemoteFetchError::Network)?,
+                response
+                    .array_buffer()
+                    .map_err(|_| RemoteFetchError::Network)?,
             )
             .await
             .map_err(|error| rejection_kind(&error))?;
@@ -1349,7 +1457,9 @@ mod web_fetch {
             }
             return Ok(bytes);
         };
-        let reader = stream.get_reader().dyn_into::<web_sys::ReadableStreamDefaultReader>()
+        let reader = stream
+            .get_reader()
+            .dyn_into::<web_sys::ReadableStreamDefaultReader>()
             .map_err(|_| RemoteFetchError::Network)?;
         let mut bytes: Vec<u8> = Vec::new();
         loop {
@@ -1388,8 +1498,7 @@ mod web_fetch {
         use wasm_bindgen_futures::JsFuture;
 
         let window = web_sys::window().ok_or(RemoteFetchError::Network)?;
-        let controller =
-            web_sys::AbortController::new().map_err(|_| RemoteFetchError::Network)?;
+        let controller = web_sys::AbortController::new().map_err(|_| RemoteFetchError::Network)?;
         let init = web_sys::RequestInit::new();
         init.set_method("GET");
         init.set_signal(Some(&controller.signal()));
@@ -1555,8 +1664,8 @@ mod invalidate_tests {
 
 #[cfg(target_arch = "wasm32")]
 pub use web_fetch::{
-    take_outcome as take_remote_fetch_outcome, take_overflowed,
-    RemoteFetchError, RemoteFetchOutcome,
+    take_outcome as take_remote_fetch_outcome, take_overflowed, RemoteFetchError,
+    RemoteFetchOutcome,
 };
 // The capped streaming reader itself, shared with the `?file=` deep-link
 // fetch (`io::web_link`) so both doors enforce the same 64 MB / 8 s bounds.
@@ -1595,7 +1704,10 @@ mod tests {
                 "{color:?}"
             );
         }
-        assert_eq!(native_footprint(Some(gif), Some(ColorType::Rgba8)).peak_bpp, 8);
+        assert_eq!(
+            native_footprint(Some(gif), Some(ColorType::Rgba8)).peak_bpp,
+            8
+        );
         assert_eq!(native_footprint(None, None).peak_bpp, 8);
     }
 
@@ -1706,7 +1818,10 @@ mod tests {
         // Not even the reduction (input + output RGBA) fits: refused.
         assert_eq!(tier_for(400, 400, 700_000, 10_000), DecodeTier::OverBudget);
         // RGBA over the decode budget.
-        assert_eq!(tier_for(2_000, 2_000, 1_000_000, 10_000), DecodeTier::OverBudget);
+        assert_eq!(
+            tier_for(2_000, 2_000, 1_000_000, 10_000),
+            DecodeTier::OverBudget
+        );
         // Exact boundary counts stay in the lower tier (limits are ">").
         assert_eq!(tier_for(50, 200, 1_000_000, 10_000), DecodeTier::Full);
         assert_eq!(tier_for(500, 500, 1_000_000, 1_000_000), DecodeTier::Full);
@@ -1796,10 +1911,18 @@ mod tests {
         // Over the cap: the product fits while both sides exceed 1 px, and
         // the aspect survives to within rounding (unless a side is too
         // small to express it — a 3 px side clamps to 1 px by design).
-        for (width, height) in [(4097u32, 4096u32), (20000, 15000), (12345, 6700), (3, 20000000)] {
+        for (width, height) in [
+            (4097u32, 4096u32),
+            (20000, 15000),
+            (12345, 6700),
+            (3, 20000000),
+        ] {
             let cap = 4096u64 * 4096;
             let (w, h) = downsample_to_cap(width, height, cap);
-            assert!((w as u64) * h as u64 <= cap, "{width}×{height} -> {w}×{h} over cap");
+            assert!(
+                (w as u64) * h as u64 <= cap,
+                "{width}×{height} -> {w}×{h} over cap"
+            );
             assert!(w >= 1 && h >= 1);
             if w >= 8 && h >= 8 {
                 let aspect = width as f64 / height as f64;
@@ -1863,13 +1986,27 @@ mod tests {
     #[test]
     fn refusals_are_noted_once_per_message() {
         let _ = take_decode_refusals();
-        let refuse = || DecodeAttempt::Refused { width: 30000, height: 30000 };
+        let refuse = || DecodeAttempt::Refused {
+            width: 30000,
+            height: 30000,
+        };
         assert!(decode_or_note(refuse(), "C:/gis/aerial.tif").is_none());
         assert!(decode_or_note(refuse(), "C:/gis/aerial.tif").is_none());
         let notes = take_decode_refusals();
         assert_eq!(notes.len(), 1, "duplicate messages collapse: {notes:?}");
-        assert!(notes[0].contains("30000×30000"), "dimensions in: {}", notes[0]);
-        assert!(notes[0].contains("aerial.tif"), "file name in: {}", notes[0]);
-        assert!(take_decode_refusals().is_empty(), "the drain cleared the queue");
+        assert!(
+            notes[0].contains("30000×30000"),
+            "dimensions in: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("aerial.tif"),
+            "file name in: {}",
+            notes[0]
+        );
+        assert!(
+            take_decode_refusals().is_empty(),
+            "the drain cleared the queue"
+        );
     }
 }

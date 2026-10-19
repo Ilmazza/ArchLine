@@ -710,31 +710,53 @@ impl OpenCADStudio {
     // closing the window without Apply calls `style_stage_discard`, which
     // restores the snapshot taken when the manager opened.
 
-    pub(super) fn style_new(&mut self, kind: StyleKind) {
+    pub(super) fn style_new(&mut self, kind: StyleKind) -> iced::Task<crate::app::Message> {
         let i = self.active_tab;
         let name = self.unique_new_name(kind);
         let h = self.tabs[i].scene.document.allocate_handle();
-        self.insert_default_style(kind, &name, h);
-        self.set_style_selected(kind, name.clone());
-        self.load_style_bufs(kind);
-        self.after_style_change(kind);
-        self.command_line
-            .push_output(crate::tf!("Style '{name}' created.").as_ref());
-    }
-
-    pub(super) fn style_copy(&mut self, kind: StyleKind) {
-        let i = self.active_tab;
+        // A new dimension style starts from the selected one: the bare
+        // defaults are inch-sized, so in a metric drawing its arrows and gaps
+        // would come out too small to see.
         let src = self.style_selected(kind);
-        let name = self.unique_suffixed_name(kind, &src);
-        let h = self.tabs[i].scene.document.allocate_handle();
-        if !self.clone_style_as(kind, &src, &name, h) {
-            return;
+        if kind != StyleKind::Dim || !self.clone_style_as(kind, &src, &name, h) {
+            self.insert_default_style(kind, &name, h);
         }
         self.set_style_selected(kind, name.clone());
         self.load_style_bufs(kind);
         self.after_style_change(kind);
         self.command_line
             .push_output(crate::tf!("Style '{name}' created.").as_ref());
+        self.rename_new_style(kind, name)
+    }
+
+    pub(super) fn style_copy(&mut self, kind: StyleKind) -> iced::Task<crate::app::Message> {
+        let i = self.active_tab;
+        let src = self.style_selected(kind);
+        let name = self.unique_suffixed_name(kind, &src);
+        let h = self.tabs[i].scene.document.allocate_handle();
+        if !self.clone_style_as(kind, &src, &name, h) {
+            return iced::Task::none();
+        }
+        self.set_style_selected(kind, name.clone());
+        self.load_style_bufs(kind);
+        self.after_style_change(kind);
+        self.command_line
+            .push_output(crate::tf!("Style '{name}' created.").as_ref());
+        self.rename_new_style(kind, name)
+    }
+
+    /// A new style opens with its generated name ready to be typed over.
+    fn rename_new_style(
+        &mut self,
+        kind: StyleKind,
+        name: String,
+    ) -> iced::Task<crate::app::Message> {
+        self.style_rename_start(kind, name);
+        let id = crate::ui::style::style_list::rename_input_id();
+        iced::Task::batch([
+            iced::widget::operation::focus(id.clone()),
+            iced::widget::operation::select_all(id),
+        ])
     }
 
     pub(super) fn style_delete(&mut self, kind: StyleKind) {
@@ -770,6 +792,7 @@ impl OpenCADStudio {
         self.load_style_bufs(kind);
         self.style_rename_buf = name.clone();
         self.style_rename = Some(name);
+        self.style_rename_kind = Some(kind);
     }
 
     /// Commit the inline rename. No-op (with feedback) on empty / unchanged /

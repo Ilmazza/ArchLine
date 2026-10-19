@@ -6,8 +6,10 @@
 //
 // Dropdown items within a group are collected into columns of 3 rows.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -16,9 +18,9 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, text}
 use iced::{Background, Border, Color, Element, Fill, Length, Padding, Theme};
 
 use crate::app::Message;
-use crate::modules::{CadModule, IconKind, RibbonGroup, RibbonItem};
+use crate::modules::{CadModule, IconKind, RibbonGroup, RibbonItem, ToolDef};
 use crate::plugin::all_ribbon_modules;
-use crate::ui::properties::{linetype_display_name, lw_options, LinetypeItem};
+use crate::ui::properties::{LinetypeItem, linetype_display_name, lw_options};
 
 mod draw_panel;
 pub(crate) mod widgets;
@@ -26,6 +28,7 @@ pub(crate) use draw_panel::tools as panel_tools;
 mod color_dropdown;
 mod context_tools;
 mod modify_panel;
+mod visibility_panel;
 pub use context_tools::{pdf_underlay_tools, point_cloud_tools, xref_tools, UnderlayContext};
 use widgets::{StyleContext, *};
 pub(crate) use widgets::{
@@ -33,11 +36,16 @@ pub(crate) use widgets::{
     UNDO_HISTORY_ID,
 };
 mod collapse;
+mod keytips;
 mod locate;
 use crate::t;
 use crate::ui::wrap_bar::{PosReport, WrapBar, WrapFlow};
 pub use collapse::CollapseMode;
 use collapse::{CollapsePanels, Panel};
+pub use keytips::{
+    KeyTipInput, KeyTipStep, active as keytips_active, key_pressed as keytip_key_pressed,
+    key_released as keytip_key_released, pointer_pressed as keytip_pointer_pressed,
+};
 
 pub(crate) fn tooltip_content(text: String) -> Element<'static, Message> {
     widgets::make_tip(text)
@@ -45,6 +53,149 @@ pub(crate) fn tooltip_content(text: String) -> Element<'static, Message> {
 
 pub(crate) fn tooltip_style(theme: &Theme) -> container::Style {
     widgets::tip_style(theme)
+}
+
+/// A line over the items of a split button whose face names the chosen item.
+fn dropdown_header(id: &str) -> Option<&'static str> {
+    (id == "IMPORT_FILE").then_some("Import File — the face runs the last one chosen")
+}
+
+fn hash_tool_layout(tool: &ToolDef, hasher: &mut impl Hasher) {
+    tool.id.hash(hasher);
+    t!(tool.label).as_ref().hash(hasher);
+}
+
+fn hash_item_layout(item: &RibbonItem, hasher: &mut impl Hasher) {
+    match item {
+        RibbonItem::Tool(tool) => {
+            0u8.hash(hasher);
+            hash_tool_layout(tool, hasher);
+        }
+        RibbonItem::LabeledTool(tool) => {
+            1u8.hash(hasher);
+            hash_tool_layout(tool, hasher);
+        }
+        RibbonItem::LargeTool(tool) => {
+            2u8.hash(hasher);
+            hash_tool_layout(tool, hasher);
+        }
+        RibbonItem::Dropdown { id, items, .. } => {
+            3u8.hash(hasher);
+            id.hash(hasher);
+            items.len().hash(hasher);
+            for (command, label, _) in items {
+                command.hash(hasher);
+                t!(*label).as_ref().hash(hasher);
+            }
+        }
+        RibbonItem::LabeledDropdown {
+            id, label, items, ..
+        } => {
+            4u8.hash(hasher);
+            id.hash(hasher);
+            t!(*label).as_ref().hash(hasher);
+            items.len().hash(hasher);
+            for (command, item_label, _) in items {
+                command.hash(hasher);
+                t!(*item_label).as_ref().hash(hasher);
+            }
+        }
+        RibbonItem::LargeDropdown {
+            id, label, items, ..
+        } => {
+            5u8.hash(hasher);
+            id.hash(hasher);
+            t!(*label).as_ref().hash(hasher);
+            items.len().hash(hasher);
+            for (command, item_label, _) in items {
+                command.hash(hasher);
+                t!(*item_label).as_ref().hash(hasher);
+            }
+        }
+        RibbonItem::ToolGrid { columns } => {
+            6u8.hash(hasher);
+            columns.len().hash(hasher);
+            for column in columns {
+                column.len().hash(hasher);
+                for tool in column {
+                    hash_tool_layout(tool, hasher);
+                }
+            }
+        }
+        RibbonItem::LayerComboGroup { row2, row3 } => {
+            7u8.hash(hasher);
+            row2.len().hash(hasher);
+            row3.len().hash(hasher);
+            for tool in row2.iter().chain(row3) {
+                hash_tool_layout(tool, hasher);
+            }
+        }
+        RibbonItem::PropertiesGroup { match_prop } => {
+            8u8.hash(hasher);
+            hash_tool_layout(match_prop, hasher);
+        }
+        RibbonItem::StyleComboGroup {
+            style_key,
+            combo_id,
+            rows,
+            ..
+        } => {
+            9u8.hash(hasher);
+            format!("{style_key:?}").hash(hasher);
+            combo_id.hash(hasher);
+            for row in rows {
+                row.len().hash(hasher);
+                for tool in row {
+                    hash_tool_layout(tool, hasher);
+                }
+            }
+        }
+    }
+}
+
+fn panel_measure_key(
+    groups: &[&RibbonGroup],
+    last_cmd: &HashMap<&'static str, &'static str>,
+    last_panel_tool: &HashMap<&'static str, &'static str>,
+    style_ctx: &StyleContext<'_>,
+    visibility: Option<&crate::ui::window::block_visibility::RibbonContext>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    crate::sys::ui_font::generation().hash(&mut hasher);
+    groups.len().hash(&mut hasher);
+    for group in groups {
+        group.title.hash(&mut hasher);
+        group.tools.len().hash(&mut hasher);
+        for item in &group.tools {
+            hash_item_layout(item, &mut hasher);
+        }
+    }
+    let mut commands: Vec<_> = last_cmd.iter().collect();
+    commands.sort_unstable_by_key(|(id, _)| **id);
+    for (id, command) in commands {
+        id.hash(&mut hasher);
+        command.hash(&mut hasher);
+    }
+    let mut representatives: Vec<_> = last_panel_tool.iter().collect();
+    representatives.sort_unstable_by_key(|(title, _)| **title);
+    for (title, tool) in representatives {
+        title.hash(&mut hasher);
+        tool.hash(&mut hasher);
+    }
+    for (names, active) in [
+        (style_ctx.text_style_names, style_ctx.active_text_style),
+        (style_ctx.dim_style_names, style_ctx.active_dim_style),
+        (
+            style_ctx.mleader_style_names,
+            style_ctx.active_mleader_style,
+        ),
+        (style_ctx.table_style_names, style_ctx.active_table_style),
+    ] {
+        names.hash(&mut hasher);
+        active.hash(&mut hasher);
+    }
+    format!("{visibility:?}").hash(&mut hasher);
+    hasher.finish()
 }
 
 // ── Ribbon state ───────────────────────────────────────────────────────────
@@ -78,6 +229,7 @@ pub struct Ribbon {
     pub show_sheet_set: bool,
     /// Graphic Attributes panel visibility — drives its ribbon button highlight.
     pub show_graphic_attributes: bool,
+    pub show_authoring_palettes: bool,
     /// File tabs (FILETAB) visibility — drives the File Tabs button highlight.
     pub show_file_tabs: bool,
     /// Layout tabs (LAYOUTTAB) visibility — drives the Layout Tabs button highlight.
@@ -96,6 +248,9 @@ pub struct Ribbon {
     pub layer_filter: String,
     /// Active object color — ACI / ByLayer / ByBlock.
     pub active_color: AcadColor,
+    /// Colour-book identity (`BOOK$NAME`) of a colour picked from a colour
+    /// book, with the colour it was picked as; see `active_color_name`.
+    pub active_color_book: Option<(AcadColor, String)>,
     /// Active linetype override ("ByLayer", "Continuous", …).
     pub active_linetype: String,
     /// Active lineweight.
@@ -133,8 +288,14 @@ pub struct Ribbon {
     xref_ctx: bool,
     /// Only point clouds are selected: whether the first shows its crops.
     point_cloud_ctx: Option<bool>,
+    /// A block editor session is open: the tab that was active before the
+    /// Block Editor tab took over.
+    block_editing: Option<usize>,
+    block_testing: Option<usize>,
     /// XDWGFADECTL as the Reference slide-out shows it (negative = off).
     pub xref_fade: i32,
+    /// Open key tips (Alt).
+    keytips: Option<keytips::State>,
 }
 
 /// Per-layer display data shown in the ribbon layer dropdown.
@@ -147,6 +308,14 @@ pub struct LayerInfo {
     pub locked: bool,
     /// Layout with an active viewport: (its Layer Manager column, frozen there).
     pub vp_frozen: Option<(usize, bool)>,
+}
+
+/// The colour of layer `name` in the ribbon's layer list.
+pub(super) fn layer_color(layers: &[LayerInfo], name: &str) -> Option<Color> {
+    layers
+        .iter()
+        .find(|layer| layer.name == name)
+        .map(|layer| layer.color)
 }
 
 /// Full-screen backdrop for an open ribbon dropdown: closes the dropdown when
@@ -187,6 +356,20 @@ fn position_ribbon_dropdown<'a>(
 }
 
 impl Ribbon {
+    /// The current layer's colour: what ByLayer looks like for new objects.
+    pub fn active_layer_color(&self) -> Option<Color> {
+        layer_color(&self.layer_infos, &self.active_layer)
+    }
+
+    /// The colour-book identity of the active colour, while the active colour
+    /// is still the one picked from the book.
+    pub fn active_color_name(&self) -> Option<String> {
+        self.active_color_book
+            .as_ref()
+            .filter(|(color, _)| *color == self.active_color)
+            .map(|(_, name)| name.clone())
+    }
+
     pub fn new() -> Self {
         Self {
             modules: all_ribbon_modules(),
@@ -200,6 +383,7 @@ impl Ribbon {
             show_count_palette: false,
             show_sheet_set: false,
             show_graphic_attributes: false,
+            show_authoring_palettes: false,
             show_file_tabs: true,
             show_layout_tabs: true,
             open_dropdown: None,
@@ -211,6 +395,7 @@ impl Ribbon {
             layer_infos: vec![],
             layer_filter: String::new(),
             active_color: AcadColor::ByLayer,
+            active_color_book: None,
             active_linetype: "ByLayer".to_string(),
             active_lineweight: LineWeight::ByLayer,
             mixed: MixedProps::default(),
@@ -236,7 +421,10 @@ impl Ribbon {
             underlay_ctx: None,
             xref_ctx: false,
             point_cloud_ctx: None,
+            block_editing: None,
+            block_testing: None,
             xref_fade: 50,
+            keytips: None,
         }
     }
 
@@ -308,6 +496,65 @@ impl Ribbon {
 
     pub fn set_available_linetypes(&mut self, items: Vec<LinetypeItem>) {
         self.available_linetypes = items;
+    }
+
+    /// Show the Block Editor tab while a block is being edited, and return to
+    /// the previous tab when the editing ends.
+    pub fn set_block_editing(&mut self, editing: bool) {
+        let Some(index) = self
+            .modules
+            .iter()
+            .position(|module| module.id() == "block_editor")
+        else {
+            return;
+        };
+        match (editing, self.block_editing) {
+            (true, None) => {
+                self.block_editing = Some(self.active);
+                self.active = index;
+            }
+            (false, Some(previous)) => {
+                self.block_editing = None;
+                if self.active == index {
+                    self.active = previous.min(self.modules.len().saturating_sub(1));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_block_testing(&mut self, testing: bool) {
+        if testing != self.block_testing.is_some() {
+            self.close_dropdown();
+            let _ = self.hide_keytips();
+        }
+        let Some(index) = self.modules.iter().position(|module| module.id() == "draw") else {
+            return;
+        };
+        match (testing, self.block_testing) {
+            (true, None) => {
+                self.block_testing = Some(self.active);
+                self.active = index;
+            }
+            (false, Some(previous)) => {
+                self.block_testing = None;
+                if self.active == index {
+                    self.active = previous.min(self.modules.len().saturating_sub(1));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Contextual panels share their normal tab with the drawing tools.
+    fn groups_for(&self, index: usize) -> impl Iterator<Item = &RibbonGroup> {
+        let testing = self.block_testing.is_some();
+        self.modules.get(index).into_iter().flat_map(move |module| {
+            module
+                .ribbon_groups()
+                .iter()
+                .filter(move |group| module.id() != "draw" || group.title != "Close" || testing)
+        })
     }
 
     pub fn select(&mut self, index: usize) {
@@ -388,6 +635,7 @@ impl Ribbon {
             show_properties: self.show_properties,
             show_count_palette: self.show_count_palette,
             show_graphic_attributes: self.show_graphic_attributes,
+            show_authoring_palettes: self.show_authoring_palettes,
             show_block_palette,
             show_sheet_set: self.show_sheet_set,
             show_file_tabs: self.show_file_tabs,
@@ -401,14 +649,13 @@ impl Ribbon {
         &'a self,
         g: &'a RibbonGroup,
         ts: widgets::ToggleState,
-        style_ctx: &StyleContext<'_>,
-        lead: &dyn Fn(bool) -> Vec<Element<'a, Message>>,
+        style_ctx: StyleContext<'a>,
     ) -> Panel<'a> {
-        let group = |compact: bool| {
+        let group = move |compact: bool| {
             render_group(
                 compact,
                 g,
-                lead(compact),
+                Vec::new(),
                 &self.active_tool,
                 &self.open_dropdown,
                 &self.last_cmd,
@@ -418,10 +665,10 @@ impl Ribbon {
                 self.active_color,
                 &self.active_linetype,
                 self.active_lineweight,
-                style_ctx,
+                &style_ctx,
             )
         };
-        let button = |tight: bool| {
+        let button = move |tight: bool| {
             collapse_button(
                 g,
                 self.last_panel_tool.get(g.title).copied(),
@@ -434,14 +681,16 @@ impl Ribbon {
                 self.active_color,
                 &self.active_linetype,
                 self.active_lineweight,
-                style_ctx,
+                &style_ctx,
                 tight,
             )
         };
-        Panel {
-            id: g.title.to_string(),
-            elements: [group(false), group(true), button(false), button(true)],
-        }
+        Panel::deferred(g.title, move |level| match level {
+            collapse::Level::Full => group(false),
+            collapse::Level::Compact => group(true),
+            collapse::Level::Collapsed => button(false),
+            collapse::Level::Tight => button(true),
+        })
     }
 
     pub fn toggle_dropdown(&mut self, id: &str) {
@@ -502,13 +751,17 @@ impl Ribbon {
         }
     }
 
-    /// Returns the index of the Layout module in the modules list.
-    #[allow(dead_code)] // layout-tab helpers; not yet wired
+    /// Returns the index of the Layout module in the modules list. Kept as a
+    /// routing helper for when the currently suppressed Layout ribbon tab is
+    /// enabled; it has no effect while that module is absent from the tabs.
+    #[allow(dead_code)]
     pub fn layout_module_index(&self) -> Option<usize> {
         self.modules.iter().position(|m| m.id() == "layout")
     }
 
-    /// Returns true if the currently active tab is the Layout module.
+    /// Returns true if the currently active tab is the Layout module. The
+    /// predicate remains useful to the future Layout tab, which is currently
+    /// suppressed by the view layer.
     #[allow(dead_code)]
     pub fn active_is_layout(&self) -> bool {
         self.modules
@@ -539,6 +792,7 @@ impl Ribbon {
         undo_count: usize,
         redo_count: usize,
         show_block_palette: bool,
+        visibility: Option<crate::ui::window::block_visibility::RibbonContext>,
     ) -> Element<'_, Message> {
         // ── Quick-access file commands + undo/redo, one merged flow ────────
         let lead = iced::widget::Row::with_children(vec![
@@ -567,12 +821,14 @@ impl Ribbon {
             |mut acc, (i, module)| {
                 // The Layout module no longer has a ribbon tab — its paper-space
                 // tools live in the right-edge side toolbar (see ui::side_toolbar).
-                if module.id() == "layout" {
+                if module.id() == "layout"
+                    || (module.id() == "block_editor" && self.block_editing.is_none())
+                {
                     return acc;
                 }
 
                 let is_active = i == self.active;
-                let is_contextual = module.id() == "layout";
+                let is_contextual = matches!(module.id(), "layout" | "block_editor");
                 let holds_tool = holding_tab == Some(i);
                 let btn = container(
                     button(
@@ -651,7 +907,7 @@ impl Ribbon {
                     },
                     ..Default::default()
                 });
-                acc.push(btn.into());
+                acc.push(keytips::anchor_with(|| format!("tab:{}", module.id()), btn));
                 acc
             },
         );
@@ -678,12 +934,14 @@ impl Ribbon {
             .padding([2, 8]);
         let mode_dd = PosReport::new(COLLAPSE_MODE_ID, mode_btn);
 
-        let mut tab_row = row![container(
-            WrapBar::new(lead.into(), tabs.into())
-                .spacing(6.0)
-                .report_height(self.tab_bar_h.clone()),
-        )
-        .width(Length::Fill)]
+        let mut tab_row = row![
+            container(
+                WrapBar::new(lead.into(), tabs.into())
+                    .spacing(6.0)
+                    .report_height(self.tab_bar_h.clone()),
+            )
+            .width(Length::Fill)
+        ]
         .spacing(6.0)
         .align_y(iced::Center);
         if !self.collapse_tight.load(Ordering::Relaxed) {
@@ -713,37 +971,56 @@ impl Ribbon {
         } else {
             self.active
         };
-        let tool_area: Element<'_, Message> =
-            if let Some(module) = self.modules.get(effective_active) {
-                let groups = module.ribbon_groups();
-                let style_ctx = StyleContext {
-                    text_style_names: &self.text_style_names,
-                    active_text_style: &self.active_text_style,
-                    dim_style_names: &self.dim_style_names,
-                    active_dim_style: &self.active_dim_style,
-                    mleader_style_names: &self.mleader_style_names,
-                    active_mleader_style: &self.active_mleader_style,
-                    table_style_names: &self.table_style_names,
-                    active_table_style: &self.active_table_style,
-                };
-
-                // Adaptive tool area: panels sit on one row; when they don't all
-                // fit they degrade from the right — a panel's large buttons first
-                // shrink to compact icon columns, then it collapses to a ▾ flyout
-                // button. See `CollapsePanels`.
-                let ts = self.toggle_state(show_block_palette);
-                let panels: Vec<Panel<'_>> = groups
-                    .iter()
-                    .map(|g| self.panel(g, ts, &style_ctx, &|_| Vec::new()))
-                    .collect();
-                CollapsePanels::new(panels, self.collapsed_open.clone(), TOOL_BAR_H)
-                    .report_height(self.tool_bar_h.clone())
-                    .report_tight(self.collapse_tight.clone())
-                    .mode(self.collapse_mode)
-                    .into()
-            } else {
-                text("").into()
+        let tool_area: Element<'_, Message> = if self.modules.get(effective_active).is_some() {
+            let groups: Vec<_> = self.groups_for(effective_active).collect();
+            let style_ctx = StyleContext {
+                text_style_names: &self.text_style_names,
+                active_text_style: &self.active_text_style,
+                dim_style_names: &self.dim_style_names,
+                active_dim_style: &self.active_dim_style,
+                mleader_style_names: &self.mleader_style_names,
+                active_mleader_style: &self.active_mleader_style,
+                table_style_names: &self.table_style_names,
+                active_table_style: &self.active_table_style,
             };
+
+            // Adaptive tool area: panels sit on one row; when they don't all
+            // fit they degrade from the right — a panel's large buttons first
+            // shrink to compact icon columns, then it collapses to a ▾ flyout
+            // button. See `CollapsePanels`.
+            let ts = self.toggle_state(show_block_palette);
+            let measure_key = if self.collapse_mode == CollapseMode::Auto {
+                panel_measure_key(
+                    &groups,
+                    &self.last_cmd,
+                    &self.last_panel_tool,
+                    &style_ctx,
+                    visibility.as_ref(),
+                )
+            } else {
+                0
+            };
+            let panels: Vec<Panel<'_>> = groups
+                .into_iter()
+                .map(|g| {
+                    if self.modules[effective_active].id() == "block_editor"
+                        && g.title == "Visibility"
+                    {
+                        visibility_panel::panel(visibility.clone())
+                    } else {
+                        self.panel(g, ts, style_ctx)
+                    }
+                })
+                .collect();
+            CollapsePanels::new(panels, self.collapsed_open.clone(), TOOL_BAR_H)
+                .measure_key(measure_key)
+                .report_height(self.tool_bar_h.clone())
+                .report_tight(self.collapse_tight.clone())
+                .mode(self.collapse_mode)
+                .into()
+        } else {
+            text("").into()
+        };
 
         let tool_bar: Element<'_, Message> = container(tool_area)
             .style(|theme: &Theme| container::Style {
@@ -789,7 +1066,7 @@ impl Ribbon {
             tool_bar
         };
 
-        column![tab_bar, tool_bar].into()
+        keytips::ribbon_area(column![tab_bar, tool_bar])
     }
 
     // ── Dropdown overlay ──────────────────────────────────────────────────
@@ -929,8 +1206,7 @@ impl Ribbon {
             return Some(ov);
         }
 
-        let module = self.modules.get(self.active)?;
-        let groups = module.ribbon_groups();
+        let groups = self.groups_for(self.active);
         let mut items_list: Option<Vec<(&'static str, &'static str, IconKind)>> = None;
         let mut dd_default = "";
         let mut dd_id: &'static str = "";
@@ -977,8 +1253,12 @@ impl Ribbon {
                         color: (!is_current || disabled)
                             .then_some(theme.palette().background.base.text.scale_alpha(0.72)),
                     });
+                let label_el = keytips::label_anchor(
+                    || keytips::label_id(&keytips::item_anchor(dd_id, cmd)),
+                    label_el,
+                );
 
-                button(
+                let item = button(
                     row![checkmark, icon_el, label_el]
                         .spacing(4)
                         .align_y(iced::Center),
@@ -989,8 +1269,8 @@ impl Ribbon {
                 }))
                 .style(popup_row_style)
                 .width(Fill)
-                .padding([4, 10])
-                .into()
+                .padding([4, 10]);
+                keytips::anchor_with(|| keytips::item_anchor(dd_id, cmd), item)
             })
             .collect();
 
@@ -998,11 +1278,22 @@ impl Ribbon {
             .iter()
             .map(|(_, label, _)| t!(*label).to_string())
             .collect();
+        let header = dropdown_header(dd_id).map(|header| t!(header).into_owned());
+        let mut rows = rows;
+        if let Some(header) = &header {
+            rows.insert(
+                0,
+                container(text(header.clone()).size(10).style(muted_text_style))
+                    .padding([4, 10])
+                    .into(),
+            );
+        }
         let panel_w = crate::ui::style::common::dropdown_popup_width(
             labels.iter().map(|s| s.as_str()),
             11.0,
             68.0,
-            190.0,
+            // A header wraps rather than widening the menu.
+            if header.is_some() { 240.0 } else { 190.0 },
         );
 
         let panel = container(column(rows))
@@ -1159,7 +1450,7 @@ impl Ribbon {
     /// Draw-tab dropdowns — so the list grows to fit its entries instead of
     /// being clipped to the ribbon-row height. (#153)
     fn style_combo_overlay(&self, open_id: &str, win: (f32, f32)) -> Option<Element<'_, Message>> {
-        let groups = self.modules.get(self.active)?.ribbon_groups();
+        let groups = self.groups_for(self.active);
 
         // Locate the open style combo; capture its style key + manager command.
         let mut found: Option<(crate::modules::StyleKey, Option<&'static str>)> = None;
@@ -1254,7 +1545,11 @@ impl Ribbon {
         win: (f32, f32),
         recent_colors: &[AcadColor],
     ) -> Option<Element<'_, Message>> {
-        let panel = color_dropdown::color_dropdown_panel(self.active_color, recent_colors);
+        let panel = color_dropdown::color_dropdown_panel(
+            self.active_color,
+            recent_colors,
+            self.active_layer_color(),
+        );
 
         let (align_right, h_pad, top) =
             self.dd_anchor(PROP_COLOR_ID, color_dropdown::PANEL_W, win.0);
@@ -1558,12 +1853,15 @@ fn collapse_button<'a>(
             column![
                 icon,
                 row![
-                    text(localized_title.clone())
-                        .size(9)
-                        .width(Fill)
-                        .align_x(iced::Center)
-                        .wrapping(iced::advanced::text::Wrapping::Word)
-                        .style(muted_text_style),
+                    keytips::label_anchor(
+                        || keytips::label_id(&keytips::collapsed_anchor(title)),
+                        text(localized_title.clone())
+                            .size(9)
+                            .width(Fill)
+                            .align_x(iced::Center)
+                            .wrapping(iced::advanced::text::Wrapping::Word)
+                            .style(muted_text_style),
+                    ),
                     crate::ui::icons::themed_secondary_arrow_down(8.0),
                 ]
                 .spacing(3)
@@ -1578,7 +1876,10 @@ fn collapse_button<'a>(
         .style(opener_style(holds))
         .width(Fill)
         .padding([3, 5]);
-        return automatic_large_button(localized_title, content.into());
+        return keytips::anchor_with(
+            || keytips::collapsed_anchor(title),
+            automatic_large_button(localized_title, content.into()),
+        );
     }
 
     // Collapsed (not yet tight): a large representative-tool face — a live button
@@ -1627,12 +1928,15 @@ fn collapse_button<'a>(
 
     let opener = button(
         row![
-            text(localized_title.clone())
-                .size(9)
-                .width(Fill)
-                .align_x(iced::Center)
-                .wrapping(iced::advanced::text::Wrapping::Word)
-                .style(muted_text_style),
+            keytips::label_anchor(
+                || keytips::label_id(&keytips::collapsed_anchor(title)),
+                text(localized_title.clone())
+                    .size(9)
+                    .width(Fill)
+                    .align_x(iced::Center)
+                    .wrapping(iced::advanced::text::Wrapping::Word)
+                    .style(muted_text_style),
+            ),
             crate::ui::icons::themed_secondary_arrow_down(8.0),
         ]
         .spacing(3)
@@ -1643,7 +1947,10 @@ fn collapse_button<'a>(
     .style(opener_style(holds && !face_lit))
     .width(Fill)
     .padding([1, 4]);
-    let opener = automatic_large_button(localized_title, opener.into());
+    let opener = keytips::anchor_with(
+        || keytips::collapsed_anchor(title),
+        automatic_large_button(localized_title, opener.into()),
+    );
 
     // The large face fills a fixed slot so a collapsed panel is shorter than a full
     // 3-row panel, letting `CollapsePanels` shrink the ribbon row.
@@ -1667,7 +1974,106 @@ impl Default for Ribbon {
 #[cfg(test)]
 mod tests {
     use super::widgets::is_active_tool;
-    use super::Ribbon;
+    use super::{CollapseMode, Ribbon, StyleContext, panel_measure_key};
+    use crate::modules::{IconKind, ModuleEvent, RibbonGroup, RibbonItem, ToolDef};
+    use rustc_hash::FxHashMap;
+
+    fn measurement_key(tool_id: &'static str, selected_command: &'static str) -> u64 {
+        let groups = [RibbonGroup {
+            title: "Test",
+            tools: vec![RibbonItem::LargeTool(ToolDef {
+                id: tool_id,
+                label: "Test Tool",
+                icon: IconKind::Glyph("T"),
+                event: ModuleEvent::Command("TEST".to_string()),
+            })],
+        }];
+        let style_ctx = StyleContext {
+            text_style_names: &[],
+            active_text_style: "",
+            dim_style_names: &[],
+            active_dim_style: "",
+            mleader_style_names: &[],
+            active_mleader_style: "",
+            table_style_names: &[],
+            active_table_style: "",
+        };
+        let groups: Vec<_> = groups.iter().collect();
+        let mut last_cmd = FxHashMap::default();
+        last_cmd.insert("TEST_DROPDOWN", selected_command);
+        panel_measure_key(&groups, &last_cmd, &FxHashMap::default(), &style_ctx, None)
+    }
+
+    #[test]
+    fn panel_measure_fingerprint_is_stable_and_tracks_panel_structure() {
+        assert_eq!(
+            measurement_key("TEST", "TEST"),
+            measurement_key("TEST", "TEST")
+        );
+        assert_ne!(
+            measurement_key("TEST", "TEST"),
+            measurement_key("OTHER", "TEST")
+        );
+        assert_ne!(
+            measurement_key("TEST", "TEST"),
+            measurement_key("TEST", "OTHER")
+        );
+    }
+
+    #[test]
+    fn forced_density_views_build_and_keep_collapsed_flyout_content() {
+        let mut ribbon = Ribbon::default();
+        let first_panel = ribbon.groups_for(ribbon.active).next().unwrap().title;
+
+        for mode in [
+            CollapseMode::Full,
+            CollapseMode::Compact,
+            CollapseMode::Collapsed,
+        ] {
+            ribbon.set_collapse_mode(mode);
+            ribbon.collapsed_open =
+                (mode == CollapseMode::Collapsed).then(|| first_panel.to_string());
+            let view = ribbon.view(false, false, 0, 0, false, None);
+            std::hint::black_box(view);
+        }
+    }
+
+    #[test]
+    fn block_test_close_panel_extends_draw_only_while_testing() {
+        let mut ribbon = Ribbon::default();
+        let draw = ribbon
+            .modules
+            .iter()
+            .position(|module| module.id() == "draw")
+            .unwrap();
+        assert!(
+            !ribbon
+                .modules
+                .iter()
+                .any(|module| module.id() == "block_test")
+        );
+        let ordinary: Vec<_> = ribbon.groups_for(draw).map(|group| group.title).collect();
+        assert!(!ordinary.contains(&"Close"));
+        ribbon.set_block_editing(true);
+        ribbon.set_block_editing(false);
+        ribbon.set_block_testing(true);
+        assert_eq!(ribbon.active, draw);
+        let testing: Vec<_> = ribbon.groups_for(draw).map(|group| group.title).collect();
+        assert_eq!(&testing[..ordinary.len()], ordinary.as_slice());
+        assert_eq!(testing.last(), Some(&"Close"));
+        ribbon.toggle_collapsed_panel("Close");
+        ribbon.set_block_testing(false);
+        assert!(ribbon.collapsed_open.is_none());
+        assert_eq!(
+            ribbon
+                .groups_for(draw)
+                .map(|group| group.title)
+                .collect::<Vec<_>>(),
+            ordinary
+        );
+        ribbon.set_block_editing(true);
+        assert_eq!(ribbon.modules[ribbon.active].id(), "block_editor");
+    }
 
     #[test]
     fn block_palette_highlight_follows_the_app_state_passed_to_the_view() {

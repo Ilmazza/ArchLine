@@ -280,6 +280,7 @@ pub struct RenderSceneGraph<'a> {
     all_visible: bool,
     depths: &'a FxHashMap<u64, [f32; 2]>,
     viewport: Option<Handle>,
+    visibility_reveal: Option<&'a FxHashSet<Handle>>,
 }
 
 impl<'a> RenderSceneGraph<'a> {
@@ -298,7 +299,13 @@ impl<'a> RenderSceneGraph<'a> {
             all_visible,
             depths,
             viewport: None,
+            visibility_reveal: None,
         }
+    }
+
+    pub fn with_visibility_reveal(mut self, handles: &'a FxHashSet<Handle>) -> Self {
+        self.visibility_reveal = Some(handles);
+        self
     }
 
     pub fn with_viewport(mut self, viewport: Option<Handle>) -> Self {
@@ -579,7 +586,11 @@ impl<'a> RenderSceneGraph<'a> {
 
     fn document_visible(&self, entity: &EntityType) -> bool {
         let common = entity.common();
-        if common.invisible {
+        if common.invisible
+            && !self
+                .visibility_reveal
+                .is_some_and(|handles| handles.contains(&common.handle))
+        {
             return false;
         }
         let layer = self.document.layers.get(&common.layer);
@@ -610,6 +621,10 @@ pub fn block_base_point(document: &CadDocument, block_name: &str) -> Vector3 {
         .iter()
         .find(|record| record.name.eq_ignore_ascii_case(block_name))
         .map(|record| {
+            if let Some((_, parameter)) = super::block_basepoint::parameter(document, record.handle)
+            {
+                return parameter.point;
+            }
             document
                 .get_entity(record.block_entity_handle)
                 .and_then(|entity| match entity {
@@ -663,7 +678,9 @@ pub(crate) fn dimension_picture_placement(
 /// placed picture has its placement folded into the subs and the dimension's
 /// own placement cleared (`clear_dim_picture_placement`); a placement left on
 /// the dimension would be applied again on top of the moved subs.
-pub(crate) fn dim_picture_placement(entity: &EntityType) -> Option<crate::command::EntityTransform> {
+pub(crate) fn dim_picture_placement(
+    entity: &EntityType,
+) -> Option<crate::command::EntityTransform> {
     let EntityType::Dimension(d) = entity else {
         return None;
     };

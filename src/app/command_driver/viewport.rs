@@ -21,7 +21,7 @@ impl OpenCADStudio {
         });
         let label = self.history_label_from_active_cmd(i, "MVIEW");
         let pending = self.begin_undo(i, label, 1, true);
-        let handle = self.commit_entity_handle(codec::EntityType::Viewport(viewport));
+        let handle = self.commit_entity_handle(codec::EntityType::Viewport(Box::new(viewport)));
         if let (Some(handle), Some(saved)) = (handle, saved_view) {
             if let Some(codec::EntityType::Viewport(viewport)) =
                 self.tabs[i].scene.document.get_entity_mut(handle)
@@ -244,7 +244,8 @@ impl OpenCADStudio {
         viewport.id = 2;
         viewport.clip_boundary_handle = clip_handle;
         viewport.status.non_rectangular_clipping = !clip_handle.is_null();
-        let viewport_handle = self.commit_entity_handle(codec::EntityType::Viewport(viewport));
+        let viewport_handle =
+            self.commit_entity_handle(codec::EntityType::Viewport(Box::new(viewport)));
         if let Some(viewport_handle) = viewport_handle {
             if !created_boundary {
                 let before = self.tabs[i]
@@ -445,6 +446,53 @@ impl OpenCADStudio {
             .zoom_to_window(p1.as_vec3(), p2.as_vec3());
         self.command_line
             .push_output(crate::t!("Zoom Window").as_ref());
+    }
+
+    /// MVSETUP Scale viewports: each picked layout viewport shows the model
+    /// at `factor` paper units per model unit. One undo step.
+    pub(in crate::app) fn handle_scale_viewports(&mut self, handles: Vec<Handle>, factor: f64) {
+        let i = self.active_tab;
+        self.tabs[i].active_cmd = None;
+        self.tabs[i].snap_result = None;
+        let handles: Vec<Handle> = handles
+            .into_iter()
+            .filter(|handle| {
+                matches!(
+                    self.tabs[i].scene.document.get_entity(*handle),
+                    Some(codec::EntityType::Viewport(viewport)) if viewport.id > 1
+                )
+            })
+            .collect();
+        if handles.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot(i, "MVSETUP");
+        for handle in handles {
+            self.tabs[i]
+                .scene
+                .set_viewport_scale_factor_for(handle, factor);
+        }
+        self.tabs[i].dirty = true;
+    }
+
+    /// Turn the active view about its line of sight so the drawing shows
+    /// `twist` radians counter-clockwise from its untwisted orientation.
+    pub(in crate::app) fn handle_twist_view(&mut self, twist: f64) {
+        let i = self.active_tab;
+        self.tabs[i].scene.remember_current_view();
+        let set = |camera: &mut crate::scene::view::camera::Camera| {
+            // The drawing turns one way when the camera rolls the other.
+            camera.roll_by(-twist as f32 - camera.roll());
+        };
+        if self.tabs[i].scene.active_viewport.is_some() {
+            self.tabs[i].scene.mutate_active_viewport_camera(set);
+        } else {
+            set(&mut self.tabs[i].scene.camera.borrow_mut());
+        }
+        self.tabs[i].scene.camera_generation += 1;
+        if let Some(prompt) = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt()) {
+            self.command_line.push_info(&prompt);
+        }
     }
 
     pub(super) fn handle_set_plot_window(&mut self, p1: glam::DVec3, p2: glam::DVec3) {

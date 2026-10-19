@@ -1,0 +1,25 @@
+# OpenCADStudio - Unreleased (2026-10-18 to Present)
+
+> **Summary:** Continued the Block Editor and dynamic block work with native Block Properties Table grips, reference-side row selection, and clearer authoring and preview behavior.
+
+### 🌟 Notable Release Notes
+
+* **Block Properties Table Editing:** Added native table grips and must-match behavior, reference-side row selection, and a popup that reflects the current authoring selection. *(Contributed by [@KarimJerbi](https://github.com/KarimJerbi))*
+* **Block Editor Authoring Improvements:** Improved parameter editing and preview, graph item management, blank-pick selection clearing, legacy base-point preview, and the editor viewport appearance. *(Contributed by [@KarimJerbi](https://github.com/KarimJerbi))*
+* **Lookup Rotation Matching:** Lookup rows now compare rotation values correctly across the angle wrap. *(Contributed by [@KarimJerbi](https://github.com/KarimJerbi))*
+
+### 🚀 New Features
+
+* **Native Block Properties Table Grips:** Author and edit table values through native grips, with must-match row behavior.
+* **Reference-Side Row Selection:** Select a Block Properties Table row from a dynamic block reference and see its authoring state in the Block Editor.
+* **Authoring Selection and Preview:** The Block Editor now presents table popup and selection state, edits and previews parameters, and manages parameter and base-point graph items more consistently.
+
+### 🐛 Bug Fixes
+
+* **Legacy Base-Point Preview:** Preserved the existing preview behavior for legacy block base points.
+* **Blank-Pick Selection:** Cleared the authoring selection when the user picks a blank area.
+* **Lookup Angle Wrap:** Compared rotation values consistently when equivalent angles straddle the wrap point.
+
+### 👥 Contributors
+
+* **Karim Jerbi** ([@KarimJerbi](https://github.com/KarimJerbi)) — Block Properties Table authoring and grips, reference-side row selection, and Block Editor selection, parameter, preview, and rotation matching improvements.

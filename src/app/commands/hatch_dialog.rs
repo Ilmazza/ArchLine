@@ -2509,7 +2509,7 @@ mod tests {
 
     fn stored(app: &OpenCADStudio, handle: Handle) -> codec::entities::Hatch {
         match app.tabs[app.active_tab].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) => hatch.clone(),
+            Some(codec::EntityType::Hatch(hatch)) => (**hatch).clone(),
             other => panic!("not a hatch: {other:?}"),
         }
     }
@@ -2601,7 +2601,7 @@ mod tests {
         assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
         assert!(app.tabs[first].active_cmd.is_none(), "the owner's pick is stopped");
         assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
-            Some(codec::EntityType::Hatch(before)));
+            Some(codec::EntityType::Hatch(Box::new(before))));
     }
 
     #[test]
@@ -3379,7 +3379,7 @@ mod tests {
             } else {
                 let _ = app.update(Message::TabSwitch(second));
                 assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
-                    Some(codec::EntityType::Hatch(before.clone())), "untouched");
+                    Some(codec::EntityType::Hatch(Box::new(before.clone()))), "untouched");
             }
             assert!(app.hatch_dialog.is_none(), "close={close}");
             assert!(app.active_modal.is_none(), "close={close}");
@@ -3625,7 +3625,7 @@ mod tests {
         let i = app.active_tab;
         let mut copy = stored(&app, hatch);
         copy.common.handle = Handle::NULL;
-        let second = app.tabs[i].scene.add_entity(codec::EntityType::Hatch(copy));
+        let second = app.tabs[i].scene.add_entity(codec::EntityType::Hatch(Box::new(copy)));
         assert!(app.tabs[i].scene.hatches.contains_key(&second), "a second hatch");
         select_only(&mut app, hatch);
         app.tabs[i].scene.select_entity(second, false);

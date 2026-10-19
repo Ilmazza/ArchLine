@@ -1808,10 +1808,12 @@ pub fn tessellate(
                         depth_override: None,
                         display_visible: true,
                         snap_only: false,
+                        reference_only: false,
                         plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,
+                        stub: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
                         dash_from_start: false,
@@ -1973,10 +1975,12 @@ pub fn tessellate(
                         depth_override: None,
                         display_visible: true,
                         snap_only: false,
+                        reference_only: false,
                         plot_visible: true,
                         fill_is_3d: false,
                         fill_is_2d_solid: false,
                         render_instance: None,
+                        stub: None,
                         pick_tris: Vec::new(),
                         pick_tris_low: Vec::new(),
                         dash_from_start: false,
@@ -2799,10 +2803,11 @@ fn builtin_arrow_from_block_name(name: &str, dimasz: f32) -> Option<ArrowKind> {
             filled: false,
             size_mul: 1.0,
         }),
-        "SMALL" => Some(ArrowKind::Triangle {
-            size: dimasz,
-            filled: true,
-            size_mul: 0.5,
+        // `_Small` is the reference's "Dot small blank": a circle half the
+        // arrow size across.
+        "SMALL" => Some(ArrowKind::Dot {
+            size: dimasz * 0.5,
+            filled: false,
         }),
         "OPEN" => Some(ArrowKind::Open {
             size: dimasz,
@@ -3209,10 +3214,9 @@ fn polyline_band_width(entity: &EntityType, fill_mode: bool) -> f32 {
 /// The widest start / end width of a 2-D polyline (0 for other entities).
 fn polyline_max_width(entity: &EntityType) -> f64 {
     match entity {
-        EntityType::LwPolyline(p) => p
-            .vertices
-            .iter()
-            .fold(p.constant_width, |w, v| w.max(v.start_width).max(v.end_width)),
+        EntityType::LwPolyline(p) => p.vertices.iter().fold(p.constant_width, |w, v| {
+            w.max(v.start_width).max(v.end_width)
+        }),
         EntityType::Polyline2D(p) => p
             .vertices
             .iter()

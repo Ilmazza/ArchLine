@@ -2,6 +2,7 @@ pub mod anno_object_scale;
 pub mod archline_theme;
 pub mod common;
 pub mod dimstyle;
+pub(crate) mod editor_table;
 pub mod form;
 pub mod fusion_theme;
 pub mod mleaderstyle;

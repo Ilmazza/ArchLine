@@ -935,6 +935,21 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
+            "DVIEW" => {
+                use crate::modules::view::dview::DviewCommand;
+                let twist = {
+                    let scene = &self.tabs[i].scene;
+                    let roll = match scene.active_viewport {
+                        Some(_) => scene.navigation_camera().roll(),
+                        None => scene.camera.borrow().roll(),
+                    };
+                    -(roll as f64)
+                };
+                let cmd = DviewCommand::new(twist.rem_euclid(std::f64::consts::TAU));
+                self.command_line.push_info(&cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
+            }
+
             "ZOOM" | "ZOOM WINDOW" | "ZOOM W" | "ZW" => {
                 use crate::modules::view::zoom_window::ZoomWindowCommand;
                 let new_cmd = ZoomWindowCommand::new();
@@ -1288,6 +1303,62 @@ impl OpenCADStudio {
                 }
             }
 
+            // TXTEXP — text becomes the polylines of its character outlines.
+            "TXTEXP" => {
+                let selected: Vec<_> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .filter(|(handle, _)| !self.tabs[i].scene.is_layer_locked(*handle))
+                    .collect();
+                if selected.is_empty() {
+                    use crate::modules::draw::select::SelectObjectsCommand;
+                    let cmd = SelectObjectsCommand::new("TXTEXP");
+                    self.command_line.push_info(&cmd.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(cmd));
+                } else {
+                    use crate::modules::draw::modify::explode::apply_explode_replacements;
+                    use crate::modules::draw::modify::txtexp::plan_text_explode;
+                    let replacements = plan_text_explode(&selected, &self.tabs[i].scene.document);
+                    let exploded = replacements.len();
+                    if exploded > 0 {
+                        self.push_undo_snapshot(i, "TXTEXP");
+                        apply_explode_replacements(&mut self.tabs[i].scene, replacements);
+                        self.tabs[i].dirty = true;
+                        self.refresh_properties();
+                        self.command_line
+                            .push_output(crate::tf!("{exploded} object(s) exploded.").as_ref());
+                    } else {
+                        self.command_line
+                            .push_info(crate::t!("TXTEXP: no text selected.").as_ref());
+                    }
+                }
+            }
+
+            // TXT2MTXT — TEXT / MTEXT combined into MTEXT. A preselection is
+            // used at once; otherwise the selection prompt with SEttings.
+            "TXT2MTXT" => {
+                if !self.tabs[i].scene.selected.is_empty() {
+                    return Some(self.dispatch_command("_TXT2MTXTSEL"));
+                }
+                use crate::modules::draw::select::SelectObjectsCommand;
+                self.command_line
+                    .push_output(crate::t!("Select text objects to combine ...").as_ref());
+                let command = SelectObjectsCommand::with_settings(
+                    "TXT2MTXT",
+                    "_TXT2MTXTSEL",
+                    "Select objects or [SEttings]:",
+                    || crate::command::CmdResult::OpenTxt2MtxtSettings,
+                );
+                self.command_line.push_info(&command.prompt());
+                self.command_line.set_step_options(command.options());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+            "_TXT2MTXTSEL" => {
+                self.apply_txt2mtxt(i);
+                return Some(self.finish_dispatch("TXT2MTXT"));
+            }
+
             "OFFSET" => {
                 use crate::modules::draw::modify::offset::{is_offsettable, OffsetCommand};
                 let all_entities: Vec<_> = self.tabs[i]
@@ -1386,8 +1457,17 @@ impl OpenCADStudio {
                             .map(|e| (h, e))
                     })
                     .collect();
+                let initial_edges: Vec<codec::Handle> = self.tabs[i]
+                    .scene
+                    .selected_entities()
+                    .into_iter()
+                    .filter_map(|(handle, entity)| {
+                        crate::modules::draw::modify::trim::is_trim_boundary_entity(&entity)
+                            .then_some(handle)
+                    })
+                    .collect();
                 let all_entities: Vec<_> = entities.into_iter().map(|(_, e)| e).collect();
-                let new_cmd = ExtendCommand::new(all_entities);
+                let new_cmd = ExtendCommand::with_boundary_edges(all_entities, initial_edges);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
@@ -1489,4 +1569,53 @@ fn title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+impl OpenCADStudio {
+    /// TXT2MTXT on the selection (in selection order), as one undo step.
+    fn apply_txt2mtxt(&mut self, i: usize) {
+        let scene = &self.tabs[i].scene;
+        let handles: Vec<codec::Handle> = scene
+            .selected_handles_in_order()
+            .into_iter()
+            .filter(|handle| !scene.is_layer_locked(*handle))
+            .collect();
+        let plan = {
+            let selected: Vec<(codec::Handle, &codec::EntityType)> = handles
+                .iter()
+                .filter_map(|h| scene.document.get_entity(*h).map(|e| (*h, e)))
+                .collect();
+            crate::modules::annotate::txt2mtxt::plan(
+                &selected,
+                &scene.document,
+                self.txt2mtxt_settings,
+            )
+        };
+        self.tabs[i].scene.deselect_all();
+        // Enter on an empty selection ends quietly.
+        if handles.is_empty() {
+            return;
+        }
+        let Some(plan) = plan else {
+            self.command_line
+                .push_output("  0 Text objects removed, 0 MText objects added.");
+            return;
+        };
+        self.push_undo_snapshot(i, "TXT2MTXT");
+        self.tabs[i].scene.erase_entities(&plan.erase);
+        let added = plan.add.len();
+        for entity in plan.add {
+            self.tabs[i].scene.add_entity(entity);
+        }
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        // Every selected object counts as removed text, the way the
+        // reference reports it.
+        let removed = handles.len();
+        self.command_line.push_output(&if added == 1 {
+            format!("  {removed} Text objects removed, 1 MText object added.")
+        } else {
+            format!("  {removed} Text objects removed, {added} MText objects added.")
+        });
+    }
 }

@@ -739,8 +739,12 @@ pub fn solve_line_line_ccp(
     candidates
         .into_iter()
         .min_by(|(t1_a, t2_a, r_a), (t1_b, t2_b, r_b)| {
-            let dist_a = (*t1_a - hint1).length_squared() + (*t2_a - hint2).length_squared() + if *r_a > 50000.0 { 1e8 } else { 0.0 };
-            let dist_b = (*t1_b - hint1).length_squared() + (*t2_b - hint2).length_squared() + if *r_b > 50000.0 { 1e8 } else { 0.0 };
+            let dist_a = (*t1_a - hint1).length_squared()
+                + (*t2_a - hint2).length_squared()
+                + if *r_a > 50000.0 { 1e8 } else { 0.0 };
+            let dist_b = (*t1_b - hint1).length_squared()
+                + (*t2_b - hint2).length_squared()
+                + if *r_b > 50000.0 { 1e8 } else { 0.0 };
             dist_a.total_cmp(&dist_b)
         })
         .map(|(t1, t2, _)| (t1, t2))
@@ -790,8 +794,12 @@ pub fn solve_circle_line_ccp(
         let t_a = i as f64 * dt;
         let t_b = (i + 1) as f64 * dt;
 
-        let Some((res_a, _, _, _)) = eval_t(t_a) else { continue; };
-        let Some((res_b, _, _, _)) = eval_t(t_b) else { continue; };
+        let Some((res_a, _, _, _)) = eval_t(t_a) else {
+            continue;
+        };
+        let Some((res_b, _, _, _)) = eval_t(t_b) else {
+            continue;
+        };
 
         if res_a.signum() != res_b.signum() {
             let mut lo = t_a;
@@ -799,7 +807,9 @@ pub fn solve_circle_line_ccp(
             let mut best_t = (lo + hi) * 0.5;
             for _ in 0..16 {
                 let mid = (lo + hi) * 0.5;
-                let Some((res_m, _, _, _)) = eval_t(mid) else { break; };
+                let Some((res_m, _, _, _)) = eval_t(mid) else {
+                    break;
+                };
                 best_t = mid;
                 if res_m.abs() < 1e-8 {
                     break;
@@ -822,8 +832,12 @@ pub fn solve_circle_line_ccp(
     candidates
         .into_iter()
         .min_by(|(c_a, l_a, r_a), (c_b, l_b, r_b)| {
-            let dist_a = (*c_a - hint_c).length_squared() + (*l_a - hint_l).length_squared() + if *r_a > 50000.0 { 1e8 } else { 0.0 };
-            let dist_b = (*c_b - hint_c).length_squared() + (*l_b - hint_l).length_squared() + if *r_b > 50000.0 { 1e8 } else { 0.0 };
+            let dist_a = (*c_a - hint_c).length_squared()
+                + (*l_a - hint_l).length_squared()
+                + if *r_a > 50000.0 { 1e8 } else { 0.0 };
+            let dist_b = (*c_b - hint_c).length_squared()
+                + (*l_b - hint_l).length_squared()
+                + if *r_b > 50000.0 { 1e8 } else { 0.0 };
             dist_a.total_cmp(&dist_b)
         })
         .map(|(pt_c, pt_l, _)| (pt_c, pt_l))
@@ -873,8 +887,12 @@ pub fn solve_ellipse_line_ccp(
         let t_a = i as f64 * dt;
         let t_b = (i + 1) as f64 * dt;
 
-        let Some((res_a, _, _, _)) = eval_t(t_a) else { continue; };
-        let Some((res_b, _, _, _)) = eval_t(t_b) else { continue; };
+        let Some((res_a, _, _, _)) = eval_t(t_a) else {
+            continue;
+        };
+        let Some((res_b, _, _, _)) = eval_t(t_b) else {
+            continue;
+        };
 
         if res_a.signum() != res_b.signum() {
             let mut lo = t_a;
@@ -882,7 +900,9 @@ pub fn solve_ellipse_line_ccp(
             let mut best_t = (lo + hi) * 0.5;
             for _ in 0..16 {
                 let mid = (lo + hi) * 0.5;
-                let Some((res_m, _, _, _)) = eval_t(mid) else { break; };
+                let Some((res_m, _, _, _)) = eval_t(mid) else {
+                    break;
+                };
                 best_t = mid;
                 if res_m.abs() < 1e-8 {
                     break;
@@ -905,8 +925,12 @@ pub fn solve_ellipse_line_ccp(
     candidates
         .into_iter()
         .min_by(|(e_a, l_a, r_a), (e_b, l_b, r_b)| {
-            let dist_a = (*e_a - hint_e).length_squared() + (*l_a - hint_l).length_squared() + if *r_a > 50000.0 { 1e8 } else { 0.0 };
-            let dist_b = (*e_b - hint_e).length_squared() + (*l_b - hint_l).length_squared() + if *r_b > 50000.0 { 1e8 } else { 0.0 };
+            let dist_a = (*e_a - hint_e).length_squared()
+                + (*l_a - hint_l).length_squared()
+                + if *r_a > 50000.0 { 1e8 } else { 0.0 };
+            let dist_b = (*e_b - hint_e).length_squared()
+                + (*l_b - hint_l).length_squared()
+                + if *r_b > 50000.0 { 1e8 } else { 0.0 };
             dist_a.total_cmp(&dist_b)
         })
         .map(|(pt_e, pt_l, _)| (pt_e, pt_l))
@@ -1674,6 +1698,9 @@ pub struct ArcCommand {
     step: ArcStep,
     cw: bool,
     plane: WorkingPlane,
+    /// Last pointer position at the end step: a typed arc length runs from
+    /// the start point towards it.
+    cursor: Option<DVec3>,
 }
 
 impl ArcCommand {
@@ -1682,6 +1709,7 @@ impl ArcCommand {
             step: ArcStep::Start,
             cw: false,
             plane: WorkingPlane::default(),
+            cursor: None,
         }
     }
 
@@ -1728,6 +1756,24 @@ impl ArcCommand {
         } else {
             (c, r, sa, ea)
         })
+    }
+
+    /// Arc about `c` from `s` whose length along the circle is `len`, running
+    /// towards the side of the start point the pointer is on.
+    fn sc_arc_length(&self, s: DVec3, c: DVec3, len: f64) -> Option<(DVec3, f64, f64, f64)> {
+        let r = c.distance(s);
+        if r < 1e-9 || len <= 0.0 || len >= TAU * r {
+            return None;
+        }
+        let toward = self
+            .cursor
+            .map(|cursor| (angle_xy(c, cursor, self.plane) - angle_xy(c, s, self.plane)).rem_euclid(TAU));
+        let ccw = match toward {
+            Some(span) if span > 1e-9 => span <= std::f64::consts::PI,
+            _ => !self.cw,
+        };
+        let span = len / r;
+        self.sc_angle(s, c, if ccw { span } else { -span })
     }
 
     /// Sweep from `s` to the cursor about `c`, going the way Ctrl says.
@@ -1936,7 +1982,11 @@ impl CadCommand for ArcCommand {
                     self.step = ArcStep::LengthSC { s, c };
                     Some(CmdResult::NeedPoint)
                 }
-                _ => None,
+                // A bare number is the arc's length along the circle (#1408).
+                _ => {
+                    let len = Self::typed_number(text)?;
+                    Some(self.commit(self.sc_arc_length(s, c, len)))
+                }
             },
             ArcStep::CenterSE { s, e } => match upper.as_str() {
                 "A" | "ANGLE" => {
@@ -2111,10 +2161,12 @@ impl CadCommand for ArcCommand {
                     .into_iter()
                     .collect()
             }
-            ArcStep::EndSC { s, c } => self
-                .preview(self.sc_end(s, c, pt), line_wire(c, pt))
-                .into_iter()
-                .collect(),
+            ArcStep::EndSC { s, c } => {
+                self.cursor = Some(pt);
+                self.preview(self.sc_end(s, c, pt), line_wire(c, pt))
+                    .into_iter()
+                    .collect()
+            }
             ArcStep::AngleSC { s, c } => {
                 let span = self.cursor_span(s, c, pt);
                 self.preview(self.sc_angle(s, c, span), line_wire(c, pt))
@@ -4140,7 +4192,10 @@ mod acad_flow_tests {
         let preview = cmd.on_preview_wires_with_tangent(DVec3::new(2.0, 2.0, 0.0), None);
         assert!(!preview.is_empty(), "Live preview must generate arc wire");
         assert!(
-            preview[0].tangent_geoms.iter().any(|g| matches!(g, TangentGeom::Arc { .. })),
+            preview[0]
+                .tangent_geoms
+                .iter()
+                .any(|g| matches!(g, TangentGeom::Arc { .. })),
             "Preview must produce an analytical arc geometry"
         );
 
@@ -4178,7 +4233,10 @@ mod acad_flow_tests {
         let preview = cmd.on_preview_wires_with_tangent(DVec3::new(1.0, 0.0, 0.0), Some(line));
         assert!(!preview.is_empty(), "Live preview must generate arc wire");
         assert!(
-            preview[0].tangent_geoms.iter().any(|g| matches!(g, TangentGeom::Arc { .. })),
+            preview[0]
+                .tangent_geoms
+                .iter()
+                .any(|g| matches!(g, TangentGeom::Arc { .. })),
             "Preview must produce an analytical arc geometry"
         );
 
@@ -4212,7 +4270,10 @@ mod acad_flow_tests {
         let preview = cmd.on_preview_wires_with_tangent(DVec3::new(2.0, 2.0, 0.0), None);
         assert!(!preview.is_empty(), "Live preview must exist");
         assert!(
-            preview[0].tangent_geoms.iter().any(|g| matches!(g, TangentGeom::Arc { .. })),
+            preview[0]
+                .tangent_geoms
+                .iter()
+                .any(|g| matches!(g, TangentGeom::Arc { .. })),
             "Preview must produce an arc, not a straight fallback line"
         );
 
@@ -4240,7 +4301,10 @@ mod acad_flow_tests {
         let preview = cmd.on_preview_wires_with_tangent(DVec3::new(1.0, 0.0, 0.0), Some(line));
         assert!(!preview.is_empty());
         assert!(
-            preview[0].tangent_geoms.iter().any(|g| matches!(g, TangentGeom::Arc { .. })),
+            preview[0]
+                .tangent_geoms
+                .iter()
+                .any(|g| matches!(g, TangentGeom::Arc { .. })),
             "Preview must produce an arc, not a straight fallback line"
         );
 
@@ -4266,7 +4330,10 @@ mod acad_flow_tests {
         // Pick 1: Tangent on Line 1 (y = 0)
         cmd.on_point_with_tangent(DVec3::new(2.0, 0.0, 0.0), Some(line1));
         // Pick 2: Point in first quadrant
-        cmd.on_point_with_tangent(DVec3::new(1.0 - (0.5_f64).sqrt(), 1.0 - (0.5_f64).sqrt(), 0.0), None);
+        cmd.on_point_with_tangent(
+            DVec3::new(1.0 - (0.5_f64).sqrt(), 1.0 - (0.5_f64).sqrt(), 0.0),
+            None,
+        );
         // Pick 3: Tangent on Line 2 (x = 0)
         let r3 = cmd.on_point_with_tangent(DVec3::new(0.0, 2.0, 0.0), Some(line2));
         let arc = committed_arc(r3.expect("two-line arc command must commit"));

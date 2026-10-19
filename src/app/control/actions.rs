@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::plot_style::PlotStyleTableExt as _;
 use super::*;
 use crate::scene::model::object::PropValue;
 
@@ -103,6 +105,16 @@ pub(super) const NAMES: &[&str] = &[
     #[cfg(not(target_arch = "wasm32"))]
     "external_change_cancel",
     "pdf_dialog_ok",
+    "txt2mtxt_settings",
+    "view_background",
+    "image_adjust",
+    "import_file_dialog",
+    "pdf_import_pick",
+    "pdf_import_dialog",
+    "dgn_import_dialog",
+    "tds_import_dialog",
+    "refedit_dialog",
+    "pdf_shx_settings",
     "pdf_layer_toggle",
     "pc_manager_toggle",
     "pc_manager",
@@ -113,9 +125,12 @@ pub(super) const NAMES: &[&str] = &[
     "pc_section",
     "ribbon_tab",
     "ribbon_dropdown",
+    "keytips",
     "dialog_ok",
+    "block_def_dialog",
     "attdef_dialog",
     "field_dialog",
+    "attman_dialog",
     "sheet_set",
     "close_document",
     "toggle_properties",
@@ -123,6 +138,7 @@ pub(super) const NAMES: &[&str] = &[
     "toggle_grid",
     "toggle_snap",
     "toggle_ortho",
+    "grip_menu_pick",
     "mtext_insert",
     "mtext_commit",
     "mtext_cancel",
@@ -405,6 +421,12 @@ impl OpenCADStudio {
     /// this needs no undo snapshot. Format follows the path extension.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn control_wblock(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        if self.tabs[self.active_tab].block_test.is_some() {
+            return Err(failure(
+                "temporary_document",
+                "Test Block is temporary and cannot be saved",
+            ));
+        }
         let path = string(req, "path")?;
         let document = &self.tabs[self.active_tab].scene.document;
         // A template base keeps its tables/styles in the exported file
@@ -698,6 +720,15 @@ impl OpenCADStudio {
                     if req.get("upside_down").is_some() {
                         page_dialog.upside_down = request.upside_down;
                     }
+                    // The requested table wins over the layout's own, which
+                    // the stored page setup just loaded (or failed to find).
+                    if let Some(table) = &loaded_style {
+                        app.active_plot_style = Some(table.clone());
+                        page_dialog.style_name = table.name.clone();
+                        page_dialog.apply_plot_styles = true;
+                        page_dialog.style_missing = false;
+                        page_dialog.style_error = None;
+                    }
                 }
                 app.plot_dialog = page_dialog;
                 if app.plot_dialog.area == "Display" {
@@ -831,6 +862,7 @@ impl OpenCADStudio {
                     "point": [grip.world.x, grip.world.y, grip.world.z],
                     "shape": format!("{:?}", grip.shape),
                     "moves_entity": grip.is_midpoint,
+                    "axis": grip.axis.map(|a| [a.x, a.y, a.z]),
                 })
             })
             .collect::<Vec<_>>();
@@ -901,33 +933,125 @@ impl OpenCADStudio {
 
     /// Click the viewport where `point` (world) shows, as the left button
     /// would, holding Ctrl and/or Shift when `modifiers` names them.
-    pub(super) fn control_click(&mut self, req: &Value) -> Result<Task<Message>, Value> {
-        let i = self.active_tab;
-        let at = point(req)?;
-        let modifiers = req["modifiers"].as_str().unwrap_or("").to_ascii_lowercase();
-        let (vw, vh) = self.tabs[i].scene.selection.borrow().view.vp_size;
-        let tile = self.tabs[i].scene.active_model_tile_bounds(vw, vh);
+    /// Where a world point shows on the drawing canvas, through the camera
+    /// the cursor edits with: an entered viewport's, else the active tile's.
+    fn control_world_to_canvas(&self, at: glam::DVec3) -> Result<iced::Point, Value> {
+        let scene = &self.tabs[self.active_tab].scene;
+        let (vw, vh) = scene.selection.borrow().view.vp_size;
+        let (camera, bounds) = scene.viewport_edit_frame((vw, vh)).unwrap_or_else(|| {
+            (
+                scene.camera.borrow().clone(),
+                scene.active_model_tile_bounds(vw, vh),
+            )
+        });
         let local = iced::Rectangle {
-            width: tile.width,
-            height: tile.height,
+            width: bounds.width,
+            height: bounds.height,
             ..iced::Rectangle::default()
         };
-        let screen = self.tabs[i]
-            .scene
-            .camera
-            .borrow()
+        camera
             .project(at, local)
-            .ok_or_else(|| failure("invalid_point", "The point is not in view"))?;
+            .filter(|p| p.x.is_finite() && p.y.is_finite())
+            .map(|p| iced::Point::new(p.x + bounds.x, p.y + bounds.y))
+            .ok_or_else(|| failure("invalid_point", "The point is not in view"))
+    }
+
+    pub(super) fn control_click(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        let at = point(req)?;
+        let modifiers = req["modifiers"].as_str().unwrap_or("").to_ascii_lowercase();
+        let cursor = self.control_world_to_canvas(at)?;
         let saved = (self.ctrl_down, self.shift_down);
         self.ctrl_down = modifiers.contains("ctrl");
         self.shift_down = modifiers.contains("shift");
-        let cursor = iced::Point::new(screen.x + tile.x, screen.y + tile.y);
         let tasks = [
             self.update(Message::ViewportMove(cursor)),
             self.update(Message::ViewportLeftPress),
             self.update(Message::ViewportLeftRelease),
         ];
         (self.ctrl_down, self.shift_down) = saved;
+        Ok(Task::batch(tasks))
+    }
+
+    /// Replay pointer events on the drawing canvas in order, as the mouse
+    /// sends them: moves (canvas pixels, or a world point projected through
+    /// the editing camera), button presses and releases, and wheel steps.
+    /// Each step reports where the cursor landed in the world, so a drag
+    /// shows the points the interaction actually received.
+    pub(super) fn control_pointer(&mut self, req: &Value) -> Result<Task<Message>, Value> {
+        let i = self.active_tab;
+        let events = req["events"]
+            .as_array()
+            .filter(|events| !events.is_empty())
+            .ok_or_else(|| failure("invalid_request", "Supply a non-empty events array"))?;
+        let modifiers = req["modifiers"].as_str().unwrap_or("").to_ascii_lowercase();
+        let coords = |value: &Value, n: usize| -> Option<Vec<f64>> {
+            let values: Vec<f64> = value.as_array()?.iter().filter_map(Value::as_f64).collect();
+            (values.len() == n && values.iter().all(|v| v.is_finite())).then_some(values)
+        };
+        let saved = (self.ctrl_down, self.shift_down);
+        self.ctrl_down = modifiers.contains("ctrl");
+        self.shift_down = modifiers.contains("shift");
+        let mut tasks = Vec::new();
+        let mut steps = Vec::new();
+        let mut outcome = Ok(());
+        for event in events {
+            let message = if let Some(xy) = event.get("move").and_then(|v| coords(v, 2)) {
+                Message::ViewportMove(iced::Point::new(xy[0] as f32, xy[1] as f32))
+            } else if let Some(at) = event.get("move_world").and_then(|v| coords(v, 3)) {
+                match self.control_world_to_canvas(glam::DVec3::new(at[0], at[1], at[2])) {
+                    Ok(cursor) => Message::ViewportMove(cursor),
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                }
+            } else if let Some(button) = event.get("press").and_then(Value::as_str) {
+                match button {
+                    "left" => Message::ViewportLeftPress,
+                    "right" => Message::ViewportRightPress,
+                    "middle" => Message::ViewportMiddlePress,
+                    _ => {
+                        outcome = Err(failure("invalid_request", "press is left, right or middle"));
+                        break;
+                    }
+                }
+            } else if let Some(button) = event.get("release").and_then(Value::as_str) {
+                match button {
+                    "left" => Message::ViewportLeftRelease,
+                    "right" => Message::ViewportRightRelease,
+                    "middle" => Message::ViewportMiddleRelease,
+                    _ => {
+                        outcome = Err(failure(
+                            "invalid_request",
+                            "release is left, right or middle",
+                        ));
+                        break;
+                    }
+                }
+            } else if let Some(lines) = event.get("wheel").and_then(Value::as_f64) {
+                Message::ViewportScroll(iced::mouse::ScrollDelta::Lines {
+                    x: 0.0,
+                    y: lines as f32,
+                })
+            } else {
+                outcome = Err(failure(
+                    "invalid_request",
+                    "Each event is move, move_world, press, release or wheel",
+                ));
+                break;
+            };
+            tasks.push(self.update(message));
+            let tab = &self.tabs[i];
+            let world = tab.last_cursor_world;
+            steps.push(json!({
+                "screen":[tab.last_cursor_screen.x, tab.last_cursor_screen.y],
+                "world":[world.x, world.y, world.z],
+                "dragging_grip":tab.active_grip.is_some(),
+            }));
+        }
+        (self.ctrl_down, self.shift_down) = saved;
+        outcome?;
+        self.set_control_result(json!({"steps":steps}));
         Ok(Task::batch(tasks))
     }
 
@@ -1059,6 +1183,8 @@ impl OpenCADStudio {
         let name = string(req, "name")?;
         let msg = match name {
             "close_modal" => Message::CloseModal,
+            // Show a layout (or "Model"), as clicking its tab does.
+            "layout_switch" => Message::LayoutSwitch(string(req, "value")?.into()),
             // The "changed outside" modal's suggested actions (D6): reload
             // the disk copy, keep the in-memory one and overwrite, save as,
             // or dismiss. Native only — the web build has no such dialog.
@@ -1387,6 +1513,26 @@ impl OpenCADStudio {
                 }
                 return Ok(Task::none());
             }
+            // The open Block Definition dialog: `name=…`, `open_in_editor=0|1`,
+            // `base_on_screen=0|1`, `objects_on_screen=0|1`, `create_empty`,
+            // `select_objects`.
+            "block_def_dialog" => {
+                if self.block_definition.is_none() {
+                    return Err(failure("no_dialog", "The Block Definition dialog is not open"));
+                }
+                let value = string(req, "value")?;
+                let (key, v) = value.split_once('=').unwrap_or((value, ""));
+                let on = v == "1";
+                match key {
+                    "name" => Message::BlockDefNameSelect(v.to_string()),
+                    "open_in_editor" => Message::BlockDefOpenInEditor(on),
+                    "base_on_screen" => Message::BlockDefBaseOnScreen(on),
+                    "objects_on_screen" => Message::BlockDefObjectsOnScreen(on),
+                    "create_empty" => Message::BlockDefCreateEmpty,
+                    "select_objects" => Message::BlockDefSelectObjects,
+                    _ => return Err(failure("invalid_value", "Unknown block definition field")),
+                }
+            }
             // One field of the open attribute definition dialog: `tag=…`,
             // `prompt=…`, `default=…`, `justify=MC`, `style=…`, `height=…`,
             // `rotation=…`, `width=…`, `on_screen=0|1`, `x=…` / `y=…` / `z=…`,
@@ -1430,6 +1576,96 @@ impl OpenCADStudio {
                         M::Mode(bit, state == "1")
                     }
                     _ => return Err(failure("invalid_value", "Unknown attdef dialog field")),
+                })
+            }
+            // The open Block Attribute Manager: `block=<name>`, `select=<row>`,
+            // `up`, `down`, `remove`, `edit`, `tab=attribute|text|properties`,
+            // `tag=…`, `prompt=…`, `default=…`, `mode=<invisible|verify|preset|multiline>:0|1`,
+            // `style=…`, `justify=MC`, `height=…`, `rotation=…`, `width=…`, `oblique=…`,
+            // `boundary=…`, `annotative=0|1`, `backwards=0|1`, `upside_down=0|1`,
+            // `layer=…`, `linetype=…`, `color=…`, `lineweight=…`, `column=<name>:0|1`,
+            // `more_columns`, `apply_existing=0|1`, `emphasize=0|1`, `live=0|1`,
+            // `pick`, `sync`, `apply`, `ok`, `cancel`.
+            "attman_dialog" => {
+                use crate::ui::window::attman_dialog::{AttManMsg as A, Column, EditTab};
+                let Some(state) = self.attman.as_ref() else {
+                    return Err(failure("no_dialog", "The attribute manager is not open"));
+                };
+                let value = string(req, "value")?;
+                let (key, v) = value.split_once('=').unwrap_or((value, ""));
+                let on = v == "1";
+                Message::AttMan(match key {
+                    "block" => A::Block(
+                        state
+                            .blocks
+                            .iter()
+                            .position(|b| b.name.eq_ignore_ascii_case(v))
+                            .ok_or_else(|| failure("invalid_value", "No such attributed block"))?,
+                    ),
+                    "select" => A::Select(
+                        v.parse()
+                            .ok()
+                            .filter(|r: &usize| *r < state.rows.len())
+                            .ok_or_else(|| failure("invalid_value", "No such row"))?,
+                    ),
+                    "up" => A::MoveUp,
+                    "down" => A::MoveDown,
+                    "remove" => A::Remove,
+                    "edit" => A::ToggleEdit,
+                    "tab" => A::Tab(match v {
+                        "text" => EditTab::Text,
+                        "properties" => EditTab::Properties,
+                        _ => EditTab::Attribute,
+                    }),
+                    "tag" => A::Tag(v.into()),
+                    "prompt" => A::Prompt(v.into()),
+                    "default" => A::Default(v.into()),
+                    "mode" => {
+                        let (mode, state) = v.split_once(':').unwrap_or((v, "1"));
+                        let mode = match mode {
+                            "invisible" => "invisible",
+                            "verify" => "verify",
+                            "preset" => "preset",
+                            "multiline" => "multiline",
+                            _ => return Err(failure("invalid_value", "Unknown mode")),
+                        };
+                        A::Mode(mode, state == "1")
+                    }
+                    "style" => A::Style(v.into()),
+                    "justify" => A::Justify(
+                        crate::modules::draw::draw::attdef::Justify::from_keyword(v)
+                            .ok_or_else(|| failure("invalid_value", "Unknown justification"))?,
+                    ),
+                    "height" => A::Height(v.into()),
+                    "rotation" => A::Rotation(v.into()),
+                    "width" => A::Width(v.into()),
+                    "oblique" => A::Oblique(v.into()),
+                    "boundary" => A::Boundary(v.into()),
+                    "annotative" => A::Annotative(on),
+                    "backwards" => A::Backwards(on),
+                    "upside_down" => A::UpsideDown(on),
+                    "layer" => A::Layer(v.into()),
+                    "linetype" => A::Linetype(v.into()),
+                    "color" => A::Color(v.into()),
+                    "lineweight" => A::Lineweight(v.into()),
+                    "column" => {
+                        let (name, state) = v.split_once(':').unwrap_or((v, "1"));
+                        A::Column(
+                            Column::from_name(name)
+                                .ok_or_else(|| failure("invalid_value", "Unknown column"))?,
+                            state == "1",
+                        )
+                    }
+                    "more_columns" => A::MoreColumns,
+                    "apply_existing" => A::ApplyExisting(on),
+                    "emphasize" => A::Emphasize(on),
+                    "live" => A::Live(on),
+                    "pick" => A::PickBlock,
+                    "sync" => A::Sync,
+                    "apply" => A::Apply,
+                    "ok" => A::Ok,
+                    "cancel" => A::Cancel,
+                    _ => return Err(failure("invalid_value", "Unknown attribute manager field")),
                 })
             }
             // One field of the open Field dialog: `category=<index>`, `name=Date`,
@@ -1786,6 +2022,450 @@ impl OpenCADStudio {
                 })
             }
             "ribbon_dropdown" => Message::ToggleRibbonDropdown(string(req, "value")?.into()),
+            // The Edit Reference dialog, one field per call: "level=<n>" (0 =
+            // the picked reference), "nested=0|1" (pick the working set in the
+            // drawing), "attributes=0|1", "lock=0|1", "unique=0|1", "ok" or
+            // "cancel".
+            "refedit_dialog" => {
+                use crate::ui::window::refedit_dialog::RefEditDialogMsg as R;
+                if self.active_modal != Some(crate::app::ModalKind::RefEdit) {
+                    return Err(failure(
+                        "no_dialog",
+                        "The Reference Edit dialog is not open",
+                    ));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let flag = || match value {
+                    "1" => Ok(true),
+                    "0" => Ok(false),
+                    _ => Err(failure("invalid_value", spec)),
+                };
+                if key == "cancel" {
+                    Message::CloseModal
+                } else {
+                    Message::RefEditDialog(match key {
+                        "ok" => R::Ok,
+                        "level" => {
+                            R::Level(value.parse().map_err(|_| failure("invalid_value", spec))?)
+                        }
+                        "nested" => R::Nested(flag()?),
+                        "attributes" => R::Attributes(flag()?),
+                        "lock" => R::Lock(flag()?),
+                        "unique" => R::Unique(flag()?),
+                        _ => return Err(failure("invalid_value", "Unknown Reference Edit field")),
+                    })
+                }
+            }
+            // Ribbon key tips: `show`, `alt` (a lone Alt), `type:<codes>`, `enter`,
+            // `esc` or `hide`. Read them back with the `keytips` read operation.
+            "keytips" => {
+                use crate::ui::ribbon::KeyTipInput as K;
+                let value = string(req, "value")?;
+                let inputs: Vec<K> = match value {
+                    "show" => vec![K::Open { refocus: false }],
+                    "alt" => vec![K::AltTap],
+                    "esc" => vec![K::Escape],
+                    "hide" => vec![K::Hide],
+                    "enter" => vec![K::Enter],
+                    _ => match value.strip_prefix("type:") {
+                        Some(codes) if !codes.is_empty() => codes
+                            .chars()
+                            .map(|ch| K::Char(ch.to_uppercase().collect()))
+                            .collect(),
+                        _ => {
+                            return Err(failure(
+                                "invalid_value",
+                                "Use show, alt, type:<codes>, enter, esc or hide",
+                            ))
+                        }
+                    },
+                };
+                let tasks: Vec<_> = inputs
+                    .into_iter()
+                    .map(|input| self.on_keytip(input))
+                    .collect();
+                return Ok(Task::batch(tasks));
+            }
+            // The -VIEW Background dialog, one field per call: "type=gradient",
+            // "color|top|middle|bottom=r,g,b", "three=1", "rotation=30",
+            // "image=<path>", "position=center|stretch|tile", "aspect=1", "offset=x,y" (pixels), "scale=x,y",
+            // "step=offset_x|offset_y|scale_x|scale_y,+1|-1", "reset",
+            // "apply" or "cancel".
+            "view_background" => {
+                use crate::ui::window::pdf_dialogs::{BgKind, BgPosition, PdfDialogMsg as P};
+                if self.active_modal != Some(crate::app::ModalKind::ViewBackground) {
+                    return Err(failure("no_dialog", "The Background dialog is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let rgb = || -> Result<[u8; 3], Value> {
+                    let parts: Vec<u8> = value
+                        .split(',')
+                        .map(|part| part.trim().parse::<u8>())
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| bad())?;
+                    <[u8; 3]>::try_from(parts).map_err(|_| bad())
+                };
+                match key {
+                    "cancel" => Message::CloseModal,
+                    "apply" => Message::PdfDialog(P::BgApply),
+                    "type" => Message::PdfDialog(P::BgKind(match value {
+                        "none" => BgKind::None,
+                        "solid" => BgKind::Solid,
+                        "gradient" => BgKind::Gradient,
+                        "image" => BgKind::Image,
+                        _ => return Err(bad()),
+                    })),
+                    "color" => Message::PdfDialog(P::BgColor(0, rgb()?)),
+                    "top" => Message::PdfDialog(P::BgColor(1, rgb()?)),
+                    "middle" => Message::PdfDialog(P::BgColor(2, rgb()?)),
+                    "bottom" => Message::PdfDialog(P::BgColor(3, rgb()?)),
+                    "three" => Message::PdfDialog(P::BgThree(value == "1")),
+                    "rotation" => Message::PdfDialog(P::BgRotation(value.to_string())),
+                    "image" => Message::PdfDialog(P::BgImage(value.to_string())),
+                    "position" => Message::PdfDialog(P::BgPosition(match value {
+                        "center" => BgPosition::Center,
+                        "stretch" => BgPosition::Stretch,
+                        "tile" => BgPosition::Tile,
+                        _ => return Err(bad()),
+                    })),
+                    "aspect" => Message::PdfDialog(P::BgAspect(value == "1")),
+                    "offset" | "scale" => {
+                        let pair: Vec<String> = value
+                            .split(',')
+                            .map(|part| part.trim().to_string())
+                            .collect();
+                        let pair = <[String; 2]>::try_from(pair).map_err(|_| bad())?;
+                        if pair
+                            .iter()
+                            .any(|v| v.parse::<f64>().map_or(true, |v| !v.is_finite()))
+                        {
+                            return Err(bad());
+                        }
+                        if key == "offset" {
+                            Message::PdfDialog(P::BgOffset(pair))
+                        } else {
+                            Message::PdfDialog(P::BgScale(pair))
+                        }
+                    }
+                    "step" => {
+                        // step=offset_x|offset_y|scale_x|scale_y,+1|-1
+                        let (field, dir) = value.split_once(',').ok_or_else(bad)?;
+                        let field = match field {
+                            "offset_x" => 0,
+                            "offset_y" => 1,
+                            "scale_x" => 2,
+                            "scale_y" => 3,
+                            _ => return Err(bad()),
+                        };
+                        let dir: i8 = dir.trim().parse().map_err(|_| bad())?;
+                        Message::PdfDialog(P::BgStep(field, dir))
+                    }
+                    "reset" => Message::PdfDialog(P::BgReset),
+                    _ => return Err(bad()),
+                }
+            }
+            // The file the next PDF import picker returns, without showing
+            // it (value: the path).
+            "pdf_import_pick" => {
+                crate::sys::set_pdf_import_pick(string(req, "value")?.into());
+                return Ok(Task::none());
+            }
+            // The Import PDF window, one field per call: "page=<n>" (1-based),
+            // "on_screen=0|1" (insertion point asked after OK), "scale=<value>",
+            // "rotation=0|90|180|270", "ok" or "cancel".
+            "pdf_import_dialog" => {
+                use crate::ui::window::pdf_dialogs::{PdfDialogMsg as P, RotationChoice};
+                if self.active_modal != Some(crate::app::ModalKind::PdfImportFile) {
+                    return Err(failure("no_dialog", "The Import PDF window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::PdfDialog(match key {
+                    "ok" => P::ImportOk,
+                    "page" => P::ImportPageText(value.to_string()),
+                    "on_screen" => P::ImportInsertOnScreen(value == "1"),
+                    "scale" => P::ImportScale(value.to_string()),
+                    "rotation" => P::ImportRotation(
+                        RotationChoice::ALL
+                            .into_iter()
+                            .find(|r| value.trim().parse() == Ok(r.0))
+                            .ok_or_else(bad)?,
+                    ),
+                    _ => return Err(bad()),
+                })
+            }
+            // The Import File window, one field per call: "path=<file>",
+            // "format=<index or name>", "search=<text>", "filter=all|supported",
+            // "recent=<n>", "ok" or "cancel".
+            "import_file_dialog" => {
+                use crate::ui::window::import_dialogs::{ImportDialogMsg as I, FORMATS};
+                if self.active_modal != Some(crate::app::ModalKind::ImportFile) {
+                    return Err(failure("no_dialog", "The Import File window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::ImportDialog(match key {
+                    "ok" => I::ImportOk,
+                    "path" => I::Path(value.to_string()),
+                    "search" => I::Search(value.to_string()),
+                    "filter" => I::OnlySupported(match value {
+                        "all" => false,
+                        "supported" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "recent" => I::Recent(value.trim().parse().map_err(|_| bad())?),
+                    "format" => I::Format(match value.trim().parse::<usize>() {
+                        Ok(k) if k < FORMATS.len() => k,
+                        _ => FORMATS
+                            .iter()
+                            .position(|f| f.name.eq_ignore_ascii_case(value.trim()))
+                            .ok_or_else(bad)?,
+                    }),
+                    _ => return Err(bad()),
+                })
+            }
+            // The 3D Studio Import window, one field per call: "check=<name>"
+            // and "uncheck=<name>" (the object's name, or "Global Settings"),
+            // "all", "clear", "filter=all|mesh|light|camera|general",
+            // "search=<text>", "layers=object|material|color|single",
+            // "multi=ask|split|first|none", "path=<file>" (as Change… picks
+            // it), "ok" or "cancel".
+            "tds_import_dialog" => {
+                use crate::ui::window::import_dialogs::ImportDialogMsg as I;
+                if self.active_modal != Some(crate::app::ModalKind::TdsImport) {
+                    return Err(failure("no_dialog", "The 3D Studio Import window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                let pick = |options: &[&str]| options.iter().position(|o| *o == value).ok_or_else(bad);
+                Message::ImportDialog(match key {
+                    "ok" => I::TdsOk,
+                    "all" => I::TdsAll,
+                    "clear" => I::TdsClear,
+                    "check" | "uncheck" => {
+                        let k = self
+                            .import_dialogs
+                            .tds
+                            .as_ref()
+                            .and_then(|s| s.objects.iter().position(|(name, _, _)| name.eq_ignore_ascii_case(value)))
+                            .ok_or_else(bad)?;
+                        I::TdsCheck(k, key == "check")
+                    }
+                    "filter" => I::TdsFilter(pick(&["all", "mesh", "light", "camera", "general"])?),
+                    "search" => I::TdsSearch(value.to_string()),
+                    "layers" => I::TdsLayers(pick(&["object", "material", "color", "single"])?),
+                    "multi" => I::TdsMulti(pick(&["ask", "split", "first", "none"])?),
+                    "path" => I::TdsPicked(Some(value.to_string())),
+                    _ => return Err(bad()),
+                })
+            }
+            // The DGN Import window, one field per call: "path=<file>" (as
+            // Change… picks it), "model=<n>", "target=new|current",
+            // "conflict=prefix|ignore", "units=master|sub", "explode=on|off",
+            // "references=translate|ignore|underlay", "existing=prompt|overwrite|keep",
+            // "mapping=layer|linetype|lineweight|color", "ok" or "cancel".
+            "dgn_import_dialog" => {
+                use crate::ui::window::import_dialogs::ImportDialogMsg as I;
+                if self.active_modal != Some(crate::app::ModalKind::DgnImport) {
+                    return Err(failure("no_dialog", "The DGN Import window is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let on = |v: &str| match v {
+                    "on" | "1" | "true" => Ok(true),
+                    "off" | "0" | "false" => Ok(false),
+                    _ => Err(bad()),
+                };
+                if key == "cancel" {
+                    return Ok(Task::done(Message::CloseModal));
+                }
+                Message::ImportDialog(match key {
+                    "ok" => I::DgnOk,
+                    "path" => I::DgnPicked(Some(value.to_string())),
+                    "model" => I::DgnModel(value.trim().parse().map_err(|_| bad())?),
+                    "target" => I::DgnCurrent(match value {
+                        "new" => false,
+                        "current" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "conflict" => I::DgnPrefix(match value {
+                        "prefix" => true,
+                        "ignore" => false,
+                        _ => return Err(bad()),
+                    }),
+                    "units" => I::DgnSub(match value {
+                        "master" => false,
+                        "sub" => true,
+                        _ => return Err(bad()),
+                    }),
+                    "explode" => I::DgnExplode(on(value)?),
+                    "references" => I::DgnReferences(match value {
+                        "translate" => crate::modules::insert::dgn_import::ReferenceMode::Translate,
+                        "ignore" => crate::modules::insert::dgn_import::ReferenceMode::Ignore,
+                        "underlay" => crate::modules::insert::dgn_import::ReferenceMode::Underlay,
+                        _ => return Err(bad()),
+                    }),
+                    "existing" => I::DgnExisting(match value {
+                        "prompt" => crate::modules::insert::dgn_import::ExistingReference::Prompt,
+                        "overwrite" => crate::modules::insert::dgn_import::ExistingReference::Overwrite,
+                        "keep" => crate::modules::insert::dgn_import::ExistingReference::Keep,
+                        _ => return Err(bad()),
+                    }),
+                    "mapping" => I::DgnMappingTab(match value {
+                        "layer" => 0,
+                        "linetype" => 1,
+                        "lineweight" => 2,
+                        "color" => 3,
+                        _ => return Err(bad()),
+                    }),
+                    _ => return Err(bad()),
+                })
+            }
+            // The Image Adjust dialog, one field per call: "brightness=70",
+            // "contrast=40", "fade=20" (the bar), "type=fade,abc" (typed into
+            // the box), "step=brightness,+1|-1", "reset", "apply" or "cancel".
+            "image_adjust" => {
+                use crate::ui::window::pdf_dialogs::PdfDialogMsg as P;
+                if self.active_modal != Some(crate::app::ModalKind::ImageAdjust) {
+                    return Err(failure("no_dialog", "The Image Adjust dialog is not open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let row = |name: &str| match name.trim() {
+                    "brightness" => Ok(0u8),
+                    "contrast" => Ok(1),
+                    "fade" => Ok(2),
+                    _ => Err(bad()),
+                };
+                match key {
+                    "cancel" => Message::CloseModal,
+                    "apply" => Message::PdfDialog(P::IaApply),
+                    "reset" => Message::PdfDialog(P::IaReset),
+                    "brightness" | "contrast" | "fade" => {
+                        let v: u8 = value
+                            .trim()
+                            .parse()
+                            .ok()
+                            .filter(|v| *v <= 100)
+                            .ok_or_else(bad)?;
+                        Message::PdfDialog(P::IaValue(row(key)?, v))
+                    }
+                    "type" => {
+                        let (name, typed) = value.split_once(',').ok_or_else(bad)?;
+                        Message::PdfDialog(P::IaText(row(name)?, typed.to_string()))
+                    }
+                    "step" => {
+                        let (name, dir) = value.split_once(',').ok_or_else(bad)?;
+                        let dir: i8 = dir.trim().parse().map_err(|_| bad())?;
+                        Message::PdfDialog(P::IaStep(row(name)?, dir))
+                    }
+                    _ => return Err(bad()),
+                }
+            }
+            // Text to MText Settings (TXT2MTXT SEttings): "combine=0",
+            // "order=select" / "order=top", "wrap=0", "uniform=1", "ok",
+            // "cancel".
+            "txt2mtxt_settings" => {
+                use crate::ui::window::pdf_dialogs::PdfDialogMsg as M;
+                if self.active_modal != Some(crate::app::ModalKind::Txt2MtxtSettings) {
+                    return Err(failure("no_dialog", "Text to MText Settings is not open"));
+                }
+                let value = string(req, "value")?;
+                let (key, arg) = value.split_once('=').unwrap_or((value, ""));
+                let on = arg != "0";
+                match key {
+                    "combine" => Message::PdfDialog(M::T2mCombine(on)),
+                    "order" => Message::PdfDialog(M::T2mSelectOrder(arg == "select")),
+                    "wrap" => Message::PdfDialog(M::T2mWrap(on)),
+                    "uniform" => Message::PdfDialog(M::T2mUniform(on)),
+                    "ok" => Message::PdfDialog(M::T2mOk),
+                    "cancel" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", "Unknown setting")),
+                }
+            }
+            // The PDF Text Recognition Settings dialog, one edit per call:
+            // "select=<n>", "toggle=<n>,0|1", "up", "down", "remove",
+            // "add=<path to .shx>", "move=<from>,<to>" (dragging a row),
+            // "threshold=<1-100>", "threshold_text=<typed>", "step=+1|-1",
+            // "layer=current|geometry", "best=0|1", "sample=<text>",
+            // "defaults", "apply" or "cancel" (rows count from 0).
+            "pdf_shx_settings" => {
+                use crate::ui::window::pdf_shx_dialog::ShxDialogMsg as S;
+                if self.active_modal != Some(crate::app::ModalKind::PdfShxSettings) {
+                    return Err(failure(
+                        "no_dialog",
+                        "The PDF Text Recognition Settings dialog is not open",
+                    ));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                let index = |v: &str| v.trim().parse::<usize>().map_err(|_| bad());
+                let flag = |v: &str| match v.trim() {
+                    "1" => Ok(true),
+                    "0" => Ok(false),
+                    _ => Err(bad()),
+                };
+                match key {
+                    "cancel" => Message::CloseModal,
+                    "move" => {
+                        let (from, to) = value.split_once(',').ok_or_else(bad)?;
+                        let (from, to) = (index(from)?, index(to)?);
+                        return Ok(Task::batch([
+                            self.update(Message::PdfShxDialog(S::DragStart(from))),
+                            self.update(Message::PdfShxDialog(S::DragDrop(to))),
+                        ]));
+                    }
+                    _ => Message::PdfShxDialog(match key {
+                        "apply" => S::Apply,
+                        "defaults" => S::Defaults,
+                        "up" => S::Up,
+                        "down" => S::Down,
+                        "remove" => S::Remove,
+                        "select" => S::Select(index(value)?),
+                        "toggle" => {
+                            let (row, on) = value.split_once(',').ok_or_else(bad)?;
+                            S::Toggle(index(row)?, flag(on)?)
+                        }
+                        "add" => S::Added(Some(std::path::PathBuf::from(value.trim()))),
+                        "threshold" => S::Threshold(
+                            value
+                                .trim()
+                                .parse::<u8>()
+                                .ok()
+                                .filter(|v| (1..=100).contains(v))
+                                .ok_or_else(bad)?,
+                        ),
+                        "threshold_text" => S::ThresholdText(value.to_string()),
+                        "step" => S::Step(value.trim().parse::<i8>().map_err(|_| bad())?),
+                        "layer" => match value.trim() {
+                            "current" => S::CurrentLayer(true),
+                            "geometry" => S::CurrentLayer(false),
+                            _ => return Err(bad()),
+                        },
+                        "best" => S::BestFont(flag(value)?),
+                        "sample" => S::Sample(value.to_string()),
+                        _ => return Err(bad()),
+                    }),
+                }
+            }
             "pdf_dialog_ok" => {
                 use crate::ui::window::pdf_dialogs::PdfDialogMsg;
                 Message::PdfDialog(match self.active_modal {
@@ -1817,6 +2497,9 @@ impl OpenCADStudio {
                 Some(crate::app::ModalKind::Field) => {
                     Message::FieldDialog(crate::ui::window::field_dialog::FieldDialogMsg::Ok)
                 }
+                Some(crate::app::ModalKind::AttMan) => {
+                    Message::AttMan(crate::ui::window::attman_dialog::AttManMsg::Ok)
+                }
                 _ => return Err(failure("no_dialog", "No dialog with an OK button is open")),
             },
             "close_document" => Message::TabClose(self.tabs[self.active_tab].id),
@@ -1825,6 +2508,23 @@ impl OpenCADStudio {
             "toggle_grid" => Message::ToggleGrid,
             "toggle_snap" => Message::ToggleSnapEnabled,
             "toggle_ortho" => Message::ToggleOrtho,
+            // Choose an entry of the open multi-functional grip menu by its
+            // position (0 = first), as a click on it does.
+            "grip_menu_pick" => {
+                let entries = self
+                    .grip_popup
+                    .as_ref()
+                    .map_or(0, |popup| popup.items.len());
+                if entries == 0 {
+                    return Err(failure("menu_closed", "No grip menu is open"));
+                }
+                let index = string(req, "value")?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|index| *index < entries)
+                    .ok_or_else(|| failure("invalid_value", "value is a menu entry index"))?;
+                Message::GripMenuPick(index)
+            }
             "mtext_insert" => {
                 if self.mtext_editor.is_none() {
                     return Err(failure("editor_closed", "MText editor is closed"));

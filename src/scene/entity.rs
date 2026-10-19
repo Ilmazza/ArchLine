@@ -519,23 +519,47 @@ impl Scene {
     /// existing entity.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn update_entity(&mut self, entity: EntityType) -> bool {
-        let mut changed = Vec::with_capacity(1);
-        let mut block_change = false;
-        if !self.update_entity_impl(entity, &mut changed, &mut block_change) {
-            return false;
-        }
-        self.publish_entity_updates(changed, block_change);
-        true
+        self.update_entities_policy(vec![entity], false) == 1
     }
 
     /// Batched variant of [`update_entity`]: writes every replacement, then
     /// issues a single geometry bump for the whole set instead of one bump per
     /// entity.
     pub fn update_entities(&mut self, updates: Vec<EntityType>) -> usize {
+        self.update_entities_policy(updates, false)
+    }
+
+    /// Like [`update_entity`](Self::update_entity) but without the
+    /// reference-only refusal. The plugin owns reference-only entities and
+    /// keeps full write access through the plugin host API, so a plugin's own
+    /// refresh of derived display geometry must not be refused. Locked-layer
+    /// policy stays enforced either way.
+    pub fn update_entity_plugin(&mut self, entity: EntityType) -> bool {
+        self.update_entities_policy(vec![entity], true) == 1
+    }
+
+    /// Like [`update_entities`](Self::update_entities) but without the
+    /// reference-only refusal (see [`update_entity_plugin`](Self::update_entity_plugin)).
+    pub fn update_entities_plugin(&mut self, updates: Vec<EntityType>) -> usize {
+        self.update_entities_policy(updates, true)
+    }
+
+    /// Shared write path of the four `update_entity*` entry points. Locked
+    /// layers always refuse (inside `update_entity_impl`); reference-only
+    /// entities refuse every caller except the plugin-owned `_plugin`
+    /// variants, mirroring the `remove_entities` edit-policy split.
+    fn update_entities_policy(
+        &mut self,
+        updates: Vec<EntityType>,
+        allow_reference_only: bool,
+    ) -> usize {
         let mut moved = 0usize;
         let mut changed = Vec::with_capacity(updates.len());
         let mut block_change = false;
         for entity in updates {
+            if !allow_reference_only && self.is_reference_only(entity.common().handle) {
+                continue;
+            }
             if self.update_entity_impl(entity, &mut changed, &mut block_change) {
                 moved += 1;
             }
@@ -969,7 +993,7 @@ impl Scene {
             .get(name)
             .map(|br| (br.handle, br.block_entity_handle));
 
-        let (br_handle, _block_handle) = if let Some((existing_br_h, existing_blk_h)) = existing {
+        let (br_handle, block_handle) = if let Some((existing_br_h, existing_blk_h)) = existing {
             if !options.redefine {
                 return Err(format!("Block \"{name}\" already exists."));
             }
@@ -991,7 +1015,7 @@ impl Scene {
                 br.units = options.unit;
                 br.description = options.description.clone();
                 br.explodable = options.allow_exploding;
-                br.scale_uniformly = options.scale_uniformly;
+                br.scale_uniformly = options.scale_uniformly || options.annotative;
             }
             // Update existing Block entity fields
             if let Some(EntityType::Block(b)) = self.document.get_entity_mut(existing_blk_h) {
@@ -1001,26 +1025,6 @@ impl Scene {
                 // go back to ZERO. Leaving an imported definition's non-zero
                 // base point here would subtract the picked base twice.
                 b.base_point = codec::types::Vector3::ZERO;
-            }
-            if options.annotative {
-                let annotative_vals = vec![codec::xdata::XDataValue::Integer16(1)];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    existing_blk_h,
-                    "AcadAnnotative",
-                    Some(annotative_vals),
-                );
-            }
-            if !options.hyperlink_url.is_empty() {
-                let link_vals = vec![codec::xdata::XDataValue::String(
-                    options.hyperlink_url.clone(),
-                )];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    existing_blk_h,
-                    "PE_URL",
-                    Some(link_vals),
-                );
             }
             (existing_br_h, existing_blk_h)
         } else {
@@ -1036,7 +1040,7 @@ impl Scene {
             block_record.units = options.unit;
             block_record.description = options.description.clone();
             block_record.explodable = options.allow_exploding;
-            block_record.scale_uniformly = options.scale_uniformly;
+            block_record.scale_uniformly = options.scale_uniformly || options.annotative;
             self.document
                 .block_records
                 .add(block_record)
@@ -1056,36 +1060,19 @@ impl Scene {
             self.document
                 .add_entity(EntityType::BlockEnd(block_end))
                 .map_err(|e| e.to_string())?;
-
-            if options.annotative {
-                let annotative_vals = vec![codec::xdata::XDataValue::Integer16(1)];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    block_handle,
-                    "AcadAnnotative",
-                    Some(annotative_vals),
-                );
-            }
-            if !options.hyperlink_url.is_empty() {
-                let link_vals = vec![codec::xdata::XDataValue::String(
-                    options.hyperlink_url.clone(),
-                )];
-                view::dispatch::set_entity_xdata(
-                    &mut self.document,
-                    block_handle,
-                    "PE_URL",
-                    Some(link_vals),
-                );
-            }
             (br_handle, block_handle)
         };
+        self.write_block_definition_xdata(br_handle, block_handle, &options);
 
         let source_entities: Vec<_> = options
             .handles
             .iter()
             .filter_map(|&h| self.document.get_entity(h).cloned().map(|e| (h, e)))
             .collect();
-        if source_entities.is_empty() {
+        // No objects at all defines an empty block (the reference's
+        // "Continue" / an empty selection at -BLOCK); objects that all vanished
+        // are an error.
+        if source_entities.is_empty() && !options.handles.is_empty() {
             return Err("No valid entities selected for block creation.".into());
         }
 
@@ -1104,15 +1091,167 @@ impl Scene {
         }
 
         let mut insert_handle = Handle::NULL;
-        if options.mode == crate::ui::window::block_definition::BlockObjectMode::Convert {
+        // An empty definition has nothing to convert into a reference.
+        if options.mode == crate::ui::window::block_definition::BlockObjectMode::Convert
+            && !options.handles.is_empty()
+        {
             let mut insert = DxfInsert::new(name, codec::types::Vector3::ZERO);
             codec::Entity::apply_transform(&mut insert, &options.block_to_world);
             insert_handle = self.add_entity(EntityType::Insert(insert));
         }
 
+        // The definition's thumbnail (BLOCK_RECORD 310), as the format keeps it.
+        let thumbnail = self.block_thumbnail(name);
+        if let Some(br) = self.document.block_records.get_mut(name) {
+            br.preview_data = thumbnail;
+        }
+
         // Advance the block epoch so all consumers and viewport renderers re-tessellate
         self.bump_geometry();
         Ok(insert_handle)
+    }
+
+    /// A 40 × 40, 32-bit bottom-up DIB of the block's geometry: white strokes
+    /// on the dark preview background, fitted with a one-pixel margin. Empty
+    /// for a block without drawable geometry.
+    pub fn block_thumbnail(&self, name: &str) -> Vec<u8> {
+        const SIZE: usize = 40;
+        let wires = self.block_preview_wires(name);
+        let mut lo = [f64::INFINITY; 2];
+        let mut hi = [f64::NEG_INFINITY; 2];
+        for wire in &wires {
+            for p in &wire.points {
+                if p[0].is_finite() && p[1].is_finite() {
+                    lo = [lo[0].min(p[0] as f64), lo[1].min(p[1] as f64)];
+                    hi = [hi[0].max(p[0] as f64), hi[1].max(p[1] as f64)];
+                }
+            }
+        }
+        if !lo[0].is_finite() {
+            return Vec::new();
+        }
+        let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1e-9);
+        let scale = (SIZE as f64 - 3.0) / span;
+        let offset = [
+            (SIZE as f64 - (hi[0] - lo[0]) * scale) / 2.0,
+            (SIZE as f64 - (hi[1] - lo[1]) * scale) / 2.0,
+        ];
+        let to_px = |p: &[f32; 3]| {
+            (
+                ((p[0] as f64 - lo[0]) * scale + offset[0]).floor() as i64,
+                ((p[1] as f64 - lo[1]) * scale + offset[1]).floor() as i64,
+            )
+        };
+        // Bottom-up rows of BGRA pixels.
+        let mut pixels = vec![[0x30u8, 0x28, 0x21, 0xFF]; SIZE * SIZE];
+        let mut plot = |x: i64, y: i64| {
+            if (0..SIZE as i64).contains(&x) && (0..SIZE as i64).contains(&y) {
+                pixels[y as usize * SIZE + x as usize] = [0xFF; 4];
+            }
+        };
+        for wire in &wires {
+            let mut prev: Option<(i64, i64)> = None;
+            for p in &wire.points {
+                if !(p[0].is_finite() && p[1].is_finite()) {
+                    prev = None;
+                    continue;
+                }
+                let (x1, y1) = to_px(p);
+                let (mut x0, mut y0) = prev.unwrap_or((x1, y1));
+                let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+                let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+                let mut err = dx + dy;
+                loop {
+                    plot(x0, y0);
+                    if x0 == x1 && y0 == y1 {
+                        break;
+                    }
+                    let e2 = 2 * err;
+                    if e2 >= dy {
+                        err += dy;
+                        x0 += sx;
+                    }
+                    if e2 <= dx {
+                        err += dx;
+                        y0 += sy;
+                    }
+                }
+                prev = Some((x1, y1));
+            }
+        }
+        let mut dib = Vec::with_capacity(40 + SIZE * SIZE * 4);
+        for value in [40u32, SIZE as u32, SIZE as u32] {
+            dib.extend_from_slice(&value.to_le_bytes());
+        }
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&32u16.to_le_bytes());
+        for value in [0u32, (SIZE * SIZE * 4) as u32, 1, 1, 0, 0] {
+            dib.extend_from_slice(&value.to_le_bytes());
+        }
+        for pixel in pixels {
+            dib.extend_from_slice(&pixel);
+        }
+        dib
+    }
+
+    /// The definition-level xdata of a block, kept on its block record the
+    /// way the format stores it: `AcadAnnotative` (`AnnotativeData { 1 1 }`)
+    /// for an annotative block, `AcadAnnoPO` when its orientation matches the
+    /// layout, and the `PE_URL` hyperlink. Markers an older definition kept
+    /// on its BLOCK entity are dropped.
+    pub fn write_block_definition_xdata(
+        &mut self,
+        br_handle: Handle,
+        block_handle: Handle,
+        options: &CreateBlockOptions,
+    ) {
+        use codec::xdata::{ExtendedDataRecord, XDataValue as V};
+        for app in ["AcadAnnotative", "AcadAnnoPO", "PE_URL"] {
+            view::dispatch::set_entity_xdata(&mut self.document, block_handle, app, None);
+            self.document.remove_object_xdata_record(br_handle, app);
+        }
+        let mut records = Vec::new();
+        if options.annotative {
+            let mut anno = ExtendedDataRecord::new("AcadAnnotative");
+            for value in [
+                V::String("AnnotativeData".into()),
+                V::ControlString("{".into()),
+                V::Integer16(1),
+                V::Integer16(1),
+                V::ControlString("}".into()),
+            ] {
+                anno.add_value(value);
+            }
+            records.push(anno);
+            if options.match_orientation {
+                let mut po = ExtendedDataRecord::new("AcadAnnoPO");
+                po.add_value(V::Integer16(1));
+                records.push(po);
+            }
+        }
+        let url = options.hyperlink_url.trim();
+        if !url.is_empty() {
+            let mut link = ExtendedDataRecord::new("PE_URL");
+            link.add_value(V::String(url.to_string()));
+            link.add_value(V::ControlString("{".into()));
+            let description = options.hyperlink_desc.trim();
+            if !description.is_empty() {
+                link.add_value(V::String(description.to_string()));
+            }
+            link.add_value(V::ControlString("{".into()));
+            link.add_value(V::Integer32(0));
+            link.add_value(V::ControlString("}".into()));
+            link.add_value(V::ControlString("}".into()));
+            records.push(link);
+        }
+        for record in records {
+            if !self.document.app_ids.contains(&record.application_name) {
+                let mut app = codec::tables::AppId::new(&record.application_name);
+                app.handle = self.document.allocate_handle();
+                let _ = self.document.app_ids.add(app);
+            }
+            self.document.set_object_xdata_record(br_handle, record);
+        }
     }
 
     /// Define a new block named `name` from `entities` (owned, not yet in the
@@ -1210,6 +1349,9 @@ impl Scene {
                 .map_err(|e| e.to_string())?;
             entity_handles.push(handle);
         }
+        // Solids, surfaces and meshes of a definition draw through their
+        // instanced block meshes, which only a tessellation pass creates.
+        self.refresh_meshes_for_handles(&entity_handles);
         // Block defns don't render on their own, but the geometry cache must
         // pick up the new definition so the interactive insert can preview it.
         self.bump_geometry();
@@ -1252,31 +1394,54 @@ impl Scene {
         block_end.common.owner_handle = br_handle;
         let _ = self.document.add_entity(EntityType::BlockEnd(block_end));
 
+        let mut added = Vec::new();
         for mut entity in entities {
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
             entity.common_mut().handle = Handle::NULL;
             entity.common_mut().owner_handle = br_handle;
-            let _ = self.document.add_entity(entity);
+            added.extend(self.document.add_entity(entity).ok());
         }
+        self.refresh_meshes_for_handles(&added);
         self.bump_geometry();
     }
 
     /// Replace the contents and base point of block `name`, defining it when
     /// absent. References keep pointing at it and show the new contents.
+    /// Refuses and returns Err if the new contents lead back to `name` directly or transitively.
     pub fn redefine_block_raw(
         &mut self,
         name: &str,
         base_point: codec::types::Vector3,
         entities: Vec<EntityType>,
-    ) {
+    ) -> Result<(), String> {
+        for entity in &entities {
+            if let EntityType::Insert(ins) = entity {
+                if crate::scene::block_service::would_create_cycle(
+                    &self.document,
+                    name,
+                    &ins.block_name,
+                ) {
+                    return Err(crate::scene::block_service::circular_dependency_error(
+                        name,
+                        &ins.block_name,
+                    ));
+                }
+            }
+        }
         let Some((br_handle, block_handle)) = self
             .document
             .block_records
             .get(name)
             .map(|br| (br.handle, br.block_entity_handle))
         else {
-            return self.define_block_raw(name, base_point, entities);
+            self.define_block_raw(name, base_point, entities);
+            return Ok(());
         };
+        if self.block_edit_block == Some(br_handle) {
+            return Err(format!(
+                "block \"{name}\" is open in the Block Editor; close it before redefining"
+            ));
+        }
         let owned: Vec<Handle> = self
             .document
             .entities()
@@ -1286,19 +1451,23 @@ impl Scene {
             })
             .map(|e| e.common().handle)
             .collect();
-        for h in owned {
-            self.document.remove_entity(h);
+        for h in &owned {
+            self.document.remove_entity(*h);
         }
         if let Some(EntityType::Block(block)) = self.document.get_entity_mut(block_handle) {
             block.base_point = base_point;
         }
+        // The old contents' meshes go with them; the new ones are built.
+        let mut changed = owned;
         for mut entity in entities {
             Self::reset_clone_subhandles(&mut self.document, &mut entity);
             entity.common_mut().handle = Handle::NULL;
             entity.common_mut().owner_handle = br_handle;
-            let _ = self.document.add_entity(entity);
+            changed.extend(self.document.add_entity(entity).ok());
         }
+        self.refresh_meshes_for_handles(&changed);
         self.bump_geometry();
+        Ok(())
     }
 
     pub(super) fn synced_hatch_models(
@@ -1349,7 +1518,7 @@ impl Scene {
                     return false;
                 }
                 let c = entity.common();
-                if c.invisible
+                if self.display_entity_invisible(c)
                     || self.entity_temporarily_hidden(handle)
                     || layer_hidden(&c.layer)
                     || crate::scene::annotative::annotative_offscale_for(
@@ -1650,6 +1819,11 @@ impl Scene {
         plot_only: bool,
     ) -> Vec<HatchModel> {
         let depth_map = self.draw_depth_map();
+        let visibility_reveal = if plot_only {
+            rustc_hash::FxHashSet::default()
+        } else {
+            self.visibility_reveal_handles()
+        };
         let graph = crate::scene::render_graph::RenderSceneGraph::new(
             &self.document,
             frozen,
@@ -1657,6 +1831,7 @@ impl Scene {
             all_visible,
             depth_map.as_ref(),
         )
+        .with_visibility_reveal(&visibility_reveal)
         .with_annotation_scale(self.annotation_scale)
         .with_viewport(viewport);
         let mut hatch_block_memo = std::collections::HashMap::new();
@@ -1861,6 +2036,11 @@ impl Scene {
         plot_only: bool,
     ) -> Vec<HatchModel> {
         let depth_map = self.draw_depth_map();
+        let visibility_reveal = if plot_only {
+            rustc_hash::FxHashSet::default()
+        } else {
+            self.visibility_reveal_handles()
+        };
         let graph = crate::scene::render_graph::RenderSceneGraph::new(
             &self.document,
             frozen,
@@ -1868,6 +2048,7 @@ impl Scene {
             all_visible,
             depth_map.as_ref(),
         )
+        .with_visibility_reveal(&visibility_reveal)
         .with_annotation_scale(self.annotation_scale);
         let mut models = Vec::new();
         let mut wipeout_sources = rustc_hash::FxHashMap::default();
@@ -3071,7 +3252,7 @@ impl Scene {
         if let Some(origin) = model.pattern_origin {
             dxf.record_pattern_origin(Vector2::new(origin[0], origin[1]));
         }
-        let mut entity = EntityType::Hatch(dxf);
+        let mut entity = EntityType::Hatch(Box::new(dxf));
 
         if let Some(layer) = layer {
             entity.as_entity_mut().set_layer(layer.to_string());
@@ -3137,10 +3318,15 @@ impl Scene {
         // The name alone leaves the header pointing at the previous style, and
         // a DWG writes the current style by handle only.
         self.document.header.current_dimstyle_handle = iso;
+        // The annotation multiplier depends on those units; Scene::new()
+        // left it at the unitless 1, which drew annotative objects 1000x too
+        // large until the first CANNOSCALE change shrank them. (#1674)
+        self.sync_annotation_scale_from_header();
         for obj in self.document.objects.values_mut() {
             if let codec::objects::ObjectType::Layout(l) = obj {
                 if l.name != "Model" {
                     crate::scene::apply_default_page_setup(l, "");
+                    self.unopened_layouts.insert(l.name.clone());
                 }
             }
         }
@@ -3172,7 +3358,7 @@ mod gradient_fill_tests {
 
     fn stored(scene: &Scene, handle: Handle) -> codec::entities::Hatch {
         match scene.document.get_entity(handle) {
-            Some(EntityType::Hatch(h)) => h.clone(),
+            Some(EntityType::Hatch(h)) => (**h).clone(),
             other => panic!("not a hatch: {other:?}"),
         }
     }

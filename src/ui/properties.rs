@@ -994,6 +994,13 @@ pub fn build_field_key_map(sections: &[PropSection]) -> HashMap<iced::widget::Id
 /// the `WebFieldCopy` operation idiom: `focusable` fires for every focusable
 /// widget, and we record the one that `is_focused()`.
 pub fn sync_active_field_task() -> iced::Task<Message> {
+    focused_widget_task(Message::PropSyncActive)
+}
+
+/// Ask the widget tree which field holds keyboard focus.
+pub fn focused_widget_task(
+    on_result: fn(Option<iced::advanced::widget::Id>) -> Message,
+) -> iced::Task<Message> {
     use iced::advanced::widget::operation::{Focusable, Outcome};
     use iced::advanced::widget::{Id, Operation};
     #[derive(Default)]
@@ -1018,7 +1025,7 @@ pub fn sync_active_field_task() -> iced::Task<Message> {
             Outcome::Some(self.focused.clone())
         }
     }
-    iced::advanced::widget::operate(FocusedId::default()).map(Message::PropSyncActive)
+    iced::advanced::widget::operate(FocusedId::default()).map(on_result)
 }
 
 /// A translated choice label paired with the unchanged value stored in the
@@ -1072,6 +1079,8 @@ pub struct PropertiesPanel {
     /// commit onto a different entity (e.g. two title blocks sharing a `REV1`
     /// tag).
     pub source_handles: Vec<Handle>,
+    /// Definition shown by the no-selection Block section, separate from entity targets.
+    pub block_definition: Option<Handle>,
     /// Whether the quick color picker dropdown is open.
     pub color_picker_open: bool,
     /// Whether the MTEXT background-colour picker dropdown is open. Separate
@@ -1098,6 +1107,12 @@ pub struct PropertiesPanel {
     pub collapsed_sections: HashSet<String>,
     /// Whether the editable-dropdown (block Name) option list is open.
     pub edit_choice_open: bool,
+    /// The open dropdown belongs to Quick Properties, not the docked panel:
+    /// both render these rows, and two open copies swallow each other's
+    /// clicks (#1766).
+    pub picker_in_quick: bool,
+    /// Set while `quick_view` builds its rows.
+    pub rendering_quick: std::cell::Cell<bool>,
     /// Field key of the value row currently being edited, or `None`. Marked when
     /// the user focuses an editable value field and cleared on commit / when the
     /// selection changes, so the active row can be highlighted. Geometry fields
@@ -1128,6 +1143,7 @@ impl Default for PropertiesPanel {
             hatch_pattern_focus: 0,
             edit_buf: HashMap::default(),
             source_handles: vec![],
+            block_definition: None,
             color_picker_open: false,
             bg_color_picker_open: false,
             open_color_field: None,
@@ -1136,6 +1152,8 @@ impl Default for PropertiesPanel {
             expanded_groups: HashSet::default(),
             collapsed_sections: HashSet::default(),
             edit_choice_open: false,
+            picker_in_quick: false,
+            rendering_quick: std::cell::Cell::new(false),
             active_field: None,
             field_key_by_id: HashMap::default(),
         }
@@ -1155,6 +1173,11 @@ impl PropertiesPanel {
     /// shown. O(1) via the [`PropertiesPanel::field_key_by_id`] map.
     pub fn prop_field_key_for_id(&self, id: &iced::widget::Id) -> Option<FieldKey> {
         self.field_key_by_id.get(id).cloned()
+    }
+
+    /// Whether the open dropdown belongs to the surface being built.
+    fn picker_here(&self) -> bool {
+        self.picker_in_quick == self.rendering_quick.get()
     }
 
     pub fn selected_handles(&self) -> Vec<Handle> {
@@ -1221,11 +1244,13 @@ impl PropertiesPanel {
             for section in &self.sections {
                 col = col.push(self.render_section(section));
             }
-            scrollable(col.width(Length::Fill))
-                .spacing(8)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            Element::from(
+                scrollable(col.width(Length::Fill))
+                    .spacing(8)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .map(|message| tag_picker(false, message))
         };
 
         container(column![header, title_bar, content])
@@ -1274,14 +1299,19 @@ impl PropertiesPanel {
         .padding([4, 10]);
 
         let mut sections = column![].spacing(0);
+        self.rendering_quick.set(true);
         for section in &self.sections {
             sections = sections.push(self.render_section(section));
         }
+        self.rendering_quick.set(false);
 
-        let content = scrollable(sections.width(Length::Fill))
-            .spacing(8)
-            .width(Length::Fill)
-            .height(Length::Shrink);
+        let content = Element::from(
+            scrollable(sections.width(Length::Fill))
+                .spacing(8)
+                .width(Length::Fill)
+                .height(Length::Shrink),
+        )
+        .map(|message| tag_picker(true, message));
 
         Some(
             container(column![title, content].spacing(0))
@@ -1479,7 +1509,7 @@ impl PropertiesPanel {
         if field == "background_color" {
             let selector = crate::ui::color_select::color_selector(
                 color,
-                self.bg_color_picker_open,
+                self.bg_color_picker_open && self.picker_here(),
                 crate::ui::color_select::ColorExtras {
                     by_layer: true,
                     by_block: true,
@@ -1512,7 +1542,7 @@ impl PropertiesPanel {
                 | "background_fill_color"
                 | "indicator_fill_color"
         ) {
-            let open = self.open_color_field.as_deref() == Some(field);
+            let open = self.open_color_field.as_deref() == Some(field) && self.picker_here();
             let fsel = field.to_string();
             let full_palette_field = field.to_string();
             let extras = if field == "dim_text_fill_color" {
@@ -1555,7 +1585,7 @@ impl PropertiesPanel {
         let selector = crate::ui::color_select::color_selector_with_name(
             color,
             display_name,
-            self.color_picker_open,
+            self.color_picker_open && self.picker_here(),
             crate::ui::color_select::ColorExtras {
                 by_layer: true,
                 by_block: true,
@@ -1570,7 +1600,7 @@ impl PropertiesPanel {
 
     fn render_color_varies_row<'a>(&'a self, label: &'a str) -> Element<'a, Message> {
         let selector = crate::ui::color_select::color_selector_varies(
-            self.color_picker_open,
+            self.color_picker_open && self.picker_here(),
             crate::ui::color_select::ColorExtras {
                 by_layer: true,
                 by_block: true,
@@ -1829,7 +1859,7 @@ impl PropertiesPanel {
             })
             .width(Length::Fill);
         let caret = button(
-            container(if self.edit_choice_open {
+            container(if self.edit_choice_open && self.picker_here() {
                 crate::ui::icons::themed_arrow_up(9.0)
             } else {
                 crate::ui::icons::themed_arrow_down(9.0)
@@ -1882,7 +1912,7 @@ impl PropertiesPanel {
             })
             .width(Length::Fill);
 
-        if !self.edit_choice_open {
+        if !(self.edit_choice_open && self.picker_here()) {
             return prop_row_with_active(label, head.into(), active);
         }
 
@@ -2086,7 +2116,7 @@ impl PropertiesPanel {
                 text(crate::ui::text_util::elide(current, 16))
                     .size(FONT_SZ)
                     .width(Length::Fill),
-                if self.hatch_pattern_picker_open {
+                if self.hatch_pattern_picker_open && self.picker_here() {
                     crate::ui::icons::themed_arrow_up(FONT_SZ)
                 } else {
                     crate::ui::icons::themed_arrow_down(FONT_SZ)
@@ -2106,7 +2136,7 @@ impl PropertiesPanel {
                 })),
                 text_color: palette.background.base.text,
                 border: Border {
-                    color: if self.hatch_pattern_picker_open {
+                    color: if self.hatch_pattern_picker_open && self.picker_here() {
                         palette.primary.base.color
                     } else {
                         palette.background.neutral.color
@@ -2120,7 +2150,7 @@ impl PropertiesPanel {
         .padding([COMBO_PAD_V, 6.0])
         .width(Length::Fill);
 
-        if !self.hatch_pattern_picker_open {
+        if !(self.hatch_pattern_picker_open && self.picker_here()) {
             return prop_row_widget(label, head.into());
         }
 
@@ -2845,6 +2875,21 @@ mod tests {
 
         assert!(scale.is_finite());
         assert!((0.01..=100.0).contains(&scale));
+    }
+}
+
+/// Marks a dropdown toggle with the surface it came from (see
+/// `PropertiesPanel::picker_in_quick`).
+fn tag_picker(quick: bool, message: Message) -> Message {
+    match message {
+        Message::PropColorPickerToggle
+        | Message::PropBgColorPickerToggle
+        | Message::PropColorFieldToggle(_)
+        | Message::PropEditChoiceToggle
+        | Message::PropHatchPatternPickerToggle(_) => {
+            Message::PropPickerSurface(quick, Box::new(message))
+        }
+        other => other,
     }
 }
 

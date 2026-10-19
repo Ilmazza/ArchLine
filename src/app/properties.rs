@@ -13,6 +13,29 @@ use codec::{Entity, EntityType, Handle};
 /// shows a count-only summary instead. Bulk edits still go through the ribbon.
 const MAX_PROP_AGGREGATE: usize = 2_000;
 
+fn property_choice_combos(
+    sections: &[crate::scene::model::object::PropSection],
+) -> rustc_hash::FxHashMap<String, iced::widget::combo_box::State<ui::properties::LocalizedChoice>>
+{
+    sections
+        .iter()
+        .flat_map(|section| section.props.iter())
+        .filter_map(|prop| match &prop.value {
+            PropValue::Choice { options, .. } => Some((
+                prop.field.to_string(),
+                iced::widget::combo_box::State::new(
+                    options
+                        .iter()
+                        .cloned()
+                        .map(ui::properties::LocalizedChoice::new)
+                        .collect(),
+                ),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Cap the total number of selection grips at
 /// [`crate::app::settings::MAX_SELECTED_GRIPS`], keeping entity order with
 /// non-midpoint (vertex/stretch) grips first. Below the cap both vecs are
@@ -554,14 +577,8 @@ impl OpenCADStudio {
             // Arrowheads are blocks; the closed-filled default has no
             // block, so seed the list with it and add the arrowhead
             // blocks (leading underscore) present in the drawing.
-            let arrow_names: Vec<String> = std::iter::once("Closed filled".to_string())
-                .chain(
-                    doc.block_records
-                        .iter()
-                        .filter(|b| b.name.starts_with('_'))
-                        .map(|b| b.name.clone()),
-                )
-                .collect();
+            // Filled in below from the current arrowhead. (#1820)
+            let arrow_names: Vec<String>;
             let block_names: Vec<String> = doc
                 .block_records
                 .iter()
@@ -590,15 +607,11 @@ impl OpenCADStudio {
                         .map(|s| s.name.clone())
                 })
                 .unwrap_or_else(|| "Standard".to_string());
-            let cur_arrow = ml
-                .arrowhead_handle
-                .and_then(|h| {
-                    doc.block_records
-                        .iter()
-                        .find(|b| b.handle == h)
-                        .map(|b| b.name.clone())
-                })
-                .unwrap_or_else(|| "Closed filled".to_string());
+            let cur_arrow = crate::entities::arrowheads::label(
+                doc,
+                ml.arrowhead_handle.unwrap_or(codec::Handle::NULL),
+            );
+            arrow_names = crate::entities::arrowheads::options([cur_arrow.as_str()]);
             let cur_ltype = ml
                 .line_type_handle
                 .and_then(|h| {
@@ -747,7 +760,7 @@ impl OpenCADStudio {
                     label: t!("Associative").into_owned(),
                     field: "associative",
                     value: crate::scene::model::object::PropValue::ReadOnly(
-                        if associative { "Yes" } else { "No" }.to_string(),
+                        if associative { t!("Yes") } else { t!("No") }.into_owned(),
                     ),
                 });
             }
@@ -793,7 +806,7 @@ impl OpenCADStudio {
                     label: t!("Associative").into_owned(),
                     field: "associative",
                     value: crate::scene::model::object::PropValue::ReadOnly(
-                        if associative { "Yes" } else { "No" }.to_string(),
+                        if associative { t!("Yes") } else { t!("No") }.into_owned(),
                     ),
                 });
             }
@@ -923,6 +936,22 @@ impl OpenCADStudio {
                     let overrides =
                         crate::io::xref::layer_overrides(doc, &br.name, &br.xref_path, &base_dir);
                     xref_rows(&mut sections, ins, &br.xref_path, factor, overrides);
+                }
+                // A dynamic block's visibility states, picked like its grip.
+                let mut custom_properties = Vec::new();
+                custom_properties.extend(Self::visibility_property(doc, handle));
+                if let Some(row) = crate::scene::block_lookup::reference_property(doc, handle) {
+                    custom_properties.push(row);
+                }
+                if !custom_properties.is_empty() {
+                    sections.push(crate::scene::model::object::PropSection {
+                        title: t!("Custom").into_owned(),
+                        props: custom_properties,
+                    });
+                }
+                // An associative array's counts and spacings.
+                if let Some(array) = crate::scene::assoc_array::array_of_insert(doc, handle) {
+                    sections.push(crate::scene::assoc_array::property_section(doc, &array));
                 }
             }
             // Underlay: name, page, path and size from the definition.
@@ -1250,7 +1279,7 @@ impl OpenCADStudio {
                 update_row_text(
                     &mut sections,
                     "tbl_flow_direction",
-                    if flow_up { "Up" } else { "Down" }.to_string(),
+                    if flow_up { t!("Up") } else { t!("Down") }.into_owned(),
                 );
                 update_row_text(
                     &mut sections,
@@ -1495,12 +1524,14 @@ impl OpenCADStudio {
             if let Some((anno_field, insert_after)) = anno {
                 let is_anno = crate::scene::annotative::is_annotative(doc, entity)
                     || match entity {
-                        codec::EntityType::Dimension(codec::entities::Dimension::Arc(
-                            dimension,
-                        )) => crate::scene::annotative::dim_style_is_annotative(
-                            doc,
-                            &dimension.base.style_name,
-                        ),
+                        codec::EntityType::Dimension(dimension)
+                            if matches!(**dimension, codec::entities::Dimension::Arc(_)) =>
+                        {
+                            crate::scene::annotative::dim_style_is_annotative(
+                                doc,
+                                &dimension.base().style_name,
+                            )
+                        }
                         codec::EntityType::Tolerance(_) => {
                             crate::scene::annotative::annotation_style_is_annotative(doc, entity)
                         }
@@ -1534,13 +1565,15 @@ impl OpenCADStudio {
                         codec::EntityType::MText(t) => set_row_value(
                             &mut sections,
                             "annotative",
-                            yes_no_choice(t.is_annotative),
+                            yes_no_choice(t.is_annotative || is_anno),
                         ),
-                        codec::EntityType::Dimension(codec::entities::Dimension::Arc(_)) => {
+                        codec::EntityType::Dimension(dimension)
+                            if matches!(**dimension, codec::entities::Dimension::Arc(_)) =>
+                        {
                             set_row(
                                 &mut sections,
                                 "annotative",
-                                if is_anno { "Yes" } else { "No" }.to_string(),
+                                if is_anno { t!("Yes") } else { t!("No") }.into_owned(),
                             )
                         }
                         codec::EntityType::Leader(_)
@@ -1548,7 +1581,7 @@ impl OpenCADStudio {
                                 doc, entity,
                             ) =>
                         {
-                            set_row(&mut sections, "annotative", "Yes".to_string())
+                            set_row(&mut sections, "annotative", t!("Yes").into_owned())
                         }
                         codec::EntityType::Text(_)
                         | codec::EntityType::Insert(_)
@@ -1560,7 +1593,7 @@ impl OpenCADStudio {
                         _ => set_row(
                             &mut sections,
                             "annotative",
-                            if is_anno { "Yes" } else { "No" }.to_string(),
+                            if is_anno { t!("Yes") } else { t!("No") }.into_owned(),
                         ),
                     }
                 }
@@ -1596,54 +1629,60 @@ impl OpenCADStudio {
         // text derives its paper height from the two endpoints,
         // while annotative text exposes that paper height and a
         // separate calculated model height.
-        if let codec::EntityType::Text(text) = entity {
-            let aligned = matches!(
-                text.horizontal_alignment,
-                codec::entities::TextHorizontalAlignment::Aligned
-            );
-            let annotative = crate::scene::annotative::is_annotative(doc, entity);
-            let model_factor = if annotative {
-                annotation_scale_handle
-                    .and_then(|handle| match doc.objects.get(&handle) {
-                        Some(codec::objects::ObjectType::Scale(scale)) => Some(
-                            scale.inverse_factor()
-                                / self.tabs[i].scene.annotation_scale_unit_factor(),
-                        ),
-                        _ => None,
-                    })
-                    .unwrap_or(self.tabs[i].scene.annotation_scale as f64)
-            } else {
-                1.0
+        if let Some(factor) = self.tabs[i]
+            .scene
+            .annotative_text_height_factor(entity.common().handle)
+        {
+            // Annotative text stores the model height of its default scale;
+            // the Height row edits the paper height at the displayed scale.
+            let (stored, model_factor, aligned) = match entity {
+                codec::EntityType::Text(text) => {
+                    let aligned = matches!(
+                        text.horizontal_alignment,
+                        codec::entities::TextHorizontalAlignment::Aligned
+                    );
+                    let stored = if aligned {
+                        crate::entities::text::text_run_placement_at_scale(text, doc, 1.0).height
+                            as f64
+                    } else {
+                        text.height
+                    };
+                    (stored, factor, aligned)
+                }
+                codec::EntityType::MText(text) => (text.height, factor, false),
+                _ => unreachable!("annotative_text_height_factor is text-only"),
             };
-            let paper_height = if aligned {
-                crate::entities::text::text_run_placement_at_scale(text, doc, model_factor as f32)
-                    .height as f64
-            } else {
-                text.height
-            };
+            let ratio = crate::scene::annotative::text_context_ratio(
+                doc,
+                entity.common().handle,
+                annotation_scale_handle,
+            )
+            .unwrap_or(1.0);
+            let paper_height = stored / model_factor;
             for section in sections.iter_mut() {
                 if let Some(row) = section.props.iter_mut().find(|row| row.field == "height") {
-                    if annotative {
-                        row.label = t!("Paper text height").into_owned();
-                    }
-                    if aligned {
-                        row.value = crate::scene::model::object::PropValue::ReadOnly(
-                            crate::entities::common::format_length(paper_height),
+                    let editable = !aligned
+                        && !matches!(
+                            row.value,
+                            crate::scene::model::object::PropValue::ReadOnly(_)
                         );
-                    }
+                    *row = crate::entities::common::num_prop(
+                        t!("Paper text height").as_ref(),
+                        "height",
+                        paper_height,
+                        editable,
+                    );
                 }
             }
-            if annotative {
-                insert_row_after(
-                    &mut sections,
-                    "height",
-                    crate::entities::common::ro_prop(
-                        t!("Model text height").as_ref(),
-                        "model_text_height",
-                        crate::entities::common::format_length(paper_height * model_factor),
-                    ),
-                );
-            }
+            insert_row_after(
+                &mut sections,
+                "height",
+                crate::entities::common::ro_prop(
+                    t!("Model text height").as_ref(),
+                    "model_text_height",
+                    crate::entities::common::format_length(stored * ratio),
+                ),
+            );
         }
 
         if !group_names.is_empty() {
@@ -1687,10 +1726,14 @@ impl OpenCADStudio {
                 format!("{} ({})", t!("Surface"), t!("Extrusion"))
             }
             // The reference names an angular dimension by its kind.
-            codec::EntityType::Dimension(codec::entities::Dimension::Angular2Ln(_)) => {
+            codec::EntityType::Dimension(dimension)
+                if matches!(**dimension, codec::entities::Dimension::Angular2Ln(_)) =>
+            {
                 t!("Angular Dimension").into_owned()
             }
-            codec::EntityType::Dimension(codec::entities::Dimension::Angular3Pt(_)) => {
+            codec::EntityType::Dimension(dimension)
+                if matches!(**dimension, codec::entities::Dimension::Angular3Pt(_)) =>
+            {
                 t!("3 Point Angular Dimension").into_owned()
             }
             codec::EntityType::Underlay(underlay) => match underlay.underlay_type {
@@ -1723,22 +1766,14 @@ impl OpenCADStudio {
                     title
                 } else {
                     use codec::entities::Dimension;
-                    match entity {
-                        codec::EntityType::Dimension(Dimension::Aligned(_)) => {
-                            t!("Aligned Dimensional Constraint")
-                        }
-                        codec::EntityType::Dimension(Dimension::Angular2Ln(_)) => {
-                            t!("Angular Dimension (Dynamic)")
-                        }
-                        codec::EntityType::Dimension(Dimension::Angular3Pt(_)) => {
+                    match crate::entities::dimension::as_dimension(entity) {
+                        Some(Dimension::Aligned(_)) => t!("Aligned Dimensional Constraint"),
+                        Some(Dimension::Angular2Ln(_)) => t!("Angular Dimension (Dynamic)"),
+                        Some(Dimension::Angular3Pt(_)) => {
                             t!("3 Point Angular Dimension (Dynamic)")
                         }
-                        codec::EntityType::Dimension(Dimension::Radius(_)) => {
-                            t!("Radius Dimensional Constraint")
-                        }
-                        codec::EntityType::Dimension(Dimension::Diameter(_)) => {
-                            t!("Diameter Dimensional Constraint")
-                        }
+                        Some(Dimension::Radius(_)) => t!("Radius Dimensional Constraint"),
+                        Some(Dimension::Diameter(_)) => t!("Diameter Dimensional Constraint"),
                         _ => t!("Linear Dimensional Constraint"),
                     }
                     .into_owned()
@@ -1746,6 +1781,19 @@ impl OpenCADStudio {
             }
             None => title,
         };
+
+        // A plugin-declared class identity (API v10) qualifies the title as
+        // "<Label> (<Native>)" while one of the live loaded plugins declares
+        // a label for this entity's XDATA class key; without one the title is
+        // exactly the native type. Display-only — the key round-trips the
+        // drawing, the label never does.
+        let title = crate::plugin::entity_labels::display_type_title(
+            crate::plugin::entity_labels::custom_entity_class_label(
+                &self.disabled_plugins,
+                source_entity,
+            ),
+            title,
+        );
         (sections, title)
     }
 
@@ -1774,6 +1822,7 @@ impl OpenCADStudio {
         // Which entities the previous panel was built for — an uncommitted
         // edit buffer only survives a rebuild for the *same* selection.
         let prev_handles = std::mem::take(&mut self.tabs[i].properties.source_handles);
+        let previous_definition = self.tabs[i].properties.block_definition;
         let selected_group = self.tabs[i].properties.selected_group.clone();
 
         // Seed the per-thread unit context from the document header so the
@@ -1814,6 +1863,9 @@ impl OpenCADStudio {
                 let art = linetypes::extract_pattern(&lt.description);
                 ui::properties::LinetypeItem { name, art }
             })
+            .chain(super::layers::catalog_linetype_items(
+                &self.tabs[i].scene.document,
+            ))
             .collect();
         let text_style_names: Vec<String> = self.tabs[i]
             .scene
@@ -2020,7 +2072,7 @@ impl OpenCADStudio {
                             value => value.to_string(),
                         })
                         .collect();
-                    let sections = vec![
+                    let mut sections = vec![
                         PropSection {
                             title: t!("General").into_owned(),
                             props: vec![
@@ -2255,27 +2307,15 @@ impl OpenCADStudio {
                             },
                         },
                     ];
+                    if let Some(section) = self.block_property_section(i) {
+                        sections.insert(5, section);
+                    }
                     ui::PropertiesPanel {
                         title: t!("No selection").into_owned(),
-                        choice_combos: sections
-                            .iter()
-                            .flat_map(|section| section.props.iter())
-                            .filter_map(|prop| match &prop.value {
-                                crate::scene::model::object::PropValue::Choice {
-                                    options, ..
-                                } => Some((
-                                    prop.field.to_string(),
-                                    iced::widget::combo_box::State::new(
-                                        options
-                                            .iter()
-                                            .cloned()
-                                            .map(ui::properties::LocalizedChoice::new)
-                                            .collect(),
-                                    ),
-                                )),
-                                _ => None,
-                            })
-                            .collect(),
+                        block_definition: tab
+                            .active_block_edit_session()
+                            .map(|session| session.br_handle),
+                        choice_combos: property_choice_combos(&sections),
                         sections,
                         layer_combo: iced::widget::combo_box::State::new(layer_names.clone()),
                         linetype_combo: iced::widget::combo_box::State::new(linetype_items.clone()),
@@ -2297,25 +2337,7 @@ impl OpenCADStudio {
                         prop_vertex,
                     );
                     ui::PropertiesPanel {
-                        choice_combos: sections
-                            .iter()
-                            .flat_map(|section| section.props.iter())
-                            .filter_map(|prop| match &prop.value {
-                                crate::scene::model::object::PropValue::Choice {
-                                    options, ..
-                                } => Some((
-                                    prop.field.to_string(),
-                                    iced::widget::combo_box::State::new(
-                                        options
-                                            .iter()
-                                            .cloned()
-                                            .map(ui::properties::LocalizedChoice::new)
-                                            .collect(),
-                                    ),
-                                )),
-                                _ => None,
-                            })
-                            .collect(),
+                        choice_combos: property_choice_combos(&sections),
                         sections,
                         title,
                         layer_combo: iced::widget::combo_box::State::new(layer_names.clone()),
@@ -2422,25 +2444,7 @@ filter={:.1} local={:.1} aggregate={:.1} entities={}",
                         retain_compact_solid_sections(&mut sections);
                     }
                     ui::PropertiesPanel {
-                        choice_combos: sections
-                            .iter()
-                            .flat_map(|section| section.props.iter())
-                            .filter_map(|prop| match &prop.value {
-                                crate::scene::model::object::PropValue::Choice {
-                                    options, ..
-                                } => Some((
-                                    prop.field.to_string(),
-                                    iced::widget::combo_box::State::new(
-                                        options
-                                            .iter()
-                                            .cloned()
-                                            .map(ui::properties::LocalizedChoice::new)
-                                            .collect(),
-                                    ),
-                                )),
-                                _ => None,
-                            })
-                            .collect(),
+                        choice_combos: property_choice_combos(&sections),
                         sections,
                         title: t!("%{count} objects selected", count = selected.len()).into_owned(),
                         selection_group_combo: iced::widget::combo_box::State::new(groups.clone()),
@@ -2456,6 +2460,49 @@ filter={:.1} local={:.1} aggregate={:.1} entities={}",
                     }
                 }
             };
+            if selected.is_empty() {
+                if let Some(item) = self.tabs[i].selected_authoring.and_then(|handle| {
+                    let session = self.tabs[i].active_block_edit_session()?;
+                    crate::scene::block_authoring::edit::items(
+                        &self.tabs[i].scene.document,
+                        session.br_handle,
+                    )
+                    .into_iter()
+                    .find(|item| item.handle == handle)
+                }) {
+                    use crate::scene::model::object::{PropSection, PropValue, Property};
+                    panel.title = item.name.clone();
+                    panel.sections = vec![PropSection {
+                        title: crate::t!("Geometry").into_owned(),
+                        props: std::iter::once(Property {
+                            label: crate::t!("Parameter name").into_owned(),
+                            field: "authoring_name",
+                            value: PropValue::PlainText(item.name.clone()),
+                        })
+                        .chain(item.grips.into_iter().map(|(part, point)| {
+                            Property {
+                                label: crate::t!(match part {
+                                    crate::scene::block_authoring::edit::Part::Point => "Position",
+                                    crate::scene::block_authoring::edit::Part::Base => "Base point",
+                                    crate::scene::block_authoring::edit::Part::End => "End point",
+                                    crate::scene::block_authoring::edit::Part::Reference =>
+                                        "Reference point",
+                                    crate::scene::block_authoring::edit::Part::Label(0) =>
+                                        "Label position",
+                                    _ => "Second label position",
+                                })
+                                .into_owned(),
+                                field: "authoring_grip_position",
+                                value: PropValue::ReadOnly(format!(
+                                    "{:.4}, {:.4}, {:.4}",
+                                    point.x, point.y, point.z
+                                )),
+                            }
+                        }))
+                        .collect(),
+                    }];
+                }
+            }
             // Precompute the focused-id → field-key map for O(1) lookups on
             // `PropSyncActive`; derived from `sections`, so rebuild it here.
             panel.field_key_by_id = crate::ui::properties::build_field_key_map(&panel.sections);
@@ -2463,7 +2510,9 @@ filter={:.1} local={:.1} aggregate={:.1} entities={}",
             // Carry the in-progress edits only when the selection is unchanged
             // (a commit-triggered rebuild); a genuine selection change starts
             // with a clean buffer so no stale value leaks onto the new entity.
-            panel.edit_buf = if prev_handles == new_handles {
+            let same_target =
+                prev_handles == new_handles && previous_definition == panel.block_definition;
+            panel.edit_buf = if same_target {
                 edit_buf
             } else {
                 Default::default()
@@ -2471,11 +2520,7 @@ filter={:.1} local={:.1} aggregate={:.1} entities={}",
             // The active-row highlight only survives a rebuild for the same
             // selection (like the edit buffer); a selection change clears it so
             // an old row isn't marked active against new content.
-            panel.active_field = if prev_handles == new_handles {
-                active_field
-            } else {
-                None
-            };
+            panel.active_field = if same_target { active_field } else { None };
             panel.expanded_groups = expanded_groups;
             panel.collapsed_sections = collapsed_sections;
             panel.source_handles = new_handles;
@@ -2668,10 +2713,14 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
     /// reachable from Options and from the sysvar of the same name.
     pub(super) fn refresh_selected_grips(&mut self) {
         let i = self.active_tab;
+        // Reference-only targets are cancelled like locked-layer ones: the
+        // plugin that owns the display geometry may have just designated the
+        // entity, and a drag that edits it would be overwritten on refresh.
         let locked_active_grip = self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
-            grip.targets
-                .iter()
-                .any(|target| self.tabs[i].scene.is_layer_locked(target.handle))
+            grip.targets.iter().any(|target| {
+                self.tabs[i].scene.is_layer_locked(target.handle)
+                    || self.tabs[i].scene.is_reference_only(target.handle)
+            })
         });
         if locked_active_grip {
             self.cancel_active_grip_edit();
@@ -2685,7 +2734,8 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
             let annotation_scale_handle = self.tabs[i].scene.displayed_annotation_scale_handle();
             let selected = self.tabs[i].scene.selected_entities();
             let single_handle = (selected.len() == 1
-                && !self.tabs[i].scene.is_layer_locked(selected[0].0))
+                && !self.tabs[i].scene.is_layer_locked(selected[0].0)
+                && !self.tabs[i].scene.is_reference_only(selected[0].0))
             .then(|| selected[0].0);
             let mut grips = Vec::new();
             let mut handles = Vec::new();
@@ -2698,7 +2748,9 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                 selected
             };
             for (handle, entity) in selected {
-                if self.tabs[i].scene.is_layer_locked(handle) {
+                if self.tabs[i].scene.is_layer_locked(handle)
+                    || self.tabs[i].scene.is_reference_only(handle)
+                {
                     continue;
                 }
                 let contextual = crate::scene::annotative::entity_for_annotation_context(
@@ -2726,7 +2778,7 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                 // scale are available.
                 if let codec::EntityType::Dimension(dim) = contextual.as_ref() {
                     if matches!(
-                        dim,
+                        &**dim,
                         codec::entities::Dimension::Linear(_)
                             | codec::entities::Dimension::Aligned(_)
                     ) && !dim.base().text_user_positioned
@@ -2763,13 +2815,17 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                         }
                     }
                 }
-                let dynamic_angle = match contextual.as_ref() {
-                    codec::EntityType::Dimension(
-                        dim @ (codec::entities::Dimension::Angular2Ln(_)
-                        | codec::entities::Dimension::Angular3Pt(_)),
-                    ) if self.tabs[i].scene.is_dynamic_dimension(handle) => Some(dim),
-                    _ => None,
-                };
+                let contextual_dimension =
+                    crate::entities::dimension::as_dimension(contextual.as_ref());
+                let dynamic_angle = contextual_dimension
+                    .filter(|dim| {
+                        matches!(
+                            dim,
+                            codec::entities::Dimension::Angular2Ln(_)
+                                | codec::entities::Dimension::Angular3Pt(_)
+                        )
+                    })
+                    .filter(|_| self.tabs[i].scene.is_dynamic_dimension(handle));
                 if let Some(dim) = dynamic_angle {
                     // A dynamic angle shows a triangle at each end of its arc
                     // pointing away from it, and squares at the arc point and
@@ -2865,28 +2921,42 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
         // Append the dynamic-block visibility (lookup) grip, if the lone
         // selection is a visibility-parametric block reference.
         self.refresh_visibility_grip(wo);
+        self.refresh_table_grip(wo);
+        self.refresh_test_action_grips(wo);
+        self.refresh_authoring_grips(wo);
     }
 
     pub(super) fn property_target_handles(&self, i: usize) -> Vec<Handle> {
         // The node graph edits its own node's entity through the panel's
         // handlers, independent of the drawing selection.
-        if let Some(handle) = self.property_target_override {
-            return vec![handle];
-        }
-        let mut handles = self.tabs[i].properties.selected_handles();
-        if handles.is_empty() {
-            handles = self.tabs[i].properties.source_handles.clone();
-        }
-        if handles.is_empty() {
-            handles.extend(self.tabs[i].selected_handle);
-        }
-        handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
-        handles
+        self.resolve_property_targets(i, true, |scene, handle| !scene.is_layer_locked(handle))
     }
 
     /// The point clouds the Locked row applies to: locked ones too, unless
     /// their layer is locked.
     pub(super) fn point_cloud_lock_targets(&self, i: usize) -> Vec<Handle> {
+        self.resolve_property_targets(i, false, |scene, handle| {
+            scene.locked_layer_name(handle).is_none()
+        })
+    }
+
+    fn resolve_property_targets(
+        &self,
+        i: usize,
+        include_override: bool,
+        mut include: impl FnMut(&crate::scene::Scene, Handle) -> bool,
+    ) -> Vec<Handle> {
+        if include_override {
+            if let Some(handle) = self.property_target_override {
+                let scene = &self.tabs[i].scene;
+                return scene
+                    .document
+                    .get_entity(handle)
+                    .filter(|_| include(scene, handle))
+                    .map(|_| vec![handle])
+                    .unwrap_or_default();
+            }
+        }
         let mut handles = self.tabs[i].properties.selected_handles();
         if handles.is_empty() {
             handles = self.tabs[i].properties.source_handles.clone();
@@ -2894,7 +2964,10 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
         if handles.is_empty() {
             handles.extend(self.tabs[i].selected_handle);
         }
-        handles.retain(|handle| self.tabs[i].scene.locked_layer_name(*handle).is_none());
+        let scene = &self.tabs[i].scene;
+        handles.retain(|handle| {
+            scene.document.get_entity(*handle).is_some() && include(scene, *handle)
+        });
         handles
     }
 
@@ -3043,8 +3116,8 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
     ) -> Option<Handle> {
         let i = self.active_tab;
         let tracks_dimension_chain = matches!(
-            &entity,
-            codec::EntityType::Dimension(
+            crate::entities::dimension::as_dimension(&entity),
+            Some(
                 codec::entities::Dimension::Linear(_)
                     | codec::entities::Dimension::Aligned(_)
                     | codec::entities::Dimension::Angular2Ln(_)
@@ -3156,7 +3229,11 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
         }
 
         if !preserve_entity_style {
-            crate::scene::view::dispatch::apply_color(&mut entity, self.ribbon.active_color);
+            crate::scene::view::dispatch::apply_named_color(
+                &mut entity,
+                self.ribbon.active_color,
+                self.ribbon.active_color_name(),
+            );
             crate::scene::view::dispatch::apply_common_prop(
                 &mut entity,
                 "linetype",
@@ -3407,7 +3484,15 @@ pub(super) fn build_selection_groups(
 
     for (kind, handles) in by_type {
         groups.push(ui::properties::SelectionGroup {
-            label: format!("{}({})", t!(title_case_word(&kind)), handles.len()),
+            label: format!(
+                "{}({})",
+                if kind == "insert" {
+                    t!("Block Reference").into_owned()
+                } else {
+                    t!(title_case_word(&kind)).into_owned()
+                },
+                handles.len()
+            ),
             handles,
         });
     }
@@ -4599,6 +4684,37 @@ mod chprop_integration_tests {
         );
     }
 
+    #[test]
+    fn property_target_resolvers_discard_stale_handles() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        let existing = line_handle(&mut app);
+        let stale = app.tabs[i].scene.document.allocate_handle();
+        app.tabs[i].properties.source_handles = vec![existing, stale];
+
+        assert_eq!(app.property_target_handles(i), vec![existing]);
+        assert_eq!(app.point_cloud_lock_targets(i), vec![existing]);
+
+        app.tabs[i].properties.source_handles = vec![stale];
+        assert!(app.property_target_handles(i).is_empty());
+        assert!(app.point_cloud_lock_targets(i).is_empty());
+
+        app.finish_pending_history(i);
+        let undo_before = app.tabs[i].history.undo_stack.len();
+        let color_before = app.tabs[i].scene.document.header.current_entity_color;
+        app.tabs[i].dirty = false;
+        let _ = app.update(crate::app::Message::PropColorChanged(
+            codec::types::Color::Index(9),
+        ));
+        app.finish_pending_history(i);
+        assert_eq!(app.tabs[i].history.undo_stack.len(), undo_before);
+        assert_eq!(
+            app.tabs[i].scene.document.header.current_entity_color,
+            color_before
+        );
+        assert!(!app.tabs[i].dirty);
+    }
+
     /// Regression test for the CLI `CHPROP` command. Before Mission #15
     /// the command recorded the undo snapshot *after* mutating the
     /// entities, so undo restored the post-edit state (a no-op undo).
@@ -5033,5 +5149,42 @@ mod aggregation_tests {
         let sections = aggregate_sections(&selected, &[]);
         let layer = row(&sections, "layer").expect("a layer row");
         assert!(format!("{:?}", layer.value).contains("WALLS"));
+    }
+}
+
+#[cfg(test)]
+mod custom_class_title_tests {
+    // Plugin-declared class labels (API v10) qualify the single-entity panel
+    // title as "<Label> (<Native>)" only while a declaring plugin is loaded.
+    // The test harness never loads plugins, so the observable behavior here is
+    // the gating: an entity stamped with a perfect identity record (registered
+    // app, class-prefix key) still shows today's exact native title. The
+    // "<Label> (<Native>)" form itself is covered by
+    // plugin::entity_labels::display_type_title, and the live-manager
+    // filtering by plugin::process::manager tests.
+    use crate::app::OpenCADStudio;
+
+    #[test]
+    fn single_entity_title_stays_native_without_a_loaded_plugin() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        let mut entity = codec::EntityType::Line(codec::entities::Line::from_points(
+            codec::types::Vector3::ZERO,
+            codec::types::Vector3::new(1.0, 0.0, 0.0),
+        ));
+        let mut record = codec::xdata::ExtendedDataRecord::new("CVIFC");
+        record.add_value(codec::xdata::XDataValue::String(
+            "CVIFC-CLASS:LINE".to_string(),
+        ));
+        entity.common_mut().extended_data.add_record(record);
+        let handle = app.tabs[i].scene.add_entity(entity);
+
+        let source = app.tabs[i]
+            .scene
+            .document
+            .get_entity(handle)
+            .expect("committed line");
+        let (_, title) = app.entity_property_sections(i, handle, source, &Vec::new(), None, 0);
+        assert_eq!(title, "Line");
     }
 }

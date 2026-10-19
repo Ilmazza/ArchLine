@@ -165,6 +165,7 @@ impl Scene {
 
     pub fn deselect_all(&mut self) {
         self.selected_constraint = None;
+        self.sub_segments.clear();
         if self.selected.is_empty() {
             return;
         }
@@ -203,6 +204,7 @@ impl Scene {
         let selected = handles
             .into_iter()
             .filter(|handle| self.passes_selection_filter(*handle))
+            .filter(|handle| !self.is_reference_only(*handle))
             .filter(|handle| {
                 self.document.get_entity(*handle).is_some_and(|entity| {
                     self.resident_entity_visible(
@@ -427,6 +429,27 @@ impl Scene {
         mode: crate::app::QSelectMode,
         append: bool,
     ) -> usize {
+        let condition = crate::app::QSelectCondition {
+            type_filter: type_name.map(str::to_owned),
+            property: property_field.map(|field| crate::app::QSelectPropertyChoice {
+                field: field.to_owned(),
+                label: field.to_owned(),
+                editor: crate::app::QSelectValueEditor::Text,
+            }),
+            operator: op,
+            value: value.to_owned(),
+        };
+        self.qselect_conditions(scope, &[condition], mode, append)
+    }
+
+    /// Evaluate all conditions against the same candidate set, then apply result behavior once.
+    pub fn qselect_conditions(
+        &mut self,
+        scope: crate::app::QSelectScope,
+        conditions: &[crate::app::QSelectCondition],
+        mode: crate::app::QSelectMode,
+        append: bool,
+    ) -> usize {
         use crate::app::{QSelectMode, QSelectOp};
         use crate::entities::traits::entity_type_name;
         let previous = self.selected.clone();
@@ -436,33 +459,44 @@ impl Scene {
             let Some(e) = self.document.get_entity(h) else {
                 continue;
             };
-            let type_ok = type_name.is_none_or(|t| entity_type_name(e) == t);
-            let prop_ok = if !type_ok {
-                true
-            } else {
-                match (property_field, op) {
-                    (None, _) | (_, QSelectOp::Any) => true,
-                    (Some(field), op) => match self.entity_property_value(e, field) {
-                        Some(actual) => match op {
-                            QSelectOp::Eq => actual.eq_ignore_ascii_case(value),
-                            QSelectOp::Neq => !actual.eq_ignore_ascii_case(value),
-                            QSelectOp::Gt | QSelectOp::Lt => {
-                                match (
-                                    crate::entities::common::parse_f64(&actual),
-                                    crate::entities::common::parse_f64(value),
-                                ) {
-                                    (Some(a), Some(b)) if matches!(op, QSelectOp::Gt) => a > b,
-                                    (Some(a), Some(b)) => a < b,
-                                    _ => false,
+            let matches_filter = conditions.iter().all(|condition| {
+                let type_ok = condition
+                    .type_filter
+                    .as_deref()
+                    .is_none_or(|t| entity_type_name(e) == t);
+                let prop_ok = if !type_ok {
+                    true
+                } else {
+                    match (
+                        condition
+                            .property
+                            .as_ref()
+                            .map(|property| property.field.as_str()),
+                        condition.operator,
+                    ) {
+                        (None, _) | (_, QSelectOp::Any) => true,
+                        (Some(field), op) => match self.entity_property_value(e, field) {
+                            Some(actual) => match op {
+                                QSelectOp::Eq => actual.eq_ignore_ascii_case(&condition.value),
+                                QSelectOp::Neq => !actual.eq_ignore_ascii_case(&condition.value),
+                                QSelectOp::Gt | QSelectOp::Lt => {
+                                    match (
+                                        crate::entities::common::parse_f64(&actual),
+                                        crate::entities::common::parse_f64(&condition.value),
+                                    ) {
+                                        (Some(a), Some(b)) if matches!(op, QSelectOp::Gt) => a > b,
+                                        (Some(a), Some(b)) => a < b,
+                                        _ => false,
+                                    }
                                 }
-                            }
-                            QSelectOp::Any => true,
+                                QSelectOp::Any => true,
+                            },
+                            None => false,
                         },
-                        None => false,
-                    },
-                }
-            };
-            let matches_filter = type_ok && prop_ok;
+                    }
+                };
+                type_ok && prop_ok
+            });
             let keep = match mode {
                 QSelectMode::Include => matches_filter,
                 QSelectMode::Exclude => !matches_filter,
@@ -583,6 +617,17 @@ impl Scene {
         type_name: Option<&str>,
         scope: crate::app::QSelectScope,
     ) -> Vec<crate::app::QSelectPropertyChoice> {
+        self.qselect_properties_with_sample(type_name, scope, None)
+    }
+
+    /// Use the picked entity's own property schema, including optional fields
+    /// that may not be present on the first entity of this type in the drawing.
+    fn qselect_properties_with_sample(
+        &self,
+        type_name: Option<&str>,
+        scope: crate::app::QSelectScope,
+        sample_handle: Option<Handle>,
+    ) -> Vec<crate::app::QSelectPropertyChoice> {
         use crate::app::{QSelectPropertyChoice, QSelectValueEditor};
         use crate::entities::traits::{entity_type_name, EntityTypeOps};
         use crate::scene::model::object::PropValue;
@@ -680,11 +725,16 @@ impl Scene {
                 .iter()
                 .map(|s| s.name.clone())
                 .collect();
-            let sample = candidate_handles
-                .iter()
-                .copied()
-                .filter_map(|h| self.document.get_entity(h))
-                .find(|e| entity_type_name(e) == t);
+            let sample = sample_handle
+                .and_then(|handle| self.document.get_entity(handle))
+                .filter(|entity| entity_type_name(entity) == t)
+                .or_else(|| {
+                    candidate_handles
+                        .iter()
+                        .copied()
+                        .filter_map(|h| self.document.get_entity(h))
+                        .find(|e| entity_type_name(e) == t)
+                });
             if let Some(sample) = sample {
                 let mut sections = vec![crate::scene::cache::properties::general_section(sample)];
                 if let Some(section) =
@@ -836,6 +886,58 @@ impl Scene {
         out
     }
 
+    /// Build editable equality conditions without changing the current selection.
+    /// The unique handle and empty values are deliberately not sampled.
+    pub fn qselect_conditions_from_entity(
+        &self,
+        handle: Handle,
+    ) -> Vec<crate::app::QSelectCondition> {
+        use crate::app::{QSelectCondition, QSelectOp, QSelectScope, QSelectValueEditor};
+        let Some(entity) = self.document.get_entity(handle) else {
+            return Vec::new();
+        };
+        let type_name = crate::entities::traits::entity_type_name(entity).to_owned();
+        let mut conditions = vec![QSelectCondition {
+            type_filter: Some(type_name.clone()),
+            property: None,
+            operator: QSelectOp::Eq,
+            value: String::new(),
+        }];
+        let properties = self.qselect_properties_with_sample(
+            Some(&type_name),
+            QSelectScope::CurrentSpace,
+            Some(handle),
+        );
+        for mut property in properties {
+            if property.field == "handle" {
+                continue;
+            }
+            let Some(value) = self.entity_property_value(entity, &property.field) else {
+                continue;
+            };
+            if value.trim().is_empty() {
+                continue;
+            }
+            // Ensure a sampled choice can also be edited, even outside the
+            // filter's current-selection scope.
+            if let QSelectValueEditor::Choice(options) = &mut property.editor {
+                if !options.contains(&value) {
+                    options.push(value.clone());
+                }
+            }
+            let condition = QSelectCondition {
+                type_filter: Some(type_name.clone()),
+                property: Some(property),
+                operator: QSelectOp::Eq,
+                value,
+            };
+            if condition.validation_error().is_none() {
+                conditions.push(condition);
+            }
+        }
+        conditions
+    }
+
     /// Reads a property value from an entity for QSELECT comparison.
     /// Returns the canonical string used as the left-hand side of the
     /// operator test. Common properties have hand-rolled formatting so
@@ -959,7 +1061,15 @@ impl Scene {
     // ── Erase ─────────────────────────────────────────────────────────────
 
     pub fn erase_entities(&mut self, handles: &[Handle]) {
-        self.remove_entities(handles, true);
+        self.remove_entities(handles, true, true);
+    }
+
+    /// Like [`erase_entities`](Self::erase_entities) but without the
+    /// reference-only skip. The plugin owns reference-only entities and
+    /// removes them through the plugin host API; locked-layer policy stays
+    /// enforced either way.
+    pub fn erase_entities_plugin(&mut self, handles: &[Handle]) {
+        self.remove_entities(handles, true, false);
     }
 
     /// Roll back entities created by the current command after a downstream
@@ -968,10 +1078,15 @@ impl Scene {
     /// The shared removal path keeps first-touch undo state, history objects,
     /// groups, selection, and derived caches coherent.
     pub(crate) fn rollback_new_entities(&mut self, handles: &[Handle]) {
-        self.remove_entities(handles, false);
+        self.remove_entities(handles, false, false);
     }
 
-    fn remove_entities(&mut self, handles: &[Handle], respect_layer_locks: bool) {
+    fn remove_entities(
+        &mut self,
+        handles: &[Handle],
+        respect_layer_locks: bool,
+        respect_reference_only: bool,
+    ) {
         let erase_handles = self.handles_expanded_for_leader_annotations(handles);
 
         // One pass over document.objects instead of a scan per erased handle.
@@ -995,8 +1110,13 @@ impl Scene {
         let mut hover_changed = false;
 
         for &h in &erase_handles {
-            // Objects on a locked layer can't be erased.
+            // Objects on a locked layer can't be erased. Reference-only
+            // entities are plugin-owned: only the plugin-owned erase path
+            // may remove them.
             if respect_layer_locks && self.is_layer_locked(h) {
+                continue;
+            }
+            if respect_reference_only && self.is_reference_only(h) {
                 continue;
             }
             let settings_handle = self.document.get_entity(h).and_then(|entity| match entity {
@@ -1024,6 +1144,12 @@ impl Scene {
                     let before = self.document.objects.get(&manager_handle).cloned();
                     self.record_undo_object_before(manager_handle, before);
                 }
+                // The designation set is scene state, not document state: a
+                // designated entity's set entry joins the same first-touch
+                // recording so undo restores entity and designation together.
+                if self.reference_only.is_marked(h) {
+                    self.record_undo_reference_designation_before(h);
+                }
             }
             self.delete_solid_history(h);
             if let Some(settings_handle) = settings_handle {
@@ -1042,6 +1168,9 @@ impl Scene {
             }
             self.remember_removed_cache_categories(h);
             self.document.remove_entity_arc(h);
+            // The set entry dies with its entity (an absent entity is never
+            // reference-only). Undo restores it through the recorded channel.
+            self.reference_only.remove(h);
             selection_changed |= self.selected.remove(&h);
             self.selected_order.retain(|selected| *selected != h);
             if self.hover_highlight == Some(h) {
@@ -1172,6 +1301,50 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qselect_sample_matches_identical_entities_without_unique_handles() {
+        use crate::app::{QSelectMode, QSelectScope};
+        use codec::entities::Line;
+        use codec::types::Vector3;
+        let mut scene = Scene::new();
+        let line = || {
+            EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(10.0, 0.0, 0.0),
+            ))
+        };
+        let first = scene.add_entity(line());
+        let second = scene.add_entity(line());
+        scene.select_entity(second, false);
+        let before = scene.selected.clone();
+        let conditions = scene.qselect_conditions_from_entity(first);
+        assert_eq!(
+            scene.selected, before,
+            "sampling must not change the selection"
+        );
+        assert!(conditions.iter().any(|condition| condition
+            .property
+            .as_ref()
+            .is_some_and(|property| property.field == "layer")));
+        assert!(conditions.iter().all(|condition| condition
+            .property
+            .as_ref()
+            .is_none_or(|property| property.field != "handle")));
+        assert!(conditions
+            .iter()
+            .all(|condition| condition.validation_error().is_none()));
+        assert_eq!(
+            scene.qselect_conditions(
+                QSelectScope::CurrentSpace,
+                &conditions,
+                QSelectMode::Include,
+                false,
+            ),
+            2
+        );
+        assert!(scene.selected.contains(&first) && scene.selected.contains(&second));
+    }
+
     #[test]
     fn pe_url_of_reads_standard_hyperlink_xdata() {
         use codec::entities::Point;

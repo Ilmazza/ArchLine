@@ -24,8 +24,84 @@ impl Scene {
     /// cached layout-name list is invalidated on insert.
     pub fn add_layout(&mut self, name: &str) -> codec::Result<Handle> {
         let handle = self.document.add_layout(name)?;
+        // Opening it fits the sheet the document made for it (placed at the
+        // origin) to its page and, with LAYOUTCREATEVIEWPORT, gives it its
+        // first viewport; saved before that, it is written with none.
+        self.unopened_layouts.insert(name.to_string());
         self.bump_layout_epoch();
         Ok(handle)
+    }
+
+    /// Give layout `name` the page of layout `source`: its page setup,
+    /// limits and UCS, and the sheet viewport's view. It opens as it is, so
+    /// it does not get the first viewport a new layout gets. The paper-space
+    /// objects are copied by the caller.
+    pub fn copy_layout_page(&mut self, source: &str, name: &str) {
+        let find = |document: &codec::CadDocument, wanted: &str| {
+            document.objects.values().find_map(|object| match object {
+                ObjectType::Layout(layout) if layout.name == wanted => Some(layout.clone()),
+                _ => None,
+            })
+        };
+        let (Some(from), Some(to)) = (find(&self.document, source), find(&self.document, name))
+        else {
+            return;
+        };
+        if let Some(ObjectType::Layout(layout)) = self.document.objects.get_mut(&to.handle) {
+            *layout = codec::objects::Layout {
+                handle: to.handle,
+                owner: to.owner,
+                name: to.name.clone(),
+                tab_order: to.tab_order,
+                block_record: to.block_record,
+                viewport: to.viewport,
+                viewports: to.viewports.clone(),
+                reactors: to.reactors.clone(),
+                xdictionary_handle: to.xdictionary_handle,
+                ..from.clone()
+            };
+        }
+        if let Some(EntityType::Viewport(sheet)) = self.document.get_entity(from.viewport).cloned()
+        {
+            if let Some(EntityType::Viewport(target)) = self.document.get_entity_mut(to.viewport) {
+                *target = Box::new(codec::entities::Viewport {
+                    common: target.common.clone(),
+                    ..*sheet
+                });
+            }
+        }
+        self.unopened_layouts.remove(name);
+        self.bump_layout_epoch();
+    }
+
+    /// The paper-space objects of layout `name`, without its sheet viewport.
+    pub fn layout_paper_entities(&self, name: &str) -> Vec<Handle> {
+        let Some((record, sheet)) = self.document.objects.values().find_map(|object| match object {
+            ObjectType::Layout(layout) if layout.name == name => {
+                Some((layout.block_record, layout.viewport))
+            }
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        self.document
+            .block_records
+            .iter()
+            .find(|br| br.handle == record)
+            .map(|br| {
+                br.entity_handles
+                    .iter()
+                    .copied()
+                    .filter(|handle| *handle != sheet)
+                    .filter(|handle| {
+                        !matches!(
+                            self.document.get_entity(*handle),
+                            None | Some(EntityType::Block(_) | EntityType::BlockEnd(_))
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Rename a paper-space layout.  Updates the Layout object name in the document.
@@ -34,6 +110,9 @@ impl Scene {
             if let ObjectType::Layout(l) = obj {
                 if l.name == old_name {
                     l.name = new_name.to_string();
+                    if self.unopened_layouts.remove(old_name) {
+                        self.unopened_layouts.insert(new_name.to_string());
+                    }
                     self.bump_layout_epoch();
                     return;
                 }

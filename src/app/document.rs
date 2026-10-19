@@ -128,6 +128,7 @@ pub(super) struct DocumentTab {
     /// must never target a tab by its transient vector index.
     pub(super) id: u64,
     pub(super) scene: Scene,
+    pub(super) table_grip: Option<super::visibility::TableGrip>,
     pub(super) current_path: Option<PathBuf>,
     /// Persistent native edit lease for the drawing currently at
     /// `current_path`. The sidecar portion survives atomic file replacement.
@@ -147,10 +148,17 @@ pub(super) struct DocumentTab {
     /// Monotonic committed-edit/undo/redo revision. Background save completion
     /// uses it with scene epochs so an older snapshot never clears newer work.
     pub(super) edit_revision: u64,
+    /// A whole document replaced this tab's content (file open, template new,
+    /// system open) and native plugins have not been told yet: the
+    /// message boundary (`OpenCADStudio::notify_plugins_document_opened`,
+    /// API v9) dispatches `DocumentOpened` once and clears it, so edits and
+    /// switching between tabs never announce the same load again.
+    pub(super) document_opened_pending: bool,
     pub(super) tab_title: String,
     pub(super) properties: PropertiesPanel,
     pub(super) layers: LayerPanel,
     pub(super) active_cmd: Option<Box<dyn CadCommand>>,
+    pub(super) measurement: super::measurement::MeasurementDisplay,
     /// Remaining command tokens queued behind a PAUSE (or `\`) awaiting user interaction.
     pub(super) pending_pause_tokens: Option<Vec<String>>,
     /// The selection set the most recent command worked on, captured when a
@@ -175,6 +183,7 @@ pub(super) struct DocumentTab {
     /// the active grip edit instead of committing it.
     pub(super) grip_base_pending: bool,
     pub(super) selected_handle: Option<Handle>,
+    pub(super) selected_authoring: Option<Handle>,
     /// Dynamic-block visibility grip for the current single selection.
     pub(super) visibility_grip: Option<super::visibility::VisibilityGrip>,
     pub(super) wireframe: bool,
@@ -205,6 +214,9 @@ pub(super) struct DocumentTab {
     /// Index of the field that TAB has focused (the one keystrokes edit).
     pub(super) dyn_active: usize,
     pub(super) history: HistoryState,
+    /// Drawing history is suspended while `history` belongs to BEDIT.
+    pub(super) block_edit_history: Option<super::block_editor::BlockEditHistory>,
+    pub(super) block_test: Option<super::block_test::BlockTestSession>,
     pub(super) active_layer: String,
     /// Block references whose properties panel shows per-axis Scale X/Y/Z even
     /// though the three factors are currently equal — the user unchecked the
@@ -227,6 +239,10 @@ pub(super) struct DocumentTab {
     pub(super) paper_bg_color: Option<[f32; 4]>,
     /// Active REFEDIT session, if any.
     pub(super) refedit_session: Option<RefEditSession>,
+    /// Sessions closed by REFCLOSE, reopened by undoing it.
+    pub(super) refedit_closed: Vec<RefEditSession>,
+    /// Sessions ended by undoing REFEDIT, reopened by redoing it.
+    pub(super) refedit_reopen: Vec<RefEditSession>,
     /// COUNT mode, while it is on.
     pub(crate) count: Option<crate::ui::window::count_palette::CountMode>,
     /// Open BEDIT block tabs. Definitions are edited live; each tab owns its
@@ -280,6 +296,8 @@ pub(super) struct DocumentTab {
     /// Model-space corners of the last crossing window drawn with no command
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
+    /// Colours picked in this drawing this session, newest first. Not saved.
+    pub(super) recent_colors: Vec<codec::types::Color>,
 }
 
 impl DocumentTab {
@@ -626,11 +644,13 @@ impl DocumentTab {
             dirty: false,
             recovery_save_as_required: false,
             edit_revision: 0,
+            document_opened_pending: true,
             prev_selection: Vec::new(),
             tab_title: format!("Drawing{}", n),
             properties: PropertiesPanel::empty(),
             layers: LayerPanel::default(),
             active_cmd: None,
+            measurement: super::measurement::MeasurementDisplay::default(),
             pending_pause_tokens: None,
             last_cmd: None,
             last_draw_anchor: None,
@@ -642,7 +662,9 @@ impl DocumentTab {
             grip_copy: false,
             grip_base_pending: false,
             selected_handle: None,
+            selected_authoring: None,
             visibility_grip: None,
+            table_grip: None,
             wireframe: false,
             render_mode: codec::entities::ViewportRenderMode::Wireframe2D,
             visual_style: "Wireframe 2D".into(),
@@ -656,6 +678,8 @@ impl DocumentTab {
             dyn_ref_screen: None,
             dyn_active: 0,
             history: HistoryState::default(),
+            block_edit_history: None,
+            block_test: None,
             active_layer: "0".to_string(),
             props_asym_scale: std::collections::HashSet::new(),
             graph: Default::default(),
@@ -665,6 +689,8 @@ impl DocumentTab {
             bg_color: None,
             paper_bg_color: None,
             refedit_session: None,
+            refedit_closed: Vec::new(),
+            refedit_reopen: Vec::new(),
             count: None,
             block_edits: Vec::new(),
             active_block_edit: None,
@@ -683,6 +709,7 @@ impl DocumentTab {
             suspended_cmd: None,
             transparent_resume: false,
             last_crossing_window: None,
+            recent_colors: Vec::new(),
         }
     }
 
@@ -694,6 +721,14 @@ impl DocumentTab {
         t.tab_title = "Start".to_string();
         t.is_start = true;
         t
+    }
+
+    /// A whole document just replaced this tab's content (file open, template
+    /// new, system open): the next message boundary announces
+    /// `DocumentOpened` once for this load (API v9). Call after the document
+    /// and its derived caches have settled.
+    pub(super) fn note_document_loaded(&mut self) {
+        self.document_opened_pending = true;
     }
 
     pub(super) fn tab_display_name(&self) -> String {
@@ -770,6 +805,10 @@ impl HistorySnapshot {
                 .saturating_add(d.named_parameters.as_ref().map_or(0, |(before, after)| {
                     before.len().saturating_add(after.len()).saturating_mul(128)
                 }))
+                .saturating_add(d.visibility_states.as_ref().map_or(0, |(before, after)| {
+                    (before.len() + after.len()).saturating_mul(32)
+                }))
+                .saturating_add(d.reference_designations.len().saturating_mul(16))
                 .saturating_add(d.label.len()),
             HistorySnapshot::ObjectVisibility(v) => v
                 .before
@@ -805,6 +844,11 @@ pub(super) struct ObjectVisibilitySnapshot {
 /// cloning the flat entity store.
 #[derive(Clone)]
 pub(super) struct DeltaSnapshot {
+    /// Editor current-state indices must follow undo even when two states show identical objects.
+    pub(super) visibility_states: Option<(
+        rustc_hash::FxHashMap<Handle, usize>,
+        rustc_hash::FxHashMap<Handle, usize>,
+    )>,
     pub(super) entities: Vec<(Handle, Option<Arc<EntityType>>, Option<Arc<EntityType>>)>,
     pub(super) current_layout_before: String,
     pub(super) current_layout_after: String,
@@ -822,6 +866,12 @@ pub(super) struct DeltaSnapshot {
     /// `document.objects`, so it needs its own channel here rather than
     /// riding along with `entities`/`structure`. Almost always empty.
     pub(super) parametric_constraints: Vec<ParametricConstraintsEntryDelta>,
+    /// Reference-only designations (API v9) this same command changed — set
+    /// state on `Scene` (see `scene::reference_only`), recorded as explicit
+    /// first-touch before/afters so undo/redo restores the designation with
+    /// the entity it belongs to (e.g. a plugin scope that both erases and
+    /// re-designates). Almost always empty.
+    pub(super) reference_designations: Vec<ReferenceDesignationDelta>,
     /// Drawing-wide parameter table changed by this transaction.
     pub(super) named_parameters: Option<(
         crate::scene::named_parameters::ParameterTable,
@@ -832,6 +882,8 @@ pub(super) struct DeltaSnapshot {
 
 #[derive(Clone)]
 pub(super) enum StructureSnapshot {
+    /// A broad save-time synchronization followed by a command's bounded edits.
+    Combined(Vec<StructureSnapshot>),
     /// Compatibility fallback for genuinely broad structural commands.
     Full(CadDocument),
     /// Exact layer-table entries touched by one command.
@@ -857,6 +909,7 @@ pub(super) enum StructureSnapshot {
 impl StructureSnapshot {
     pub(super) fn estimated_bytes(&self) -> usize {
         match self {
+            Self::Combined(parts) => parts.iter().map(Self::estimated_bytes).sum(),
             Self::Full(doc) => doc.objects.len().saturating_mul(192),
             Self::Layers(entries) => entries.len().saturating_mul(256),
             Self::TextStyles(entries) => entries.len().saturating_mul(320),
@@ -870,6 +923,7 @@ impl StructureSnapshot {
 
     pub(super) fn is_full(&self) -> bool {
         matches!(self, Self::Full(_))
+            || matches!(self,Self::Combined(parts) if parts.iter().any(Self::is_full))
     }
 }
 
@@ -896,6 +950,17 @@ pub(super) struct ParametricConstraintsEntryDelta {
     pub(super) after: crate::scene::parametric_constraints::ParametricConstraintSet,
 }
 
+/// One reference-only designation's before/after value within an entity delta
+/// (API v9). The designation set lives on `Scene`, not in the document, so
+/// the value rides its own channel — symmetric like every other delta field,
+/// undo applies the before value, redo the after value.
+#[derive(Clone)]
+pub(super) struct ReferenceDesignationDelta {
+    pub(super) handle: Handle,
+    pub(super) before: bool,
+    pub(super) after: bool,
+}
+
 #[derive(Default)]
 pub(super) struct HistoryState {
     pub(super) undo_stack: Vec<HistorySnapshot>,
@@ -904,6 +969,7 @@ pub(super) struct HistoryState {
 }
 
 pub(super) struct PendingHistorySnapshot {
+    pub(super) visibility_states_before: rustc_hash::FxHashMap<Handle, usize>,
     pub(super) label: String,
     pub(super) current_layout: String,
     pub(super) active_layer: String,
@@ -911,6 +977,12 @@ pub(super) struct PendingHistorySnapshot {
     pub(super) dirty_before: bool,
     pub(super) structure_before: CadDocument,
     pub(super) recorder: Arc<codec::document::EntityChangeRecorder>,
+    /// First-touch before-values of reference-only designations (API v9)
+    /// mutated inside this plugin scope (see `scene::reference_only`). Set
+    /// mutations are not document writes, so the scope closes by reading the
+    /// set's current state as the after-image and keeping entries whose value
+    /// actually flipped.
+    pub(super) reference_designations_before: Vec<(Handle, bool)>,
     /// Kept as an undo step even when nothing changed.
     pub(super) keep_empty: bool,
 }

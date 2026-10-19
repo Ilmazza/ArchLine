@@ -424,13 +424,33 @@ impl OpenCADStudio {
         let i = self.active_tab;
         self.push_undo_snapshot(i, "INSERT");
         self.merge_dependencies(i, &deps);
-        for def in deps.blocks {
+        let apps = crate::app::command_driver::clipboard::eed_app_map(
+            &self.tabs[i].scene.document,
+            &deps,
+        );
+        let mut created = Vec::new();
+        for def in &deps.blocks {
             let scene = &mut self.tabs[i].scene;
-            if redefine && def.name.eq_ignore_ascii_case(name) {
-                scene.redefine_block_raw(&def.name, def.base_point, def.entities);
-            } else if scene.document.block_records.get(&def.name).is_none() {
-                scene.define_block_raw(&def.name, def.base_point, def.entities);
+            let mut entities = def.entities.clone();
+            for entity in &mut entities {
+                crate::app::command_driver::clipboard::remap_eed_apps(entity, &apps);
             }
+            if redefine && def.name.eq_ignore_ascii_case(name) {
+                if let Err(err) = scene.redefine_block_raw(&def.name, def.base_point, entities) {
+                    self.command_line.push_error(&err);
+                    return Err(err);
+                }
+            } else if scene.document.block_records.get(&def.name).is_none() {
+                scene.define_block_raw(&def.name, def.base_point, entities);
+                created.push(def);
+            }
+        }
+        // A dynamic definition keeps its parameters and states.
+        use crate::app::command_driver::clipboard::{block_record_map, import_block_def_graph};
+        let document = &mut self.tabs[i].scene.document;
+        let records = block_record_map(document, &deps.blocks);
+        for def in created {
+            import_block_def_graph(document, def, &records);
         }
         self.tabs[i].scene.populate_meshes_from_document();
         self.tabs[i].dirty = true;
@@ -625,14 +645,7 @@ impl OpenCADStudio {
         self.block_palette.source_tab_id = Some(self.tabs[i].id);
         self.block_palette.source_block_epoch = self.tabs[i].scene.block_epoch;
         let doc = &self.tabs[i].scene.document;
-        let annotative = |name: &str| {
-            doc.block_records.get(name).is_some_and(|br| {
-                matches!(
-                    doc.get_entity(br.block_entity_handle),
-                    Some(codec::EntityType::Block(b)) if b.common.extended_data.records().iter().any(|r| r.application_name == "AcadAnnotative")
-                )
-            })
-        };
+        let annotative = |name: &str| crate::scene::annotative::block_is_annotative(doc, name);
         let entries: Vec<BlockEntry> = names
             .into_iter()
             .map(|name| BlockEntry {

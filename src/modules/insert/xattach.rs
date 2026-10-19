@@ -147,6 +147,9 @@ pub struct XAttachCommand {
 
 const NONZERO: &str = "Value must be nonzero.";
 
+/// Raster image files ATTACH places as images.
+pub const IMAGE_EXTENSIONS: &[&str] = &["bmp", "gif", "jpg", "jpeg", "png", "tif", "tiff", "webp"];
+
 impl XAttachCommand {
     pub fn new(request: XrefAttachRequest, placement: XrefPlacement, label: &'static str) -> Self {
         let block_name = path_to_block_name(&request.path);
@@ -648,7 +651,17 @@ pub fn prepare_xref_definition(
     request: &XrefAttachRequest,
     host_file: Option<&std::path::Path>,
 ) -> String {
-    let stem = path_to_block_name(&request.path);
+    prepare_named_xref_definition(scene, request, host_file, &path_to_block_name(&request.path))
+}
+
+/// [`prepare_xref_definition`] under a chosen name instead of the file's.
+pub fn prepare_named_xref_definition(
+    scene: &mut Scene,
+    request: &XrefAttachRequest,
+    host_file: Option<&std::path::Path>,
+    stem: &str,
+) -> String {
+    let stem = stem.to_string();
     if let Some(existing) = existing_reference(scene, &stem) {
         return existing;
     }

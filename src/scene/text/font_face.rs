@@ -96,7 +96,9 @@ impl Face {
             }
         }
         let is_builtin = lff::is_builtin(font_name);
-        let has_sys = sysfont::has_family(font_name);
+        // A missing `.shx` file draws with a stroke substitute, never with a
+        // TrueType face of a similar name (measured).
+        let has_sys = !lff::is_shx_name(font_name) && sysfont::has_family(font_name);
         if !is_builtin && has_sys {
             let canonical =
                 sysfont::canonical_family_name(font_name).unwrap_or_else(|| font_name.to_string());
@@ -144,6 +146,17 @@ impl Face {
                 }
                 primary.glyph(ch)
             }
+        }
+    }
+
+    /// `ch`'s glyph from this face itself, without the TrueType fallback
+    /// [`glyph`](Self::glyph) reaches for when the face lacks it.
+    pub fn own_glyph(&self, ch: char) -> Option<GlyphRef<'_>> {
+        match self {
+            Face::Lff(f) => f.glyph(ch).map(GlyphRef::Borrowed),
+            Face::Ttf { family, .. } => ttf_glyph::glyph(family, ch).map(GlyphRef::Owned),
+            Face::Shx { path, .. } => shx::font_glyph(path, ch as u16).map(GlyphRef::Owned),
+            Face::WithBig { primary, .. } => primary.own_glyph(ch),
         }
     }
 
@@ -264,6 +277,30 @@ mod tests {
     fn shx_name_stays_lff() {
         assert!(matches!(Face::resolve("txt"), Face::Lff(_)));
         assert!(matches!(Face::resolve("romans.shx"), Face::Lff(_)));
+    }
+
+    // `txt`/`monotxt` are the DXF *stroke* text fonts. An installed TrueType
+    // face that happens to share the name (e.g. "Txt Regular") is not that
+    // font and must never stand in for it, so the stroke substitute is drawn
+    // on every machine. The #1764 escape hatch (an installed copy of a real
+    // TrueType alias such as ISOCPEUR draws that face) stays for aliases that
+    // genuinely name one.
+    #[test]
+    fn stroke_aliases_ignore_a_same_named_true_type_face() {
+        for name in &["txt", "TXT", "monotxt", "MONOTXT"] {
+            assert!(
+                matches!(Face::resolve(name), Face::Lff(_)),
+                "{name} must resolve to the embedded stroke font"
+            );
+        }
+        // A stroke face still supplies its own Latin glyphs.
+        assert!(Face::resolve("txt").glyph('A').is_some());
+        // ISOCPEUR keeps the #1764 behaviour: Lff stand-in, or the installed
+        // TrueType face when one is present.
+        assert!(matches!(
+            Face::resolve("isocpeur"),
+            Face::Lff(_) | Face::Ttf { .. }
+        ));
     }
 
     #[test]

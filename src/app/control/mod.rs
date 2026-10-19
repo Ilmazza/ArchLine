@@ -204,6 +204,26 @@ fn open_bytes_request(req: &Value) -> Result<(String, Vec<u8>), Value> {
     }
     Ok((name.to_string(), bytes))
 }
+/// `{"op":"font_register","file_name":"Brand-Regular.ttf","data_base64":"…"}`:
+/// a host hands over a TrueType/OpenType file that text styles reference by
+/// name. The web build has no font folder, so this is how such styles get
+/// their real face instead of a fallback.
+fn font_register_request(req: &Value) -> Result<(String, Vec<u8>), Value> {
+    use base64::Engine as _;
+    let name = string(req, "file_name")?;
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    if name.is_empty() {
+        return Err(failure("invalid_request", "Missing file_name"));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req["data_base64"].as_str().unwrap_or_default())
+        .map_err(|e| failure("invalid_request", format!("data_base64: {e}")))?;
+    if bytes.is_empty() {
+        return Err(failure("invalid_request", "data_base64 is empty"));
+    }
+    Ok((name.to_string(), bytes))
+}
+
 fn string<'a>(req: &'a Value, key: &str) -> Result<&'a str, Value> {
     req[key]
         .as_str()
@@ -277,6 +297,7 @@ fn command_category(name: &str) -> &'static str {
         "BREAK",
         "JOIN",
         "EXPLODE",
+        "TXTEXP",
         "STRETCH",
         "ARRAY",
         "PEDIT",
@@ -287,7 +308,17 @@ fn command_category(name: &str) -> &'static str {
     .contains(&name)
     {
         "modify"
-    } else if ["DIST", "ID", "AREA", "MEASURE", "MEASUREGEOM"].contains(&name) {
+    } else if [
+        "DIST",
+        "ID",
+        "AREA",
+        "MEASURE",
+        "MEASUREGEOM",
+        "MEASURERADIUS",
+        "MEASUREANGLE",
+    ]
+    .contains(&name)
+    {
         "inspect"
     } else if ["ZOOM", "PAN", "UCS", "PLAN", "VPORTS", "3DORBIT"].contains(&name) {
         "view"
@@ -349,10 +380,13 @@ fn command_selection_policy(name: &str) -> &'static str {
         "CUTCLIP",
         "ERASE",
         "EXPLODE",
+        "TXTEXP",
+        "TXT2MTXT",
         "GROUP",
         "LAYCUR",
         "LAYFRZ",
         "LAYLCK",
+        "LAYCUR",
         "LAYMCUR",
         "LAYOFF",
         "LAYULK",
@@ -538,6 +572,7 @@ impl OpenCADStudio {
                 | "audit"
                 | "text_search"
                 | "text_audit"
+                | "keytips"
         );
         if !query && !self.control.enabled {
             return (
@@ -744,6 +779,30 @@ impl OpenCADStudio {
                         Task::none(),
                     );
                 }
+                // Any other request settles once the work it started reports
+                // back. When that never happens (a save or open whose result
+                // never arrives) the bridge would stay busy until the app is
+                // killed, so `cancel` ends the active command and closes the
+                // request as cancelled. (#1801)
+                if op == "cancel" {
+                    let task = self.update(Message::CommandEscape);
+                    if let Some(p) = self.control.pending.as_mut() {
+                        p.cancelled = true;
+                        p.pending = 0;
+                    }
+                    self.control_settle_inner(true);
+                    let response = self
+                        .control
+                        .completed
+                        .iter()
+                        .find(|(i, _, _)| *i == pending_id)
+                        .map(|(_, _, r)| r.clone());
+                    return (
+                        response
+                            .unwrap_or_else(|| failure("busy", "Wait for the running operation")),
+                        task,
+                    );
+                }
                 return (
                     failure("busy", "Wait for the running operation"),
                     Task::none(),
@@ -774,7 +833,12 @@ impl OpenCADStudio {
             }
         // Interactive requests operate on the active tab by definition, so
         // a client may omit document_id (the GUI-hosted REST channel does).
-        } else if !query && !matches!(op, "new" | "open" | "stop" | "user_select" | "getpoint") {
+        } else if !query
+            && !matches!(
+                op,
+                "new" | "open" | "font_register" | "stop" | "user_select" | "getpoint"
+            )
+        {
             return (
                 failure("document_required", "Read state and supply document_id"),
                 Task::none(),
@@ -824,6 +888,9 @@ impl OpenCADStudio {
                     }
                 }
                 "grips" => self.control_grips(),
+                "keytips" => self
+                    .ribbon
+                    .keytips_json(req["detail"].as_str() == Some("full")),
                 "xdata_get" => self.xdata_read(&req),
                 "get_selection" => self.control_get_selection(),
                 "text_search" => self.control_text_search(&req).unwrap_or_else(|e| e),
@@ -945,10 +1012,9 @@ impl OpenCADStudio {
             "new" => {
                 if let Some(template) = req["template"].as_str() {
                     match self.apply_template(template) {
-                        Ok(purged) => {
+                        Ok(()) => {
                             self.set_control_result(json!({
                                 "template": template,
-                                "purged": purged,
                                 "total": self.tabs[i].scene.document.entities().count(),
                             }));
                             Task::none()
@@ -980,6 +1046,24 @@ impl OpenCADStudio {
             "open" => self.update(Message::OpenExternal(std::path::PathBuf::from(string(
                 req, "path",
             )?))),
+            "font_register" => {
+                let (name, bytes) = font_register_request(req)?;
+                let (family, faces) =
+                    crate::scene::text::sysfont::register_font_file(&name, &bytes)
+                        .ok_or_else(|| failure("font_invalid", "data_base64 holds no font face"))?;
+                // Same invalidation as a fetched web font: styles that fell
+                // back while the file was missing lay out again.
+                crate::scene::text::ttf_glyph::clear_fallback_cache();
+                for tab in self.tabs.iter_mut() {
+                    tab.scene.invalidate_text_geometry_dependencies();
+                }
+                self.set_control_result(json!({
+                    "file_name": name,
+                    "family": family,
+                    "faces": faces,
+                }));
+                Task::none()
+            }
             "activate" | "switch_document" => {
                 let i = self
                     .tabs
@@ -1073,6 +1157,7 @@ impl OpenCADStudio {
             "property" => self.control_set_property(req)?,
             "grip_drag" => self.control_grip_drag(req)?,
             "click" => self.control_click(req)?,
+            "pointer" => self.control_pointer(req)?,
             "set_properties" => self.control_set_record_properties(req)?,
             "action" => self.control_ui_action(req)?,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1103,6 +1188,12 @@ impl OpenCADStudio {
             "view_focus" => self.control_view_focus(req)?,
             #[cfg(not(target_arch = "wasm32"))]
             "save" => {
+                if self.tabs[i].block_test.is_some() {
+                    return Err(failure(
+                        "temporary_document",
+                        "Test Block is temporary and cannot be saved",
+                    ));
+                }
                 let path = req["path"]
                     .as_str()
                     .map(std::path::PathBuf::from)
@@ -1149,6 +1240,55 @@ impl OpenCADStudio {
                         true,
                     )
                 }
+            }
+            // Web: no filesystem path; the drawing comes back in the reply.
+            #[cfg(target_arch = "wasm32")]
+            "save" => {
+                if self.tabs[i].block_test.is_some() {
+                    return Err(failure(
+                        "temporary_document",
+                        "Test Block is temporary and cannot be saved",
+                    ));
+                }
+                use base64::Engine as _;
+                let default_is_dxf = crate::io::source_is_dxf(None, &self.tabs[i].scene.document);
+                let (version, is_dxf) = super::automation::requested_save_target(
+                    req,
+                    self.tabs[i].scene.document.version,
+                    default_is_dxf,
+                    None,
+                )
+                .map_err(|error| failure("invalid_target", error))?;
+                let dropped =
+                    crate::io::dropped_on_save_count(&self.tabs[i].scene.document, version, is_dxf);
+                if dropped > 0 && req["allow_lossy"].as_bool() != Some(true) {
+                    return Err(failure(
+                        "lossy_conversion_not_acknowledged",
+                        format!(
+                            "Conversion would drop {dropped} unsupported record(s); set allow_lossy=true to acknowledge"
+                        ),
+                    ));
+                }
+                let ext = if is_dxf { "dxf" } else { "dwg" };
+                self.sync_view_state_for_save(i);
+                super::update::util::sync_annotation_scale_header(&mut self.tabs[i].scene);
+                self.stamp_header_sysvars(i);
+                self.sync_solid_models_for_save(i);
+                self.tabs[i].scene.sync_native_parametric_graph();
+                let bytes = crate::io::save_to_bytes(&self.tabs[i].scene.document, ext, version)
+                    .map_err(|error| failure("save_failed", error))?;
+                self.tabs[i].dirty = false;
+                let name = req["name"].as_str().filter(|name| !name.is_empty());
+                let name = name.map_or_else(|| format!("drawing.{ext}"), str::to_string);
+                self.set_control_result(json!({
+                    "name": name,
+                    "target_format": ext,
+                    "target_version": format!("{version:?}"),
+                    "dropped_on_save": dropped,
+                    "bytes": bytes.len(),
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }));
+                Task::none()
             }
             #[cfg(not(target_arch = "wasm32"))]
             "save_verified" => {
@@ -1245,14 +1385,9 @@ impl OpenCADStudio {
     pub(super) fn control_track(&mut self, task: Task<Message>) -> Task<Message> {
         let track_zero_unit = self.control.pending.as_ref().is_some_and(|p| {
             p.request["op"] == "run"
-                && p.request["cmd"]
-                    .as_str()
-                    .is_some_and(|cmd| {
-                        matches!(
-                            cmd.trim().to_ascii_uppercase().as_str(),
-                            "SAVE" | "QSAVE"
-                        )
-                    })
+                && p.request["cmd"].as_str().is_some_and(|cmd| {
+                    matches!(cmd.trim().to_ascii_uppercase().as_str(), "SAVE" | "QSAVE")
+                })
         });
         // Most zero-unit tasks are `Task::none()` and have already completed
         // synchronously. SAVE/QSAVE are the deliberate exception: the command
@@ -1334,11 +1469,22 @@ impl OpenCADStudio {
         }
     }
     pub(super) fn control_settle(&mut self) {
-        if self.control.pending.as_ref().is_none_or(|p| p.pending != 0) || self.opening.is_some() {
+        self.control_settle_inner(false);
+    }
+
+    /// `force` closes the request even while an open or a save it may have
+    /// started is still running.
+    fn control_settle_inner(&mut self, force: bool) {
+        if self.control.pending.as_ref().is_none_or(|p| p.pending != 0) {
+            return;
+        }
+        if !force && self.opening.is_some() {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.active_save_jobs.is_empty() || self.pending_native_thumbnail_save.is_some() {
+        if !force
+            && (!self.active_save_jobs.is_empty() || self.pending_native_thumbnail_save.is_some())
+        {
             return;
         }
         let p = self.control.pending.take().unwrap();
@@ -1794,10 +1940,7 @@ mod tests {
                 .as_nanos(),
         ));
         let _ = std::fs::remove_file(&path);
-        let saved = request(
-            &mut app,
-            json!({"op":"save","path":path,"overwrite":true}),
-        );
+        let saved = request(&mut app, json!({"op":"save","path":path,"overwrite":true}));
         assert_eq!(saved["ok"], true, "{saved}");
         assert_eq!(
             request(&mut app, json!({"op":"run","cmd":"LINE 0,5 10,5"}))["status"],
@@ -1834,10 +1977,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("blocked.dwg");
-        let saved = request(
-            &mut app,
-            json!({"op":"save","path":path,"overwrite":true}),
-        );
+        let saved = request(&mut app, json!({"op":"save","path":path,"overwrite":true}));
         assert_eq!(saved["ok"], true, "{saved}");
         // A directory at the target path makes the next write fail
         // deterministically; the operation must settle as failed instead of
@@ -1851,7 +1991,9 @@ mod tests {
         let qsave = request(&mut app, json!({"op":"run","cmd":"QSAVE"}));
         assert_eq!(qsave["status"], "failed", "{qsave}");
         assert!(
-            qsave["error"].as_str().is_some_and(|error| !error.is_empty()),
+            qsave["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()),
             "{qsave}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1875,7 +2017,10 @@ mod tests {
             }))
             .0;
         assert_eq!(parked["status"], "accepted", "{parked}");
-        assert!(app.control.capture_frame_pending, "capture should wait for a frame");
+        assert!(
+            app.control.capture_frame_pending,
+            "capture should wait for a frame"
+        );
         let running = app
             .control_request(json!({"op":"operation","request_id":"cap-frame"}))
             .0;
@@ -1883,11 +2028,8 @@ mod tests {
 
         let _frame_task = app.on_control_capture_frame(true);
         assert!(!app.control.capture_frame_pending);
-        let screenshot = iced::window::Screenshot::new(
-            vec![0u8; 4 * 4 * 4],
-            iced::Size::new(4, 4),
-            1.0,
-        );
+        let screenshot =
+            iced::window::Screenshot::new(vec![0u8; 4 * 4 * 4], iced::Size::new(4, 4), 1.0);
         app.control_screenshot(path.to_string_lossy().into_owned(), Some(screenshot));
         let done = app
             .control_request(json!({"op":"operation","request_id":"cap-frame"}))
@@ -1964,14 +2106,13 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         request(&mut app, json!({"op":"new"}));
         request(&mut app, json!({"op":"run","cmd":"LINE 0,0 10,0"}));
-        let handle = request(&mut app, json!({"op":"query","type":"Line"}))["entities"][0]["handle"]
+        let handle = request(&mut app, json!({"op":"query","type":"Line"}))["entities"][0]
+            ["handle"]
             .as_str()
             .unwrap()
             .to_string();
         let before = app.control_state()["selection_revision"].as_u64().unwrap();
-        let selected = app.automation_op(&format!(
-            r#"{{"op":"select","handles":["{handle}"]}}"#
-        ));
+        let selected = app.automation_op(&format!(r#"{{"op":"select","handles":["{handle}"]}}"#));
         assert_eq!(selected["ok"], true, "{selected}");
         let state = app.control_state();
         assert_eq!(
@@ -1980,7 +2121,10 @@ mod tests {
             "selection revision should increment once: {state}"
         );
         assert!(
-            state["selection"].as_array().unwrap().contains(&json!(handle)),
+            state["selection"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(handle)),
             "{state}"
         );
         let events = app.control_request(json!({"op":"events"})).0;
@@ -1988,7 +2132,10 @@ mod tests {
         assert_eq!(last["kind"], "selection", "{events}");
         assert_eq!(last["document_id"], state["document_id"], "{events}");
         assert!(
-            last["selection"].as_array().unwrap().contains(&json!(handle)),
+            last["selection"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(handle)),
             "{events}"
         );
     }
@@ -2192,7 +2339,10 @@ mod tests {
     fn pending_request_id_reuse_rejects_changed_payload() {
         let mut app = OpenCADStudio::new_for_test();
         app.main_window = Some(iced::window::Id::unique());
-        assert_eq!(request(&mut app, json!({"op":"new"}))["status"], "completed");
+        assert_eq!(
+            request(&mut app, json!({"op":"new"}))["status"],
+            "completed"
+        );
 
         let pending = request(
             &mut app,
@@ -2214,10 +2364,7 @@ mod tests {
         );
         assert_eq!(changed["code"], "request_id_reused", "{changed}");
         assert!(
-            changed["error"]
-                .as_str()
-                .unwrap()
-                .contains("pending-reuse"),
+            changed["error"].as_str().unwrap().contains("pending-reuse"),
             "{changed}"
         );
 
@@ -2298,6 +2445,59 @@ mod tests {
         let bad = open_bytes_request(&json!({"name":"a.dwg","data_base64":"not base64!"}));
         assert_eq!(bad.unwrap_err()["code"], "invalid_request");
     }
+    #[test]
+    fn font_register_validates_the_request() {
+        let ok = font_register_request(
+            &json!({"file_name":"C:\\Fonts\\Brand.ttf","data_base64":"AAEC"}),
+        );
+        assert_eq!(ok, Ok(("Brand.ttf".to_string(), vec![0, 1, 2])));
+        for req in [
+            json!({"data_base64":"AAEC"}),
+            json!({"file_name":"fonts/","data_base64":"AAEC"}),
+            json!({"file_name":"a.ttf","data_base64":""}),
+            json!({"file_name":"a.ttf","data_base64":"not base64!"}),
+        ] {
+            assert_eq!(
+                font_register_request(&req).unwrap_err()["code"],
+                "invalid_request",
+                "{req}"
+            );
+        }
+    }
+
+    #[test]
+    fn font_register_makes_a_style_file_resolve() {
+        use base64::Engine as _;
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/web/fonts/greek.ttf"))
+            .expect("bundled web font");
+        let mut app = OpenCADStudio::new_for_test();
+        request(&mut app, json!({"op":"new"}));
+        let reply = request(
+            &mut app,
+            json!({
+                "op":"font_register",
+                "file_name":"Control-Registered.ttf",
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        let family = reply["result"]["family"]
+            .as_str()
+            .expect("family")
+            .to_string();
+        assert!(reply["result"]["faces"].as_u64().unwrap() >= 1, "{reply}");
+        assert_eq!(
+            crate::scene::text::sysfont::family_for_reference("control-registered.ttf"),
+            Some(family)
+        );
+
+        let refused = request(
+            &mut app,
+            json!({"op":"font_register","file_name":"x.ttf","data_base64":"AAEC"}),
+        );
+        assert_eq!(refused["code"], "font_invalid", "{refused}");
+    }
+
     #[test]
     fn open_from_bytes_is_refused_natively_without_touching_documents() {
         let mut app = OpenCADStudio::new_for_test();
@@ -2801,8 +3001,8 @@ mod tests {
         assert_eq!(response["status"], "completed", "{response}");
 
         // The plotted PDF carries two distinct pen widths — the per-layer
-        // 0.13 mm / 0.50 mm hierarchy survives the plot style (thin clamps to
-        // the 1 px floor, so the ratio is the clamped-pixel ratio 1.889).
+        // 0.13 mm / 0.50 mm hierarchy survives the plot style at its true
+        // ratio; the screen's 1 px floor does not reach the plot (#1749).
         let text =
             crate::io::pdf_export::pdf_stream_text(&std::fs::read(&pdf).expect("pdf written"));
         let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -2825,7 +3025,7 @@ mod tests {
             "two layer weights in the plotted PDF: {widths:?}"
         );
         assert!(
-            (widths[1] / widths[0] - 1.889).abs() < 0.15,
+            (widths[1] / widths[0] - 50.0 / 13.0).abs() < 0.15,
             "0.50 mm vs 0.13 mm hierarchy: {widths:?}"
         );
         let _ = std::fs::remove_file(&pdf);

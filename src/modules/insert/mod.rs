@@ -2,18 +2,19 @@
 
 mod attdef;
 pub(crate) mod attedit;
-mod attman;
+pub(crate) mod attman;
 pub mod base_point;
+pub(crate) mod block_cmdline;
 mod content_browser;
 pub(crate) mod create_block;
 mod design_center;
+pub(crate) mod dgn_import;
+pub(crate) mod tds_import;
 pub(crate) mod edit_block;
 pub(crate) mod image_transparency;
 pub(crate) mod insert_block;
-mod landxml;
 pub mod minsert;
 mod mview_block;
-mod open_obj;
 pub(crate) mod pc_attach;
 pub(crate) mod pc_crop;
 pub(crate) mod pc_extract;
@@ -21,17 +22,23 @@ pub(crate) mod pc_stylize;
 pub(crate) mod pdf_attach;
 pub(crate) mod pdf_clip;
 pub(crate) mod pdf_import;
+pub(crate) mod pdf_shx_text;
 pub(crate) mod picker;
 mod snap_underlays;
 pub(crate) mod solid3d_cmds;
 mod underlay_layers;
 pub(crate) mod wblock;
-mod xadjust;
+pub(crate) mod xadjust;
 pub(crate) mod xattach;
 pub(crate) mod xclip;
 pub(crate) mod xref_cmd;
 
-use crate::modules::{CadModule, IconKind, RibbonGroup, RibbonItem};
+use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, ToolDef};
+
+/// Insert > Block Definition: the Create Block / Write Block split button.
+pub(crate) const CREATE_BLOCK_DROPDOWN: &str = "CREATE_BLOCK_DROPDOWN";
+
+const IMPORT_ICON: IconKind = IconKind::Svg(include_bytes!("../../../assets/icons/import_obj.svg"));
 
 const FRAMES_ICON: IconKind =
     IconKind::Svg(include_bytes!("../../../assets/icons/underlay_frames.svg"));
@@ -50,6 +57,62 @@ impl CadModule for InsertModule {
         static GROUPS: std::sync::OnceLock<Vec<RibbonGroup>> = std::sync::OnceLock::new();
         GROUPS.get_or_init(|| {
             vec![
+                // ── Block ─────────────────────────────────────────────────────────
+                RibbonGroup {
+                    title: "Block",
+                    tools: vec![
+                        RibbonItem::LargeTool(mview_block::tool()),
+                        insert_block::gallery(),
+                        RibbonItem::LabeledDropdown {
+                            id: "ATTEDIT_DROPDOWN",
+                            label: "Edit Attribute",
+                            icon: attedit::ICON,
+                            items: vec![
+                                ("ATTEDIT", "Single", attedit::ICON),
+                                ("-ATTEDIT", "Multiple", attedit::ICON),
+                            ],
+                            default: "ATTEDIT",
+                        },
+                        // ATTMODE: the face shows the drawing's current setting.
+                        RibbonItem::LabeledDropdown {
+                            id: "ATTMODE_DROPDOWN",
+                            label: "",
+                            icon: attedit::ICON,
+                            items: vec![
+                                ("ATTMODE1", "Retain Attribute Display", attedit::ICON),
+                                ("ATTMODE2", "Display All Attributes", attedit::ICON),
+                                ("ATTMODE0", "Hide All Attributes", attedit::ICON),
+                            ],
+                            default: "ATTMODE1",
+                        },
+                    ],
+                },
+                // ── Block Definition (slide-out: Set Base Point, Synchronize) ─────
+                RibbonGroup {
+                    title: "Block Definition",
+                    tools: vec![
+                        // Split button: the face runs the last one chosen.
+                        RibbonItem::LargeDropdown {
+                            id: CREATE_BLOCK_DROPDOWN,
+                            label: "Create Block",
+                            icon: create_block::tool().icon,
+                            items: vec![
+                                ("BLOCK", "Create Block", create_block::tool().icon),
+                                ("WBLOCK", "Write Block", wblock::tool().icon),
+                            ],
+                            default: "BLOCK",
+                        },
+                        RibbonItem::LargeTool(attdef::tool()),
+                        RibbonItem::LargeTool(ToolDef {
+                            label: "Manage Attributes",
+                            ..attman::tool()
+                        }),
+                        RibbonItem::LargeTool(ToolDef {
+                            label: "Block Editor",
+                            ..edit_block::tool()
+                        }),
+                    ],
+                },
                 // ── Reference ────────────────────────────────────────────────────
                 RibbonGroup {
                     title: "Reference",
@@ -89,62 +152,60 @@ impl CadModule for InsertModule {
                         },
                         RibbonItem::LabeledDropdown {
                             id: "UOSNAP_DROPDOWN",
-                            label: "Snap to Underlays",
+                            // An empty label shows the current state.
+                            label: "",
                             icon: snap_underlays::ICON,
                             items: vec![
                                 ("UOSNAP1", "Snap to Underlays ON", snap_underlays::ICON),
                                 ("UOSNAP0", "Snap to Underlays OFF", snap_underlays::ICON),
+                                // Shown (not selectable) while PDFOSNAP, DWFOSNAP
+                                // and DGNOSNAP differ (UOSNAP 2).
+                                ("UOSNAP2", "*Underlay OSnap's vary*", snap_underlays::ICON),
                             ],
                             default: "UOSNAP1",
                         },
                     ],
                 },
-                // ── Block ─────────────────────────────────────────────────────────
-                RibbonGroup {
-                    title: "Block",
-                    tools: vec![
-                        RibbonItem::LargeTool(mview_block::tool()),
-                        insert_block::gallery(),
-                        RibbonItem::LabeledDropdown {
-                            id: "ATTEDIT_DROPDOWN",
-                            label: "Edit Attribute",
-                            icon: attedit::ICON,
-                            items: vec![
-                                ("ATTEDIT", "Single", attedit::ICON),
-                                ("-ATTEDIT", "Multiple", attedit::ICON),
-                            ],
-                            default: "ATTEDIT",
-                        },
-                        // ATTMODE: the face shows the drawing's current setting.
-                        RibbonItem::LabeledDropdown {
-                            id: "ATTMODE_DROPDOWN",
-                            label: "",
-                            icon: attedit::ICON,
-                            items: vec![
-                                ("ATTMODE1", "Retain Attribute Display", attedit::ICON),
-                                ("ATTMODE2", "Display All Attributes", attedit::ICON),
-                                ("ATTMODE0", "Hide All Attributes", attedit::ICON),
-                            ],
-                            default: "ATTMODE1",
-                        },
-                    ],
-                },
-                // ── Block Definition (slide-out: Set Base Point, Synchronize) ─────
-                RibbonGroup {
-                    title: "Block Definition",
-                    tools: vec![
-                        RibbonItem::LargeTool(create_block::tool()),
-                        RibbonItem::LargeTool(attdef::tool()),
-                        RibbonItem::LargeTool(attman::tool()),
-                        RibbonItem::LargeTool(edit_block::tool()),
-                    ],
-                },
-                // ── Import ────────────────────────────────────────────────────────
+                // ── Import (slide-out: Land XML) ──────────────────────────────────
                 RibbonGroup {
                     title: "Import",
                     tools: vec![
-                        RibbonItem::LargeTool(open_obj::tool()),
-                        RibbonItem::LargeTool(landxml::tool()),
+                        // The face names and runs the last one chosen. A `;`
+                        // answers the started command's prompt, as in a menu
+                        // macro.
+                        RibbonItem::LargeDropdown {
+                            id: "IMPORT_FILE",
+                            label: "",
+                            icon: IMPORT_ICON,
+                            items: vec![
+                                ("PDFIMPORT;FILE", "PDF Import", underlay_layers::ICON),
+                                ("DGNIMPORT", "DGN Import", underlay_layers::ICON),
+                                ("IMPORT", "Import…", IMPORT_ICON),
+                            ],
+                            default: "PDFIMPORT;FILE",
+                        },
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "PDFSHXTEXT",
+                            label: "Recognize SHX Text",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/text.svg")),
+                            event: ModuleEvent::Command("PDFSHXTEXT".to_string()),
+                        }),
+                        RibbonItem::LabeledTool(ToolDef {
+                            id: "PDFSHXTEXT_SETTINGS",
+                            label: "Recognition Settings",
+                            icon: IconKind::Svg(include_bytes!(
+                                "../../../assets/icons/options_tool.svg"
+                            )),
+                            event: ModuleEvent::Command(
+                                "PDFSHXTEXT;SETTINGS".to_string(),
+                            ),
+                        }),
+                        RibbonItem::LargeTool(ToolDef {
+                            id: "TXT2MTXT",
+                            label: "Combine Text",
+                            icon: IconKind::Svg(include_bytes!("../../../assets/icons/mtext.svg")),
+                            event: ModuleEvent::Command("TXT2MTXT".to_string()),
+                        }),
                     ],
                 },
                 // ── Content ───────────────────────────────────────────────────────

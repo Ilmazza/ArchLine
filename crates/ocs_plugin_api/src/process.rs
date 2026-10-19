@@ -1150,6 +1150,74 @@ fn generate_token() -> Result<String, PluginError> {
     Ok(out)
 }
 
+/// In-crate test support: build a `PluginProcess` whose fields are otherwise
+/// private to this module, so sibling test modules (`process::manager`) can
+/// put one in a `PluginManager` without spawning a real runner.
+#[cfg(all(test, feature = "host"))]
+impl PluginProcess {
+    /// A process backed by a real sleeping child process and a local socket
+    /// pair, carrying the given manifest (no cdylib, no runner). The
+    /// runner-side peer socket is dropped immediately; nothing reads it.
+    pub(crate) fn fake(manifest: OwnedPluginManifest) -> Self {
+        use interprocess::local_socket::traits::Stream as StreamTrait;
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "ocs_plugin_fake_process_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let name_ref = name
+            .clone()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("valid name");
+        let listener = ListenerOptions::new()
+            .name(name_ref)
+            .create_sync()
+            .expect("listener");
+        let client_name = name.clone();
+        let client_thread: std::thread::JoinHandle<Stream> = std::thread::spawn(move || {
+            StreamTrait::connect(client_name.to_ns_name::<GenericNamespaced>().unwrap())
+                .expect("connect")
+        });
+        let host_stream = listener.accept().expect("accept");
+        drop(client_thread.join().expect("client thread"));
+
+        Self {
+            stream: Mutex::new(Some(host_stream)),
+            v4: None,
+            child: Mutex::new(Some(sleepy_test_child())),
+            id: manifest.id.clone(),
+            manifest,
+            ribbon: vec![],
+            io_lines: Mutex::new(None),
+        }
+    }
+}
+
+/// A child that lives ~30 s — long enough to read as "alive", short enough to
+/// never hang a leaked test. Shared by `PluginProcess::fake` and this module's
+/// own tests.
+#[cfg(all(test, feature = "host"))]
+fn sleepy_test_child() -> Child {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("ping -n 30 127.0.0.1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,6 +1420,7 @@ mod timeout_tests {
             ribbon_order: 0,
             xdata_apps: vec![],
             command_prefixes: vec![],
+            entity_classes: None,
         }
     }
 
@@ -1497,7 +1566,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_correct_token_is_accepted() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::Token("correct-token".to_string()),
@@ -1512,7 +1581,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_selects_v4_path() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {
@@ -1530,7 +1599,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_mismatched_version_is_rejected() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OCS_PLUGIN_MAX_API_VERSION");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {
@@ -1547,7 +1616,7 @@ mod timeout_tests {
 
     #[test]
     fn runner_handshake_tokenv4_rejected_when_v4_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OCS_PLUGIN_MAX_API_VERSION", "3");
         let result = verify_runner_handshake(
             RunnerHandshake::TokenV4 {

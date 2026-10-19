@@ -532,6 +532,11 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             value.value_set.increment,
             value.value_set.values.len()
         ),
+        DynamicBlockData::PropertiesTable(value) => format!(
+            "{}; fields {}",
+            value.parameter.parameter.element.name,
+            value.fields.len()
+        ),
         DynamicBlockData::LookupParameter(value) => format!(
             "{}; {} index {}; description {}",
             value.parameter.parameter.element.name,
@@ -620,7 +625,7 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             "{}; dependencies {}; parameters {}; distance multiplier {:.6}; angle {:.6}",
             value.action.element.name,
             value.action.dependencies.len(),
-            value.action.parameter_ids.len(),
+            value.action.action_ids.len(),
             value.offsets.distance_multiplier,
             value.offsets.angle_offset
         ),
@@ -628,14 +633,14 @@ fn dynamic_data_text(data: &DynamicBlockData) -> String {
             "{}; dependencies {}; parameters {}; connections {}",
             value.action.element.name,
             value.action.dependencies.len(),
-            value.action.parameter_ids.len(),
+            value.action.action_ids.len(),
             value.connections.len()
         ),
         DynamicBlockData::RotateAction(value) | DynamicBlockData::ScaleAction(value) => format!(
             "{}; dependencies {}; parameters {}; base {:.6},{:.6},{:.6}; dependent {}",
             value.action.action.element.name,
             value.action.action.dependencies.len(),
-            value.action.action.parameter_ids.len(),
+            value.action.action.action_ids.len(),
             value.action.base_point.x,
             value.action.base_point.y,
             value.action.base_point.z,

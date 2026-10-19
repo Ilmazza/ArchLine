@@ -841,7 +841,7 @@ impl super::OpenCADStudio {
         // catastrophic cancellation. Insertion is a pure translation, so zeroing
         // it keeps the layout's shape, wrapping and alignment identical.
         mt.insertion_point = Vector3::new(0.0, 0.0, 0.0);
-        let entity = EntityType::MText(mt.clone());
+        let entity = EntityType::MText(Box::new(mt.clone()));
         let anno = 1.0;
         let bg = self.tabs[i].scene.bg_color;
         let wires: Vec<WireModel> = tessellate::tessellate(
@@ -1721,7 +1721,7 @@ impl super::OpenCADStudio {
                     annotative,
                 );
                 if annotative {
-                    if let Some(scale) = self.tabs[i].scene.current_annotation_scale_handle() {
+                    if let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() {
                         crate::scene::annotative::create_annotation_context(
                             &mut self.tabs[i].scene.document,
                             h,
@@ -1753,9 +1753,10 @@ impl super::OpenCADStudio {
             ));
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
-            let handle = self.commit_entity_handle(plane.place_entity(EntityType::MText(mt)));
+            let handle =
+                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
             if annotative {
-                let scale = self.tabs[i].scene.current_annotation_scale_handle();
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
                 if let (Some(handle), Some(scale)) = (handle, scale) {
                     crate::scene::annotative::create_annotation_context(
                         &mut self.tabs[i].scene.document,
@@ -1837,7 +1838,7 @@ impl super::OpenCADStudio {
                     annotative,
                 );
                 if annotative {
-                    if let Some(scale) = self.tabs[i].scene.current_annotation_scale_handle() {
+                    if let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() {
                         crate::scene::annotative::create_annotation_context(
                             &mut self.tabs[i].scene.document,
                             h,
@@ -1869,10 +1870,11 @@ impl super::OpenCADStudio {
             ));
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
-            let handle = self.commit_entity_handle(plane.place_entity(EntityType::MText(mt)));
+            let handle =
+                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
             self.tabs[i].dirty = true;
             if annotative {
-                let scale = self.tabs[i].scene.current_annotation_scale_handle();
+                let scale = self.tabs[i].scene.creation_annotation_scale_handle();
                 if let (Some(handle), Some(scale)) = (handle, scale) {
                     crate::scene::annotative::create_annotation_context(
                         &mut self.tabs[i].scene.document,
@@ -1885,7 +1887,7 @@ impl super::OpenCADStudio {
             if let (Some(h), Some(ed)) = (handle, self.mtext_editor.as_mut()) {
                 ed.editing = Some(h);
                 if let Some(EntityType::MText(mtext)) = self.tabs[i].scene.document.get_entity(h) {
-                    ed.original = Some(mtext.clone());
+                    ed.original = Some((**mtext).clone());
                 }
             }
         }

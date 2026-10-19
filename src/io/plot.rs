@@ -7,9 +7,9 @@
 // the historical `Pdf*` names as aliases so existing call sites keep working.
 
 use crate::io::plot_style::PlotStyleTable;
-use crate::scene::WireModel;
 use crate::scene::model::hatch_model::HatchModel;
 use crate::scene::model::image_model::ImageModel;
+use crate::scene::WireModel;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -90,6 +90,9 @@ pub struct PlotContent {
     pub wipeouts: Vec<HatchModel>,
     pub images: Vec<PlotImage>,
     pub group_splits: PlotGroupSplits,
+    /// Drawing layer of each plotted entity, keyed by the handle its wire or
+    /// hatch name carries; the PDF groups output into one layer per entry.
+    pub entity_layers: std::collections::HashMap<codec::Handle, String>,
 }
 
 /// Owned geometry and settings for one plot page.

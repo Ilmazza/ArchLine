@@ -987,6 +987,23 @@ impl HostApi for V4PluginHostApi {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn set_reference_only(&mut self, handle: Handle, reference_only: bool) -> Result<(), String> {
+        match self.request(PluginRequest::SetReferenceOnly {
+            handle,
+            reference_only,
+        }) {
+            Ok(PluginResponse::SetReferenceOnlyResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected reference-only response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1193,7 +1210,7 @@ mod tests {
 
     #[test]
     fn v4_client_notification_queue_size_env_is_honored() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE").ok();
         std::env::set_var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE", "7");
         assert_eq!(notify_queue_size(), 7);
@@ -1205,7 +1222,7 @@ mod tests {
 
     #[test]
     fn v4_client_notification_queue_drops_newest_on_overflow() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE").ok();
         std::env::set_var("OCS_PLUGIN_NOTIFY_QUEUE_SIZE", "1");
         let (host_stream, mut runner_stream) = connect_pair();

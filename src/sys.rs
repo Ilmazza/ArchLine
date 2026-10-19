@@ -1,6 +1,8 @@
 // Small platform shims for things the desktop build does natively but the web
 // (wasm) build must handle differently or skip.
 
+pub mod ui_font;
+
 /// Drawing hyperlinks may open web pages, never local files or custom handlers.
 pub(crate) fn web_hyperlink(value: &str) -> Option<String> {
     if value.chars().any(char::is_control) {
@@ -440,7 +442,6 @@ fn pasted_image_name(mime_type: &str) -> String {
 /// the candidate already names a registered source. The taken-check is
 /// injectable so this — the part worth locking with tests — runs natively;
 /// wasm passes [`crate::scene::model::image_model::has_source`].
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // tested everywhere, used on wasm
 pub(crate) fn unique_pasted_image_name(
     base: &str,
     ext: &str,
@@ -587,6 +588,133 @@ pub fn file_dialog() -> rfd::AsyncFileDialog {
     rfd::AsyncFileDialog::new()
 }
 
+// ── FILEDIA and file pickers that keep their file type ───────────────────────
+
+static FILE_DIA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// FILEDIA (a profile setting): commands that have a command-line form show
+/// their file dialogs only while it is on.
+pub fn file_dia() -> bool {
+    FILE_DIA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_file_dia(on: bool) {
+    FILE_DIA.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A file the next PDF import picker returns without showing itself (set
+/// by automation, used once).
+static PDF_IMPORT_PICK: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_pdf_import_pick(path: std::path::PathBuf) {
+    *PDF_IMPORT_PICK.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+}
+
+pub fn take_pdf_import_pick() -> Option<std::path::PathBuf> {
+    PDF_IMPORT_PICK.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// The file type ATTACH's picker was last left on (1-based; 7 = Drawing).
+static ATTACH_FILTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(7);
+
+pub fn attach_filter() -> u32 {
+    ATTACH_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_attach_filter(index: u32) {
+    ATTACH_FILTER.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A file type of [`pick_file_with_filter`]: its label and extensions
+/// (`"*"` for every file).
+pub type FileFilter = (String, &'static [&'static str]);
+
+/// Open-file dialog that starts on file type `index` (1-based) and returns the
+/// picked path with the file type the dialog was left on.
+#[cfg(target_os = "windows")]
+pub async fn pick_file_with_filter(
+    title: String,
+    filters: Vec<FileFilter>,
+    index: u32,
+) -> Option<(std::path::PathBuf, u32)> {
+    // The dialog blocks, so it runs on its own thread like the async picker.
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(open_file_dialog_blocking(&title, &filters, index));
+    });
+    rx.await.ok().flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn open_file_dialog_blocking(
+    title: &str,
+    filters: &[FileFilter],
+    index: u32,
+) -> Option<(std::path::PathBuf, u32)> {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let mut filter = Vec::new();
+    for (label, extensions) in filters {
+        let pattern = extensions
+            .iter()
+            .map(|e| format!("*.{e}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        filter.extend(wide(label));
+        filter.extend(wide(&pattern));
+    }
+    filter.push(0);
+    let title = wide(title);
+    let dir = crate::config::last_dialog_dir().map(|d| wide(&d.to_string_lossy()));
+    let mut file = vec![0u16; 32768];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: filter.as_ptr(),
+        nFilterIndex: index,
+        lpstrFile: file.as_mut_ptr(),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: title.as_ptr(),
+        lpstrInitialDir: dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
+        Flags: OFN_EXPLORER
+            | OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR
+            | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+    // SAFETY: every pointer in `ofn` points into buffers that outlive the call.
+    let picked = unsafe {
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        GetOpenFileNameW(&mut ofn)
+    };
+    if picked == 0 {
+        return None;
+    }
+    let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    let path = std::path::PathBuf::from(String::from_utf16_lossy(&file[..len]));
+    crate::config::remember_dialog_dir(&path);
+    Some((path, ofn.nFilterIndex))
+}
+
+/// Elsewhere the picker cannot start on a file type; the index passes through.
+#[cfg(not(target_os = "windows"))]
+pub async fn pick_file_with_filter(
+    title: String,
+    filters: Vec<FileFilter>,
+    index: u32,
+) -> Option<(std::path::PathBuf, u32)> {
+    let mut dialog = file_dialog().set_title(title);
+    for (label, extensions) in &filters {
+        dialog = dialog.add_filter(label, extensions);
+    }
+    let handle = dialog.pick_file().await?;
+    Some((handle_path(&handle), index))
+}
+
 /// Trigger a browser download of `bytes` as `name`. Builds a Blob, points a
 /// hidden `<a download>` at it and clicks it programmatically — because this
 /// runs inside the Save button's click (a user gesture), the file downloads
@@ -597,10 +725,15 @@ pub fn download_bytes(name: &str, bytes: &[u8]) {
     let Some(window) = web_sys::window() else {
         return;
     };
+    let array = js_sys::Uint8Array::from(bytes);
+    // A host page that embeds the app takes the file instead of a download.
+    if let Some(hook) = save_hook() {
+        let _ = hook.call2(&window, &wasm_bindgen::JsValue::from_str(name), &array);
+        return;
+    }
     let Some(document) = window.document() else {
         return;
     };
-    let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::new();
     parts.push(&array.buffer());
     let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence(&parts) else {
@@ -616,6 +749,21 @@ pub fn download_bytes(name: &str, bytes: &[u8]) {
         a.click();
     }
     let _ = web_sys::Url::revoke_object_url(&url);
+}
+
+/// The `window.openCadStudioSaveFile(name, bytes)` function an embedding page
+/// registers to receive saved and exported files, if any.
+#[cfg(target_arch = "wasm32")]
+pub fn save_hook() -> Option<js_sys::Function> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    js_sys::Reflect::get(
+        window.as_ref(),
+        &wasm_bindgen::JsValue::from_str("openCadStudioSaveFile"),
+    )
+    .ok()?
+    .dyn_into::<js_sys::Function>()
+    .ok()
 }
 
 /// Show a plot preview as an in-page overlay. The plotted PDF arrives already
@@ -1238,4 +1386,35 @@ pub mod web_diag {
             let _ = pre.append_child(&line);
         }
     }
+}
+
+/// The user's Documents folder (the known folder, wherever it is
+/// redirected), else the home folder.
+#[cfg(target_os = "windows")]
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: SHGetKnownFolderPath writes a CoTaskMemAlloc'd, NUL-terminated
+    // wide string to `raw`, freed below.
+    let hr =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, 0, std::ptr::null_mut(), &mut raw) };
+    let path = if hr == 0 && !raw.is_null() {
+        // SAFETY: `raw` is a valid NUL-terminated wide string from the call above.
+        let len = unsafe { (0..).take_while(|&k| *raw.add(k) != 0).count() };
+        let wide = unsafe { std::slice::from_raw_parts(raw, len) };
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(wide)))
+    } else {
+        None
+    };
+    // SAFETY: freeing the buffer SHGetKnownFolderPath allocated (null is a no-op).
+    unsafe { CoTaskMemFree(raw as *const core::ffi::c_void) };
+    path.or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let documents = home.join("Documents");
+    Some(if documents.is_dir() { documents } else { home })
 }

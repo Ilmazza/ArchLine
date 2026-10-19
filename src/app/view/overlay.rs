@@ -928,6 +928,7 @@ fn position_canvas_overlay_clamped<'a>(
         bottom_inset: bottom_inset.max(0.0),
         gap: 0.0,
         offset,
+        passive: false,
     })
 }
 
@@ -944,6 +945,48 @@ pub(super) fn position_canvas_overlay_near_cursor<'a>(
         bottom_inset: bottom_inset.max(0.0),
         gap: 12.0,
         offset: Vector::ZERO,
+        passive: false,
+    })
+}
+
+/// Measured, wrapping text in the existing clamped panel layout. Input goes
+/// straight through, including clicks directly on the result text.
+pub(super) fn measurement_overlay<'a>(
+    anchor: iced::Point,
+    bottom_inset: f32,
+    value: String,
+) -> Element<'a, Message> {
+    // Inquiry commands return a compact, comma-separated summary for the
+    // command line. Show its fields on separate lines in the transient HUD,
+    // without altering the command-line history or the measured precision.
+    let display_value = if value.contains("\n") {
+        value.replace(",  ", "\n").replace(", ", "\n")
+    } else {
+        value
+    };
+    let panel = container(text(display_value).size(12))
+        .padding([6, 8])
+        .width(Length::Fit.max(300.0))
+        .style(|theme: &Theme| {
+            let palette = theme.palette();
+            container::Style {
+                background: Some(Background::Color(palette.background.weak.color)),
+                text_color: Some(palette.background.weak.text),
+                border: Border {
+                    color: palette.background.neutral.color,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+    Element::new(ClampedPin {
+        content: panel.into(),
+        anchor,
+        bottom_inset: bottom_inset.max(0.0),
+        gap: 18.0,
+        offset: Vector::ZERO,
+        passive: true,
     })
 }
 
@@ -954,6 +997,8 @@ struct ClampedPin<'a> {
     gap: f32,
     /// Preferred placement shift from the anchor (applied before fitting).
     offset: Vector,
+    /// Readouts prefer above the cursor and never participate in input.
+    passive: bool,
 }
 
 impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
@@ -1008,7 +1053,9 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
         let max_y = (max.height - bottom_inset - MARGIN - content.height).max(MARGIN);
         let below = self.anchor.y + self.gap + self.offset.y;
         let above = self.anchor.y - self.gap - content.height;
-        let y = if below <= max_y {
+        let y = if self.passive && above >= MARGIN && above <= max_y {
+            above
+        } else if below <= max_y {
             below.max(MARGIN)
         } else if above >= MARGIN {
             above
@@ -1016,6 +1063,9 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
             max_y
         };
 
+        // A cursor over the command-line inset can put even the "above"
+        // candidate below the safe area. Keep this passive readout inside it.
+        let y = if self.passive { y.min(max_y) } else { y };
         node = node.move_to(iced::Point::new(x, y));
         let size = limits.resolve(Length::Fill, Length::Fill, node.size());
         layout::Node::with_children(size, vec![node])
@@ -1046,6 +1096,9 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if self.passive {
+            return;
+        }
         self.content.as_widget_mut().update(
             tree,
             event,
@@ -1065,6 +1118,9 @@ impl Widget<Message, Theme, iced::Renderer> for ClampedPin<'_> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
+        if self.passive {
+            return mouse::Interaction::None;
+        }
         self.content.as_widget().mouse_interaction(
             tree,
             layout.children().next().unwrap(),
@@ -1587,8 +1643,13 @@ pub(super) fn qselect_overlay<'a>(
         candidate_count,
         crate::ui::modal::ModalSizing::FILL,
     );
-    let content =
-        crate::ui::modal::intrinsic(measurement, content, iced::Size::INFINITE, modal_resize);
+    // Long imported values must not make the natural dialog span the viewport.
+    let content = crate::ui::modal::intrinsic(
+        measurement,
+        content,
+        iced::Size::new(720.0, f32::INFINITY),
+        modal_resize,
+    );
 
     crate::ui::modal::modal(
         Space::new().width(Fill).height(Fill),
@@ -1598,6 +1659,15 @@ pub(super) fn qselect_overlay<'a>(
         modal_offset,
         crate::ui::modal::ModalOptions::STANDARD,
     )
+}
+
+/// Object type label for the selection filter; INSERT reads as a block reference.
+fn qselect_type_label(name: &str) -> String {
+    if name == "Insert" {
+        t!("Block Reference").into_owned()
+    } else {
+        t!(name).into_owned()
+    }
 }
 
 fn qselect_content<'a>(
@@ -1715,7 +1785,7 @@ fn qselect_content<'a>(
     } else {
         None
     };
-    let error = state.error.clone().or(derived_error);
+    let error = state.error.clone().or(derived_error.clone());
 
     let scope_options = vec![
         crate::app::QSelectScope::CurrentSpace,
@@ -1734,9 +1804,71 @@ fn qselect_content<'a>(
     let cancel = dialog_button(t!("Cancel"), Message::QSelectClose, false);
     let apply = dialog_button_styled_opt(
         t!("Apply"),
-        error.is_none().then_some(Message::QSelectApply),
+        (candidate_count > 0
+            && state.editing_condition.is_none()
+            && (state.conditions.is_empty() && error.is_none() || !state.conditions.is_empty()))
+        .then_some(Message::QSelectApply),
         button::primary,
     );
+
+    let mut condition_rows = column![].spacing(5);
+    if state.conditions.is_empty() {
+        condition_rows = condition_rows.push(text(t!("No conditions added.")).size(12));
+    }
+    for (index, condition) in state.conditions.iter().enumerate() {
+        let type_label = condition
+            .type_filter
+            .as_deref()
+            .map(qselect_type_label)
+            .unwrap_or_else(|| t!(QSELECT_ANY_TYPE).into_owned());
+        let property_label = condition
+            .property
+            .as_ref()
+            .map(|property| property.to_string())
+            .unwrap_or_else(|| t!(QSELECT_ANY_PROP).into_owned());
+        let summary = format!(
+            "{}. {} | {} | {} | {}",
+            index + 1,
+            type_label,
+            property_label,
+            condition.operator,
+            condition.value
+        );
+        condition_rows = condition_rows.push(
+            row![
+                // The measuring copy must not fill the viewport's available width.
+                text(summary).size(12).width(flex_width),
+                dialog_button(t!("Edit"), Message::QSelectEditCondition(index), false),
+                dialog_button(t!("Delete"), Message::QSelectRemoveCondition(index), false),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    let add_condition = dialog_button_styled_opt(
+        if state.editing_condition.is_some() {
+            t!("Update condition")
+        } else {
+            t!("Add condition")
+        },
+        (derived_error.is_none() && (state.type_filter.is_some() || state.property.is_some()))
+            .then_some(Message::QSelectAddCondition),
+        button::secondary,
+    );
+    let condition_actions = row![
+        add_condition,
+        dialog_button_styled_opt(
+            t!("Cancel edit"),
+            state.editing_condition.map(|_| Message::QSelectCancelEdit),
+            button::secondary
+        ),
+        dialog_button_styled_opt(
+            t!("Clear conditions"),
+            (!state.conditions.is_empty()).then_some(Message::QSelectClearConditions),
+            button::secondary
+        ),
+    ]
+    .spacing(6);
 
     let panel_body = column![
         section_label(t!("Scope")),
@@ -1758,15 +1890,17 @@ fn qselect_content<'a>(
         Space::new().height(5),
         row![
             label(t!("Object type:")),
-            iced::widget::pick_list(Some(type_sel), type_options, |value| t!(value).into_owned(),)
-                .on_select(|s: String| {
-                    if s == QSELECT_ANY_TYPE {
-                        Message::QSelectSetType(None)
-                    } else {
-                        Message::QSelectSetType(Some(s))
-                    }
-                })
-                .width(field_width),
+            iced::widget::pick_list(Some(type_sel), type_options, |value| {
+                qselect_type_label(value)
+            })
+            .on_select(|s: String| {
+                if s == QSELECT_ANY_TYPE {
+                    Message::QSelectSetType(None)
+                } else {
+                    Message::QSelectSetType(Some(s))
+                }
+            })
+            .width(field_width),
         ]
         .align_y(iced::Alignment::Center)
         .spacing(8)
@@ -1804,6 +1938,28 @@ fn qselect_content<'a>(
             .width(sizing.width),
         Space::new().height(10),
         container(rule::horizontal(1)).width(flex_width),
+        Space::new().height(10),
+        condition_actions,
+        Space::new().height(8),
+        dialog_button_styled_opt(
+            t!("Select object"),
+            state
+                .editing_condition
+                .is_none()
+                .then_some(Message::QSelectPickObject),
+            button::secondary,
+        ),
+        Space::new().height(8),
+        section_label(t!("Conditions (all must match)")),
+        Space::new().height(5),
+        iced::widget::scrollable(condition_rows)
+            .height(120)
+            .width(sizing.width),
+        Space::new().height(5),
+        text(t!(
+            "When the list is nonempty, only listed conditions are applied."
+        ))
+        .size(11),
         Space::new().height(10),
         section_label(t!("Result")),
         Space::new().height(5),
@@ -1870,6 +2026,68 @@ fn qselect_content<'a>(
         });
 
     panel.into()
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+    #[test]
+    fn measurement_overlay_passes_all_clicks_on_text() {
+        let underlay = mouse_area(Space::new().width(Fill).height(Fill))
+            .on_press(Message::ViewportLeftPress)
+            .on_right_press(Message::ViewportRightPress)
+            .on_middle_press(Message::ViewportMiddlePress);
+        let mut ui = iced_test::simulator(stack![
+            underlay,
+            measurement_overlay(
+                iced::Point::new(400.0, 300.0),
+                60.0,
+                "measurement-result".into()
+            )
+        ]);
+        let center = ui
+            .find("measurement-result")
+            .unwrap()
+            .visible_bounds()
+            .unwrap()
+            .center();
+        ui.point_at(center);
+        for button in [
+            iced::mouse::Button::Left,
+            iced::mouse::Button::Right,
+            iced::mouse::Button::Middle,
+        ] {
+            ui.simulate([Event::Mouse(iced::mouse::Event::ButtonPressed(button))]);
+            ui.simulate([Event::Mouse(iced::mouse::Event::ButtonReleased(button))]);
+        }
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::ViewportLeftPress)));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::ViewportRightPress)));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::ViewportMiddlePress)));
+    }
+    #[test]
+    fn measurement_overlay_stays_inside_canvas_above_command_line() {
+        for anchor in [iced::Point::new(5.0, 5.0), iced::Point::new(790.0, 595.0)] {
+            let mut ui = iced_test::simulator::Simulator::with_size(
+                Default::default(),
+                iced::Size::new(800.0, 600.0),
+                measurement_overlay(anchor, 90.0, "measurement-result".into()),
+            );
+            let bounds = ui
+                .find("measurement-result")
+                .unwrap()
+                .visible_bounds()
+                .unwrap();
+            assert!(bounds.x >= 4.0 && bounds.y >= 4.0);
+            assert!(bounds.x + bounds.width <= 796.0 && bounds.y + bounds.height <= 506.0);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -233,7 +233,7 @@ pub fn read_gradient(hatch: &Hatch) -> GradientSpec {
 }
 
 fn stop_entry(value: f64, color: AcadColor) -> GradientColorEntry {
-    GradientColorEntry { value, color }
+    GradientColorEntry { value, color, ..Default::default() }
 }
 
 /// Write `spec` as the hatch's whole fill: the canonical, complete form used
@@ -698,6 +698,7 @@ mod tests {
         hatch.gradient_color.colors.push(GradientColorEntry {
             value: 0.0,
             color: AcadColor::Index(3),
+            ..Default::default()
         });
         let read = read_gradient(&hatch);
         assert_eq!(read.color1, AcadColor::Index(3));

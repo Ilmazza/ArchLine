@@ -3,6 +3,7 @@
 //! `OpenCADStudio --mcp` speaks MCP over stdio. All drawing work is forwarded
 //! to the authenticated GUI control bridge; this module contains no geometry.
 
+use crate::mcp_ops::{batch_bindings, validate_execute_request};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -31,7 +32,7 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 ///
 /// `block_delete` gained its optional `force` parameter.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "634a75872d56ae4445dbd9f27479b3ff3d8c8e88c72db69a699fafa3d9f29b72";
+const TOOL_SCHEMA_DIGEST: &str = "d15005e14fc00154501db5d261cb9febae1bcc61f6d9b850e91b7fd1879c3b8e";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -39,7 +40,7 @@ const CACHE_TTL_MS: u64 = 3_600_000;
 /// land. Tools and discovery are static by comparison, so they keep the hour.
 const RESOURCE_TTL_MS: u64 = 60_000;
 const TASK_TTL_MS: u64 = 3_600_000;
-pub(crate) const INSTRUCTIONS: &str = "Call ocs_sessions, then pass its session_id as ocs_session_id to ocs_read, ocs_execute and ocs_capture. Read capabilities to discover the complete CAD automation surface. Call record_schema to discover every record type, property path, JSON type, enum, unit, constraint and write rule before editing unfamiliar data. Use records to inspect every serializable entity, object, table, header and document record; filter with RFC 6901 JSON Pointer paths. Use set_properties for atomic, type-checked record edits and preserve document_id, revision and request_id. Use commands with parameters.name for a command manifest. Use batch when several steps are known, and request changed_entities when resulting geometry is needed. For interactive work, call start and follow state.command.accepts, options and input_example. To have the person at the screen pick entities for you, call user_select and keep polling until it completes; running means they are still picking. A run.cmd contains the command name followed by prompt answers separated by spaces; points use x,y or x,y,z. After a timeout, query the existing operation and never replay a mutation with a new request_id. waiting_input and running are not completion. Let OCS and its geometry kernel calculate geometry; use query near, contains_point and intersections for exact relationships. ARCHITECTURAL VECTORIZATION DIRECTIVE: When converting or vectorizing a floorplan from an image or sketch: 1. Attach reference images as Xref underlays via embed_image on layer _XREF and lock it. 2. NEVER draw loose lines or arcs for doors or windows; always query records (collection: 'block_records') and insert Block References (type: 'INSERT') on A-DOOR and A-GLAZ. If a block is missing, draft standard geometry at origin (0,0) and register it with block_define before inserting. 3. Categorize layers cleanly: A-WALL-EXTR, A-WALL-INTR, A-WALL-HATCH, A-DOOR, A-GLAZ, A-ANNO-TEXT, A-ANNO-DIMS. 4. Always verify drafted geometry using ocs_capture with annotate: true (Set-of-Marks entity IDs) and diff: true (visual dirty streaming). ocs_capture operates quietly in background and overlapped window states without stealing user focus. Viewports and captured snapshots are available as MCP resources under cad://session/{session_id}/viewport.png and cad://session/{session_id}/snapshot/{hash}.png; ocs_capture accepts delivery: 'resource' to avoid large inline base64 payloads, supplies standardized spatial grounding in _spatial, supports diff: true for streaming dirty visual regions, and provides multiscale DeepZoom pyramidal tiling via tile: {level, x, y} or cad://session/{session_id}/pyramid/manifest.json and cad://session/{session_id}/tile/{level}/{x}/{y}.png. Before delivery call audit with the intended target_format and target_version; use save_verified with an explicit absolute path to save, reopen, hash and compare the semantic manifest. When you first connect, announce the build you are working with to the user from the `bridge` object on ocs_sessions states and hello/capabilities responses (OpenCADStudio version, build_rev, tool_schema digest); repeat the announcement if a later handshake reports a different build.";
+pub(crate) const INSTRUCTIONS: &str = "Call ocs_sessions and pass session_id as ocs_session_id. Read capabilities and record_schema before unfamiliar operations. Use entity_schema for creation fields and validate for preflight. Preserve document_id, revision and request_id. After a timeout query the existing operation; never replay a mutation with a new request_id. running and waiting_input are not completion: follow state.command.accepts, options and input_example. Let the geometry kernel calculate geometry. Before delivery audit the target format/version and use save_verified with an absolute path. Announce the bridge build on first connection and when it changes. Use batch with response_detail: summary for known steps; bindings can reuse earlier results. Read guides on demand via cad://guides/{name} or ocs_read op: guide with parameters.name: workflow, architecture, capture, batch-bindings. Read architecture before floorplan vectorization and capture before advanced visual verification. Omit parameters.name to list guides.";
 const READ_OPS: &[&str] = &[
     "state",
     "hello",
@@ -60,10 +61,14 @@ const READ_OPS: &[&str] = &[
     "events",
     "operation",
     "batch_result",
+    "guide",
+    "entity_schema",
+    "validate",
     "xdata_get",
     "audit",
     "text_search",
     "text_audit",
+    "keytips",
     "capture",
 ];
 const EXECUTE_OPS: &[&str] = &[
@@ -81,6 +86,7 @@ const EXECUTE_OPS: &[&str] = &[
     "property",
     "grip_drag",
     "click",
+    "pointer",
     "set_properties",
     "action",
     "embed_image",
@@ -109,48 +115,6 @@ const EXECUTE_OPS: &[&str] = &[
     "save_verified",
     "stop",
     "batch",
-];
-const BATCH_STEP_OPS: &[&str] = &[
-    "new",
-    "open",
-    "activate",
-    "switch_document",
-    "run",
-    "start",
-    "input",
-    "cancel",
-    "undo",
-    "redo",
-    "select",
-    "property",
-    "grip_drag",
-    "click",
-    "set_properties",
-    "action",
-    "embed_image",
-    "wblock",
-    "plot",
-    "entities_create",
-    "entities_delete",
-    "entities_transform",
-    "text_replace",
-    "block_define",
-    "block_delete",
-    "xdata_set",
-    "view_focus",
-    "entities_copy_to",
-    "group_create",
-    "selection_set_save",
-    "selection_set_load",
-    "user_select",
-    "getpoint",
-    "close",
-    "sysvar",
-    "layout_create",
-    "page_setup_set",
-    "file_identity",
-    "save",
-    "stop",
 ];
 const MAX_BATCH_STEPS: usize = 64;
 
@@ -890,6 +854,8 @@ fn now_unix_secs() -> u64 {
 fn write_startup_lock_at(directory: &Path, pid: u64, started: u64) -> Result<(), String> {
     let text = serde_json::to_string(&json!({"pid": pid, "started": started}))
         .map_err(|error| error.to_string())?;
+    // On a profile that never ran the editor nothing has made the folder yet.
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     std::fs::write(startup_lock_path_for(directory), text).map_err(|error| error.to_string())
 }
 
@@ -1296,8 +1262,17 @@ impl GuiClient {
                     pump,
                     mcp_id,
                 )
+            } else if let Err(error) =
+                resolve_batch_step(&batch.steps[batch.next], batch.next, &batch.results)
+            {
+                Ok(
+                    json!({"ok":false,"status":"failed","code":"invalid_batch_binding","error":error}),
+                )
             } else {
-                let mut step = batch.steps[batch.next]
+                let resolved =
+                    resolve_batch_step(&batch.steps[batch.next], batch.next, &batch.results)
+                        .expect("step resolution just succeeded");
+                let mut step = resolved
                     .as_object()
                     .cloned()
                     .ok_or_else(|| format!("batch step {} must be an object", batch.next))?;
@@ -1529,45 +1504,55 @@ fn required_string<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, Strin
         .ok_or_else(|| format!("Missing {key}"))
 }
 
-fn validate_execute_request(
-    request: &Value,
-    op: &str,
-) -> Result<crate::mcp_ops::ValidationResult, String> {
-    if op == "batch" {
-        let steps = request["steps"].as_array().ok_or_else(|| {
-            r#"Missing steps for batch. Example request: {"op":"batch","request_id":"draw-1","steps":[{"op":"run","cmd":"LINE 0,0 10,0"}]}"#.to_string()
-        })?;
-        if steps.is_empty() || steps.len() > MAX_BATCH_STEPS {
-            return Err(format!(
-                "batch steps must contain 1 to {MAX_BATCH_STEPS} operations"
-            ));
+fn resolve_batch_step(step: &Value, index: usize, results: &[Value]) -> Result<Value, String> {
+    batch_bindings(step, index)?;
+    let mut resolved = step.clone();
+    if let Some(bindings) = resolved
+        .as_object_mut()
+        .ok_or("batch step must be an object")?
+        .remove("bindings")
+    {
+        for (target, source) in bindings.as_object().expect("validated bindings") {
+            let previous = results
+                .get(source["step"].as_u64().unwrap() as usize)
+                .ok_or("source step result unavailable")?;
+            if previous["status"] != "completed" || previous["ok"] == false {
+                return Err("binding source step has not completed successfully".into());
+            }
+            let path = source["path"].as_str().unwrap();
+            resolved[target] = previous
+                .pointer(path)
+                .ok_or_else(|| format!("binding '{target}' path '{path}' not found"))?
+                .clone();
         }
-        let mut warnings = Vec::new();
-        for (index, step) in steps.iter().enumerate() {
-            let step_obj = step
-                .as_object()
-                .ok_or_else(|| format!("batch step {index} must be an object"))?;
-            if step_obj.contains_key("request_id") {
-                return Err(format!(
-                    "batch step {index} must omit request_id; the batch assigns idempotency keys"
-                ));
-            }
-            let step_op = step_obj
-                .get("op")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("batch step {index} is missing op"))?;
-            if !BATCH_STEP_OPS.contains(&step_op) {
-                return Err(format!("Unknown operation {step_op} in batch step {index}"));
-            }
-            let step_val = crate::mcp_ops::validate_request(step, true)
-                .map_err(|error| format!("batch step {index}: {error}"))?;
-            for w in step_val.warnings {
-                warnings.push(format!("batch step {index}: {w}"));
-            }
-        }
-        return Ok(crate::mcp_ops::ValidationResult { warnings });
     }
-    crate::mcp_ops::validate_request(request, false)
+    crate::mcp_ops::validate_request(&resolved, true)?;
+    Ok(resolved)
+}
+
+fn preflight_request(request: &Value) -> Value {
+    let result =
+        required_string(request, "op").and_then(|op| validate_execute_request(request, op));
+    match result {
+        Ok(validated) => {
+            let deferred: Vec<Value> = request["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(index, step)| {
+                    step.get("bindings")
+                        .map(|bindings| json!({"step":index,"bindings":bindings}))
+                })
+                .collect();
+            json!({"ok":true,"valid":true,"scope":"static","warnings":validated.warnings,"deferred_bindings":deferred,
+                "not_checked":["live document revision, handles, blocks, styles and record property write rules","file access, command execution and non-creation geometry operations","values resolved from earlier batch results"],
+                "executed":false})
+        }
+        Err(error) => {
+            json!({"ok":false,"valid":false,"scope":"static","executed":false,"code":"validation_failed","error":error})
+        }
+    }
 }
 
 fn compact_state(state: &Value) -> Value {
@@ -1637,6 +1622,43 @@ fn shape_execute_response(
     Ok(response)
 }
 
+const GUIDES: &[(&str, &str, &str)] = &[
+    (
+        "workflow",
+        "CAD automation workflow",
+        include_str!("../docs/automation/guides/workflow.md"),
+    ),
+    (
+        "architecture",
+        "Architectural vectorization",
+        include_str!("../docs/automation/guides/architecture.md"),
+    ),
+    (
+        "capture",
+        "Captures and visual verification",
+        include_str!("../docs/automation/guides/capture.md"),
+    ),
+    (
+        "batch-bindings",
+        "Dependent batch steps",
+        include_str!("../docs/automation/batch-bindings.md"),
+    ),
+];
+
+fn guide_resources() -> Vec<Value> {
+    GUIDES.iter().map(|(name, title, _)| json!({
+        "uri":format!("cad://guides/{name}"), "name":name, "title":title, "mimeType":"text/markdown"
+    })).collect()
+}
+
+fn guide_resource(name: &str) -> Result<Value, String> {
+    let (_, _, text) = GUIDES.iter().find(|(key, _, _)| *key == name)
+        .ok_or_else(|| format!("Unknown guide '{name}'; use ocs_read op guide without parameters.name to list guides"))?;
+    Ok(
+        json!({"contents":[{"uri":format!("cad://guides/{name}"),"mimeType":"text/markdown","text":text}]}),
+    )
+}
+
 fn read_resource(
     uri: &str,
     clients: &mut HashMap<String, GuiClient>,
@@ -1644,6 +1666,9 @@ fn read_resource(
     pump: &mut CancelPump,
     mcp_id: Option<&Value>,
 ) -> Result<Value, String> {
+    if let Some(name) = uri.strip_prefix("cad://guides/") {
+        return guide_resource(name);
+    }
     if !uri.starts_with("cad://") {
         return Err(format!("Unsupported resource URI scheme: {uri}"));
     }
@@ -1938,11 +1963,33 @@ fn call_tool(
             Ok(Value::Array(sessions(launch).map_err(CallError::Infra)?))
         }
         "ocs_read" => {
-            let session_id = required_string(arguments, "ocs_session_id")?;
             let op = arguments["op"].as_str().unwrap_or("state");
             if !READ_OPS.contains(&op) {
                 return Err("Use ocs_execute for mutations".to_string().into());
             }
+            if op == "entity_schema" {
+                return match arguments["parameters"]["type"].as_str() {
+                    Some(kind) => Ok(
+                        json!({"ok":true,"schema":crate::entity_creation::schema(kind)?,"validation":"Use op validate with parameters.request to preflight; live document checks still run on execution."}),
+                    ),
+                    None => Ok(
+                        json!({"ok":true,"types":crate::entity_creation::TYPES,"aliases":{"Polyline":"LwPolyline"},"next":"Set parameters.type for one creation schema and example."}),
+                    ),
+                };
+            }
+            if op == "validate" {
+                return Ok(preflight_request(&arguments["parameters"]["request"]));
+            }
+            if op == "guide" {
+                let mut result = match arguments["parameters"]["name"].as_str() {
+                    Some(name) => guide_resource(name).map_err(CallError::Tool)?,
+                    None => json!({"guides":guide_resources()}),
+                };
+                result["ok"] = json!(true);
+                result["status"] = json!("completed");
+                return Ok(result);
+            }
+            let session_id = required_string(arguments, "ocs_session_id")?;
             if op == "batch_result" {
                 let request_id = required_string(&arguments["parameters"], "request_id")?;
                 return cached_batch_result(clients, session_id, request_id);
@@ -2399,21 +2446,21 @@ pub(crate) fn tool_definitions() -> Value {
         },
         {
             "name":"ocs_read",
-            "description":"Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"name":{"type":"string","description":"Command name or record name."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"required":["ocs_session_id"],"additionalProperties":false},
+            "description":"Use entity_schema with parameters.type for creation fields/examples; omit type to list. Use validate with parameters.request to check an execute request without running it (no live document checks). Use guide with parameters.name to read workflow, architecture, capture or batch-bindings guidance (omit name to list). Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
+            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name or record name."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "title":"Read OCS state","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         },
         {
             "name":"ocs_execute",
-            "description":"Execute semantic OCS actions, batch drafting, and mutations. Supports batch creation (entities_create), reference image underlays (embed_image), block definitions (block_define), and block reference insertions (INSERT). MANDATORY: For architectural drafting, all doors and windows must be inserted as CAD blocks (type: INSERT), never loose lines.",
+            "description":"Execute semantic OCS actions, batch drafting, and mutations. Supports batch creation (entities_create), reference image underlays (embed_image), block definitions (block_define), and block reference insertions (INSERT). Read the architecture guide before floorplan vectorization.",
             "inputSchema":execute_input_schema(),
             "outputSchema":execute_output_schema(),
             "title":"Execute OCS action","annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}
         },
         {
             "name":"ocs_capture",
-            "description":"Capture the actual current OCS drawing viewport or window as a bounded PNG with optional camera framing, entity highlighting, spatial coordinates and Set-of-Marks annotations. Works quietly in background and overlapped window states without stealing focus. MANDATORY FOR CAD ACCURACY: Use annotate: true to render Set-of-Marks entity IDs directly on the drawing for precision alignment feedback, and diff: true to stream visual changes between steps.",
+            "description":"Capture the actual current OCS drawing viewport or window as a bounded PNG with optional camera framing, entity highlighting, spatial coordinates and Set-of-Marks annotations. Works quietly in background and overlapped window states without stealing focus. Read the capture guide for annotations, diff, resource delivery and tiling.",
             "inputSchema":{
                 "type":"object",
                 "properties":{
@@ -2461,11 +2508,10 @@ fn tool_result(value: Value) -> Value {
                 "text": format!("Captured viewport to MCP resource: {uri}")
             }));
             content.push(json!({
-                "type": "resource",
-                "resource": {
-                    "uri": uri,
-                    "mimeType": res["mimeType"].as_str().unwrap_or("image/png")
-                }
+                "type": "resource_link",
+                "name": "Captured viewport",
+                "uri": uri,
+                "mimeType": res["mimeType"].as_str().unwrap_or("image/png")
             }));
         }
         if let Some(meta) = value.get("metadata") {
@@ -2775,7 +2821,8 @@ fn handle_message(
             // Deterministic order: HashMap iteration is random, and stable
             // ordering keeps client caches and prompt caches hitting.
             session_ids.sort();
-            let list = resources.list_resources(&session_ids);
+            let mut list = guide_resources();
+            list.extend(resources.list_resources(&session_ids));
             response(
                 id,
                 protocol_result(json!({ "resources": list }), modern, Some(RESOURCE_TTL_MS)),
@@ -3108,11 +3155,21 @@ mod tests {
             assert!(tool["inputSchema"]["properties"]
                 .get("session_id")
                 .is_none());
+        }
+        for tool in [&tools[2], &tools[3]] {
             assert!(tool["inputSchema"]["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("ocs_session_id")));
         }
+        let read_schema = &tools[1]["inputSchema"];
+        for op in ["guide", "entity_schema", "validate"] {
+            crate::schema_validation::validate_shape(read_schema, &json!({"op":op}), "").unwrap();
+        }
+        assert!(
+            crate::schema_validation::validate_shape(read_schema, &json!({"op":"state"}), "")
+                .is_err()
+        );
         assert_eq!(
             tools[2]["inputSchema"]["properties"]["request"]["required"],
             json!(["op", "request_id"])
@@ -3160,7 +3217,7 @@ mod tests {
         assert!(EXECUTE_OPS.contains(&"set_properties"));
         assert!(EXECUTE_OPS.contains(&"save_verified"));
         assert!(EXECUTE_OPS.contains(&"text_replace"));
-        assert!(BATCH_STEP_OPS.contains(&"text_replace"));
+        assert!(crate::mcp_ops::find_op("text_replace").unwrap().batchable);
         let save_var = find_variant("save_verified");
         assert_eq!(save_var["properties"]["target_version"]["enum"][0], "R14");
         assert_eq!(
@@ -3897,11 +3954,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cad://session/s1/snapshot/hash123.png"));
-        assert_eq!(content[1]["type"], "resource");
-        assert_eq!(
-            content[1]["resource"]["uri"],
-            "cad://session/s1/snapshot/hash123.png"
-        );
+        assert_eq!(content[1]["type"], "resource_link");
+        assert_eq!(content[1]["name"], "Captured viewport");
+        assert_eq!(content[1]["mimeType"], "image/png");
+        assert!(content[1].get("resource").is_none());
+        assert_eq!(content[1]["uri"], "cad://session/s1/snapshot/hash123.png");
         // Ensure no image block was sent
         assert!(!content.iter().any(|c| c["type"] == "image"));
 
@@ -3918,7 +3975,7 @@ mod tests {
         });
         let both_res = tool_result(both_value);
         let both_content = both_res["content"].as_array().unwrap();
-        assert!(both_content.iter().any(|c| c["type"] == "resource"));
+        assert!(both_content.iter().any(|c| c["type"] == "resource_link"));
         assert!(both_content.iter().any(|c| c["type"] == "image"));
     }
 
@@ -4438,6 +4495,231 @@ mod tests {
         let after = standalone.to_string().len();
         eprintln!("Execute request schema: {before} -> {after} bytes");
         assert!(after * 100 < before * 70, "expected at least 30% reduction");
+    }
+
+    #[test]
+    fn entity_schemas_and_preflight_are_local_and_never_dispatch() {
+        let mut clients = HashMap::new();
+        let mut resources = ResourceStore::default();
+        let mut call = |op: &str, parameters: Value| {
+            call_tool(
+                "ocs_read",
+                &json!({"op":op,"parameters":parameters}),
+                &mut clients,
+                &mut resources,
+                &mut detached_pump(),
+                None,
+            )
+            .unwrap()
+        };
+        let catalog = call("entity_schema", json!({}));
+        assert_eq!(catalog["types"].as_array().unwrap().len(), 11);
+        assert!(catalog.get("schema").is_none());
+        let circle = call("entity_schema", json!({"type":"Circle"}));
+        assert_eq!(
+            circle["schema"]["required"],
+            json!(["type", "center", "radius"])
+        );
+        let request = json!({"op":"entities_create","entities":[{"type":"Circle","center":[0,0],"radius":2}]});
+        let validated = call("validate", json!({"request":request}));
+        assert_eq!(validated["valid"], true);
+        assert_eq!(validated["executed"], false);
+        assert_eq!(validated["scope"], "static");
+        crate::schema_validation::validate_shape(&read_output_schema(), &validated, "").unwrap();
+        let invalid = call(
+            "validate",
+            json!({"request":{"op":"entities_create","entities":[{"type":"Circle","center":["bad",0],"radius":2}]}}),
+        );
+        assert_eq!(invalid["valid"], false);
+        assert!(invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("/entities/0/center/0"));
+        assert!(clients.is_empty());
+        assert!(resources.latest.is_empty());
+        let rejected = call_tool(
+            "ocs_execute",
+            &json!({"ocs_session_id":"offline","request":{"op":"entities_create","request_id":"invalid","entities":[{"type":"Circle","center":[0,0],"radius":-1}]}}),
+            &mut clients,
+            &mut resources,
+            &mut detached_pump(),
+            None,
+        );
+        assert!(rejected.is_err());
+        assert!(clients.is_empty());
+    }
+
+    #[test]
+    fn preflight_checks_nested_data_envelopes_and_deferred_bindings() {
+        let malformed = json!({"op":"set_properties","collection":"entities","handle":"A","updates":[{"path":123,"value":"Walls"}]});
+        let error = preflight_request(&malformed);
+        assert_eq!(error["valid"], false);
+        assert!(error["error"].as_str().unwrap().contains("/updates/0/path"));
+        for request in [
+            json!({"op":"run","cmd":"LINE","document_id":-1}),
+            json!({"op":"run","cmd":"LINE","request_id":""}),
+            json!({"op":"run","cmd":"LINE","selection":[42]}),
+            json!({"op":"not_an_operation"}),
+        ] {
+            assert_eq!(preflight_request(&request)["valid"], false);
+        }
+        let batch = json!({"op":"batch","steps":[{"op":"run","cmd":"LINE"},{"op":"group_create","name":"Walls","bindings":{"handles":{"step":0,"path":"/result/handles"}}}]});
+        let validated = preflight_request(&batch);
+        assert_eq!(validated["valid"], true);
+        assert_eq!(validated["deferred_bindings"][0]["step"], 1);
+        assert!(!validated["not_checked"].as_array().unwrap().is_empty());
+        let mut invalid = batch;
+        invalid["steps"][1]["bindings"]["handles"]["step"] = json!(1);
+        assert_eq!(preflight_request(&invalid)["valid"], false);
+    }
+
+    #[test]
+    fn guides_are_discoverable_without_a_gui_session() {
+        assert!(INSTRUCTIONS.len() < 1100);
+        assert!(INSTRUCTIONS.contains("state.command.accepts"));
+        assert!(INSTRUCTIONS.contains("never replay a mutation"));
+        let mut clients = HashMap::new();
+        let mut resources = ResourceStore::default();
+        let listed = handle_message(
+            json!({"jsonrpc":"2.0","id":1,"method":"resources/list"}),
+            &mut clients,
+            &mut TaskStore::default(),
+            &mut resources,
+            &mut detached_pump(),
+        )
+        .unwrap();
+        let tool_list = call_tool(
+            "ocs_read",
+            &json!({"ocs_session_id":"offline","op":"guide"}),
+            &mut clients,
+            &mut resources,
+            &mut detached_pump(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(tool_list["guides"].as_array().unwrap().len(), GUIDES.len());
+        for (name, _, text) in GUIDES {
+            let uri = format!("cad://guides/{name}");
+            assert!(listed["result"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["uri"] == uri));
+            let resource = read_resource(
+                &uri,
+                &mut clients,
+                &mut resources,
+                &mut detached_pump(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(resource["contents"][0]["text"], *text);
+            let tool = call_tool(
+                "ocs_read",
+                &json!({"ocs_session_id":"offline","op":"guide","parameters":{"name":name}}),
+                &mut clients,
+                &mut resources,
+                &mut detached_pump(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(tool["contents"], resource["contents"]);
+            assert_eq!(tool["ok"], true);
+            assert_eq!(tool_list["ok"], true);
+        }
+        assert!(read_resource(
+            "cad://guides/missing",
+            &mut clients,
+            &mut resources,
+            &mut detached_pump(),
+            None
+        )
+        .is_err());
+        assert!(clients.is_empty());
+    }
+
+    #[test]
+    fn batch_bindings_validate_and_preserve_types() {
+        let step = json!({"op":"group_create","name":"walls","bindings":{"handles":{"step":0,"path":"/result/a~1b~0c"}}});
+        let request = json!({"op":"batch","steps":[{"op":"run","cmd":"LINE 0,0 1,1"},step]});
+        assert!(validate_execute_request(&request, "batch")
+            .unwrap()
+            .warnings
+            .is_empty());
+        let results = vec![json!({"ok":true,"status":"completed","result":{"a/b~c":["A","B"]}})];
+        let resolved = resolve_batch_step(&step, 1, &results).unwrap();
+        assert_eq!(resolved["handles"], json!(["A", "B"]));
+        assert!(resolved.get("bindings").is_none());
+        assert!(resolve_batch_step(
+            &step,
+            1,
+            &[json!({"status":"completed","result":{"a/b~c":42}})]
+        )
+        .is_err());
+        assert!(resolve_batch_step(&step, 1, &[json!({"status":"running"})]).is_err());
+        assert!(resolve_batch_step(&step, 1, &[json!({"status":"completed"})]).is_err());
+        for binding in [
+            json!({"step":1,"path":"/result"}),
+            json!({"step":2,"path":"/result"}),
+            json!({"step":0,"path":"/bad~2"}),
+            json!({"step":0,"path":"result"}),
+            json!({"step":0,"path":"","extra":true}),
+        ] {
+            let mut invalid = request.clone();
+            invalid["steps"][1]["bindings"]["handles"] = binding;
+            assert!(validate_execute_request(&invalid, "batch").is_err());
+        }
+        for key in ["op", "request_id", "revision", "unknown"] {
+            let invalid = json!({"op":"group_create","name":"walls","bindings":{key:{"step":0,"path":"/result"}}});
+            assert!(batch_bindings(&invalid, 1).is_err());
+        }
+        let mut conflict = step.clone();
+        conflict["handles"] = json!(["A"]);
+        assert!(batch_bindings(&conflict, 1).is_err());
+        let mut missing = request.clone();
+        missing["steps"][1].as_object_mut().unwrap().remove("name");
+        assert!(validate_execute_request(&missing, "batch").is_err());
+    }
+
+    #[test]
+    fn batch_binding_failure_is_cached_without_dispatch() {
+        let step = json!({"op":"group_create","name":"walls","bindings":{"handles":{"step":0,"path":"/missing"}}});
+        let request = json!({"op":"batch","request_id":"binding-test","steps":[{"op":"run","cmd":"LINE"},step]});
+        let mut client = GuiClient {
+            descriptor: Descriptor {
+                session_id: "test".into(),
+                port: 0,
+                token: String::new(),
+                pid: None,
+            },
+            state: json!({}),
+            client_id: "test".into(),
+            inflight: HashMap::new(),
+            dismissed: VecDeque::new(),
+            batches: VecDeque::from([BatchExecution {
+                id: "binding-test".into(),
+                request: request.clone(),
+                steps: request["steps"].as_array().unwrap().clone(),
+                next: 1,
+                active: None,
+                pending: None,
+                results: vec![json!({"ok":true,"status":"completed"})],
+                changes: vec![],
+                state: None,
+                terminal: None,
+            }]),
+        };
+        let failed = client
+            .execute_batch(request.clone(), 0.0, &mut detached_pump(), None)
+            .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["results"][1]["code"], "invalid_batch_binding");
+        assert_eq!(
+            client
+                .execute_batch(request, 0.0, &mut detached_pump(), None)
+                .unwrap(),
+            failed
+        );
     }
 
     #[test]
