@@ -1,6 +1,8 @@
 # Parità con AutoCAD: cosa manca ad ArchLine
 
-Stato: 2026-10-17, su `lavoro` (cea29392), codec `opencadcodec` fe69506, kernel `opencadkernel` ae28f66. Riferimento:
+Stato: 2026-10-17, su `lavoro` (cea29392), codec `opencadcodec` fe69506, kernel `opencadkernel` ae28f66. **Confronto per nome
+rimisurato il 2026-10-19 sulla v2026.42** (§1bis, §3); l'analisi di profondità (§4, §5) resta quella del 17/10, salvo le
+righe segnate. Riferimento:
 AutoCAD 2026. Per Mauro Mazzarelli. Approfondisce [gap-ocs-vs-autocad.md](gap-ocs-vs-autocad.md), che confrontava i
 **nomi** dei comandi con un elenco scritto a memoria: qui il confronto per nome è fatto sull'indice ufficiale Autodesk e,
 soprattutto, si guarda la **profondità** (cosa fa davvero il codice). Le priorità del §6 sono una proposta: la scelta è tua.
@@ -20,17 +22,19 @@ livello di AutoCAD. La parità si rompe su cinque fronti:
 
 | Comandi AutoCAD 2026 | Voci |
 |---|---|
-| registrati in ArchLine con lo stesso nome | 407 |
-| presenti in ArchLine con un altro nome (§3.3) | 14 |
-| assenti | 567 |
+| registrati in ArchLine con lo stesso nome | 456 (il 17/10: 408 nel TSV) |
+| presenti in ArchLine con un altro nome (§3.3) | 13 (14) |
+| assenti | 519 (567) |
 
-Come si dividono le 567 assenze:
+I conteggi sono rifatti sul codice della v2026.42: 48 voci sono diventate «registrate» (47 erano assenti, BCLOSE era «altro nome»; §1bis).
+
+Come si dividono le 519 assenze:
 - **58 fuori scopo per scelta**: servizi cloud e IA di Autodesk (41) e LISP/VBA/.NET/ARX (17).
-- **156 tra 3D, rendering e geolocalizzazione.**
-- **353 nelle altre aree**: interfaccia 77, riferimenti e import 52, annotazione 41, file 37, disegno 2D 33, stampa 29,
-  blocchi 26, blocchi dinamici 24, viste e layer 21, utilità 13.
+- **154 tra 3D, rendering e geolocalizzazione.**
+- **307 nelle altre aree**: interfaccia 74, riferimenti e import 42, annotazione 31, file 35, disegno 2D 30, stampa 24,
+  blocchi 25, blocchi dinamici 13, viste e layer 20, utilità 13.
 
-Registrato non vuol dire funzionante: dei 407, almeno una dozzina sono stub o rimandi (§3.2).
+Registrato non vuol dire funzionante: dei 456, ne restano alcuni che sono stub o rimandi (§3.2, rivisto il 19/10).
 
 **Le dieci lacune che pesano di più su uno studio** (dettaglio al §4, ordine proposto al §6). «Ricontrollato» = verificato
 da me nel codice, oltre che dall'analisi.
@@ -44,13 +48,15 @@ da me nel codice, oltre che dall'analisi.
 4. **La stampa su plotter passa sempre da un PDF temporaneo.** Se è installato un lettore PDF che gestisce la stampa diretta
    (`printto`), stampa lui e la scala la decide il lettore. Altrimenti ArchLine stampa un raster a 300 DPI, adattato all'area
    stampabile e solo della prima pagina. Niente PC3. (ricontrollato)
-5. **Non c'è una pubblicazione vera**: PRINTALL fa un solo PDF del disegno attivo. Mancano un PDF per tavola, più disegni,
-   un elenco salvabile.
+5. **Pubblicazione solo parziale** (aggiornato il 19/10): `PUBLISH` c'è come sinonimo di «Print all» e il dialogo dà un PDF
+   per tavola (nostro). Mancano più disegni e l'elenco salvabile (DSD).
 6. ~~**Estrazione dati e conteggi non servono per gli abachi.**~~ **Corretto per i blocchi** (voce 10): DATAEXTRACTION ha le
    colonne «Block name» e una per ogni attributo, `COUNT BLOCK` conta per blocco, SELECTSIMILAR non mescola più i blocchi.
    Restano fuori le proprietà dinamiche, i MINSERT espansi e i blocchi annidati (§4.4).
-7. **Dei blocchi dinamici si cambia solo la visibilità**, e con un difetto (§5). Niente maniglie stretch, flip, rotate,
-   lookup; le proprietà dinamiche si leggono ma non si modificano.
+7. ~~**Dei blocchi dinamici si cambia solo la visibilità**~~ **Superato in parte da upstream v2026.42**: ci sono
+   BPARAMETER, BACTION, BVSTATE, BLOOKUPTABLE, BTESTBLOCK, BVHIDE/BVSHOW con test (`src/app/block_editor_tests.rs`).
+   La profondità (maniglie, flip, lookup su blocchi di terzi) **non è rimisurata** e va provata a schermo; il difetto
+   della visibilità che tocca tutte le copie (§5) non è ricontrollato.
 8. **Non ci sono percorsi di supporto.** `.pat` e `.lin` esterni non si caricano, gli SHX si cercano solo vicino al disegno,
    la GUI non offre template (NEW crea un disegno vuoto in metri).
 9. **Gli xref annidati non si vedono nel disegno** (ricontrollato) e lo stato Unload non si salva.
@@ -78,6 +84,15 @@ L'analisi di questo documento è del 2026-10-17 e misurava la v2026.40.1. Il 18/
 - **Corretto dal codec nuovo**: gli accenti nei DXF prima del 2007 (§5, voce 5) escono giusti; lo ha misurato il banco di conformità il 2026-10-19 (`text_accents` R2000 da ATTESO a OK).
 - **Riaperti** (il lavoro non è sopravvissuto all'unione): FILLET con Shift per il raggio 0, CHAMFER Angle/Method, CHAMFER su tutta la polilinea.
 - **Campi in una cella di tabella**: l'aggiornamento misurato riguarda solo i testi (MTEXT, TEXT, attributi); una cella con un campo Area di polilinea mostra il valore memorizzato (non coperto, non verificato).
+
+**Rimisura per nome (2026-10-19).** Ho estratto dal codice i nomi di tutti i `CommandRegistration { names }` (819) e li ho confrontati con le 988 voci dell'indice: nessuna voce registrata il 17/10 è sparita; 47 assenti ora sono registrate e BCLOSE era un «altro nome» e ora è un comando. Per ognuna ho controllato che ci sia un gestore (non un messaggio «non implementato»):
+- **blocchi dinamici (authoring)**: BPARAMETER, BACTION, BACTIONSET, BACTIONTOOL, BAUTHORPALETTE(CLOSE), BLOOKUPTABLE, BTESTBLOCK, BVSTATE, BVHIDE, BVSHOW, BSAVEAS;
+- **annotazione**: COUNTAREA, COUNTFIELD, COUNTLIST(CLOSE), COUNTTABLE, COUNTCLOSE, UPDATEFIELD, TXT2MTXT, TXTEXP;
+- **stampa e fogli**: PUBLISH, MVSETUP, NEWSHEETSET, OPENSHEETSET, SHEETSETHIDE (e SHEETSET/SSM ora aprono il Sheet Set Manager);
+- **import e riferimenti**: IMPORT, DGNIMPORT (e `-DGNIMPORT`), PDFSHXTEXT, WMFIN, ACISIN, IMAGEADJUST (e `-IMAGEADJUST`), DWFADJUST, DGNADJUST, REFSET;
+- **modifica e viste**: ARRAYEDIT, PASTESPEC, PTYPE, CHSPACE, DVIEW, COMPARE, QNEW; interfaccia: RIBBON, RIBBONCLOSE, EXTERNALREFERENCESCLOSE.
+
+Il confronto è per nome: dice che il comando esiste e ha un gestore, **non** quanto sia profondo rispetto ad AutoCAD. La classificazione per area delle assenti resta quella del 17/10. Ho tenuto per assenti le 33 voci che compaiono nel codice solo come stringa (alias `pgp.rs`, catalogo delle traduzioni, parole comuni come `SELECT`, `LOAD`, `FILL`): nessuna è un comando con quel nome. Il TSV è aggiornato; la procedura (estrazione con una regex sui `CommandRegistration`, controllo a mano dei gestori) non è uno strumento nel repo.
 
 **Dalle note di rilascio della v2026.42, non verificato nel codice** (da ricontrollare prima di contare sui nomi in §3.1 e sulle funzioni in §4): blocchi dinamici con parametri e azioni, tabelle di ricerca e di proprietà; `IMPORT`, `DGNIMPORT`, `PDFIMPORT`, `PDFSHXTEXT`; `EXPORTSVG`, `FBXEXPORT`; `MVSETUP`, `-VIEW`, `DVIEW`, `PASTESPEC`, `FILTER`, `TXT2MTXT`, `TXTEXP`, `ATTMAN`/`BATTMAN`, `HPASSOC`, `SELECTIONCYCLING`, `ARRAYRECT`/`ARRAYPOLAR` associativi, `ADJUST`/`-IMAGEADJUST`, `LAYCUR`, `MEASUREGEOM` con raggio e angolo; dock e palette riscritti, Graphic Attributes, menu a tendina classico (in ArchLine compare solo fuori dal workspace classico); PDF con i layer del disegno.
 
@@ -112,44 +127,44 @@ La colonna di destra elenca i comandi che contano per uno studio di architettura
 
 | Area | Assenti | Quelli che contano |
 |---|---|---|
-| Interfaccia e personalizzazione | 77 | `WORKSPACE`, `WSSAVE`, `CUSTOMIZE`, `ACTRECORD` (Action Recorder), `TOOLBAR`. Molti degli altri sono comandi di chiusura palette (`…CLOSE`): impatto basso |
-| Riferimenti, immagini, import | 52 | `IMAGEADJUST`, `IMAGEQUALITY`, `PDFSHXTEXT`, `-XBIND`, `DGNIMPORT`/`DGNEXPORT`, `INSERTOBJ` e `OLE*`, hyperlink (`ATTACHURL`…), Express `XLIST` |
-| Annotazione | 41 | `DIM` (quota unica), `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT`, `DIMOVERRIDE`, `TEXTALIGN`, `SPELL`, `TXT2MTXT`, `TXTEXP`, `UPDATEFIELD`, la famiglia `COUNT*` (palette, tabella, campo), `HATCHSETORIGIN`, `HATCHGENERATEBOUNDARY` |
-| File e qualità | 37 | `RECOVER`, `RECOVERALL`, `DRAWINGRECOVERY`, `COMPARE`, `XCOMPARE`, `QNEW`, `CLOSEALL`, `PARTIALOPEN`, `STANDARDS`/`CHECKSTANDARDS`, `EXPORTTOAUTOCAD`/`PURGEAECDATA` (file di AutoCAD Architecture), `DWGCONVERT` |
-| Disegno e modifica 2D | 33 | `CHANGE`, `COPYTOLAYER`, `ARRAYEDIT`, `CUTBASE`, `PASTESPEC`, `PTYPE`; Express `BREAKLINE`, `COPYM`, `MPEDIT`, `SUPERHATCH`, `EXOFFSET` |
-| Stampa e pubblicazione | 29 | `PUBLISH`, `PREVIEW`, `PLOTTERMANAGER`, `PLOTSTAMP`, `CONVERTCTB`/`CONVERTPSTYLES`, `EXPORTLAYOUT`, `PNGOUT`/`JPGOUT`, `NEWSHEETSET`/`OPENSHEETSET`, `MVSETUP`, `LAYOUTWIZARD` |
-| Blocchi e attributi | 26 | `BCOUNT`, `BURST`, `BLOCKREPLACE`/`BREPLACE`, `GATTE`, `ATTIPEDIT`, `ATTOUT`/`ATTIN`, `TINSERT`, `GROUPEDIT`, `BLOCKICON` |
-| Blocchi dinamici (authoring) | 24 | `BPARAMETER`, `BACTION`, `BVSTATE`, `BTABLE`, `BTESTBLOCK` |
-| Viste, layer, viewport | 21 | `LAYWALK`, `LAYVPI`, `CHSPACE`, `VPMAX`/`VPMIN`, `UCSMAN`, `VIEWBACK`/`VIEWFORWARD` |
+| Interfaccia e personalizzazione | 74 | `WORKSPACE`, `WSSAVE`, `CUSTOMIZE`, `ACTRECORD` (Action Recorder), `TOOLBAR`. Molti degli altri sono comandi di chiusura palette (`…CLOSE`): impatto basso |
+| Riferimenti, immagini, import | 42 | `IMAGEQUALITY`, `-XBIND`, `DGNEXPORT`, `INSERTOBJ` e `OLE*`, hyperlink (`ATTACHURL`…), Express `XLIST` |
+| Annotazione | 31 | `DIM` (quota unica), `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT`, `DIMOVERRIDE`, `TEXTALIGN`, `SPELL`, `HATCHSETORIGIN`, `HATCHGENERATEBOUNDARY` |
+| File e qualità | 35 | `RECOVER`, `RECOVERALL`, `DRAWINGRECOVERY`, `XCOMPARE`, `CLOSEALL`, `PARTIALOPEN`, `STANDARDS`/`CHECKSTANDARDS`, `EXPORTTOAUTOCAD`/`PURGEAECDATA` (file di AutoCAD Architecture), `DWGCONVERT` |
+| Disegno e modifica 2D | 30 | `CHANGE`, `COPYTOLAYER`, `CUTBASE`; Express `BREAKLINE`, `COPYM`, `MPEDIT`, `SUPERHATCH`, `EXOFFSET` |
+| Stampa e pubblicazione | 24 | `PREVIEW`, `PLOTTERMANAGER`, `PLOTSTAMP`, `CONVERTCTB`/`CONVERTPSTYLES`, `EXPORTLAYOUT`, `PNGOUT`/`JPGOUT`, `LAYOUTWIZARD` |
+| Blocchi e attributi | 25 | `BCOUNT`, `BURST`, `BLOCKREPLACE`/`BREPLACE`, `GATTE`, `ATTIPEDIT`, `ATTOUT`/`ATTIN`, `TINSERT`, `GROUPEDIT`, `BLOCKICON` |
+| Blocchi dinamici (authoring) | 13 | `BTABLE`, `BCPARAMETER`, `BGRIPSET`, `BCONSTRUCTION`, `BASSOCIATE`, `RESETBLOCK` (il nucleo BPARAMETER/BACTION/BVSTATE/BTESTBLOCK ora c'è) |
+| Viste, layer, viewport | 20 | `LAYWALK`, `LAYVPI`, `VPMAX`/`VPMIN`, `UCSMAN`, `VIEWBACK`/`VIEWFORWARD` |
 | Utilità | 13 | `STATUS`, `TIME`; per gli script `DELAY`, `RESUME`, `RSCRIPT` |
-| 3D, rendering, geolocalizzazione | 156 | §4.10 |
+| 3D, rendering, geolocalizzazione | 154 | §4.10 |
 | Cloud e IA di Autodesk | 41 | fuori scopo per scelta (§4.11) |
 | LISP/VBA/.NET/ARX | 17 | fuori scopo per scelta |
 
-**Express Tools.** L'indice ne elenca 84: 12 sono registrati in ArchLine (`ALIASEDIT`, `ARCTEXT`, `EXTRIM`, `FLATTEN`,
-`SAVEALL`, `TCASE`, `TCOUNT`, `TEXTFIT`, `TEXTMASK`, `TORIENT`, `VPSYNC`, `XDATA`), 72 sono assenti.
+**Express Tools.** L'indice ne elenca 84: 13 sono registrati in ArchLine (`ALIASEDIT`, `ARCTEXT`, `EXTRIM`, `FLATTEN`,
+`SAVEALL`, `TCASE`, `TCOUNT`, `TEXTFIT`, `TEXTMASK`, `TORIENT`, `TXTEXP`, `VPSYNC`, `XDATA`), 71 sono assenti.
 
 ### 3.2 Registrati ma non funzionanti
 
 | Nome | Cosa fa davvero | Evidenza |
 |---|---|---|
-| `TOOLPALETTES` | dice «not yet implemented» | `src/app/commands/display.rs:591` |
-| `SHEETSET`, `SSM` | dice «not yet implemented» | `src/app/commands/display.rs:596` |
-| `ADCENTER`, `ADC`, `CONTENTBROWSER` | stampano in riga di comando i nomi di blocchi e layer del disegno corrente | `src/app/commands/blocks.rs:666-692` |
-| `BATTMAN`, `ATTMAN` | aprono l'editor dell'istanza, non il gestore delle definizioni | `src/app/commands/blocks.rs:716-725` |
+| `TOOLPALETTES` | dice «not yet implemented» (ricontrollato 19/10) | `src/app/commands/display.rs:642-645` |
+| ~~`SHEETSET`, `SSM`~~ | **Superato da upstream**: aprono il Sheet Set Manager (19/10) | `src/app/commands/sheet_set.rs:535` |
+| `ADCENTER`, `ADC`, `CONTENTBROWSER` | stampano in riga di comando i nomi di blocchi e layer del disegno corrente (ricontrollato 19/10) | `src/app/commands/blocks.rs:695-715` |
+| ~~`BATTMAN`, `ATTMAN`~~ | **Superato da upstream**: aprono il gestore degli attributi (finestra con modifica delle definizioni e, a scelta, dei riferimenti); non provato a schermo (19/10) | `src/app/commands/attman.rs` |
 | `CUIIMPORT`, `CUILOAD` | leggono un file di testo «TASTO COMANDO», non un `.cuix` | `src/app/commands/view.rs:352-396` |
-| `FILTER` | è un alias di QSELECT: niente AND/OR/NOT né filtri salvati | `src/app/commands/inquiry.rs:116` |
+| `FILTER` | è un alias di QSELECT: niente AND/OR/NOT né filtri salvati (la riga è ancora nel dispatch, `inquiry.rs:118`; confronto con le note della v2026.42 non fatto) | `src/app/commands/inquiry.rs:118` |
 | `QLEADER` | è un alias di LEADER, senza finestra delle impostazioni | `src/app/commands/dim.rs:115` |
 | `QTEXTMODE`, `PICKSTYLE` | il valore si salva ma non ha effetto | `src/app/commands/styleprops.rs:2375`, `:2451` |
-| `ARCTEXT` | crea un TEXT per carattere: niente oggetto modificabile | `src/app/commands/dim.rs:1359-1407` |
-| `DWGPROPS` | nessuna finestra | `src/app/commands/view.rs:84-92` |
+| `ARCTEXT` | crea un TEXT per carattere: niente oggetto modificabile (ricontrollato 19/10) | `src/app/commands/dim.rs:1495-1530` |
+| `DWGPROPS` | nessuna finestra: stampa le proprietà in riga di comando (ricontrollato 19/10) | `src/app/commands/view.rs:100-125` |
 
 ### 3.3 Presenti con un altro nome: alias a costo quasi nullo
 
 | AutoCAD | ArchLine |
 |---|---|
 | `GCPARALLEL` / `GCTANGENT` / `GCSYMMETRIC` / `GCCOLLINEAR` | `PCONSTRAINT` / `TCONSTRAINT` / `SYCONSTRAINT` / `LCONSTRAINT` |
-| `BSAVE` / `BCLOSE` | `BEDIT_SAVE` (**alias fatto**) / `BEDIT_DISCARD` (**non fatto**: AutoCAD chiede prima di scartare le modifiche, `BEDIT_DISCARD` no) |
+| `BSAVE` / `BCLOSE` | `BEDIT_SAVE` (**alias fatto**) / `BCLOSE` (**ora è un comando di upstream**, 19/10: non verificato se chieda prima di scartare) |
 | `MTEDIT` | `TEXTEDIT` |
 | `LAYERSTATESAVE` | `LAYERSTATE` |
 | `NEWVIEW` | `VIEW` |
@@ -157,7 +172,7 @@ La colonna di destra elenca i comandi che contano per uno studio di architettura
 | `LAYOUT`, `MODEL` | schede e `LAYOUTMANAGER` (manca il comando `LAYOUT` con le sue opzioni) |
 | `ULAYERS`, `PDFADJUST` | **registrati** (compaiono nell'autocompletamento) |
 
-**Fatti** in `claude/parita-l1-08-alias-attsync` (`src/app/commands/autocad_names.rs`, verificati da test: stesso esito del comando di destinazione): `GCPARALLEL`, `GCTANGENT`, `GCSYMMETRIC`, `GCCOLLINEAR`, `BSAVE`, `MTEDIT`, `LAYERSTATESAVE` (→ `LAYERSTATE SAVE`), `NEWVIEW` (→ `VIEW`, che offre Save). Funzionano anche con il tuo `ocad.pgp` già copiato, perché sono nel codice. **Non fatti**, per i motivi sopra o perché il comando di destinazione non fa la stessa cosa: `BCLOSE`, `XBIND`, `LAYOUT`, `MODEL`.
+**Fatti** in `claude/parita-l1-08-alias-attsync` (`src/app/commands/autocad_names.rs`, verificati da test: stesso esito del comando di destinazione): `GCPARALLEL`, `GCTANGENT`, `GCSYMMETRIC`, `GCCOLLINEAR`, `BSAVE`, `MTEDIT`, `LAYERSTATESAVE` (→ `LAYERSTATE SAVE`), `NEWVIEW` (→ `VIEW`, che offre Save). Funzionano anche con il tuo `ocad.pgp` già copiato, perché sono nel codice. **Non fatti**, per i motivi sopra o perché il comando di destinazione non fa la stessa cosa: `XBIND`, `LAYOUT`, `MODEL`.
 
 Ci sono anche differenze negli alias di `assets/ocad.pgp`, da controllare una per una prima di cambiarle:
 - ~~`T` apre TEXT, mentre in AutoCAD apre MTEXT~~ **Cambiato su tua decisione** (`claude/parita-l1-09-alias-t`): `T` apre MTEXT. Chi ha già l'`ocad.pgp` con `T` su TEXT viene portato su MTEXT alla prima apertura (migrazione v6); un `T` personalizzato non si tocca. `DT` resta TEXT;
@@ -265,12 +280,12 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 |---|---|---|---|
 | DATAEXTRACTION / EATTEXT | **Parziale; utile per gli abachi di blocchi** | `src/app/annotation_data.rs`, `src/app/extraction_blocks.rs` | Nuove proprietà: «Block name» (nome della definizione, anche per i blocchi dinamici) e una colonna per ogni tag di attributo trovato nella sorgente (categoria «Attributes», spente di default; si ricordano nelle impostazioni salvate). Con «combina identici» e senza Handle/Details le righe si raggruppano per blocco e attributi. Gli oggetti estratti sono solo quelli di spazio modello e layout, non la geometria dentro le definizioni di blocco (prima si contava anche quella). Mancano le proprietà dinamiche, l'espansione dei blocchi annidati e dei MINSERT (un MINSERT è un riferimento). Esce solo CSV/TXT, e la tabella non è collegata |
 | COUNT / BCOUNT | ~~Assente per i blocchi~~ **`COUNT BLOCK`** | `src/app/commands/inquiry.rs:1244-1290` | Conta i riferimenti a blocco di spazio modello e layout per nome di definizione (non quelli annidati nelle definizioni; un MINSERT conta 1). `COUNT` per tipo o layer conta ancora tutto il documento, definizioni di blocco comprese: stesso difetto di prima, non toccato |
-| Blocchi dinamici, uso | Parziale | `src/app/visibility.rs:179-219`; `src/entities/object_data.rs:719-790` | Funziona solo la visibilità; le altre proprietà si vedono in sola lettura. Mancano le maniglie lineare, polare, XY, rotazione, flip, lookup e le loro azioni |
-| Blocchi dinamici, authoring | Assente | — | BPARAMETER, BACTION, BVSTATE, BTABLE, BTESTBLOCK |
+| Blocchi dinamici, uso | Parziale (misura del 17/10: **superata in parte** dalla v2026.42, non rimisurata) | `src/app/visibility.rs:179-219`; `src/entities/object_data.rs:719-790` | Funziona solo la visibilità; le altre proprietà si vedono in sola lettura. Mancano le maniglie lineare, polare, XY, rotazione, flip, lookup e le loro azioni |
+| Blocchi dinamici, authoring | **Registrato con gestori e test dal 19/10; profondità non rimisurata** | `src/app/commands/bvisibility.rs`, `src/modules/block_editor/`, `src/app/block_editor_tests.rs` | Restano assenti BTABLE, BCPARAMETER, BGRIPSET, BCONSTRUCTION, BASSOCIATE, RESETBLOCK. Da provare a schermo con un blocco di terzi |
 | BEDIT | Parziale | `src/app/commands/inquiry.rs:463-660` | Niente parametri. Si entra solo scegliendo un riferimento: un blocco mai inserito non si modifica. **Corretto**: su un riferimento dinamico apre la definizione, non il `*U` (verificato da test con una rappresentazione sintetica, non con un blocco dinamico reale: da provare a schermo con un blocco della libreria) |
 | REFEDIT | Parziale | `inquiry.rs`, `blockedit_target.rs` | ATTDEF esclusi; niente REFSET. Su un riferimento dinamico apre la definizione; su un xref rifiuta con un messaggio (verificato da test) |
 | ATTSYNC | Parziale | `src/app/commands/blocks.rs` | **Difetto corretto** (verificato da test): l'attributo nuovo prende posizione, altezza, rotazione, stile e layer dalla definizione, con la trasformazione dell'inserimento; i valori degli attributi già presenti non cambiano |
-| BATTMAN | Assente (rimanda all'editor) | `blocks.rs:716-725` | gestione delle definizioni |
+| BATTMAN | ~~Assente~~ **Fatto da upstream** (19/10, non provato a schermo) | `src/app/commands/attman.rs` | — |
 | ATTDIA | Assente | `styleprops.rs:2091` | salvato, mai letto: niente finestra dei valori all'inserimento |
 | -ATTEDIT globale, ATTIPEDIT, GATTE | Parziale / Assenti | `src/app/commands/draw.rs:82-180` | -ATTEDIT lavora solo su inserti già selezionati |
 | Palette Blocks, librerie | Parziale | `src/app/update/blocks_palette.rs:192`, `:537` | I blocchi dentro un DWG-libreria non si sfogliano. La casella «Auto-Placement» non ha effetto |
