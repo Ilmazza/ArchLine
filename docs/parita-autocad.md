@@ -67,6 +67,19 @@ da me nel codice, oltre che dall'analisi.
 **Vantaggi verificati** (§7): automazione esterna (MCP, REST, uso senza interfaccia), blocco dei file interoperabile,
 nessun traffico di rete all'avvio, vincoli parametrici completi, node graph.
 
+## 1bis. Aggiornamento del 2026-10-19: upstream v2026.42
+
+L'analisi di questo documento è del 2026-10-17 e misurava la v2026.40.1. Il 18/10 upstream ha rilasciato la **v2026.42** (250 commit dalla .41; `Cargo.toml` 2026.42.0, codec `acadrust` rev 0dcd5aa) e ArchLine l'ha unita nel branch `claude/merge-upstream-2026.42` (16 file in conflitto con il fork risolti a mano; il lavoro di parità è poi stato riportato commit per commit, scartando o riducendo ciò che upstream fa già; tutti i test passano). Le voci che seguono hanno cambiato stato; le altre di questo documento **non sono state rimisurate**.
+
+**Verificato nel codice o con un test dopo l'unione**
+- Fatti da upstream: snap digitati, viste con nome e `ZOOM nXP`, FILLET/CHAMFER senza taglio e su polilinea, STRETCH di punti e spline, ATTSYNC, BEDIT/REFEDIT (REFEDIT scrive sugli xref), UPDATEFIELD e il modello dei campi aggiornati su eventi (apertura, salvataggio, rigenera, plot), `COUNT` come palette per blocco, `PUBLISH` come sinonimo di «Print all» (un PDF con tutti i layout, o stampante).
+- Restano nostri: LAYUNISO, `HPGAPTOL`, ROTATE/SCALE Copy, Undo/Group e preselezione, i sette alias, STRETCH di leader/MLine/wipeout/tratteggi, DATAEXTRACTION con blocco e attributi, SELECTSIMILAR per blocco, TABLEEXPORT, campi Area/Lunghezza su polilinee, tratteggi, ellissi e spline (ora agganciati a `update_fields`: i campi si aggiornano su apertura, salvataggio, rigenera e UPDATEFIELD, non più a ogni ridisegno), un PDF per tavola da «Print all».
+- Il difetto del codec sui campi (area solo del cerchio, lunghezza di linea, cerchio, arco) c'è ancora nel rev 0dcd5aa.
+- **Riaperti** (il lavoro non è sopravvissuto all'unione): FILLET con Shift per il raggio 0, CHAMFER Angle/Method, CHAMFER su tutta la polilinea.
+- **Campi in una cella di tabella**: l'aggiornamento misurato riguarda solo i testi (MTEXT, TEXT, attributi); una cella con un campo Area di polilinea mostra il valore memorizzato (non coperto, non verificato).
+
+**Dalle note di rilascio della v2026.42, non verificato nel codice** (da ricontrollare prima di contare sui nomi in §3.1 e sulle funzioni in §4): blocchi dinamici con parametri e azioni, tabelle di ricerca e di proprietà; `IMPORT`, `DGNIMPORT`, `PDFIMPORT`, `PDFSHXTEXT`; `EXPORTSVG`, `FBXEXPORT`; `MVSETUP`, `-VIEW`, `DVIEW`, `PASTESPEC`, `FILTER`, `TXT2MTXT`, `TXTEXP`, `ATTMAN`/`BATTMAN`, `HPASSOC`, `SELECTIONCYCLING`, `ARRAYRECT`/`ARRAYPOLAR` associativi, `ADJUST`/`-IMAGEADJUST`, `LAYCUR`, `MEASUREGEOM` con raggio e angolo; dock e palette riscritti, Graphic Attributes, menu a tendina classico (in ArchLine compare solo fuori dal workspace classico); PDF con i layer del disegno.
+
 ## 2. Metodo e affidabilità
 
 1. **Indice ufficiale dei comandi.** È l'indice "Commands" A–Z della guida AutoCAD 2026 (help.autodesk.com), raccolto il
@@ -220,7 +233,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 
 | Funzione | Stato | Evidenza | Cosa manca |
 |---|---|---|---|
-| Campi Area/Lunghezza | **Corretto lato app** | `src/entities/field_measure.rs`; `src/entities/field.rs` (aggancio); `src/ui/window/field_dialog.rs` | Il codec valuta l'area solo del cerchio e la lunghezza di linea, cerchio e arco (`codec:fields.rs:1053`, `:1061-1082`); per il resto ArchLine misura LWPOLYLINE, POLYLINE 2D e 3D, HATCH (solo area), ELLIPSE e SPLINE con la geometria del comando AREA e passa il numero al formattatore del codec, quindi anteprima, testo con campo e celle di tabella si aggiornano. Il dialogo Oggetto ha Formato, Precisione e Fattore di conversione (`%lu`, `%pr`, `%ct8[f]`, `%qf1` per le aree). Limiti: l'area di una polilinea aperta è quella chiusa dalla corda (come AREA; per AutoCAD è dedotto, non provato); l'area dell'arco di ellisse idem; un tratteggio non ha lunghezza; manca il prefisso/suffisso (`%ps`, per esempio «m²»); UPDATEFIELD resta assente (il testo con campo si rivaluta a ogni ridisegno, `src/entities/mtext.rs:88`; non verificato che il valore salvato nel file sia quello nuovo) |
+| Campi Area/Lunghezza | **Corretto lato app** | `src/entities/field_measure.rs`; `src/entities/field.rs` (aggancio); `src/ui/window/field_dialog.rs` | Il codec valuta l'area solo del cerchio e la lunghezza di linea, cerchio e arco (`codec:fields.rs`, rev 0dcd5aa: `area` a `:987`, `length` a `:995`); per il resto ArchLine misura LWPOLYLINE, POLYLINE 2D e 3D, HATCH (solo area), ELLIPSE e SPLINE con la geometria del comando AREA e passa il numero al formattatore del codec, quindi anteprima, testo con campo e celle di tabella si aggiornano. Il dialogo Oggetto ha Formato, Precisione e Fattore di conversione (`%lu`, `%pr`, `%ct8[f]`, `%qf1` per le aree). Limiti: l'area di una polilinea aperta è quella chiusa dalla corda (come AREA; per AutoCAD è dedotto, non provato); l'area dell'arco di ellisse idem; un tratteggio non ha lunghezza; manca il prefisso/suffisso (`%ps`, per esempio «m²»); UPDATEFIELD resta assente (il testo con campo si rivaluta a ogni ridisegno, `src/entities/mtext.rs:88`; non verificato che il valore salvato nel file sia quello nuovo) |
 | HATCH, tolleranza di chiusura | **Presente** (fatto; verificato da test, non a schermo) | `src/app/commands/hatchvars.rs`, `draw.rs` (HATCH e GRADIENT) | `HPGAPTOL n` (0–5000, 0 = chiusura esatta, come AutoCAD) chiude lacune fino a n unità nel contorno, con la stessa `boundary_faces` di BOUNDARY. Vale per la sessione: l'header del codec non ha il campo, quindi non si salva nel disegno. Manca l'opzione nella finestra/prompt di HATCH. Da verificare a schermo: come si vede il tratteggio sulla lacuna chiusa |
 | HATCH, pattern | Parziale | `src/io/patterns.rs:11` | Un solo `.pat` incorporato: 106 pattern di derivazione QCAD. Non si caricano `.pat` dell'utente; `acad.pat` e `acadiso.pat` non sono completi |
 | HATCH da riga di comando | Parziale | `src/modules/draw/draw/hatch.rs:538` | solo P/A/L |
@@ -458,21 +471,20 @@ Criteri:
 
 Ogni voce dei livelli 1–2 è una PR piccola, con test.
 
-**Livello 1 — difetti e gesti quotidiani, costo basso**
-1. ~~Snap digitati al prompt~~ **Fatto** (test: `typed_snap_token_arms_the_one_shot_override`, `typed_non_token_is_the_none_override`).
-2. ~~LAYUNISO, viste con nome, `ZOOM nXP`~~ **fatti** (voci 2 e 3 della consegna).
-3. ~~Tolleranza di chiusura in HATCH~~ **fatta** (`HPGAPTOL`).
-4. ~~FILLET e CHAMFER: Trim/No trim, Shift per raggio 0, CHAMFER Angle, Method e Polyline~~ **fatti**.
-5. ~~STRETCH sui tipi oggi saltati~~ **fatto** (restano tabelle, MULTILEADER, immagini).
-6. ~~ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, ISOLATEOBJECTS, HIDEOBJECTS, LAYISO~~ **fatti** (CHPROP, DRAWORDER, TCASE non servivano: lo facevano già).
-7. ~~I 14 nomi AutoCAD del §3.3 come alias~~ **8 alias fatti, 2 registrati, 4 non fatti con motivo** (vedi §3.3). Cambiare `T` in MTEXT resta una scelta tua: rompe l'abitudine di chi usa già ArchLine.
-8. ~~ATTSYNC; BEDIT e REFEDIT che aprono la definizione e non il `*U`; REFEDIT bloccato sugli xref finché non salva~~ **fatti**.
+**Livello 1 — difetti e gesti quotidiani, costo basso** (stato dopo l'unione con la v2026.42; «upstream» = lo fa il motore di Open CAD Studio)
+1. Snap digitati al prompt: **upstream** (`typed_snap_override`, più completo del mio; il mio commit è stato scartato).
+2. LAYUNISO: **fatto** (nostro). Viste con nome e `ZOOM nXP`: **upstream** (`last_render_aspect`, `set_viewport_scale_factor`); restano nostri i messaggi di `ZOOM nXP` (valore illeggibile, viewport bloccata o assente: upstream zooma la vista in silenzio) e i test.
+3. Tolleranza di chiusura in HATCH (`HPGAPTOL`): **fatta** (nostra), per `-HATCH` e per la finestra Hatch.
+4. FILLET e CHAMFER: **upstream** ha Trim/No trim (TRIMMODE), Polyline per FILLET e CHAMFER su un angolo, Multiple. **Riaperti, da rifare sulla struttura nuova** (il mio commit è stato scartato): Shift per il raggio 0 nel FILLET, CHAMFER con metodo Angle e opzione Method, CHAMFER su tutta la polilinea.
+5. STRETCH: **upstream** muove punti e spline (`stretch_entity`); **nostri** leader, MLine, wipeout e tratteggi non associativi (`stretch_grips.rs`, ripiego dopo `stretch_entity`). Restano fuori tabelle, MULTILEADER, immagini.
+6. ROTATE e SCALE con Copy; Undo e Group nel prompt di selezione; preselezione per LIST, ISOLATEOBJECTS, HIDEOBJECTS, LAYISO: **fatti** (nostri). CHPROP, DRAWORDER, TCASE non servivano: lo facevano già.
+7. Alias dei nomi AutoCAD: **sette nostri** (GCPARALLEL, GCTANGENT, GCSYMMETRIC, GCCOLLINEAR, MTEDIT, LAYERSTATESAVE, NEWVIEW) in `autocad_names.rs`; `BSAVE` è ora un comando di upstream; ULAYERS e PDFADJUST sono di upstream e noi li abbiamo solo registrati per l'autocompletamento; 4 non fatti con motivo (§3.3). `T` apre MTEXT (scelta di Mauro; migrazione dei profili alla versione 11 degli alias).
+8. ATTSYNC, BEDIT e REFEDIT: **upstream** (ATTSYNC rifà gli attributi dalla definizione con la trasformazione del blocco, come la mia correzione: verificato con `attsync_gives_a_new_attribute_the_definitions_place_and_height`; BEDIT/REFEDIT riscritti, con il write-back sugli xref). Il nostro `blockedit_target.rs` resta solo come helper per il nome della definizione di un blocco dinamico.
 
 **Livello 2 — dati per abachi e cartigli** (ponte verso il plugin architettonico)
 9. ~~Campi Area/Lunghezza su LWPOLYLINE, POLYLINE, HATCH, ELLIPSE, SPLINE, con formato e fattore di conversione nel dialogo.~~ **Fatto lato app**
     (scelta di Mauro; test in `src/entities/field_measure.rs` e `src/ui/window/field_dialog.rs`; da verificare a schermo: il dialogo Campo su una polilinea e su un tratteggio, e il testo che segue la polilinea quando si sposta un vertice).
-10. ~~DATAEXTRACTION con il nome del blocco e gli attributi come colonne; COUNT e SELECTSIMILAR per nome di blocco.~~ **Fatto**
-    (test in `src/app/annotation_data.rs` e `src/app/extraction_blocks.rs`; da verificare a schermo: il wizard con attributi reali).
+10. DATAEXTRACTION con il nome del blocco e gli attributi come colonne, SELECTSIMILAR per nome di blocco: **fatti** (nostri; test in `src/app/annotation_data.rs`, `src/app/extraction_blocks.rs`, `src/app/dialog_flow_tests.rs`; da verificare a schermo: il wizard con attributi reali). Il conteggio per blocco è ora il `COUNT` di upstream (palette): il mio `COUNT BLOCK` è stato scartato.
 11. ~~TABLEEXPORT (`table_to_csv` esiste già).~~ **Fatto** (test in `src/app/commands/table_export.rs`; da verificare a schermo: finestra di salvataggio e file aperto in Excel).
 
 **Livello 3 — consegna delle tavole**
