@@ -14,7 +14,7 @@ python -m unittest discover -s tests/conformance -p "test_*.py"   # test del ban
 python tests/conformance/run.py target\release\ArchLine.exe  # misura DXF/DWG con oracolo ezdxf (~35 s)
 ```
 - `.cargo/config.toml`: `RUST_MIN_STACK` è a 64 MiB (upstream 8 MiB). Non rimuoverlo: senza, `rustc` è andato in stack overflow su Windows in release.
-- CI: `.github/workflows/archline-windows.yml` compila su `windows-latest` a ogni push su `claude/**` e su `lavoro` e pubblica l'artefatto `ArchLine-windows-N` (Actions → corsa → Artifacts). `Tests` è il `ci.yml` di upstream. Lo stesso workflow esegue il banco di conformità (passo non bloccante, `continue-on-error`) e mette `conformance-report.md` nell'artefatto.
+- **CI su GitHub: SPENTA per volere dell'utente (2026-10-21).** GitHub Actions è disabilitato sul repo `Ilmazza/ArchLine` (impostazione del repo, non i file): niente corse a ogni push, nessun artefatto, nemmeno le CI di upstream. **Non riattivarla, non aggiungere workflow, non proporre di "vedere cosa dice la CI"**: si verifica in locale (`cargo check`, `cargo test --lib <filtro>`, `cargo build --release --bin ArchLine`, banco di conformità, `build-msi.ps1`), con le build che consegniamo noi. I file in `.github/workflows/` restano com'erano (sono di upstream o storici, toccarli darebbe conflitti nei merge); `archline-windows.yml` è inerte. Per riaccenderla (solo su richiesta esplicita): `gh api -X PUT repos/Ilmazza/ArchLine/actions/permissions -F enabled=true`. Le voci sotto che parlano di CI (Python host check, `Tests`, Web build check, artefatti `ArchLine-windows-N`) valgono solo come storia.
 - Il container cloud non ha GPU: la verifica visiva si fa solo su Windows, con screenshot dell'utente.
 
 ## Branch e flusso
