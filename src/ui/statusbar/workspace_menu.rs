@@ -13,8 +13,8 @@ use crate::t;
 use crate::ui::window::workspaces::WorkspaceMsg;
 use crate::workspaces::WorkspaceSet;
 
-/// `icons::GEAR` exists only on the web build.
-static GEAR: &[u8] = include_bytes!("../../../assets/icons/ui/gear.svg");
+/// A real gear: `ui/gear.svg` (upstream, web only) is a circle with rays, a sun.
+static GEAR: &[u8] = include_bytes!("../../../assets/icons/ui/workspace_gear.svg");
 
 /// What the button needs from the app, copied per frame (a handful of names).
 #[derive(Clone, Debug, Default, PartialEq)]
