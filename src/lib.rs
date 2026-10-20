@@ -25,6 +25,7 @@ pub mod par;
 pub mod patreon;
 pub mod privacy;
 pub mod workspace;
+pub mod workspaces;
 pub mod perf;
 pub mod plugin;
 #[cfg(not(target_arch = "wasm32"))]
