@@ -16,6 +16,7 @@ pub mod popup;
 pub mod properties;
 pub mod read_only;
 pub mod classic_layers;
+pub mod classic_styles;
 pub mod classic_menu;
 pub mod classic_start;
 pub mod classic_toolbar;

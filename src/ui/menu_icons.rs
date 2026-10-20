@@ -18,6 +18,9 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("STYLE", asset!("text_style.svg")),
     ("COLOR", asset!("color_palette.svg")),
     ("UCS", asset!("ucs_icon.svg")),
+    ("SHEETSET", asset!("sheetset.svg")),
+    ("TABLESTYLE", asset!("table_style.svg")),
+    ("MLEADERSTYLE", asset!("mleader_style.svg")),
 ];
 
 /// Black-stroke glyphs: some from the quick-access strip, the rest drawn for
@@ -45,6 +48,8 @@ const MONO: &[(&str, &[u8])] = &[
     ("SHORTCUTS", asset!("menu/shortcuts.svg")),
     ("QUIT", asset!("menu/quit.svg")),
     ("COPYBASE", asset!("menu/copy_base.svg")),
+    ("PUBLISH", asset!("menu/publish.svg")),
+    ("QUICKCALC", asset!("menu/quickcalc.svg")),
 ];
 
 fn find(table: &'static [(&'static str, &'static [u8])], command: &str) -> Option<&'static [u8]> {

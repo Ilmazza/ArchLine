@@ -224,6 +224,49 @@ mod tests {
     }
 
     #[test]
+    fn the_x_of_a_floating_bar_hides_it() {
+        use crate::ui::toolbar_dock::{decorate, floating_id, ToolbarMsg};
+        use crate::ui::toolbar_layout::{Target, ToolbarId};
+        let mut app = OpenCADStudio::new_for_test();
+        app.toolbars = Default::default();
+        app.toolbars
+            .move_to(ToolbarId::Draw, Target::Float { x: 20.0, y: 200.0 });
+        assert!(app.toolbars.is_visible(ToolbarId::Draw));
+        let layer = decorate(
+            iced::widget::Space::new().into(),
+            &app.toolbars,
+            &app.ribbon,
+            None,
+            (1600.0, 900.0),
+            true,
+        );
+        let mut ui = iced_test::simulator(layer);
+        let b = ui
+            .find(floating_id(ToolbarId::Draw))
+            .expect("floating frame present")
+            .visible_bounds()
+            .expect("frame visible");
+        // The X sits at the right end of the button row, under the title strip.
+        let x = iced::Point::new(b.x + b.width - 13.0, b.y + 32.0);
+        ui.point_at(x);
+        ui.simulate(vec![
+            iced_core::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            iced_core::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)),
+        ]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Toolbar(ToolbarMsg::Toggle(ToolbarId::Draw)))),
+            "no Toggle(Draw) published: {messages:?}"
+        );
+        for m in messages {
+            let _ = app.update(m);
+        }
+        assert!(!app.toolbars.is_visible(ToolbarId::Draw), "the X hides the bar");
+    }
+
+    #[test]
     fn classic_active_is_off_on_start_and_clean_screen() {
         assert!(!crate::workspace::classic_active(true, false));
         assert!(!crate::workspace::classic_active(false, true));

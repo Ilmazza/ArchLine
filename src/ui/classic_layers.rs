@@ -83,7 +83,7 @@ fn swatch(color: Color) -> Element<'static, Message> {
 
 /// Closed combo button: `lead` widgets, the elided `label`, a drop arrow. Opens
 /// the ribbon overlay registered under `id`.
-fn combo(
+pub(super) fn combo(
     id: &'static str,
     is_open: bool,
     width: f32,

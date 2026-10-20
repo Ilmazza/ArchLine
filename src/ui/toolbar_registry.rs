@@ -155,6 +155,113 @@ const RIBBON_BARS: &[(&str, &[(&str, &str)])] = &[
     ("Customization", &[("manage", "Customization")]),
 ];
 
+/// A button or a separator of a bar defined here by command.
+enum Cb {
+    /// Label, command and an icon of its own (`None`: the menu icon, or a glyph).
+    Btn(&'static str, &'static str, Option<&'static [u8]>),
+    Sep,
+}
+
+use Cb::{Btn, Sep};
+
+/// AutoCAD toolbars with neither a menu of their own nor a ribbon group (the
+/// ribbon keeps Draw Order in a slide-out), or that gather commands from several
+/// menus (Standard), as (list name, buttons).
+const COMMAND_BARS: &[(&str, &[Cb])] = &[
+    (
+        "Standard",
+        &[
+            Btn("New", "NEW", None),
+            Btn("Open", "OPEN", None),
+            Btn("Save", "SAVE", None),
+            Btn("Save As", "SAVEAS", None),
+            Sep,
+            Btn("Plot", "PLOT", None),
+            Btn("Publish", "PUBLISH", None),
+            Sep,
+            Btn("Cut", "CUTCLIP", None),
+            Btn("Copy", "COPYCLIP", None),
+            Btn("Paste", "PASTECLIP", None),
+            Btn("Match Properties", "MATCHPROP", None),
+            Sep,
+            Btn("Undo", "UNDO", None),
+            Btn("Redo", "REDO", None),
+            Sep,
+            Btn("Pan", "PAN", None),
+            Btn("Zoom Window", "ZOOM WINDOW", None),
+            Btn("Zoom Previous", "ZOOM PREVIOUS", None),
+            Btn("Zoom Extents", "ZOOM EXTENTS", None),
+            Sep,
+            Btn("Properties", "PROPERTIES", None),
+            Btn("Design Center", "ADCENTER", None),
+            Btn("Tool Palettes", "TOOLPALETTES", None),
+            Btn("Sheet Set Manager", "SHEETSET", None),
+            Btn("Calculator", "QUICKCALC", None),
+            Sep,
+            Btn("Help", "HELP", None),
+            Sep,
+            Btn("Close", "CLOSE", None),
+            Btn("Exit", "QUIT", None),
+        ],
+    ),
+    (
+        // The combos are drawn by `classic_styles`; these are its manager buttons.
+        "Styles",
+        &[
+            Btn("Text Style", "STYLE", None),
+            Btn("Dimension Style", "DIMSTYLE", None),
+            Btn("Table Style", "TABLESTYLE", None),
+            Btn("Multileader Style", "MLEADERSTYLE", None),
+        ],
+    ),
+    (
+        "Draw Order",
+        &[
+            Btn(
+                "Bring to Front",
+                "DRAWORDER_FRONT",
+                Some(include_bytes!("../../assets/icons/draworder_front.svg")),
+            ),
+            Btn(
+                "Send to Back",
+                "DRAWORDER_BACK",
+                Some(include_bytes!("../../assets/icons/draworder_back.svg")),
+            ),
+            Btn(
+                "Bring Above Objects",
+                "DRAWORDER_ABOVE",
+                Some(include_bytes!("../../assets/icons/draworder_above.svg")),
+            ),
+            Btn(
+                "Send Under Objects",
+                "DRAWORDER_UNDER",
+                Some(include_bytes!("../../assets/icons/draworder_under.svg")),
+            ),
+        ],
+    ),
+];
+
+/// Items of a [`COMMAND_BARS`] bar.
+fn command_items(buttons: &'static [Cb]) -> Vec<ClassicItem> {
+    let items = buttons
+        .iter()
+        .map(|b| match *b {
+            Sep => ClassicItem::Separator,
+            Btn(label, command, None) => button(label, command),
+            Btn(label, command, Some(icon)) => {
+                let main = ToolDef {
+                    id: command,
+                    label,
+                    icon: IconKind::Svg(icon),
+                    event: ModuleEvent::Command(command.to_string()),
+                };
+                ClassicItem::Button(ClassicButton { main, variants: Vec::new(), tinted: false })
+            }
+        })
+        .collect();
+    tidy(items)
+}
+
 fn ribbon_tool(t: &ToolDef) -> ClassicItem {
     ClassicItem::Button(ClassicButton {
         main: t.clone(),
@@ -239,6 +346,8 @@ fn build() -> Registry {
         .iter()
         .map(|b| b.key().to_lowercase())
         .collect();
+    // The File menu's bar is the Standard bar of `COMMAND_BARS`.
+    taken.push("file".to_string());
     let mut add = |title: &'static str, items: Vec<ClassicItem>| {
         if !has_buttons(&items) || taken.contains(&title.to_lowercase()) {
             return;
@@ -274,6 +383,17 @@ fn build() -> Registry {
         }
         taken.push(title.to_lowercase());
         raw.push((ToolbarId::Group(leak(format!("ribbon:{title}"))), title, items));
+    }
+    for (title, buttons) in COMMAND_BARS {
+        if taken.contains(&title.to_lowercase()) {
+            continue;
+        }
+        taken.push(title.to_lowercase());
+        raw.push((
+            ToolbarId::Group(leak(format!("ribbon:{title}"))),
+            title,
+            command_items(buttons),
+        ));
     }
     let mut names: Vec<(ToolbarId, &'static str)> =
         ToolbarId::BUILTIN.iter().map(|&id| (id, id.key())).collect();
@@ -417,7 +537,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_known_group_keys_and_drops_unknown_ones() {
         // Review focus 1.
-        let g = groups().into_iter().find(|id| id.title() == "File").unwrap();
+        let g = groups().into_iter().find(|id| id.title() == "Edit").unwrap();
         let json = format!(
             r#"{{"bars":{{"{}":{{"Floating":{{"x":10.0,"y":20.0,"home":null}}}},"gone:Removed":{{"Hidden":{{"home":null}}}}}}}}"#,
             g.key()
@@ -506,7 +626,7 @@ mod tests {
     #[test]
     fn there_is_a_bar_per_menu_and_per_command_submenu() {
         for name in [
-            "File", "Edit", "View", "Insert", "Format", "Tools", "Help", "Dimension", "Zoom",
+            "Standard", "Edit", "View", "Insert", "Format", "Tools", "Help", "Dimension", "Zoom",
             "Visual Styles", "Inquiry", "Geometric", "Dimensional", "Manage",
         ] {
             bar_named(name);
@@ -538,11 +658,52 @@ mod tests {
             "Modeling", "Solid Editing", "Viewports", "Layouts", "Preset Views", "Navigate",
             "Viewport Tools", "Palettes", "Reference", "Block Definition", "Content", "Group",
             "Centerlines", "Markup", "Annotation Scaling", "Cleanup", "Customization",
+            "Draw Order", "Standard", "Styles",
         ] {
             let id = bar_named(name);
             assert!(id.key().starts_with("ribbon:"), "{name}: {}", id.key());
             assert!(!ToolbarId::default_visible_groups().contains(&id), "{name} is on by default");
             assert!(!items_for(id).is_empty(), "{name} is empty");
+        }
+    }
+
+    #[test]
+    fn the_draw_order_bar_has_the_four_commands() {
+        assert_eq!(
+            bar_commands(bar_named("Draw Order")),
+            ["DRAWORDER_FRONT", "DRAWORDER_BACK", "DRAWORDER_ABOVE", "DRAWORDER_UNDER"]
+        );
+    }
+
+    #[test]
+    fn the_standard_bar_replaces_file_and_runs_registered_commands() {
+        assert!(entries().iter().all(|(_, n)| *n != "File"), "File is now Standard");
+        let registered = crate::command::all_registered_command_names();
+        let cmds = bar_commands(bar_named("Standard"));
+        for c in ["NEW", "OPEN", "SAVE", "SAVEAS", "PLOT", "UNDO", "REDO", "PAN", "HELP", "CLOSE", "QUIT"] {
+            assert!(cmds.iter().any(|x| x == c), "Standard lacks {c}");
+        }
+        for c in &cmds {
+            let base = c.split(' ').next().unwrap();
+            assert!(
+                registered.contains(&c.as_str()) || registered.contains(&base),
+                "{c} is not a registered command"
+            );
+        }
+    }
+
+    #[test]
+    fn every_standard_and_styles_button_has_a_real_icon() {
+        for name in ["Standard", "Styles"] {
+            for i in items_for(bar_named(name)) {
+                if let ClassicItem::Button(b) = i {
+                    assert!(
+                        matches!(b.main.icon, IconKind::Svg(_)),
+                        "{name}: {} has only a glyph",
+                        b.main.id
+                    );
+                }
+            }
         }
     }
 

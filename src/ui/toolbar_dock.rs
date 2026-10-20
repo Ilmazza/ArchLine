@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use iced::widget::{column, container, mouse_area, opaque, pin, row, scrollable, text, Space, Stack};
+use iced::widget::{button, column, container, mouse_area, opaque, pin, row, scrollable, text, Space, Stack};
 use iced::{Background, Border, Color, Element, Length, Point, Theme};
 
 use super::classic_layers::layer_row;
@@ -105,18 +105,35 @@ pub fn menu_entries(layout: &ToolbarLayout) -> Arc<[BarEntry]> {
         .into()
 }
 
-/// Lower bound of a bar-list row's height (text 12 + padding), in px.
-const BAR_ROW_H: f32 = 22.0;
+/// Height of a bar-list row, in px: a little above the real one, so a column
+/// never ends up taller than the window.
+const BAR_ROW_H: f32 = 26.0;
+/// Width of one column of the list.
+const BAR_COL_W: f32 = 260.0;
+/// The list is split into at most this many columns before it scrolls.
+const BAR_MAX_COLS: usize = 3;
 
 fn bars_menu_for(layout: &ToolbarLayout, win_h: f32) -> BarsMenu {
     BarsMenu {
         entries: menu_entries(layout),
-        max_h: (win_h - 80.0).clamp(160.0, 600.0),
+        max_h: (win_h - 80.0).clamp(160.0, 900.0),
     }
+}
+
+/// How the list is laid out: `(rows per column, columns)`. All rows in as few
+/// columns as the height allows; `None` when even `BAR_MAX_COLS` columns would
+/// not hold them (the list then scrolls).
+fn bars_menu_columns(rows: usize, max_h: f32) -> Option<(usize, usize)> {
+    let fit = (((max_h - 4.0) / BAR_ROW_H) as usize).max(1);
+    let cols = rows.div_ceil(fit).max(1);
+    (cols <= BAR_MAX_COLS).then(|| (rows.div_ceil(cols).max(1), cols))
 }
 
 /// Rows are `mouse_area`s publishing on press, never buttons: `ContextMenu`
 /// rebuilds its overlay every view (trap 2 in CLAUDE.md).
+///
+/// The list is laid out in columns rather than scrolled: a scrollable inside
+/// that overlay lost its position on the next rebuild and jumped back up.
 fn bars_menu_panel(menu: &BarsMenu) -> Element<'static, Message> {
     let rows: Vec<Element<'static, Message>> = menu
         .entries
@@ -139,17 +156,23 @@ fn bars_menu_panel(menu: &BarsMenu) -> Element<'static, Message> {
             .into()
         })
         .collect();
-    // `container` has no max height in this iced: cap the scrollable instead,
-    // from a (slightly low) row-height estimate; shorter lists shrink to fit.
-    let est = menu.entries.len() as f32 * BAR_ROW_H;
-    let height = if est > menu.max_h {
-        Length::Fixed(menu.max_h)
-    } else {
-        Length::Shrink
+    let Some((per_col, cols)) = bars_menu_columns(rows.len(), menu.max_h) else {
+        // Far too many bars for the window: one scrolling column, capped from a
+        // (slightly low) row-height estimate.
+        return container(scrollable(column(rows)).height(Length::Fixed(menu.max_h.min(600.0))))
+            .padding(2)
+            .width(Length::Fixed(BAR_COL_W))
+            .style(panel_style)
+            .into();
     };
-    container(scrollable(column(rows)).height(height))
+    let mut columns: Vec<Element<'static, Message>> = Vec::with_capacity(cols);
+    let mut rows = rows.into_iter();
+    for _ in 0..cols {
+        let col: Vec<Element<'static, Message>> = rows.by_ref().take(per_col).collect();
+        columns.push(column(col).width(Length::Fixed(BAR_COL_W)).into());
+    }
+    container(row(columns).align_y(iced::alignment::Vertical::Top))
         .padding(2)
-        .width(Length::Fixed(260.0))
         .style(panel_style)
         .into()
 }
@@ -163,6 +186,9 @@ fn with_bars_menu(el: Element<'static, Message>, menu: &BarsMenu) -> Element<'st
 pub fn bar_length(id: ToolbarId) -> f32 {
     if id == ToolbarId::Layers {
         return LAYERS_LENGTH;
+    }
+    if id.is_styles() {
+        return super::classic_styles::LENGTH;
     }
     let items: f32 = items_for(id)
         .iter()
@@ -212,6 +238,9 @@ fn bar_body(id: ToolbarId, vertical: bool, ribbon: &Ribbon) -> Element<'static, 
     if id == ToolbarId::Layers {
         // Combo boxes: horizontal only (the model never docks it on a side).
         return layer_row(ribbon).into();
+    }
+    if id.is_styles() {
+        return super::classic_styles::styles_row(ribbon).into();
     }
     let items = items_for(id);
     if vertical {
@@ -359,10 +388,41 @@ pub fn frame<'a>(
 /// Height of a floating bar's title strip plus its padding.
 const FLOAT_TITLE_H: f32 = 18.0;
 
-/// `(width, height)` of a floating bar: a title strip over a horizontal body.
+/// Width of the close button at a floating bar's right end, plus its gap.
+const FLOAT_CLOSE_W: f32 = 20.0;
+
+/// `(width, height)` of a floating bar: a title strip over a horizontal body
+/// that ends with the close button.
 pub fn floating_size(id: ToolbarId) -> (f32, f32) {
     let (w, h) = bar_size(id, false);
-    (w, h + FLOAT_TITLE_H)
+    (w + FLOAT_CLOSE_W, h + FLOAT_TITLE_H)
+}
+
+/// The X at a floating bar's right end, as in AutoCAD: hides the bar (it stays
+/// in the right-click list). A button captures its own press, so it does not
+/// start a drag.
+fn close_button(id: ToolbarId) -> Element<'static, Message> {
+    button(
+        container(crate::ui::icons::themed(crate::ui::icons::CLOSE, 10.0)).center(Length::Fill),
+    )
+    .padding(0)
+    .width(Length::Fixed(16.0))
+    .height(Length::Fixed(16.0))
+    .on_press(Message::Toolbar(ToolbarMsg::Toggle(id)))
+    .style(|theme: &Theme, status| {
+        let p = theme.palette();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then_some(Background::Color(p.background.base.color)),
+            border: Border {
+                radius: 2.0.into(),
+                ..Default::default()
+            },
+            text_color: p.background.base.text,
+            ..Default::default()
+        }
+    })
+    .into()
 }
 
 /// Where each floating bar is drawn: its saved position, pulled back inside
@@ -393,8 +453,14 @@ fn floating_el(
     // own background showing above the buttons (a `Fill` strip would stretch
     // the whole bar across the window).
     let title = container(text(crate::t!(id.title()).into_owned()).size(11)).padding([2, 6]);
-    let body = container(bar_body(id, false, ribbon))
-        .padding(2)
+    let body = container(
+        row![
+            bar_body(id, false, ribbon),
+            container(close_button(id)).padding([4, 2])
+        ]
+        .align_y(iced::Alignment::Start),
+    )
+    .padding(2)
         .style(|theme: &Theme| container::Style {
             background: Some(Background::Color(theme.palette().background.weak.color)),
             ..Default::default()
@@ -547,6 +613,23 @@ pub fn decorate<'a>(
 mod tests {
     use super::*;
     use crate::ui::toolbar_layout::Target;
+
+    #[test]
+    fn the_bar_list_fits_in_columns_instead_of_scrolling() {
+        // 47 bars in a 1000 px window: two columns of 24.
+        assert_eq!(bars_menu_columns(47, 900.0), Some((24, 2)));
+        // A short list is one column.
+        assert_eq!(bars_menu_columns(10, 900.0), Some((10, 1)));
+        // In a tiny window it scrolls instead.
+        assert_eq!(bars_menu_columns(47, 160.0), None);
+        // Every row of a column fits the height it was split for.
+        for rows in 1..=60 {
+            if let Some((per_col, cols)) = bars_menu_columns(rows, 700.0) {
+                assert!(per_col as f32 * BAR_ROW_H <= 700.0, "{rows} rows");
+                assert!(per_col * cols >= rows, "{rows} rows do not fit {cols} cols");
+            }
+        }
+    }
 
     #[test]
     fn every_floating_frame_id_carries_the_toolbar_prefix_and_is_unique() {

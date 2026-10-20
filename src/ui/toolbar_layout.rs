@@ -81,9 +81,14 @@ impl ToolbarId {
         super::toolbar_registry::display_name(self)
     }
 
-    /// `Layers` holds combo boxes and is horizontal only.
+    /// The Styles bar (`classic_styles`).
+    pub fn is_styles(self) -> bool {
+        self == ToolbarId::Group(super::classic_styles::BAR_KEY)
+    }
+
+    /// `Layers` and `Styles` hold combo boxes and are horizontal only.
     pub fn allowed_on(self, edge: Edge) -> bool {
-        !(self == ToolbarId::Layers && edge.is_vertical())
+        !((self == ToolbarId::Layers || self.is_styles()) && edge.is_vertical())
     }
 }
 

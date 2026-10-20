@@ -1470,7 +1470,9 @@ impl Ribbon {
                 }
             }
         }
-        let (style_key, manager_cmd) = found?;
+        // The classic Styles bar's combos are not in any ribbon group.
+        let (style_key, manager_cmd) =
+            found.or_else(|| crate::ui::classic_styles::combo_for(open_id))?;
 
         let ctx = StyleContext {
             text_style_names: &self.text_style_names,
