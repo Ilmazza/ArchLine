@@ -76,6 +76,14 @@ impl ToolbarId {
         Self::all().iter().copied().find(|id| id.key() == key)
     }
 
+    /// The bar called `title` in the bar list (case-insensitive).
+    pub fn from_title(title: &str) -> Option<ToolbarId> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|id| id.title().eq_ignore_ascii_case(title))
+    }
+
     /// Name shown in the bar list and on a floating bar.
     pub fn title(self) -> &'static str {
         super::toolbar_registry::display_name(self)
@@ -225,6 +233,41 @@ impl ToolbarLayout {
                 _ => None,
             })
             .collect()
+    }
+
+    /// ArchLine: the AutoCAD Classic arrangement, as in AutoCAD 2025's default
+    /// workspace (spec `2026-10-20-workspace-design.md` §4). Every bar not named
+    /// here is hidden. The lanes are written directly: `move_to` one bar at a
+    /// time would shift the others.
+    pub fn autocad_classic() -> Self {
+        let lanes = |rows: &[&[&str]]| -> Vec<Vec<ToolbarId>> {
+            rows.iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|title| {
+                            ToolbarId::from_title(title)
+                                .unwrap_or_else(|| panic!("no toolbar called {title}"))
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let mut l = Self { bars: BTreeMap::new() };
+        l.write_lanes(
+            Edge::Top,
+            &lanes(&[
+                &["Standard", "Dimension", "Inquiry"],
+                &["Layers", "Styles"],
+                &["Insert", "Reference"],
+            ]),
+        );
+        l.write_lanes(Edge::Left, &lanes(&[&["Draw"]]));
+        l.write_lanes(Edge::Right, &lanes(&[&["Modify", "Draw Order"]]));
+        l.write_lanes(
+            Edge::Bottom,
+            &lanes(&[&["Visual Styles", "Preset Views", "Modeling", "Solid Editing"]]),
+        );
+        l
     }
 
     /// Rewrite the slots of `edge` from `lanes`, dropping empty lanes.

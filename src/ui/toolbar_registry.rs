@@ -676,6 +676,47 @@ mod tests {
     }
 
     #[test]
+    fn autocad_classic_places_every_bar_of_the_screenshot() {
+        use crate::ui::toolbar_layout::Edge;
+        let l = ToolbarLayout::autocad_classic();
+        let titles = |edge: Edge| -> Vec<Vec<&'static str>> {
+            l.lanes(edge)
+                .iter()
+                .map(|lane| lane.iter().map(|id| id.title()).collect())
+                .collect()
+        };
+        assert_eq!(
+            titles(Edge::Top),
+            vec![
+                vec!["Standard", "Dimension", "Inquiry"],
+                vec!["Layers", "Styles"],
+                vec!["Insert", "Reference"],
+            ]
+        );
+        assert_eq!(titles(Edge::Left), vec![vec!["Draw"]]);
+        assert_eq!(titles(Edge::Right), vec![vec!["Modify", "Draw Order"]]);
+        assert_eq!(
+            titles(Edge::Bottom),
+            vec![vec!["Visual Styles", "Preset Views", "Modeling", "Solid Editing"]]
+        );
+        // Every other bar is hidden.
+        let shown = ToolbarId::all().iter().filter(|id| l.is_visible(**id)).count();
+        assert_eq!(shown, 3 + 2 + 2 + 1 + 2 + 4);
+    }
+
+    #[test]
+    fn autocad_classic_is_already_sanitized() {
+        let l = ToolbarLayout::autocad_classic();
+        assert_eq!(l, l.clone().sanitized());
+    }
+
+    #[test]
+    fn from_title_is_case_insensitive() {
+        assert_eq!(ToolbarId::from_title("styles"), Some(bar_named("Styles")));
+        assert_eq!(ToolbarId::from_title("nope"), None);
+    }
+
+    #[test]
     fn the_standard_bar_replaces_file_and_runs_registered_commands() {
         assert!(entries().iter().all(|(_, n)| *n != "File"), "File is now Standard");
         let registered = crate::command::all_registered_command_names();

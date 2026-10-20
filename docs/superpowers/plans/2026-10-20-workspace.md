@@ -79,11 +79,11 @@ Condizioni che la spec lascia implicite; ognuna ha il suo test nel task indicato
 **Interfaces:**
 - Produces: `ToolbarId::from_title(title: &str) -> Option<ToolbarId>` (cerca nel registro per nome visualizzato, senza distinzione di maiuscole); `ToolbarLayout::autocad_classic() -> ToolbarLayout` (uguale al proprio `.sanitized()`, perché `first_run` li confronta).
 
-- [ ] **Step 1: Test** `autocad_classic_places_every_bar_of_the_screenshot` in `toolbar_registry.rs`: con `l = ToolbarLayout::autocad_classic()`, `l.lanes(Edge::Top)` è, per titoli, `[["Standard","Dimension","Inquiry"],["Layers","Styles"],["Insert","Reference"]]`; `lanes(Left)` = `[["Draw"]]`; `lanes(Right)` = `[["Modify","Draw Order"]]`; `lanes(Bottom)` = `[["Visual Styles","Preset Views","Modeling","Solid Editing"]]`. Ogni altra barra di `ToolbarId::all()` è nascosta. `autocad_classic_is_already_sanitized`: `l == l.clone().sanitized()`. Aggiungere `from_title_is_case_insensitive` (`"styles"` → `Some`, `"nope"` → `None`).
-- [ ] **Step 2: Run** `cargo test --locked --lib toolbar_registry` — FAIL.
-- [ ] **Step 3: Implementare** `autocad_classic()` scrivendo le corsie direttamente con `write_lanes(edge, &[...])` per ognuno dei quattro bordi (non con `move_to` in sequenza: ognuno sposta gli altri), partendo da `bars` vuoto. Draw, Modify, Layers e le tre barre di `DEFAULT_TOP` **non** sono nascoste quando assenti (`default_placement`): vanno tutte nelle corsie della tabella (spec §4), quindi nessuna resta col default; le altre sono assenti dalla mappa e quindi nascoste. `from_title` sopra `toolbar_registry::entries()`.
-- [ ] **Step 4: Run** — PASS; `cargo test --locked --lib toolbar` verde (nessun test esistente cambia: `default()` è intatto).
-- [ ] **Step 5: Commit** `barre: disposizione predefinita di AutoCAD Classic`.
+- [x] **Step 1: Test** `autocad_classic_places_every_bar_of_the_screenshot` in `toolbar_registry.rs`: con `l = ToolbarLayout::autocad_classic()`, `l.lanes(Edge::Top)` è, per titoli, `[["Standard","Dimension","Inquiry"],["Layers","Styles"],["Insert","Reference"]]`; `lanes(Left)` = `[["Draw"]]`; `lanes(Right)` = `[["Modify","Draw Order"]]`; `lanes(Bottom)` = `[["Visual Styles","Preset Views","Modeling","Solid Editing"]]`. Ogni altra barra di `ToolbarId::all()` è nascosta. `autocad_classic_is_already_sanitized`: `l == l.clone().sanitized()`. Aggiungere `from_title_is_case_insensitive` (`"styles"` → `Some`, `"nope"` → `None`).
+- [x] **Step 2: Run** `cargo test --locked --lib toolbar_registry` — FAIL.
+- [x] **Step 3: Implementare** `autocad_classic()` scrivendo le corsie direttamente con `write_lanes(edge, &[...])` per ognuno dei quattro bordi (non con `move_to` in sequenza: ognuno sposta gli altri), partendo da `bars` vuoto. Draw, Modify, Layers e le tre barre di `DEFAULT_TOP` **non** sono nascoste quando assenti (`default_placement`): vanno tutte nelle corsie della tabella (spec §4), quindi nessuna resta col default; le altre sono assenti dalla mappa e quindi nascoste. `from_title` sopra `toolbar_registry::entries()`.
+- [x] **Step 4: Run** — PASS; `cargo test --locked --lib toolbar` verde (nessun test esistente cambia: `default()` è intatto).
+- [x] **Step 5: Commit** `barre: disposizione predefinita di AutoCAD Classic`.
 
 ### Task 3: Modello dei workspace
 
