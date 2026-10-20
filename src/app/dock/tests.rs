@@ -767,6 +767,13 @@ fn hovering_a_strip_icon_reveals_an_auto_hiding_edge_in_the_real_view() {
             crate::ui::toolbar_layout::ToolbarId::Modify,
             crate::ui::toolbar_layout::Target::Float { x: 300.0, y: 300.0 },
         );
+        // AutoCAD Classic docks Draw Order under Modify: it leaves with it.
+        let draw_order = crate::ui::toolbar_layout::ToolbarId::from_title("Draw Order")
+            .expect("the Draw Order bar");
+        app.toolbars.move_to(
+            draw_order,
+            crate::ui::toolbar_layout::Target::Float { x: 340.0, y: 340.0 },
+        );
         // Mirror the layout onto the left so the block palette's title marks
         // where the workspace starts, then auto-hide the right edge.
         let title = find_in_view(&app, "Blocks");

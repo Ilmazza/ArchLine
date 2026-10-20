@@ -4,7 +4,7 @@ use crate::app::{Message, OpenCADStudio};
 use crate::ui::toolbar_dock::{
     bar_length, bar_size, ToolbarDrag, ToolbarMsg, DRAG_THRESHOLD, GRIP_ANCHOR, HOLD_MS,
 };
-use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx, ToolbarId};
+use crate::ui::toolbar_layout::{clamp_floating, resolve_drop, DropCtx, ToolbarId, ToolbarLayout};
 
 impl OpenCADStudio {
     /// Esc ends a toolbar drag or closes a toolbar flyout. `true` when it did,
@@ -138,7 +138,8 @@ impl OpenCADStudio {
                 self.save_config();
             }
             ToolbarMsg::Reset => {
-                self.toolbars = Default::default();
+                // ArchLine: the reset is AutoCAD Classic's arrangement.
+                self.toolbars = ToolbarLayout::autocad_classic();
                 self.toolbar_drag = None;
                 self.save_config();
             }
@@ -286,7 +287,7 @@ mod tests {
         );
         drag(&mut app, ToolbarId::Draw, Point::new(800.0, 450.0));
         toolbar(&mut app, ToolbarMsg::Reset);
-        assert_eq!(app.toolbars, ToolbarLayout::default());
+        assert_eq!(app.toolbars, ToolbarLayout::autocad_classic());
     }
 
     #[test]

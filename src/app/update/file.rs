@@ -1441,6 +1441,7 @@ impl OpenCADStudio {
                 dock
             },
             toolbars: self.toolbars.clone(),
+            workspaces: self.workspaces.clone(),
             show_graphic_attributes: self.show_graphic_attributes,
             graphic_fills_on_current_layer: self.graphic_attributes.fill_on_current_layer,
             annotation_auto_scale: self.annotation_auto_scale,
@@ -1511,6 +1512,16 @@ impl OpenCADStudio {
         dock.ensure_settings();
         self.dock = dock;
         self.toolbars = cfg.toolbars.sanitized();
+        // Workspaces: keep what the user had (first run), then take only the
+        // *interface* of the current one. The working layout is not replaced at
+        // startup; a workspace loads its layout only when it is chosen.
+        self.workspaces = cfg.workspaces.sanitized();
+        let env_ribbon = std::env::var("ARCHLINE_WORKSPACE")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("ribbon"));
+        self.workspaces.first_run(&self.toolbars, env_ribbon);
+        crate::workspace::set_classic(
+            self.workspaces.resolved().interface == crate::workspaces::Interface::Classic,
+        );
         self.show_graphic_attributes = cfg.show_graphic_attributes;
         self.graphic_attributes.fill_on_current_layer = cfg.graphic_fills_on_current_layer;
         if self.show_graphic_attributes {

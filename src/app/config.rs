@@ -32,6 +32,8 @@ pub struct AppConfig {
     pub dock: crate::ui::dock::DockState,
     /// Where each classic toolbar is: docked on an edge, or floating.
     pub toolbars: crate::ui::toolbar_layout::ToolbarLayout,
+    /// The user's workspaces and the choices about them (spec 2026-10-20).
+    pub workspaces: crate::workspaces::WorkspaceSet,
     /// Whether the optional Graphic Attributes palette is visible.
     pub show_graphic_attributes: bool,
     /// Graphic Attributes creates fills on the current layer instead of the
@@ -59,7 +61,8 @@ impl Default for AppConfig {
             start: StartConfig::default(),
             statusbar: StatusBarConfig::default(),
             dock: crate::ui::dock::DockState::default(),
-            toolbars: crate::ui::toolbar_layout::ToolbarLayout::default(),
+            toolbars: crate::ui::toolbar_layout::ToolbarLayout::autocad_classic(),
+            workspaces: crate::workspaces::WorkspaceSet::default(),
             show_graphic_attributes: false,
             graphic_fills_on_current_layer: false,
             annotation_auto_scale: -4,
@@ -737,12 +740,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_install_has_the_autocad_classic_toolbars() {
+        assert_eq!(
+            AppConfig::default().toolbars,
+            crate::ui::toolbar_layout::ToolbarLayout::autocad_classic()
+        );
+    }
+
+    #[test]
+    fn workspaces_default_when_absent_and_round_trip() {
+        // A settings.json from before workspaces has no section.
+        let old: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.workspaces, crate::workspaces::WorkspaceSet::default());
+
+        let mut cfg = AppConfig::default();
+        cfg.workspaces.save(
+            "Mio",
+            crate::workspaces::Interface::Classic,
+            cfg.toolbars.clone(),
+        );
+        cfg.workspaces.show_label = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workspaces, cfg.workspaces);
+    }
+
+    #[test]
     fn toolbars_default_when_absent_and_round_trip() {
-        // A settings.json from before the dockable toolbars has no section.
+        // A settings.json from before the dockable toolbars has no section: it
+        // reads as `AppConfig::default()`, which is AutoCAD Classic's layout.
         let old: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(
             old.toolbars,
-            crate::ui::toolbar_layout::ToolbarLayout::default()
+            crate::ui::toolbar_layout::ToolbarLayout::autocad_classic()
         );
 
         let mut cfg = AppConfig::default();

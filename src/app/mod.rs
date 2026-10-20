@@ -19,6 +19,7 @@ mod block_properties_table;
 #[cfg(test)]
 mod block_properties_tests;
 mod block_save_as;
+mod workspaces;
 mod block_test;
 #[cfg(test)]
 mod block_test_tests;
@@ -1029,6 +1030,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) dock: crate::ui::dock::DockState,
     /// Classic toolbar placement (docked lane / floating position).
     pub(crate) toolbars: crate::ui::toolbar_layout::ToolbarLayout,
+    /// The user's workspaces and which one is current (`workspaces.rs`).
+    pub(crate) workspaces: crate::workspaces::WorkspaceSet,
     /// Bar being dragged by its grip, with the live drop target.
     pub(crate) toolbar_drag: Option<crate::ui::toolbar_dock::ToolbarDrag>,
     /// A press on a toolbar button that has variants, waiting to become a long
@@ -4997,6 +5000,7 @@ impl OpenCADStudio {
             xref_manager: Default::default(),
             dock: Default::default(),
             toolbars: Default::default(),
+            workspaces: Default::default(),
             toolbar_drag: None,
             tool_hold: None,
             start_ui: Default::default(),
@@ -5382,6 +5386,7 @@ impl OpenCADStudio {
         // so preferences, recents, status-bar layout, ribbon density and print
         // options survive across sessions (issue #68). `last_saved_config` is
         // seeded below so the first change — not the boot — triggers a write.
+        let had_workspaces = !config.workspaces.current.is_empty();
         app.apply_config(config);
         // Load command aliases from ocad.pgp (writes the shipped default file
         // on first launch). The hide-set keeps aliases out of autocomplete while
@@ -5403,6 +5408,11 @@ impl OpenCADStudio {
             app.rebuild_ribbon_modules();
         }
         app.last_saved_config = Some(app.current_config());
+        // First run with workspaces: write the migration (it is idempotent, but
+        // `last_saved_config` was seeded after it).
+        if !had_workspaces {
+            app.current_config().save();
+        }
         app.sync_ribbon_layers();
         app
     }
