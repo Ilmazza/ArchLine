@@ -170,11 +170,11 @@ Condizioni che la spec lascia implicite; ognuna ha il suo test nel task indicato
 - Consumes: `WorkspaceUi`, `WorkspaceMsg`, `WorkspaceSet` (Task 3 e 5), `toolbar_dock::menu_entries` per l'elenco delle barre.
 - Produces: `pub(crate) fn view_save_as(ui: &WorkspaceUi, sizing: ModalSizing) -> Element<'_, Message>`; `pub(crate) fn view_window(ui: &WorkspaceUi, set: &WorkspaceSet, bars: &[BarEntry], classic: bool, sizing: ModalSizing) -> Element<'_, Message>`.
 
-- [ ] **Step 1: Test** (flussi con i messaggi dell'interfaccia): `save_as_dialog_creates_a_workspace_from_the_menu` (Message `OpenSaveAs`, scrivere il nome, `SaveAsApply`: compare nel menu e `current` cambia); `save_as_dialog_shows_the_error_and_disables_ok` (`ui.save_error` vero con nome vuoto e il bottone OK non pubblica nulla); `settings_tab_lists_builtins_read_only` (nessun `Delete`/`Rename` pubblicati per i predefiniti); `customize_tab_toggles_a_bar` (clic sulla riga → barra nascosta nel layout di lavoro); `customize_tab_explains_when_the_ribbon_is_active`.
-- [ ] **Step 2: Run** `cargo test --locked --lib dialog_flow` — FAIL.
-- [ ] **Step 3: Implementare** le due viste (stile di `block_save_as::view`: campo + OK/Annulla; finestra a due schede con elenco, pulsanti Imposta come corrente/Rinomina/Elimina/Su/Giù, interruttore auto-save, e nella scheda Customize l'elenco delle barre con caselle più "Ripristina workspace"); in `modal.rs` il titolo ("Save Workspace As", "Workspaces") e la vista dentro `sized_flow(ex, 430, 220, ..)` e `sized_flow(ex, 640, 520, ..)`; Invio nel Save As si gestisce come per `BlockSaveAs` in `update/mod.rs`.
-- [ ] **Step 4: Run** — PASS; `cargo test --locked --lib i18n` verde (se fallisce per stringhe nuove, aggiungere le voci come indica il messaggio del test).
-- [ ] **Step 5: Commit** `workspace: finestre Save As, Settings e Customize`.
+- [x] **Step 1: Test** (flussi con i messaggi dell'interfaccia): `save_as_dialog_creates_a_workspace_from_the_menu` (Message `OpenSaveAs`, scrivere il nome, `SaveAsApply`: compare nel menu e `current` cambia); `save_as_dialog_shows_the_error_and_disables_ok` (`ui.save_error` vero con nome vuoto e il bottone OK non pubblica nulla); `settings_tab_lists_builtins_read_only` (nessun `Delete`/`Rename` pubblicati per i predefiniti); `customize_tab_toggles_a_bar` (clic sulla riga → barra nascosta nel layout di lavoro); `customize_tab_explains_when_the_ribbon_is_active`.
+- [x] **Step 2: Run** `cargo test --locked --lib dialog_flow` — FAIL.
+- [x] **Step 3: Implementare** le due viste (stile di `block_save_as::view`: campo + OK/Annulla; finestra a due schede con elenco, pulsanti Imposta come corrente/Rinomina/Elimina/Su/Giù, interruttore auto-save, e nella scheda Customize l'elenco delle barre con caselle più "Ripristina workspace"); in `modal.rs` il titolo ("Save Workspace As", "Workspaces") e la vista dentro `sized_flow(ex, 430, 220, ..)` e `sized_flow(ex, 640, 520, ..)`; Invio nel Save As si gestisce come per `BlockSaveAs` in `update/mod.rs`.
+- [x] **Step 4: Run** — PASS; `cargo test --locked --lib i18n` verde (se fallisce per stringhe nuove, aggiungere le voci come indica il messaggio del test).
+- [x] **Step 5: Commit** `workspace: finestre Save As, Settings e Customize`.
 
 ### Task 8: Documentazione e verifica finale
 

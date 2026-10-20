@@ -84,6 +84,23 @@ impl OpenCADStudio {
                 }
                 self.save_config();
             }
+            WorkspaceMsg::RenameStart(name) => {
+                if let Some(ui) = self.workspace_ui.as_mut() {
+                    ui.rename = Some((name.clone(), name));
+                    ui.save_error = None;
+                }
+            }
+            WorkspaceMsg::RenameEdit(text) => {
+                if let Some((_, typed)) = self.workspace_ui.as_mut().and_then(|ui| ui.rename.as_mut()) {
+                    *typed = text;
+                }
+            }
+            WorkspaceMsg::RenameCancel => {
+                if let Some(ui) = self.workspace_ui.as_mut() {
+                    ui.rename = None;
+                    ui.save_error = None;
+                }
+            }
             WorkspaceMsg::Rename(old, new) => match self.workspaces.rename(&old, &new) {
                 Ok(()) => {
                     if let Some(ui) = self.workspace_ui.as_mut() {
@@ -517,5 +534,148 @@ mod tests {
         assert_eq!(app.workspace_ui.as_ref().unwrap().tab, WorkspaceTab::Customize);
         send(&mut app, W::Tab(WorkspaceTab::Settings));
         assert_eq!(app.workspace_ui.as_ref().unwrap().tab, WorkspaceTab::Settings);
+    }
+
+    // ── The windows, driven with the real widgets ──────────────────────────
+
+    use crate::ui::modal::ModalSizing;
+    use crate::ui::window::workspaces::{view_save_as, view_window};
+
+    /// Click `target` in the Save As window as it is now; the messages it publishes.
+    fn click_save_as(app: &OpenCADStudio, target: &str) -> (bool, Vec<Message>) {
+        let ui = app.workspace_ui.clone().expect("the window is open");
+        let mut sim = iced_test::simulator(view_save_as(&ui, ModalSizing::FILL));
+        let found = sim.click(target).is_ok();
+        (found, sim.into_messages().collect())
+    }
+
+    /// Click `target` in the Workspaces window as it is now.
+    fn click_window(app: &OpenCADStudio, target: &str) -> (bool, Vec<Message>) {
+        let ui = app.workspace_ui.clone().expect("the window is open");
+        let bars = crate::ui::toolbar_dock::menu_entries(&app.toolbars);
+        let classic = crate::workspace::is_classic();
+        let mut sim = iced_test::simulator(view_window(
+            &ui,
+            &app.workspaces,
+            &bars,
+            classic,
+            ModalSizing::FILL,
+        ));
+        let found = sim.click(target).is_ok();
+        (found, sim.into_messages().collect())
+    }
+
+    fn apply(app: &mut OpenCADStudio, messages: Vec<Message>) {
+        for m in messages {
+            let _ = app.update(m);
+        }
+    }
+
+    #[test]
+    fn save_as_dialog_creates_a_workspace_from_the_buttons() {
+        let mut app = app();
+        app.toolbars = edited();
+        send(&mut app, W::OpenSaveAs);
+        send(&mut app, W::SaveAsName("Rilievi".to_string()));
+        let (found, messages) = click_save_as(&app, "OK");
+        assert!(found, "the OK button is there");
+        apply(&mut app, messages);
+        assert_eq!(app.workspaces.current, "Rilievi");
+        assert_eq!(app.workspaces.get("Rilievi").unwrap().toolbars, edited());
+        assert!(app.workspace_ui.is_none());
+    }
+
+    #[test]
+    fn save_as_dialog_disables_ok_while_the_name_is_bad() {
+        let mut app = app();
+        send(&mut app, W::OpenSaveAs);
+        let (_, messages) = click_save_as(&app, "OK");
+        apply(&mut app, messages);
+        assert!(app.workspaces.saved.is_empty(), "an empty name saves nothing");
+        send(&mut app, W::SaveAsName("opencad studio".to_string()));
+        let (_, messages) = click_save_as(&app, "OK");
+        apply(&mut app, messages);
+        assert!(app.workspaces.saved.is_empty(), "a reserved name saves nothing");
+    }
+
+    #[test]
+    fn save_as_dialog_asks_then_replaces_with_the_replace_button() {
+        let mut app = app();
+        app.workspaces.save("Mio", Interface::Classic, ToolbarLayout::autocad_classic());
+        app.toolbars = edited();
+        send(&mut app, W::OpenSaveAs);
+        send(&mut app, W::SaveAsName("Mio".to_string()));
+        let (_, messages) = click_save_as(&app, "OK");
+        apply(&mut app, messages);
+        assert!(app.workspace_ui.as_ref().unwrap().confirm_replace);
+        let (found, messages) = click_save_as(&app, "Replace");
+        assert!(found, "the question offers Replace");
+        apply(&mut app, messages);
+        assert_eq!(app.workspaces.get("Mio").unwrap().toolbars, edited());
+    }
+
+    #[test]
+    fn settings_tab_lists_builtins_read_only() {
+        let mut app = app();
+        send(&mut app, W::OpenSettings);
+        // Only the two built-ins: nothing to delete or rename.
+        assert!(!click_window(&app, "Delete").0);
+        assert!(!click_window(&app, "Rename").0);
+        // A workspace of the user can be deleted from its row.
+        app.workspaces.save("Mio", Interface::Classic, ToolbarLayout::autocad_classic());
+        let (found, messages) = click_window(&app, "Delete");
+        assert!(found);
+        apply(&mut app, messages);
+        assert!(app.workspaces.saved.is_empty());
+    }
+
+    #[test]
+    fn settings_tab_inline_rename_and_auto_save_switch() {
+        let mut app = app();
+        app.workspaces.save("Mio", Interface::Classic, ToolbarLayout::autocad_classic());
+        send(&mut app, W::OpenSettings);
+        let (found, messages) = click_window(&app, "Rename");
+        assert!(found);
+        apply(&mut app, messages);
+        assert_eq!(
+            app.workspace_ui.as_ref().unwrap().rename,
+            Some(("Mio".to_string(), "Mio".to_string()))
+        );
+        send(&mut app, W::RenameEdit("Nuovo".to_string()));
+        let (found, messages) = click_window(&app, "OK");
+        assert!(found);
+        apply(&mut app, messages);
+        assert_eq!(app.workspaces.names().last().map(String::as_str), Some("Nuovo"));
+        assert!(app.workspace_ui.as_ref().unwrap().rename.is_none());
+        let (found, messages) =
+            click_window(&app, "Save changes automatically when switching workspace");
+        assert!(found);
+        apply(&mut app, messages);
+        assert!(app.workspaces.auto_save);
+    }
+
+    #[test]
+    fn customize_tab_toggles_a_bar_and_restores_the_workspace() {
+        let mut app = app();
+        send(&mut app, W::OpenCustomize);
+        let id = ToolbarId::from_title("Standard").unwrap();
+        assert!(app.toolbars.is_visible(id));
+        let (found, messages) = click_window(&app, "Standard");
+        assert!(found, "the Standard bar has a box");
+        apply(&mut app, messages);
+        assert!(!app.toolbars.is_visible(id));
+        let (found, messages) = click_window(&app, "Restore workspace");
+        assert!(found);
+        apply(&mut app, messages);
+        assert!(app.toolbars.is_visible(id), "Restore brings AutoCAD Classic's layout back");
+    }
+
+    #[test]
+    fn customize_tab_explains_when_the_ribbon_is_active() {
+        let mut app = app();
+        send(&mut app, W::Switch(OPENCAD_STUDIO.to_string()));
+        send(&mut app, W::OpenCustomize);
+        assert!(!click_window(&app, "Restore workspace").0, "no bars to restore under the ribbon");
+        assert!(!click_window(&app, "Standard").0, "no bar boxes under the ribbon");
     }
 }

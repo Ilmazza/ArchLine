@@ -409,9 +409,25 @@ impl OpenCADStudio {
                     crate::ui::window::block_visibility::view(state, flow)
                 })
             }
-            super::super::ModalKind::Workspaces | super::super::ModalKind::WorkspaceSaveAs => {
-                self.workspace_ui.as_ref()?;
-                sized_flow(ex, 640, 520, |_flow| iced::widget::Space::new().into())
+            super::super::ModalKind::WorkspaceSaveAs => {
+                let ui = self.workspace_ui.as_ref()?;
+                sized_flow(ex, 440, 230, |flow| {
+                    crate::ui::window::workspaces::view_save_as(ui, flow)
+                })
+            }
+            super::super::ModalKind::Workspaces => {
+                let ui = self.workspace_ui.as_ref()?;
+                let bars = crate::ui::toolbar_dock::menu_entries(&self.toolbars);
+                let classic = crate::workspace::is_classic();
+                sized_flow(ex, 640, 520, |flow| {
+                    crate::ui::window::workspaces::view_window(
+                        ui,
+                        &self.workspaces,
+                        &bars,
+                        classic,
+                        flow,
+                    )
+                })
             }
             super::super::ModalKind::BlockSaveAs => {
                 let state = self.block_save_as.as_ref()?;

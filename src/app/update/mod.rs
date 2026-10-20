@@ -612,6 +612,14 @@ impl OpenCADStudio {
             {
                 return self.apply_block_save_as_dialog();
             }
+            if self.active_modal == Some(super::ModalKind::WorkspaceSaveAs)
+                && (matches!(msg, Message::CommandFinalize)
+                    || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN")))
+            {
+                return self.update(Message::Workspace(
+                    crate::ui::window::workspaces::WorkspaceMsg::SaveAsApply,
+                ));
+            }
             if self.active_modal == Some(super::ModalKind::WriteBlock) {
                 if matches!(msg, Message::CommandFinalize)
                     || matches!(&msg, Message::ShortcutPressed(key) if key.rsplit('+').next() == Some("ENTER") || key.rsplit('+').next() == Some("RETURN"))
