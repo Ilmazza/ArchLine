@@ -53,6 +53,8 @@ pub struct StatusMenuData<'a> {
     pub tooltip_hidden: bool,
     /// ArchLine: the workspace button and its menu.
     pub workspace: workspace_menu::WorkspaceMenu,
+    /// ArchLine: text of the X and Y snap-spacing fields of the Snap to Grid menu.
+    pub snap_spacing: (String, String),
 }
 
 /// Drawing/layout inputs used to build the status bar's layout and scale controls.
@@ -77,6 +79,8 @@ pub struct StatusBarLayoutState<'a> {
 
 /// Drafting modes and document settings represented by status bar controls.
 pub struct StatusBarModes {
+    pub grid_display: bool,
+    pub grid_snap: bool,
     pub ortho_mode: bool,
     pub polar_mode: bool,
     pub polar_increment_deg: f32,
@@ -156,6 +160,8 @@ impl StatusBar {
             lineweight_display,
         } = layout;
         let StatusBarModes {
+            grid_display,
+            grid_snap,
             ortho_mode,
             polar_mode,
             polar_increment_deg,
@@ -188,6 +194,7 @@ impl StatusBar {
             selection_filter,
             tooltip_hidden,
             workspace,
+            snap_spacing,
         } = menu_data;
 
         // Leftmost hamburger: opens a dropdown listing Model + every layout, so
@@ -345,6 +352,27 @@ impl StatusBar {
                 )
                 .into(),
             );
+        }
+        if vis(StatusPill::Grid) {
+            pills.push(
+                tip(
+                    toggle_pill(crate::ui::icons::ST_GRID, grid_display, Message::ToggleGrid),
+                    t!("Grid Display\nF7"),
+                )
+                .into(),
+            );
+        }
+        if vis(StatusPill::GridSnap) {
+            pills.push(grid_snap_btn(
+                grid_snap,
+                tooltip_hidden,
+                crate::ui::popup::grid_snap_popup::menu_entries(
+                    grid_snap,
+                    isometric_drafting,
+                    &snap_spacing.0,
+                    &snap_spacing.1,
+                ),
+            ));
         }
         if vis(StatusPill::Ortho) {
             pills.push(
@@ -942,6 +970,47 @@ fn polar_pill<'a>(
     );
 
     split_pill(main.into(), caret, active)
+}
+
+// ── Snap to Grid pill ──────────────────────────────────────────────────────
+//
+// Main: toggles grid snap on/off. Caret: spacing, isometric snap, settings.
+
+fn grid_snap_btn<'a>(
+    active: bool,
+    tooltip_hidden: bool,
+    entries: Vec<StatusMenuEntry<'a>>,
+) -> Element<'a, Message> {
+    let icon = if active {
+        crate::ui::icons::themed_primary_weak_text(crate::ui::icons::ST_GRIDSNAP, 17.0)
+    } else {
+        crate::ui::icons::themed_secondary(crate::ui::icons::ST_GRIDSNAP, 17.0)
+    };
+    let main = tip(
+        mouse_area(icon).on_press(Message::ToggleGridSnap).into(),
+        t!("Snap to Grid\nF9"),
+    );
+
+    let caret = status_menu::menu_bar(
+        menu_tip(
+            mouse_area(
+                container(if active {
+                    crate::ui::icons::themed_primary_weak_arrow_down(9.0)
+                } else {
+                    crate::ui::icons::themed_secondary_arrow_down(9.0)
+                })
+                .padding([4, 7]),
+            )
+            .on_press(Message::StatusMenuTooltipHidden(true))
+            .into(),
+            t!("Snap settings\nSpacing, isometric snap, Drafting Settings"),
+            tooltip_hidden,
+        ),
+        entries,
+        230.0,
+    );
+
+    split_pill(main, caret, active)
 }
 
 // ── OSNAP pill ─────────────────────────────────────────────────────────────

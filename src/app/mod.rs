@@ -19,6 +19,7 @@ mod block_properties_table;
 #[cfg(test)]
 mod block_properties_tests;
 mod block_save_as;
+mod snap_spacing;
 mod workspaces;
 mod block_test;
 #[cfg(test)]
@@ -562,6 +563,9 @@ pub(super) struct OpenCADStudio {
     polar_popup_open: bool,
     /// Live text of the polar picker's custom-angle field.
     polar_custom_input: String,
+    /// ArchLine: half-typed snap spacing of the Snap to Grid menu
+    /// (`snap_spacing.rs`); `None` shows the live spacing.
+    snap_spacing_edit: Option<snap_spacing::SnapSpacingEdit>,
     /// True while the status-bar customization menu is open.
     statusbar_menu_open: bool,
     /// True while the leftmost hamburger's Model/layout list dropdown is open.
@@ -4331,6 +4335,8 @@ pub enum Message {
     Toolbar(crate::ui::toolbar_dock::ToolbarMsg),
     /// The workspace menu and windows.
     Workspace(crate::ui::window::workspaces::WorkspaceMsg),
+    /// ArchLine: the snap-spacing fields of the Snap to Grid menu.
+    SnapSpacing(crate::ui::popup::grid_snap_popup::SnapSpacingMsg),
     /// Sort / search / view / section on the classic Start page.
     Start(crate::ui::classic_start::StartMsg),
     AuthoringPaletteTabSelected(crate::ui::window::authoring_palettes::Tab),
@@ -4793,6 +4799,7 @@ impl OpenCADStudio {
             scale_popup_open: false,
             polar_popup_open: false,
             polar_custom_input: String::new(),
+            snap_spacing_edit: None,
             statusbar_menu_open: false,
             layout_list_open: false,
             units_popup_open: false,

@@ -2648,6 +2648,7 @@ bg={bg_ms:.1}ms n={view_count}"
                         workspace: crate::ui::statusbar::workspace_menu::WorkspaceMenu::from_set(
                             &self.workspaces,
                         ),
+                        snap_spacing: self.snap_spacing_texts(),
                     };
                     self.status_bar.view(
                         &self.snapper,
@@ -2670,6 +2671,8 @@ bg={bg_ms:.1}ms n={view_count}"
                             lineweight_display: tab.scene.document.header.lineweight_display,
                         },
                         crate::ui::statusbar::StatusBarModes {
+                            grid_display: self.show_grid,
+                            grid_snap: self.snapper.grid_snap(),
                             ortho_mode: self.ortho_mode,
                             polar_mode: self.polar_mode,
                             polar_increment_deg: self.polar_increment_deg,

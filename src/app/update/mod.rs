@@ -10821,6 +10821,7 @@ impl OpenCADStudio {
                 self.status_menu_tooltip_hidden = hidden;
                 if hidden {
                     self.polar_custom_input.clear();
+                    self.snap_spacing_edit = None;
                 }
                 Task::none()
             }
@@ -11091,6 +11092,7 @@ impl OpenCADStudio {
             Message::Dock(m) => self.on_dock(m),
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Workspace(m) => self.on_workspace(m),
+            Message::SnapSpacing(m) => self.on_snap_spacing(m),
             Message::Start(m) => self.on_start(m),
             Message::AuthoringPaletteTabSelected(tab) => {
                 if self.dock_panel_visible(crate::ui::dock::PanelId::AuthoringPalettes) {
