@@ -63,12 +63,12 @@ Condizioni che la spec lascia implicite; ognuna ha il suo test nel task indicato
 **Interfaces:**
 - Produces: `pub fn set_classic(classic: bool)`; `pub fn is_classic() -> bool` (stessa firma di oggi).
 
-- [ ] **Step 1: Test** in `workspace.rs`: `set_classic_flips_every_predicate` — chiama `set_classic(false)` e verifica `ribbon_shown(false, false)`, `!menu_bar_shown(false)`, `!classic_active(false, false)`; poi `set_classic(true)` e il contrario; alla fine ripristina il valore iniziale. Lo stato è globale, e `new_for_test()` passa da `apply_config`: sotto `cfg(test)` lo stato è un `thread_local!` `Cell` (inizializzato dalla variabile d'ambiente in ogni thread), così i test in parallelo non si disturbano e `with_stack` dei test del dock (thread proprio) resta valido.
-- [ ] **Step 2: Run** `cargo test --locked --lib workspace::` — FAIL (`set_classic` non esiste).
-- [ ] **Step 3: Implementare** lo stato (in produzione un `AtomicU8`: 0 = da leggere, 1 = classico, 2 = ribbon; sotto `cfg(test)` il `thread_local!` di cui sopra): `is_classic()` inizializza al primo uso da `ARCHLINE_WORKSPACE` (stessa regola di oggi: `ribbon`, senza distinzione di maiuscole, → ribbon), `set_classic()` scrive. Le altre funzioni restano invariate.
-- [ ] **Step 4: Run** — PASS, e `ARCHLINE_WORKSPACE=ribbon cargo test --locked --lib dock` verde come prima.
-- [ ] **Step 5: Audit.** Elencare con `Grep` tutti gli usi di `is_classic`, `classic_active`, `ribbon_shown`, `menu_bar_shown`, `bottom_chrome_shown` fuori da `workspace.rs` e confermare nel messaggio di commit che ognuno è letto a ogni `view` (non in cache all'avvio). Le chiamate note sono `app/view/mod.rs` (2487–2582, 2806, 3701) e i test: nessuna è in cache e nessuna costante di altezza dipende dalla modalità. Se ne emerge una nuova, correggerla qui.
-- [ ] **Step 6: Commit** `workspace: l'interfaccia classico/ribbon si cambia a metà sessione`.
+- [x] **Step 1: Test** in `workspace.rs`: `set_classic_flips_every_predicate` — chiama `set_classic(false)` e verifica `ribbon_shown(false, false)`, `!menu_bar_shown(false)`, `!classic_active(false, false)`; poi `set_classic(true)` e il contrario; alla fine ripristina il valore iniziale. Lo stato è globale, e `new_for_test()` passa da `apply_config`: sotto `cfg(test)` lo stato è un `thread_local!` `Cell` (inizializzato dalla variabile d'ambiente in ogni thread), così i test in parallelo non si disturbano e `with_stack` dei test del dock (thread proprio) resta valido.
+- [x] **Step 2: Run** `cargo test --locked --lib workspace::` — FAIL (`set_classic` non esiste).
+- [x] **Step 3: Implementare** lo stato (in produzione un `AtomicU8`: 0 = da leggere, 1 = classico, 2 = ribbon; sotto `cfg(test)` il `thread_local!` di cui sopra): `is_classic()` inizializza al primo uso da `ARCHLINE_WORKSPACE` (stessa regola di oggi: `ribbon`, senza distinzione di maiuscole, → ribbon), `set_classic()` scrive. Le altre funzioni restano invariate.
+- [x] **Step 4: Run** — PASS, e `ARCHLINE_WORKSPACE=ribbon cargo test --locked --lib dock` verde come prima.
+- [x] **Step 5: Audit.** Elencare con `Grep` tutti gli usi di `is_classic`, `classic_active`, `ribbon_shown`, `menu_bar_shown`, `bottom_chrome_shown` fuori da `workspace.rs` e confermare nel messaggio di commit che ognuno è letto a ogni `view` (non in cache all'avvio). Le chiamate note sono `app/view/mod.rs` (2487–2582, 2806, 3701) e i test: nessuna è in cache e nessuna costante di altezza dipende dalla modalità. Se ne emerge una nuova, correggerla qui.
+- [x] **Step 6: Commit** `workspace: l'interfaccia classico/ribbon si cambia a metà sessione`.
 
 ### Task 2: Disposizione di AutoCAD Classic
 
