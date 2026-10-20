@@ -19,6 +19,7 @@ mod block_properties_table;
 #[cfg(test)]
 mod block_properties_tests;
 mod block_save_as;
+mod font_subst;
 mod snap_spacing;
 mod workspaces;
 mod block_test;
@@ -1633,6 +1634,9 @@ pub(super) struct OpenCADStudio {
     /// Fonts skipped or unavailable during this process lifetime. Reopening a
     /// drawing must not repeatedly nag for the same unresolved file.
     suppressed_missing_fonts: rustc_hash::FxHashSet<String>,
+    /// ArchLine: the stand-in picked so far for each font of the dialog
+    /// (`font_subst.rs`); a font without an entry is on "Default".
+    missing_font_picks: std::collections::HashMap<String, crate::font_alt::Substitute>,
     /// Drawings handed to us by other launches while `opening` was busy.
     /// `opening` is a single slot that a second `OpenPathPicked` would
     /// overwrite, and `on_file_opened` drops any result arriving once it is
@@ -4597,6 +4601,10 @@ pub enum Message {
     MissingFontsSourceChanged(String),
     /// Close the missing-fonts prompt without downloading.
     MissingFontsDismiss,
+    /// ArchLine: the stand-in picked for one font of the prompt.
+    MissingFontsPick(String, crate::font_alt::Substitute),
+    /// ArchLine: OK — remember the picks and redraw the text.
+    MissingFontsApply,
     /// Fonts fetched (or failed); payload lists (name, saved-path) pairs.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     MissingFontsResult(Result<Vec<(String, std::path::PathBuf)>, String>),
@@ -5173,6 +5181,7 @@ impl OpenCADStudio {
             missing_fonts_path: None,
             missing_fonts_downloading: false,
             suppressed_missing_fonts: rustc_hash::FxHashSet::default(),
+            missing_font_picks: Default::default(),
             pending_opens: std::collections::VecDeque::new(),
             pending_startup_script_lines: Vec::new(),
             active_interaction_index: None,

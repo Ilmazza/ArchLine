@@ -257,7 +257,7 @@ Per ogni area: una riga con ciò che è al livello di AutoCAD, poi una tabella *
 | ARCHTICK | Parziale | `src/scene/convert/tessellate.rs:2696` | disegnato come OBLIQUE, senza spessore |
 | `DIM`, `DIMREASSOCIATE`, `DIMDISASSOCIATE`, `DIMINSPECT` | Assenti | — | — |
 | Editor MTEXT | Parziale | `src/app/mtext_editor.rs` | Mancano elenchi puntati e numerati, tabulazioni, inserimento di campi e controllo ortografico. Il giustificato è reso allineato a sinistra; le colonne dinamiche non rifluiscono |
-| Font SHX | Parziale | `src/scene/text/font_face.rs:80-97` | Nessun percorso di ricerca né FONTALT. Un font mancante viene sostituito in silenzio con LFF. Su richiesta si scarica da GitHub (`src/io/font_repo.rs`) |
+| Font SHX | Parziale | `src/scene/text/font_face.rs:80-97`; `src/font_alt.rs` | Nessun percorso di ricerca. Un font mancante si disegna con un sostituto LFF; la finestra "Missing fonts" fa scegliere il sostituto (LFF o font di Windows) e lo ricorda in `settings.json` (equivalente di FONTALT/`acad.fmp`, ma per utente e non per disegno). Larghezze misurate contro gli SHX di AutoCAD 2025: identiche per romans, simplex, txt; approssimate per gli altri (isoct −28%, monotxt −25%, isocp +10%). Il download da GitHub (`src/io/font_repo.rs`) resta solo con `ARCHLINE_ONLINE=1` |
 | TrueType grassetto/corsivo | Parziale | `src/entities/text_support.rs:643-660` | simulati (obliquo, tratto più largo) |
 | FIND/REPLACE | Parziale | `src/app/find_replace.rs:205-245` | Non cerca in quote, MLEADER e tabelle. Mancano maiuscole/minuscole, parola intera e caratteri jolly |
 | SPELL | Assente nella GUI | `src/app/control/text_ops.rs:967` | solo dall'API (`text_audit`) |

@@ -878,6 +878,7 @@ impl OpenCADStudio {
             default_assoc_prompted: self.default_assoc_prompted,
             check_missing_fonts: self.check_missing_fonts,
             font_source_url: self.font_source_url.clone(),
+            font_substitutions: crate::font_alt::snapshot(),
             qnew_template: self.qnew_template.clone(),
             donation_prompt_version: self.donation_prompt_version.clone(),
             gpu_warning_silenced: self.gpu_warning_silenced.clone(),
@@ -1050,6 +1051,7 @@ impl OpenCADStudio {
         self.default_assoc_prompted = s.default_assoc_prompted;
         self.check_missing_fonts = s.check_missing_fonts;
         self.font_source_url = s.font_source_url.clone();
+        crate::font_alt::set_table(&s.font_substitutions);
         self.qnew_template = s.qnew_template.clone();
         self.font_source_input = s.font_source_url.clone();
         self.donation_prompt_version = s.donation_prompt_version.clone();
@@ -2392,12 +2394,22 @@ impl OpenCADStudio {
                         .suppressed_missing_fonts
                         .contains(&crate::io::font_repo::font_key(name))
                 });
+                // ArchLine: fonts with an exact stand-in or a saved choice are
+                // not asked about (`font_alt`); the exact ones leave a note.
+                let review = crate::font_alt::review(missing);
+                if self.check_missing_fonts {
+                    for note in &review.notes {
+                        self.command_line.push_info(note);
+                    }
+                }
+                let missing = review.ask;
                 // Read-only/MCP evaluation sessions must remain non-blocking:
                 // report missing fonts through control state, but never offer
                 // a network/download mutation from a read-only launch.
                 if !missing.is_empty() && self.check_missing_fonts && !self.read_only {
                     self.font_source_input = self.font_source_url.clone();
                     self.missing_fonts = Some(missing);
+                    self.missing_font_picks.clear();
                     self.missing_fonts_path = self.tabs[i].current_path.clone();
                     self.missing_fonts_downloading = false;
                     self.active_modal = Some(crate::app::ModalKind::MissingFonts);

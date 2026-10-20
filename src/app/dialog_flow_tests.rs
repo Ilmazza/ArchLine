@@ -273,3 +273,29 @@ fn attsync_gives_a_new_attribute_the_definitions_place_and_height() {
     );
     assert!((attribute.height - 3.0).abs() < 1e-9, "height {}", attribute.height);
 }
+
+#[test]
+fn the_missing_fonts_dialog_remembers_the_stand_in_chosen() {
+    use crate::font_alt::{self, Substitute};
+    let mut app = fresh_app();
+    app.missing_fonts = Some(vec!["zz_flow_font.shx".into(), "zz_flow_other.shx".into()]);
+    app.active_modal = Some(super::ModalKind::MissingFonts);
+
+    send(
+        &mut app,
+        Message::MissingFontsPick("zz_flow_font.shx".into(), Substitute::Stroke("romand".into())),
+    );
+    send(&mut app, Message::MissingFontsApply);
+
+    assert!(app.missing_fonts.is_none());
+    assert!(app.active_modal.is_none());
+    // The pick is kept, the font left on "Default" is marked as answered, and
+    // both are in what gets written to settings.json.
+    let saved = app.current_settings().font_substitutions;
+    assert_eq!(saved["zz_flow_font"], "stroke:romand");
+    assert_eq!(saved["zz_flow_other"], "default");
+    assert_eq!(font_alt::snapshot()["zz_flow_font"], "stroke:romand");
+    // Asked once: the same drawing opened again does not raise the dialog.
+    let again = font_alt::review(vec!["zz_flow_font.shx".into(), "zz_flow_other.shx".into()]);
+    assert!(again.ask.is_empty());
+}

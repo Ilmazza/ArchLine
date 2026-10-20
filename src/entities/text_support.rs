@@ -74,8 +74,10 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
                 p
             } else if explicit_shx {
                 // A missing .shx file draws with the stroke substitute of its
-                // name, never with an installed TrueType face (measured).
-                file.rsplit(['/', '\\']).next().unwrap_or(file).trim().to_string()
+                // name, never with an installed TrueType face (measured) — unless
+                // the user chose another font for it (`font_alt`).
+                crate::font_alt::replacement(file)
+                    .unwrap_or_else(|| file.rsplit(['/', '\\']).next().unwrap_or(file).trim().to_string())
             } else if let Some(family) = resolve_font_reference(file) {
                 // The file is installed, so its family is the face to draw with.
                 // Substituting a stroke font instead drops every letter that
@@ -85,7 +87,7 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
                 let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
                 let stem = basename.split('.').next().unwrap_or(basename).trim();
                 if !stem.is_empty() {
-                    stem.to_string()
+                    crate::font_alt::replacement(file).unwrap_or_else(|| stem.to_string())
                 } else if !style.name.trim().is_empty() {
                     style.name.trim().to_string()
                 } else {

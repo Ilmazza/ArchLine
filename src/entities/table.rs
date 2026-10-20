@@ -1200,7 +1200,7 @@ impl RenderConvertible for Table {
                         let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
                         let stem = basename.split('.').next().unwrap_or(basename).trim();
                         if !stem.is_empty() {
-                            stem.to_string()
+                            crate::font_alt::replacement(file).unwrap_or_else(|| stem.to_string())
                         } else {
                             return None;
                         }
@@ -1478,7 +1478,7 @@ pub fn tessellate_table(
                 let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
                 let stem = basename.split('.').next().unwrap_or(basename).trim();
                 if !stem.is_empty() {
-                    stem.to_string()
+                    crate::font_alt::replacement(file).unwrap_or_else(|| stem.to_string())
                 } else {
                     return None;
                 }

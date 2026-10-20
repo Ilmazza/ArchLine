@@ -1798,10 +1798,16 @@ impl OpenCADStudio {
                     Message::MissingFontsResult,
                 )
             }
+            Message::MissingFontsPick(font, pick) => {
+                self.on_missing_fonts_pick(font, pick);
+                Task::none()
+            }
+            Message::MissingFontsApply => self.on_missing_fonts_apply(),
             Message::MissingFontsDismiss => {
                 if self.missing_fonts_downloading {
                     return Task::none();
                 }
+                self.missing_font_picks.clear();
                 for name in self.missing_fonts.take().unwrap_or_default() {
                     self.suppressed_missing_fonts
                         .insert(crate::io::font_repo::font_key(&name));

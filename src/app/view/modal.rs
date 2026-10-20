@@ -1795,11 +1795,15 @@ impl OpenCADStudio {
             super::super::ModalKind::MissingFonts => {
                 let fonts = self.missing_fonts.as_ref()?;
                 let font_source = &self.font_source_input;
-                automatic_flow(ex, |flow| {
+                // Capped so the long texts wrap instead of stretching the
+                // window to the width of their single line.
+                sized_flow(ex, 660, 440, |flow| {
                     crate::ui::window::missing_fonts::view_window(
                         fonts,
+                        &self.missing_font_picks,
                         &font_source,
                         self.missing_fonts_downloading,
+                        crate::privacy::online(),
                         flow,
                     )
                 })

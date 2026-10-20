@@ -572,6 +572,11 @@ pub struct UserSettings {
     /// so an intranet folder or a private GitHub raw folder both work.
     #[serde(default)]
     pub font_source_url: String,
+    /// ArchLine: what a missing `.shx` font is drawn with, per font file
+    /// (`isoct` → `stroke:romans` / `system:Arial` / `default`); see
+    /// `crate::font_alt`.
+    #[serde(default)]
+    pub font_substitutions: std::collections::BTreeMap<String, String>,
     /// Drawing new tabs start from (QNEW template); empty = a blank drawing.
     #[serde(default)]
     pub qnew_template: String,
@@ -1015,6 +1020,7 @@ impl Default for UserSettings {
             default_assoc_prompted: false,
             check_missing_fonts: true,
             font_source_url: String::new(),
+            font_substitutions: Default::default(),
             qnew_template: String::new(),
             donation_prompt_version: String::new(),
             gpu_warning_silenced: String::new(),

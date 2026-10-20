@@ -550,6 +550,11 @@ pub fn is_shx_name(name: &str) -> bool {
     name.trim().to_ascii_lowercase().ends_with(".shx")
 }
 
+/// Stems of every embedded stroke font (`romans`, `iso3098`, …).
+pub fn embedded_font_stems() -> impl Iterator<Item = &'static str> {
+    FONTS_SRC.iter().map(|(stem, _)| *stem)
+}
+
 /// Whether an embedded font is that very font (its own stem, as `simplex`
 /// or `romans.shx`), not a stand-in reached through an alias (`txt` draws
 /// with `standard`).

@@ -23,6 +23,7 @@ pub mod modules;
 pub(crate) mod network;
 pub mod par;
 pub mod patreon;
+pub mod font_alt;
 pub mod privacy;
 pub mod workspace;
 pub mod workspaces;
