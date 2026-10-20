@@ -1032,6 +1032,8 @@ pub(super) struct OpenCADStudio {
     pub(crate) toolbars: crate::ui::toolbar_layout::ToolbarLayout,
     /// The user's workspaces and which one is current (`workspaces.rs`).
     pub(crate) workspaces: crate::workspaces::WorkspaceSet,
+    /// The open workspace window (Save As, or Settings / Customize).
+    pub(crate) workspace_ui: Option<crate::ui::window::workspaces::WorkspaceUi>,
     /// Bar being dragged by its grip, with the live drop target.
     pub(crate) toolbar_drag: Option<crate::ui::toolbar_dock::ToolbarDrag>,
     /// A press on a toolbar button that has variants, waiting to become a long
@@ -2302,6 +2304,8 @@ impl ClipboardDeps {
 /// modal's ✕ (`Message::CloseModal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
+    Workspaces,
+    WorkspaceSaveAs,
     About,
     Shortcuts,
     PluginManager,
@@ -4325,6 +4329,8 @@ pub enum Message {
     Dock(crate::ui::dock::DockMsg),
     /// A drag / redock / reset on the classic toolbars.
     Toolbar(crate::ui::toolbar_dock::ToolbarMsg),
+    /// The workspace menu and windows.
+    Workspace(crate::ui::window::workspaces::WorkspaceMsg),
     /// Sort / search / view / section on the classic Start page.
     Start(crate::ui::classic_start::StartMsg),
     AuthoringPaletteTabSelected(crate::ui::window::authoring_palettes::Tab),
@@ -5001,6 +5007,7 @@ impl OpenCADStudio {
             dock: Default::default(),
             toolbars: Default::default(),
             workspaces: Default::default(),
+            workspace_ui: None,
             toolbar_drag: None,
             tool_hold: None,
             start_ui: Default::default(),

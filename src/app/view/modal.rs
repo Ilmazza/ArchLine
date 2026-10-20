@@ -93,6 +93,8 @@ impl OpenCADStudio {
             Some(K::BlockLookup) => crate::t!("Property Lookup Table").into_owned(),
             Some(K::BlockPropertiesTable) => crate::t!("Block Properties Table").into_owned(),
             Some(K::BlockSaveAs) => crate::t!("Save Block As").into_owned(),
+            Some(K::Workspaces) => crate::t!("Workspaces").into_owned(),
+            Some(K::WorkspaceSaveAs) => crate::t!("Save Workspace As").into_owned(),
             Some(K::PointStyle) => crate::tr!("modal", "point-style"),
             Some(K::AttributeEditor) => crate::tr!("modal", "attribute-editor"),
             Some(K::SaveDialog) => crate::tr!("modal", "save-drawing-as"),
@@ -406,6 +408,10 @@ impl OpenCADStudio {
                 sized_flow(ex, 580, 470, |flow| {
                     crate::ui::window::block_visibility::view(state, flow)
                 })
+            }
+            super::super::ModalKind::Workspaces | super::super::ModalKind::WorkspaceSaveAs => {
+                self.workspace_ui.as_ref()?;
+                sized_flow(ex, 640, 520, |_flow| iced::widget::Space::new().into())
             }
             super::super::ModalKind::BlockSaveAs => {
                 let state = self.block_save_as.as_ref()?;

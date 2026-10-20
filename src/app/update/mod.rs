@@ -245,6 +245,7 @@ impl OpenCADStudio {
             Some(AttMan) => self.attman = None,
             Some(BlockEditPicker) => self.block_edit_picker = None,
             Some(BlockSaveAs) => self.block_save_as = None,
+            Some(Workspaces | WorkspaceSaveAs) => self.workspace_ui = None,
             Some(BlockVisibility) => self.block_visibility = None,
             Some(BlockLookup) => self.block_lookup = None,
             Some(BlockPropertiesTable) => self.block_properties_table = None,
@@ -11081,6 +11082,7 @@ impl OpenCADStudio {
             Message::GraphicAttributes(m) => self.on_graphic_attributes(m),
             Message::Dock(m) => self.on_dock(m),
             Message::Toolbar(m) => self.on_toolbar(m),
+            Message::Workspace(m) => self.on_workspace(m),
             Message::Start(m) => self.on_start(m),
             Message::AuthoringPaletteTabSelected(tab) => {
                 if self.dock_panel_visible(crate::ui::dock::PanelId::AuthoringPalettes) {

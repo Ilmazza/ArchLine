@@ -47,4 +47,5 @@ pub mod update_notice;
 pub mod wblock;
 pub mod xref_attach;
 pub mod xref_help;
+pub mod workspaces;
 pub mod xref_manager;
