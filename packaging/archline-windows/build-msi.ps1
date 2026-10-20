@@ -5,18 +5,22 @@
   WiX Toolset 3.x (candle.exe, light.exe, WixUIExtension.dll).
 
   Uso:
-    pwsh packaging\archline-windows\build-msi.ps1 [-Wix <cartella WiX>] [-Out dist] [-SkipBuild]
+    pwsh packaging\archline-windows\build-msi.ps1 [-Wix <cartella WiX>] [-Out dist] [-SkipBuild] [-Revision <n>]
 
   -Wix        cartella con candle.exe/light.exe, o la sua radice con `bin\` (default: $env:WIX)
   -Out        cartella di destinazione dell'MSI (default: dist)
   -SkipBuild  non esegue cargo: usa target\release\ArchLine.exe e dwg_thumbnailer_win.dll già costruiti
+  -Revision   numero di ArchLine in coda alla versione (2026.42.0 -> 2026.42.0.<n>), per distinguere
+              questo installer da quello ufficiale di OpenCAD Studio. Default: il numero in
+              packaging\archline-windows\revision.txt (0 o assente = nessun numero in coda)
 
   L'MSI non è firmato: Windows SmartScreen mostra un avviso al primo avvio.
 #>
 param(
     [string]$Wix = $env:WIX,
     [string]$Out = "dist",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [int]$Revision = -1
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -30,6 +34,16 @@ $year, $minor, $patch = [int]$cargoVersion.Groups[1].Value, [int]$cargoVersion.G
 $msiVersion = "{0}.{1}.{2}" -f ($year - 2000), $minor, $patch
 if (($year - 2000) -gt 255 -or $minor -gt 255 -or $patch -gt 65535) { throw "versione MSI fuori limite: $msiVersion" }
 $version = "{0}.{1}.{2}" -f $year, $minor, $patch
+
+# Revisione di ArchLine: quarta cifra della versione, nel nome del file e nella versione
+# dell'MSI (Windows la mostra in "App installate"; per riconoscere un aggiornamento conta solo
+# AAAA.S.P, e `AllowSameVersionUpgrades` in main.wxs fa sostituire comunque la versione installata).
+if ($Revision -lt 0) {
+    $revFile = Join-Path $PSScriptRoot "revision.txt"
+    $Revision = if (Test-Path $revFile) { [int](Get-Content $revFile -Raw).Trim() } else { 0 }
+}
+if ($Revision -gt 65535) { throw "revisione fuori limite: $Revision" }
+if ($Revision -gt 0) { $msiVersion += ".$Revision"; $version += ".$Revision" }
 
 # Strumenti WiX.
 if (-not $Wix) { throw "WiX non trovato: passa -Wix <cartella> o imposta WIX" }
