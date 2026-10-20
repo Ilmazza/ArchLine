@@ -1,6 +1,6 @@
 # Workspace: pulsante, menu e disposizioni salvate
 
-Stato: bozza da approvare. Branch `claude/merge-upstream-2026.42`. Data: 2026-10-20.
+Stato: implementata (piano `2026-10-20-workspace.md`); da verificare a schermo dall'utente. Branch `claude/merge-upstream-2026.42`. Data: 2026-10-20.
 
 ## 1. Contesto e scopo
 

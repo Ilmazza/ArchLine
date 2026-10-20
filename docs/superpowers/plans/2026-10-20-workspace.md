@@ -181,8 +181,8 @@ Condizioni che la spec lascia implicite; ognuna ha il suo test nel task indicato
 **Files:**
 - Modify: `CLAUDE.md` (voce "Cosa è ArchLine": workspace, file nuovi, regole), `docs/superpowers/specs/2026-10-20-workspace-design.md` (stato: "implementata")
 
-- [ ] **Step 1:** Aggiungere a `CLAUDE.md` una voce `src/workspaces.rs` + `src/app/workspaces.rs` + `src/ui/window/workspaces.rs` + `src/ui/statusbar/workspace_menu.rs` con: cosa fa, `Message::Workspace`, che `ToolbarLayout::default()` resta il default storico e `autocad_classic()` è quello di AutoCAD, e che `ARCHLINE_WORKSPACE` vale solo come valore iniziale.
-- [ ] **Step 2: Run** `cargo test --locked --lib -- workspace toolbar classic statusbar config i18n dialog_flow` — tutto verde; poi `cargo check --locked`.
-- [ ] **Step 3: Run** `cargo build --release --bin ArchLine` (con ArchLine chiuso) — `Finished`.
+- [x] **Step 1:** Aggiungere a `CLAUDE.md` una voce `src/workspaces.rs` + `src/app/workspaces.rs` + `src/ui/window/workspaces.rs` + `src/ui/statusbar/workspace_menu.rs` con: cosa fa, `Message::Workspace`, che `ToolbarLayout::default()` resta il default storico e `autocad_classic()` è quello di AutoCAD, e che `ARCHLINE_WORKSPACE` vale solo come valore iniziale.
+- [x] **Step 2: Run** `cargo test --locked --lib -- workspace toolbar classic statusbar config i18n dialog_flow` — tutto verde; poi `cargo check --locked`.
+- [x] **Step 3: Run** `cargo build --release --bin ArchLine` (con ArchLine chiuso) — `Finished`.
 - [ ] **Step 4:** Chiedere all'utente uno screenshot del menu aperto, della finestra Customize e del passaggio a OpenCAD Studio e ritorno; correggere ciò che non va a schermo.
-- [ ] **Step 5: Commit** `workspace: documentazione`.
+- [x] **Step 5: Commit** `workspace: documentazione`.
