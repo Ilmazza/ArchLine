@@ -2645,6 +2645,9 @@ bg={bg_ms:.1}ms n={view_count}"
                         selection_types,
                         selection_filter: &tab.scene.selection_filter,
                         tooltip_hidden: self.status_menu_tooltip_hidden,
+                        workspace: crate::ui::statusbar::workspace_menu::WorkspaceMenu::from_set(
+                            &self.workspaces,
+                        ),
                     };
                     self.status_bar.view(
                         &self.snapper,

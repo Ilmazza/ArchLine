@@ -4,6 +4,7 @@ pub(crate) mod spacemouse;
 pub mod status_menu;
 pub mod statusbar_config;
 pub mod statusbar_menu;
+pub mod workspace_menu;
 
 use iced::widget::tooltip::Position as TipPos;
 use iced::widget::{button, column, container, mouse_area, row, text, text_input, tooltip};
@@ -50,6 +51,8 @@ pub struct StatusMenuData<'a> {
     pub selection_types: Arc<Vec<String>>,
     pub selection_filter: &'a rustc_hash::FxHashSet<String>,
     pub tooltip_hidden: bool,
+    /// ArchLine: the workspace button and its menu.
+    pub workspace: workspace_menu::WorkspaceMenu,
 }
 
 /// Drawing/layout inputs used to build the status bar's layout and scale controls.
@@ -184,6 +187,7 @@ impl StatusBar {
             selection_types,
             selection_filter,
             tooltip_hidden,
+            workspace,
         } = menu_data;
 
         // Leftmost hamburger: opens a dropdown listing Model + every layout, so
@@ -580,6 +584,23 @@ impl StatusBar {
                 .into(),
             );
         }
+        // ArchLine: workspace switching (the gear, with the name before it when
+        // asked for), left of the customization handle.
+        if let Some(label) = workspace_menu::label(&workspace) {
+            pills.push(label);
+        }
+        pills.push(
+            status_menu::menu_bar(
+                menu_tip(
+                    workspace_menu::button(),
+                    t!("Workspace Switching\nSwitch or save the arrangement of menus and toolbars"),
+                    tooltip_hidden,
+                ),
+                workspace_menu::entries(&workspace),
+                230.0,
+            )
+            .into(),
+        );
         // Customization handle: opens the pill show/hide menu.
         pills.push(
             status_menu::menu_bar(

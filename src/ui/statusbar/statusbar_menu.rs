@@ -46,7 +46,7 @@ fn layout_row<'a>(name: String, is_current: bool) -> Element<'a, Message> {
         .into()
 }
 
-fn menu_row(
+pub(super) fn menu_row(
     label: std::borrow::Cow<'static, str>,
     checked: bool,
     msg: Message,

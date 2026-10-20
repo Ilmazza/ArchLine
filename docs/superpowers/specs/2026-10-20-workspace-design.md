@@ -86,8 +86,8 @@ ingranaggio di AutoCAD e la descrizione "Workspace Switching". Apre il menu con 
 (lo stesso componente della personalizzazione), che chiude il menu dopo la scelta.
 
 **Menu**, in quest'ordine: i workspace (predefiniti poi quelli dell'utente per nome; spunta su quello
-attivo); separatore; *Save Current As…*; *Workspace Settings…*; *Customize…*; separatore; *Display
-Workspace Label* (con spunta). Come nello screenshot dell'utente.
+attivo); separatore; *Save Current As…*; *Workspace Settings…*; *Customize…*; *Display Workspace
+Label* (con spunta). Un solo separatore, come nello screenshot dell'utente.
 
 **Etichetta.** Con *Display Workspace Label* acceso, il nome del workspace attivo compare nella barra di
 stato accanto al pulsante. Di default spenta, come in AutoCAD.
