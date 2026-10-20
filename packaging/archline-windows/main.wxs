@@ -22,8 +22,13 @@
       InstallScope='perMachine'
       SummaryCodepage='1252' />
 
+    <!-- AllowSameVersionUpgrades: un MSI ricostruito con lo stesso numero di versione
+         (il Cargo.toml cambia solo a ogni release di upstream) deve sostituire quello
+         installato. Senza, Windows lo installa accanto al vecchio (ProductCode nuovo) e non
+         riscrive ArchLine.exe, che ha la stessa versione interna. -->
     <MajorUpgrade
       Schedule='afterInstallInitialize'
+      AllowSameVersionUpgrades='yes'
       DowngradeErrorMessage='!(loc.DowngradeError)' />
 
     <Media Id='1' Cabinet='product.cab' EmbedCab='yes' />
