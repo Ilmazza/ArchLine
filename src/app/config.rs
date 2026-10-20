@@ -100,7 +100,8 @@ pub struct UiThemeConfig {
 
 impl Default for UiThemeConfig {
     fn default() -> Self {
-        let theme = iced::Theme::Oxocarbon;
+        // ArchLine: the AutoCAD-classic dark theme (upstream starts on Oxocarbon).
+        let theme = crate::ui::style::archline_theme::archline_dark();
         Self {
             name: theme.to_string(),
             palette: UiThemePalette::from_iced(theme.seed()),
@@ -115,7 +116,7 @@ impl UiThemeConfig {
         } else if self.name.eq_ignore_ascii_case("System") {
             resolve_system_theme()
         } else {
-            builtin_theme(&self.name).unwrap_or(iced::Theme::Oxocarbon)
+            builtin_theme(&self.name).unwrap_or_else(crate::ui::style::archline_theme::archline_dark)
         }
     }
 }
@@ -719,6 +720,20 @@ mod tests {
         assert_eq!(deserialized.model_space.grid_opacity, 45);
         assert_eq!(deserialized.model_space.selection_opacity, 35);
         assert_eq!(deserialized.model_space.selection_window_color, 5);
+    }
+
+    #[test]
+    fn a_fresh_install_starts_on_archline_dark() {
+        use crate::ui::style::archline_theme::ARCHLINE_DARK;
+        let cfg = UiThemeConfig::default();
+        assert_eq!(cfg.name, ARCHLINE_DARK);
+        assert_eq!(cfg.to_iced().to_string(), ARCHLINE_DARK);
+        // A name this build does not know falls back to it, not to upstream's.
+        let unknown = UiThemeConfig { name: "Nope".into(), ..Default::default() };
+        assert_eq!(unknown.to_iced().to_string(), ARCHLINE_DARK);
+        // A saved choice is kept.
+        let saved = UiThemeConfig { name: "Oxocarbon".into(), ..Default::default() };
+        assert_eq!(saved.to_iced().to_string(), "Oxocarbon");
     }
 
     #[test]
