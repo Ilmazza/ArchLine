@@ -10,14 +10,18 @@
 
 use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType};
 use codec::{CadDocument, EntityType, Handle};
-use kernel::geom2d::{contains, distance_to, signed_area, Curve, Line, Tolerance};
+use kernel::geom2d::{
+    contains, distance_to, segment_crossing, signed_area, Curve, Line, SegmentCrossing, Tolerance,
+    Transform,
+};
 use kernel::tessellation::DEFAULT_ANGLE;
 use rustc_hash::FxHashMap;
 
 use crate::command::WorkingPlane;
 use crate::entities::hatch::{boundary_area, edge_curve};
 use crate::scene::{
-    boundary_faces, entity_boundary_source_on_plane, exact_hatch_paths, BoundarySource,
+    boundary_faces, entity_boundary_source_on_plane, exact_hatch_paths, sources_near_rings,
+    BoundarySource,
 };
 
 use super::LAYER_PREFIX;
@@ -224,43 +228,178 @@ fn face_inside(outer: &[Curve], inner: &[[f64; 2]], tol: f64) -> bool {
 /// misurati con `boundary_area` come una campitura. Altrimenti vale la formula
 /// del laccio sugli anelli (archi in corde) e il risultato è `false`.
 ///
+/// Tutto si misura attorno a un'origine locale, il primo vertice del
+/// contorno: `boundary_area` integra rispetto all'origine del disegno, e a
+/// coordinate georiferite (Gauss-Boaga, milioni di metri) i termini da 10¹³ si
+/// cancellerebbero lasciando millesimi di m² di errore.
+///
 /// Un percorso esatto vale solo se, per il suo anello:
+/// - nessun lato è attribuibile a due curve diverse dei muri
+///   ([`has_ambiguous_edge`]). `exact_hatch_paths` sceglie la curva di un lato
+///   per sovrapposizione e poi per distanza degli estremi: su una «D» (un arco
+///   e la sua corda nella stessa entità) o su una LINE e un ARC poco aperto
+///   con gli stessi estremi sceglie a caso, e un arco poco aperto preso al
+///   posto della corda resta dentro qualsiasi soglia geometrica;
 /// - segue l'anello ([`path_follows_ring`]): ogni punto del percorso sta a
 ///   meno della freccia delle corde (più la tolleranza) dall'anello, e ogni
-///   vertice dell'anello dal percorso. È il controllo che conta:
-///   `exact_hatch_paths` chiude una polilinea a «D» (un arco e la sua corda
-///   nella stessa entità) come un cerchio intero, e quando la corda è un lato
-///   di un locale grande (una nicchia) l'arco in più vale pochi punti
-///   percentuali dell'area, ma sta a un raggio dalla corda;
+///   vertice dell'anello dal percorso;
 /// - ha un'area finita, positiva e vicina a quella dell'anello
-///   ([`MAX_EXACT_DRIFT`]). Costa poco e copre ciò che la geometria non vede:
-///   un verso sbagliato nell'integrale di `boundary_area` su un contorno giusto.
+///   ([`MAX_EXACT_DRIFT`]): copre un verso sbagliato nell'integrale di
+///   `boundary_area` su un contorno giusto.
 pub fn net_area(
     region: &Region,
     sources: &FxHashMap<Handle, BoundarySource>,
     tol: f64,
 ) -> (f64, bool) {
-    let rings: Vec<Vec<[f64; 2]>> = std::iter::once(region.outer.clone())
+    let origin = region.outer.first().copied().unwrap_or([0.0, 0.0]);
+    let global: Vec<Vec<[f64; 2]>> = std::iter::once(region.outer.clone())
         .chain(region.holes.iter().cloned())
         .collect();
+    let rings: Vec<Vec<[f64; 2]>> = global
+        .iter()
+        .map(|ring| ring.iter().map(|&p| local(p, origin)).collect())
+        .collect();
+    let polygon = signed_area(&rings[0]).abs()
+        - rings[1..]
+            .iter()
+            .map(|hole| signed_area(hole).abs())
+            .sum::<f64>();
+    let near = sources_near_rings(&global, sources, WELD_SLACK * tol.max(1.0e-6));
+    let Some(sources) = localized(&near, origin) else {
+        return (polygon, false);
+    };
     let exterior: Vec<bool> = (0..rings.len()).map(|index| index == 0).collect();
-    let paths = exact_hatch_paths(&rings, &exterior, sources, tol);
+    let paths = exact_hatch_paths(&rings, &exterior, &sources, tol);
     let faithful = paths.len() == rings.len()
         && paths.iter().zip(&rings).all(|(path, ring)| {
-            path_follows_ring(path, ring, tol)
+            !has_ambiguous_edge(ring, &sources, tol)
+                && path_follows_ring(path, ring, tol)
                 && credible(
                     boundary_area(&hatch_of(vec![path.clone()])),
                     signed_area(ring).abs(),
                 )
         });
     let exact = faithful.then(|| boundary_area(&hatch_of(paths)));
-    let polygon = signed_area(&region.outer).abs()
-        - region
-            .holes
-            .iter()
-            .map(|hole| signed_area(hole).abs())
-            .sum::<f64>();
     pick_area(exact, polygon)
+}
+
+fn local(p: [f64; 2], origin: [f64; 2]) -> [f64; 2] {
+    [p[0] - origin[0], p[1] - origin[1]]
+}
+
+/// Le sorgenti spostate nell'origine locale; `None` se una curva non si lascia
+/// spostare (non succede con rette e archi).
+fn localized(
+    sources: &FxHashMap<Handle, BoundarySource>,
+    origin: [f64; 2],
+) -> Option<FxHashMap<Handle, BoundarySource>> {
+    let shift = Transform::translation([-origin[0], -origin[1]]);
+    sources
+        .iter()
+        .map(|(&handle, source)| {
+            let segments = source
+                .segments
+                .iter()
+                .map(|segment| Line {
+                    start: local(segment.start, origin),
+                    end: local(segment.end, origin),
+                })
+                .collect();
+            let curves = source
+                .curves
+                .iter()
+                .map(|curve| curve.transformed(&shift))
+                .collect::<Option<Vec<_>>>()?;
+            Some((handle, BoundarySource { segments, curves }))
+        })
+        .collect()
+}
+
+/// Un lato dell'anello si può attribuire a due curve diverse dei muri? Si
+/// rifà la scelta di `edge_curve` (privata, `scene/boundary.rs`): vincono le
+/// sorgenti con la sovrapposizione più lunga sul lato (alla pari entro `tol`:
+/// l'ordine della tabella decide), e in ognuna le curve con la somma minima
+/// delle distanze dagli estremi (alla pari entro [`WELD_SLACK`] tolleranze);
+/// senza sovrapposizioni, le curve vicine a un estremo. Se tra le candidate ci
+/// sono due percorsi diversi (una retta e un arco, o archi di cerchi diversi),
+/// il lato è ambiguo.
+fn has_ambiguous_edge(
+    ring: &[[f64; 2]],
+    sources: &FxHashMap<Handle, BoundarySource>,
+    tol: f64,
+) -> bool {
+    let tolerance = Tolerance::new(tol);
+    let reach = WELD_SLACK * tol;
+    ring.iter()
+        .zip(ring.iter().cycle().skip(1))
+        .any(|(&start, &end)| {
+            let edge = Line { start, end };
+            let length = (end[0] - start[0]).hypot(end[1] - start[1]);
+            let overlaps: Vec<(f64, &BoundarySource)> = sources
+                .values()
+                .filter_map(|source| {
+                    let overlap = source
+                        .segments
+                        .iter()
+                        .filter_map(
+                            |segment| match segment_crossing(edge, *segment, tolerance) {
+                                SegmentCrossing::Overlap { a, .. } => {
+                                    Some((a[1] - a[0]).abs() * length)
+                                }
+                                _ => None,
+                            },
+                        )
+                        .fold(0.0, f64::max);
+                    (overlap > 0.0).then_some((overlap, source))
+                })
+                .collect();
+            let best = overlaps
+                .iter()
+                .map(|(overlap, _)| *overlap)
+                .fold(0.0, f64::max);
+            let pools: Vec<Vec<&Curve>> = if overlaps.is_empty() {
+                vec![sources
+                    .values()
+                    .flat_map(|source| source.curves.iter())
+                    .filter(|curve| distance_to(curve, start).min(distance_to(curve, end)) <= reach)
+                    .collect()]
+            } else {
+                overlaps
+                    .iter()
+                    .filter(|(overlap, _)| *overlap >= best - tol)
+                    .map(|(_, source)| source.curves.iter().collect())
+                    .collect()
+            };
+            let error = |curve: &Curve| distance_to(curve, start) + distance_to(curve, end);
+            let mut picks: Vec<&Curve> = Vec::new();
+            for pool in pools {
+                let least = pool
+                    .iter()
+                    .map(|curve| error(curve))
+                    .fold(f64::INFINITY, f64::min);
+                for curve in pool {
+                    if error(curve) <= least + reach
+                        && !picks.iter().any(|pick| same_course(pick, curve, reach))
+                    {
+                        picks.push(curve);
+                    }
+                }
+            }
+            picks.len() > 1
+        })
+}
+
+/// Due curve candidate per lo stesso lato danno lo stesso percorso? Due rette
+/// sì (passano per gli stessi estremi); due archi solo sullo stesso cerchio.
+fn same_course(a: &Curve, b: &Curve, reach: f64) -> bool {
+    match (a, b) {
+        (Curve::Line(_), Curve::Line(_)) => true,
+        (Curve::Arc(p), Curve::Arc(q)) => {
+            (p.centre[0] - q.centre[0]).hypot(p.centre[1] - q.centre[1]) <= reach
+                && (p.radius - q.radius).abs() <= reach
+        }
+        _ => a == b,
+    }
 }
 
 /// Il percorso esatto `path` ricalca l'anello `ring` delle facce? Le facce
@@ -700,17 +839,25 @@ mod tests {
         }
     }
 
-    /// Mezzo disco di raggio 1 sopra `centre`: una `LWPOLYLINE` chiusa con un
-    /// arco e la sua corda.
-    fn d_shape(centre: [f64; 2]) -> EntityType {
+    /// Una «D» sopra la corda da `centre − (1; 0)` a `centre + (1; 0)`: una
+    /// `LWPOLYLINE` chiusa con un arco (`bulge` 1 = mezzo disco di raggio 1) e
+    /// la sua corda.
+    fn d_shape(centre: [f64; 2], bulge: f64) -> EntityType {
         let mut d = LwPolyline::new();
         d.add_vertex(LwVertex::with_bulge(
             Vector2::new(centre[0] + 1.0, centre[1]),
-            1.0,
+            bulge,
         ));
         d.add_vertex(LwVertex::new(Vector2::new(centre[0] - 1.0, centre[1])));
         d.is_closed = true;
         on(LAYER_MURI, EntityType::LwPolyline(d))
+    }
+
+    /// Il segmento circolare tra la corda lunga 2 e l'arco della «D».
+    fn d_segment(bulge: f64) -> f64 {
+        let sweep = 4.0 * bulge.atan();
+        let radius = 1.0 / (sweep / 2.0).sin();
+        radius * radius * (sweep - sweep.sin()) / 2.0
     }
 
     #[test]
@@ -720,7 +867,7 @@ mod tests {
         // sull'arco. L'area resta quella a corde, dichiarata non esatta.
         let half_disc = std::f64::consts::FRAC_PI_2;
         let tol = M.tolerance();
-        let scene = scene_with(vec![d_shape([0.0, 0.0])], 6);
+        let scene = scene_with(vec![d_shape([0.0, 0.0], 1.0)], 6);
         let walls = wall_set(&scene.document, tol);
         let region = region_at(&faces(&walls.sources, tol), [0.0, 0.5], tol).unwrap();
         let (area, exact) = net_area(&region, &walls.sources, tol);
@@ -737,7 +884,7 @@ mod tests {
                 on(LAYER_MURI, line([a[0], a[1], 0.0], [b[0], b[1], 0.0]))
             })
             .collect();
-        entities.push(d_shape([0.0, 0.0]));
+        entities.push(d_shape([0.0, 0.0], 1.0));
         let scene = scene_with(entities, 6);
         let walls = wall_set(&scene.document, tol);
         let region = region_at(&faces(&walls.sources, tol), [2.0, 2.0], tol).unwrap();
@@ -749,15 +896,14 @@ mod tests {
         assert!((area - (36.0 - half_disc)).abs() < 0.01, "{area}");
     }
 
-    #[test]
-    fn d_niche_on_a_room_side_is_not_exact() {
-        // Locale 8 × 5 con una nicchia semicircolare (r = 1) nella parete nord,
-        // disegnata come «D» chiusa: la sua corda è il lato del locale tra
-        // (3; 5) e (5; 5), la faccia del muro si interrompe lì. La superficie
-        // vera è 40,00 (tutti lati dritti).
-        let half_disc = std::f64::consts::FRAC_PI_2;
+    /// Locale 8 × 5 (40,00 m², tutti lati dritti) con la faccia del muro nord
+    /// interrotta tra (3; 5) e (5; 5): lì il lato del locale lo danno `extra`.
+    /// Sorgenti da `sources_of` con handle fissi (10… per il locale, 99… per
+    /// `extra`), come le geometrie sintetiche dei task successivi: così
+    /// l'ordine della tabella, che decide i pareggi di upstream, non cambia.
+    fn room_with_gap(extra: Vec<EntityType>) -> (FxHashMap<Handle, BoundarySource>, Region) {
         let tol = M.tolerance();
-        let mut entities: Vec<EntityType> = [
+        let room = [
             ([0.0, 0.0], [8.0, 0.0]),
             ([8.0, 0.0], [8.0, 5.0]),
             ([8.0, 5.0], [5.0, 5.0]),
@@ -765,33 +911,142 @@ mod tests {
             ([0.0, 5.0], [0.0, 0.0]),
         ]
         .iter()
-        .map(|&(a, b)| on(LAYER_MURI, line([a[0], a[1], 0.0], [b[0], b[1], 0.0])))
-        .collect();
-        entities.push(d_shape([4.0, 5.0]));
-        let scene = scene_with(entities, 6);
-        let walls = wall_set(&scene.document, tol);
-        let region = region_at(&faces(&walls.sources, tol), [4.0, 2.5], tol).unwrap();
-        assert!(region.holes.is_empty(), "la nicchia è fuori dal locale");
+        .map(|&(a, b)| line([a[0], a[1], 0.0], [b[0], b[1], 0.0]));
+        let entities: Vec<(Handle, EntityType)> = room
+            .enumerate()
+            .map(|(i, e)| (Handle::new(10 + i as u64), e))
+            .chain(
+                extra
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (Handle::new(99 + i as u64), e)),
+            )
+            .collect();
+        let (sources, off_plane) = sources_of(&entities, tol);
+        assert_eq!(off_plane, 0);
+        let region = region_at(&faces(&sources, tol), [4.0, 2.5], tol).unwrap();
+        assert!(region.holes.is_empty(), "ciò che sta oltre il lato è fuori");
+        assert_m2(signed_area(&region.outer).abs(), 40.0, "contorno a corde");
+        (sources, region)
+    }
 
-        // Premessa: upstream ricostruisce la corda come il mezzo cerchio della
-        // nicchia (40 + π/2) e lo scarto, 3,9 %, passerebbe il controllo
-        // sull'area. Se upstream corregge `edge_curve`, la premessa cade e il
-        // test va rivisto: allora 40,00 può tornare esatto.
-        let wrong = boundary_area(&hatch_of(exact_hatch_paths(
-            &[region.outer.clone()],
-            &[true],
-            &walls.sources,
-            tol,
-        )));
-        assert!(
-            (wrong - (40.0 + half_disc)).abs() < 1e-9,
-            "premessa: {wrong}"
-        );
-        assert!(credible(wrong, 40.0), "premessa: sotto il 5 %");
+    #[test]
+    fn d_niche_on_a_room_side_is_not_exact() {
+        // Nicchia nella parete nord disegnata come «D» chiusa: la sua corda è
+        // il lato del locale. Profonda (mezzo disco) o quasi piatta (bulge
+        // 0,04 e 0,02, archi da 9,2° e 4,6°), la superficie vera è 40,00.
+        let tol = M.tolerance();
+        for bulge in [1.0, 0.04, 0.02] {
+            let (sources, region) = room_with_gap(vec![d_shape([4.0, 5.0], bulge)]);
 
-        let (area, exact) = net_area(&region, &walls.sources, tol);
-        assert!(!exact, "nessuna area sbagliata dichiarata esatta: {area}");
-        assert_m2(area, 40.0, "nicchia");
+            // Premessa: la corda ha gli estremi sull'arco e sulla retta della
+            // stessa polilinea, il lato è ambiguo; con questi handle upstream
+            // sceglie l'arco (40 + segmento, sotto il 5 %), e da bulge 0,04 in
+            // giù l'arco sta anche entro la freccia ammessa dal controllo
+            // geometrico. Con altri handle (una scena) può scegliere la retta:
+            // l'ordine di saldatura dei vertici decide il pareggio. Se upstream
+            // corregge `edge_curve`, la premessa cade e il test va rivisto.
+            assert!(has_ambiguous_edge(&region.outer, &sources, tol));
+            let paths = exact_hatch_paths(&[region.outer.clone()], &[true], &sources, tol);
+            let wrong = boundary_area(&hatch_of(paths.clone()));
+            assert!(
+                (wrong - (40.0 + d_segment(bulge))).abs() < 1e-9,
+                "premessa {bulge}: {wrong}"
+            );
+            assert!(credible(wrong, 40.0), "premessa {bulge}: sotto il 5 %");
+            assert_eq!(
+                path_follows_ring(&paths[0], &region.outer, tol),
+                bulge < 0.05,
+                "premessa {bulge}: controllo geometrico"
+            );
+
+            let (area, exact) = net_area(&region, &sources, tol);
+            assert!(
+                !exact,
+                "bulge {bulge}: area sbagliata dichiarata esatta: {area}"
+            );
+            assert_m2(area, 40.0, bulge);
+        }
+    }
+
+    #[test]
+    fn line_and_shallow_arc_with_the_same_ends_are_not_exact() {
+        // Il lato (3; 5)–(5; 5) disegnato come LINE e anche come ARC verso
+        // l'esterno di 6°: l'arco diventa una sola corda, uguale alla linea, e
+        // upstream sceglie l'una o l'altro secondo l'ordine della tabella.
+        let tol = M.tolerance();
+        let half = 3.0_f64.to_radians();
+        let radius = 1.0 / half.sin();
+        let centre = Vector3::new(4.0, 5.0 - radius * half.cos(), 0.0);
+        let right = std::f64::consts::FRAC_PI_2 - half;
+        let arc = Arc::from_center_radius_angles(centre, radius, right, right + 2.0 * half);
+        let (sources, region) = room_with_gap(vec![
+            line([5.0, 5.0, 0.0], [3.0, 5.0, 0.0]),
+            EntityType::Arc(arc),
+        ]);
+        assert!(has_ambiguous_edge(&region.outer, &sources, tol));
+        let (area, exact) = net_area(&region, &sources, tol);
+        assert!(!exact, "{area}");
+        assert_m2(area, 40.0, "linea e arco");
+
+        // Lo stesso arco da solo, senza la linea: nessun pareggio, esatto.
+        // Il lato curvo verso l'esterno aggiunge il segmento all'area.
+        let arc = Arc::from_center_radius_angles(centre, radius, right, right + 2.0 * half);
+        let (sources, region) = room_with_gap(vec![EntityType::Arc(arc)]);
+        assert!(!has_ambiguous_edge(&region.outer, &sources, tol));
+        let (area, exact) = net_area(&region, &sources, tol);
+        let segment = radius * radius * (2.0 * half - (2.0 * half).sin()) / 2.0;
+        assert!(exact, "{area}");
+        assert_m2(area, 40.0 + segment, "arco solo");
+    }
+
+    /// Le entità del caso A spostate di `by`.
+    fn shifted(entities: Vec<EntityType>, by: [f64; 2]) -> Vec<EntityType> {
+        entities
+            .into_iter()
+            .map(|mut entity| {
+                match &mut entity {
+                    EntityType::Line(l) => {
+                        l.start.x += by[0];
+                        l.start.y += by[1];
+                        l.end.x += by[0];
+                        l.end.y += by[1];
+                    }
+                    EntityType::LwPolyline(p) => {
+                        for v in &mut p.vertices {
+                            v.location.x += by[0];
+                            v.location.y += by[1];
+                        }
+                    }
+                    _ => unreachable!("il caso A ha solo LINE e LWPOLYLINE"),
+                }
+                entity
+            })
+            .collect()
+    }
+
+    #[test]
+    fn georeferenced_case_a_keeps_exact_areas() {
+        // Gauss-Boaga, Roma: E ≈ 2 300 000 m, N ≈ 4 640 000 m. Con l'integrale
+        // attorno all'origine del disegno l'errore arriverebbe ai millesimi di
+        // m²; attorno al primo vertice resta quello di rappresentazione delle
+        // coordinate (4,10 → 2 300 004,1 m: meno di 1e-10 m), sotto 1e-9 m².
+        let (east, north) = (2_300_000.0, 4_640_000.0);
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            for unit in [M, DrawingUnit::Millimetri] {
+                let k = unit.per_metre();
+                let by = [east * k, north * k];
+                let entities = shifted(case_a(form, unit), by);
+                let at = |x: f64, y: f64| [by[0] + x * k, by[1] + y * k];
+                let code = unit.insunits();
+                assert_m2(
+                    area_at(entities.clone(), code, at(2.0, 1.5)),
+                    12.00,
+                    (form, unit),
+                );
+                assert_m2(area_at(entities, code, at(6.0, 1.5)), 11.70, (form, unit));
+            }
+        }
     }
 
     #[test]
