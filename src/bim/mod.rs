@@ -3,6 +3,7 @@
 //!
 //! Spec: `docs/superpowers/specs/2026-10-23-bim-stato-piante-design.md`.
 
+pub mod commands;
 pub mod record;
 pub mod report;
 pub mod units;
