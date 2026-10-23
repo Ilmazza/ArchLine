@@ -871,7 +871,7 @@ pub enum WriteError {
 /// versione del documento. Senza `overwrite`, se anche uno solo dei file
 /// esiste non scrive nulla e restituisce tutti quelli che esistono. Un errore
 /// di scrittura ferma il giro: i file già scritti restano (ognuno è scritto
-/// accanto e poi sostituito, quindi mai a metà).
+/// accanto e poi sostituito, quindi mai a metà) e il messaggio li nomina.
 pub fn write(
     ex: &Extracted,
     dir: &Path,
@@ -897,11 +897,25 @@ pub fn write(
             return Err(WriteError::Exists(existing));
         }
     }
-    for ((_, doc), path) in ex.docs.iter().zip(&paths) {
+    for (done, ((_, doc), path)) in ex.docs.iter().zip(&paths).enumerate() {
         crate::io::save_as_version(doc, path, doc.version)
-            .map_err(|e| WriteError::Io(format!("{}: {e}", path.display())))?;
+            .map_err(|e| WriteError::Io(write_failure(path, &e, &paths[..done])))?;
     }
     Ok(paths)
+}
+
+/// Il messaggio di un file che non si è potuto scrivere: il file, l'errore e,
+/// se ce ne sono, i file scritti prima di lui, che restano sul disco.
+fn write_failure(path: &Path, error: &str, written: &[PathBuf]) -> String {
+    let mut text = format!("{}: {error}", path.display());
+    if !written.is_empty() {
+        let names: Vec<String> = written.iter().map(|p| p.display().to_string()).collect();
+        text.push_str(&format!(
+            " (già scritti prima dell'errore: {})",
+            names.join(", ")
+        ));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -1508,6 +1522,45 @@ mod tests {
             write(&ex, &missing, "casa", false),
             Err(WriteError::Io(_))
         ));
+    }
+
+    /// Il secondo file non si scrive (al suo posto c'è una cartella): il primo
+    /// resta sul disco e il messaggio lo nomina; se si ferma al primo, nessun
+    /// file da nominare.
+    #[test]
+    fn write_io_error_names_the_files_already_written() {
+        let tmp = TempDir::new("parziale");
+        let ex = extract(&doc_with_zones(), &opts(&both()));
+        let first = tmp.0.join("casa_stato-di-fatto.dwg");
+        let second = tmp.0.join("casa_demolizioni-costruzioni.dwg");
+        std::fs::create_dir(&second).unwrap();
+
+        let Err(WriteError::Io(message)) = write(&ex, &tmp.0, "casa", true) else {
+            panic!("atteso un errore di scrittura");
+        };
+        assert!(first.is_file());
+        assert!(
+            message.starts_with(&second.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(&format!(
+                " (già scritti prima dell'errore: {})",
+                first.display()
+            )),
+            "{message}"
+        );
+
+        std::fs::remove_file(&first).unwrap();
+        std::fs::create_dir(&first).unwrap();
+        let Err(WriteError::Io(message)) = write(&ex, &tmp.0, "casa", true) else {
+            panic!("atteso un errore di scrittura");
+        };
+        assert!(
+            message.starts_with(&first.display().to_string()),
+            "{message}"
+        );
+        assert!(!message.contains("già scritti"), "{message}");
     }
 
     #[test]

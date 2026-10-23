@@ -80,7 +80,7 @@ fn is_wall_in(doc: &CadDocument, model: Handle, entity: &EntityType) -> bool {
 }
 
 /// Layer `AL-*`; come tutti i nomi dei layer, senza distinguere le maiuscole.
-fn is_bim_layer(name: &str) -> bool {
+pub(crate) fn is_bim_layer(name: &str) -> bool {
     name.get(..LAYER_PREFIX.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(LAYER_PREFIX))
 }

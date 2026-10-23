@@ -903,6 +903,8 @@ pub(super) struct OpenCADStudio {
     pending_setvar: Option<String>,
     /// BIM (ArchLine): il comando `AL_*` da rilanciare dopo la scelta dell'unità (`AL_UNITA`).
     pub(crate) bim_pending: Option<String>,
+    /// BIM (ArchLine): la finestra di `AL_ESTRAI`, mentre è aperta.
+    pub(crate) bim_extract: Option<crate::ui::window::bim_extract::ExtractDialog>,
     /// DELOBJ system variable (0–3), shared by every open drawing.
     delete_objects: i16,
     /// Cursor is hovering over the UCS icon body — drives the hover highlight.
@@ -2318,6 +2320,8 @@ impl ClipboardDeps {
 pub enum ModalKind {
     Workspaces,
     WorkspaceSaveAs,
+    /// ArchLine (BIM): la finestra di `AL_ESTRAI`.
+    BimExtract,
     About,
     Shortcuts,
     PluginManager,
@@ -4343,6 +4347,8 @@ pub enum Message {
     Toolbar(crate::ui::toolbar_dock::ToolbarMsg),
     /// The workspace menu and windows.
     Workspace(crate::ui::window::workspaces::WorkspaceMsg),
+    /// ArchLine (BIM): la finestra di `AL_ESTRAI`.
+    Bim(crate::ui::window::bim_extract::BimMsg),
     /// ArchLine: the snap-spacing fields of the Snap to Grid menu.
     SnapSpacing(crate::ui::popup::grid_snap_popup::SnapSpacingMsg),
     /// Sort / search / view / section on the classic Start page.
@@ -4975,6 +4981,7 @@ impl OpenCADStudio {
             awaiting_vports: false,
             pending_setvar: None,
             bim_pending: None,
+            bim_extract: None,
             delete_objects: 1,
             ucs_icon_hover: false,
             ucs_icon_selected: false,

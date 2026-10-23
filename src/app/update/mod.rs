@@ -246,6 +246,7 @@ impl OpenCADStudio {
             Some(BlockEditPicker) => self.block_edit_picker = None,
             Some(BlockSaveAs) => self.block_save_as = None,
             Some(Workspaces | WorkspaceSaveAs) => self.workspace_ui = None,
+            Some(BimExtract) => self.bim_extract = None,
             Some(BlockVisibility) => self.block_visibility = None,
             Some(BlockLookup) => self.block_lookup = None,
             Some(BlockPropertiesTable) => self.block_properties_table = None,
@@ -11098,6 +11099,7 @@ impl OpenCADStudio {
             Message::Dock(m) => self.on_dock(m),
             Message::Toolbar(m) => self.on_toolbar(m),
             Message::Workspace(m) => self.on_workspace(m),
+            Message::Bim(m) => self.on_bim(m),
             Message::SnapSpacing(m) => self.on_snap_spacing(m),
             Message::Start(m) => self.on_start(m),
             Message::AuthoringPaletteTabSelected(tab) => {

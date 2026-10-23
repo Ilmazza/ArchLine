@@ -1,26 +1,32 @@
-//! Famiglia dei comandi BIM di ArchLine (spec §3 e §5.1): `AL_DEMOLISCI`,
-//! `AL_NUOVO`, `AL_STATO` e l'interno `AL_UNITA`.
+//! Famiglia dei comandi BIM di ArchLine (spec §3, §5.1 e §5.5): `AL_DEMOLISCI`,
+//! `AL_NUOVO`, `AL_STATO`, `AL_ESTRAI` e l'interno `AL_UNITA`.
 //!
 //! Qui sta solo il lato app: l'unità del disegno (chiesta quando `INSUNITS`
 //! vale 0, mai scritta in `INSUNITS`), i layer `AL-*` creati la prima volta in
 //! un passo di annullamento a sé, l'istantanea della geometria, l'avvio di
-//! [`ZoneCommand`] e il cambio di stato delle zone esistenti (`AL_STATO`). La
-//! logica sta in `crate::bim`.
+//! [`ZoneCommand`], il cambio di stato delle zone esistenti (`AL_STATO`) e
+//! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
+//! sta in `crate::bim`.
 
-use crate::app::{Message, OpenCADStudio};
+use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
+use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::record;
 use crate::bim::report::Notice;
 use crate::bim::units::{self, DrawingUnit, UnitLookup};
 use crate::bim::walls;
 use crate::bim::zone::{self, Zone, ZoneGeom, ZoneState};
 use crate::bim::APP_ZONA;
-use crate::command::{CadCommand, KeywordCommand, SelectThenKeywordCommand};
+use crate::command::{
+    CadCommand, FreeTextValuePromptCommand, KeywordCommand, SelectThenKeywordCommand,
+};
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::scene::Scene;
+use crate::ui::window::bim_extract::{BimMsg, ExtractDialog};
 use codec::{CadDocument, Handle};
 use iced::Task;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 inventory::submit!(crate::command::CommandRegistration {
     names: &[
@@ -39,6 +45,18 @@ const UNIT_PROMPT: &str =
 
 const STATO_PROMPT: &str = "AL_STATO  [Demolito/Nuovo/Varco/Altezza/Spessore]:";
 
+const ESTRAI_PROMPT: &str = "Cartella di destinazione:";
+
+/// Gli elaborati di `AL_ESTRAI <cartella>`: tutti e tre.
+const ALL_ELABORATI: [Elaborato; 3] = [
+    Elaborato::StatoDiFatto,
+    Elaborato::DemolizioniCostruzioni,
+    Elaborato::StatoDiProgetto,
+];
+
+/// Il nome di base dei file quando il disegno non ne dà uno utilizzabile.
+const FALLBACK_BASE: &str = "Disegno";
+
 impl OpenCADStudio {
     /// I comandi `AL_*`, riconosciuti dal primo token in maiuscolo.
     pub(super) fn dispatch_bim(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
@@ -55,6 +73,7 @@ impl OpenCADStudio {
                     self.bim_apply_stato(i, keyword, &args)
                 }
             }),
+            "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
             _ => None,
         }
     }
@@ -263,6 +282,345 @@ impl OpenCADStudio {
             .push_info(&format!("AL_STATO: {modified} zone modificate."));
         Task::none()
     }
+
+    /// `AL_ESTRAI [cartella]` (spec §5.5). La cartella è il resto della riga,
+    /// spazi compresi, anche tra virgolette: si estraggono subito i tre
+    /// elaborati e non si sovrascrive mai (con file esistenti non si scrive
+    /// nulla). Senza cartella la si chiede: in riga di comando a uno script
+    /// (`scripted_dispatch`), con la finestra a una persona. Prima serve
+    /// l'unità del disegno, come per le zone. Estrarre non cambia il disegno.
+    fn bim_start_extract(&mut self, i: usize, cmd: &str) -> Task<Message> {
+        let line = cmd.trim_start();
+        let (name, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let folder = unquote(rest.trim());
+        if folder.is_empty() {
+            if line.len() > name.len() {
+                // `AL_ESTRAI ` con lo spazio e niente dopo: l'Invio a vuoto alla
+                // domanda della cartella.
+                self.command_line
+                    .push_error("AL_ESTRAI: nessuna cartella indicata. Niente è stato scritto.");
+                return Task::none();
+            }
+            return self.bim_ask_extract(i);
+        }
+        let dir = PathBuf::from(folder);
+        if let Some(error) = folder_error(&dir) {
+            self.command_line.push_error(&format!("AL_ESTRAI: {error}"));
+            return Task::none();
+        }
+        if self.bim_unit_or_ask(i, line.trim_end()).is_none() {
+            return self.finish_dispatch("AL_ESTRAI");
+        }
+        self.bim_pending = None;
+        let layer = initial_new_walls_layer(&self.tabs[i].scene.document);
+        if let Err(error) = self.bim_run_extract(i, &dir, ALL_ELABORATI.to_vec(), layer, false) {
+            self.bim_report_extract_error(error);
+        }
+        Task::none()
+    }
+
+    /// `AL_ESTRAI` senza cartella: l'unità, poi la domanda (script) o la
+    /// finestra, con la cartella del disegno, le tre caselle e il layer dei
+    /// muri nuovi ricordato nel record.
+    fn bim_ask_extract(&mut self, i: usize) -> Task<Message> {
+        if self.bim_unit_or_ask(i, "AL_ESTRAI").is_none() {
+            return self.finish_dispatch("AL_ESTRAI");
+        }
+        self.bim_pending = None;
+        if self.scripted_dispatch {
+            // Nessuno risponderebbe alla finestra: la cartella si chiede in
+            // riga di comando e torna qui come `AL_ESTRAI <cartella>`. Testo
+            // libero: gli spazi e le maiuscole di un percorso restano (in un
+            // file .scr la riga intera è la cartella).
+            let ask = FreeTextValuePromptCommand::new("AL_ESTRAI", ESTRAI_PROMPT);
+            self.command_line.push_info(&ask.prompt());
+            self.tabs[i].active_cmd = Some(Box::new(ask));
+            return self.finish_dispatch("AL_ESTRAI");
+        }
+        let tab = &self.tabs[i];
+        let doc = &tab.scene.document;
+        let mut layers: Vec<String> = doc
+            .layers
+            .iter()
+            .map(|layer| layer.name.clone())
+            .filter(|name| !walls::is_bim_layer(name))
+            .collect();
+        layers.sort_by_key(|name| name.to_lowercase());
+        let dialog = ExtractDialog {
+            tab_id: tab.id,
+            dir: tab
+                .current_path
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|dir| dir.is_dir())
+                .map(Path::to_path_buf),
+            fatto: true,
+            comparativa: true,
+            progetto: true,
+            layer: initial_new_walls_layer(doc),
+            layers,
+            confirm_overwrite: false,
+        };
+        self.bim_extract = Some(dialog);
+        self.active_modal = Some(ModalKind::BimExtract);
+        self.reset_modal_geometry();
+        Task::none()
+    }
+
+    /// I messaggi della finestra di `AL_ESTRAI`. A finestra chiusa (una
+    /// cartella scelta che arriva dopo Annulla) non fanno nulla.
+    pub(in crate::app) fn on_bim(&mut self, m: BimMsg) -> Task<Message> {
+        let Some(dialog) = self.bim_extract.as_mut() else {
+            return Task::none();
+        };
+        match m {
+            #[cfg(not(target_arch = "wasm32"))]
+            BimMsg::Browse => {
+                let start = dialog.dir.clone();
+                return Task::perform(
+                    async move {
+                        let mut picker =
+                            crate::sys::file_dialog().set_title("Cartella di destinazione");
+                        if let Some(dir) = start {
+                            picker = picker.set_directory(dir);
+                        }
+                        picker
+                            .pick_folder()
+                            .await
+                            .map(|handle| crate::sys::handle_path(&handle))
+                    },
+                    |dir| Message::Bim(BimMsg::Picked(dir)),
+                );
+            }
+            // Il browser non sceglie cartelle.
+            #[cfg(target_arch = "wasm32")]
+            BimMsg::Browse => {}
+            BimMsg::Picked(Some(dir)) => {
+                dialog.dir = Some(dir);
+                // Altra cartella, altri file: la conferma di prima non vale.
+                dialog.confirm_overwrite = false;
+            }
+            BimMsg::Picked(None) => {}
+            BimMsg::Toggle(elaborato) => dialog.toggle(elaborato),
+            BimMsg::Layer(name) => dialog.layer = name,
+            BimMsg::Ok => return self.bim_extract_ok(),
+            BimMsg::Cancel => self.bim_close_extract(),
+        }
+        Task::none()
+    }
+
+    /// OK della finestra. Se i file esistono e non c'è ancora la conferma, la
+    /// finestra lo dice e resta aperta: niente è stato scritto. Altrimenti
+    /// estrae (sovrascrivendo solo dopo la conferma), si chiude e il rapporto
+    /// va in riga di comando.
+    fn bim_extract_ok(&mut self) -> Task<Message> {
+        let Some(dialog) = self.bim_extract.as_ref() else {
+            return Task::none();
+        };
+        let Some(dir) = dialog.dir.clone().filter(|_| dialog.can_ok()) else {
+            return Task::none();
+        };
+        let tab_id = dialog.tab_id;
+        let elaborati = dialog.elaborati();
+        let layer = dialog.layer.clone();
+        let overwrite = dialog.confirm_overwrite;
+        let Some(i) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            self.bim_close_extract();
+            self.command_line
+                .push_error("AL_ESTRAI: il disegno non è più aperto. Niente è stato scritto.");
+            return Task::none();
+        };
+        match self.bim_run_extract(i, &dir, elaborati, layer, overwrite) {
+            Err(WriteError::Exists(_)) if !overwrite => {
+                if let Some(dialog) = self.bim_extract.as_mut() {
+                    dialog.confirm_overwrite = true;
+                }
+            }
+            result => {
+                self.bim_close_extract();
+                if let Err(error) = result {
+                    self.bim_report_extract_error(error);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Chiude la finestra di `AL_ESTRAI` (Annulla, o dopo l'estrazione).
+    fn bim_close_extract(&mut self) {
+        if self.active_modal == Some(ModalKind::BimExtract) {
+            self.close_active_modal();
+        }
+        self.bim_extract = None;
+    }
+
+    /// Estrae `elaborati` dal disegno `i` e li scrive in `dir` con il nome del
+    /// disegno; con `overwrite` falso un file esistente ferma tutto prima di
+    /// scrivere (`Exists`). Riuscita: il layer dei muri nuovi nel record, se è
+    /// cambiato, e il rapporto in riga di comando. Gli errori li riporta il
+    /// chiamante; il testo di `Io` è già una frase.
+    fn bim_run_extract(
+        &mut self,
+        i: usize,
+        dir: &Path,
+        elaborati: Vec<Elaborato>,
+        layer: String,
+        overwrite: bool,
+    ) -> Result<Vec<PathBuf>, WriteError> {
+        if let Some(error) = folder_error(dir) {
+            return Err(WriteError::Io(error));
+        }
+        let unit = match units::resolve(&self.tabs[i].scene.document) {
+            UnitLookup::Known(unit) => unit,
+            // Chi chiama ha già chiesto l'unità: qui non si inventa.
+            UnitLookup::Unsupported(_) | UnitLookup::Unspecified => {
+                return Err(WriteError::Io(
+                    "unità del disegno non disponibile. Niente è stato scritto.".into(),
+                ));
+            }
+        };
+        let layer = layer.trim().to_string();
+        let opts = ExtractOptions {
+            elaborati,
+            new_walls_layer: layer.clone(),
+            unit,
+            tol: unit.tolerance(),
+        };
+        let extracted = extract::extract(&self.tabs[i].scene.document, &opts);
+        let tab = &self.tabs[i];
+        let base = base_name(tab.current_path.as_deref(), &tab.tab_title);
+        let written =
+            extract::write(&extracted, dir, &base, overwrite).map_err(|error| match error {
+                WriteError::Io(message) => {
+                    WriteError::Io(format!("scrittura non riuscita: {message}."))
+                }
+                exists => exists,
+            })?;
+        self.bim_remember_new_walls_layer(i, &layer);
+        self.command_line.push_info(&format!(
+            "AL_ESTRAI: scritti {} file in {}.",
+            written.len(),
+            dir.display()
+        ));
+        for notice in &extracted.notices {
+            self.command_line.push_info(&notice.text());
+        }
+        Ok(written)
+    }
+
+    /// Il layer dei muri nuovi va nel record del disegno, in un passo di
+    /// annullamento a sé, solo se è cambiato. Vuoto = nessuno.
+    fn bim_remember_new_walls_layer(&mut self, i: usize, layer: &str) {
+        let mut rec = record::read(&self.tabs[i].scene.document);
+        let chosen = Some(layer.to_string()).filter(|name| !name.is_empty());
+        if rec.new_walls_layer == chosen {
+            return;
+        }
+        self.push_undo_snapshot(i, "AL_ESTRAI");
+        rec.new_walls_layer = chosen.clone();
+        let doc = &mut self.tabs[i].scene.document;
+        record::write(doc, &rec);
+        if record::read(doc).new_walls_layer == chosen {
+            self.tabs[i].dirty = true;
+            self.finish_pending_history(i);
+        } else {
+            // Senza dizionario radice il record non si scrive: nessun passo vuoto.
+            self.drop_unchanged_pending_history(i);
+            self.command_line.push_error(
+                "AL_ESTRAI: impossibile ricordare il layer dei muri nuovi nel disegno.",
+            );
+        }
+    }
+
+    fn bim_report_extract_error(&mut self, error: WriteError) {
+        let text = match error {
+            WriteError::Exists(paths) => format!(
+                "AL_ESTRAI: i file esistono già: {}. Niente è stato scritto.",
+                file_names(&paths)
+            ),
+            WriteError::Io(message) => format!("AL_ESTRAI: {message}"),
+        };
+        self.command_line.push_error(&text);
+    }
+}
+
+/// Perché `dir` non va bene come cartella di destinazione, se non va bene.
+/// Una cartella che non c'è non si crea: lo si dice e basta.
+fn folder_error(dir: &Path) -> Option<String> {
+    if dir.is_dir() {
+        None
+    } else if dir.exists() {
+        Some(format!(
+            "{} non è una cartella. Niente è stato scritto.",
+            dir.display()
+        ))
+    } else {
+        Some(format!(
+            "la cartella {} non esiste. Niente è stato scritto.",
+            dir.display()
+        ))
+    }
+}
+
+/// Il testo senza le virgolette doppie attorno, se ci sono: un percorso con
+/// spazi scritto come in Windows, `"C:\Progetti\Casa Rossi"`.
+fn unquote(text: &str) -> &str {
+    text.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(text)
+        .trim()
+}
+
+/// Il layer dei muri nuovi da proporre: quello ricordato nel record; senza
+/// record, per ora nessuno (la proposta dal layer più frequente dei muri
+/// arriva con lo stato di progetto).
+fn initial_new_walls_layer(doc: &CadDocument) -> String {
+    record::read(doc).new_walls_layer.unwrap_or_default()
+}
+
+/// Il nome di base dei file estratti: il file del disegno senza estensione
+/// oppure, per un disegno mai salvato, il titolo del tab; sempre un nome di
+/// file valido per Windows.
+fn base_name(path: Option<&Path>, title: &str) -> String {
+    let raw = path.and_then(Path::file_stem).map_or_else(
+        || title.to_string(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    safe_file_stem(&raw)
+}
+
+/// `name` come parte di un nome di file di Windows: i caratteri vietati
+/// (`<>:"/\|?*` e quelli di controllo) diventano `_`. Un nome vuoto diventa
+/// «Disegno».
+fn safe_file_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    match cleaned.trim() {
+        "" => FALLBACK_BASE.to_string(),
+        stem => stem.to_string(),
+    }
+}
+
+/// I nomi dei file, separati da virgole (la cartella è già nota).
+fn file_names(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Che cosa chiede `AL_STATO <parola> [valore]`.
@@ -437,10 +795,71 @@ fn last_new_thickness(zones: &[ZoneGeom]) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{commits_to_model_space, parse_positive, StatoChange};
+    use super::{
+        base_name, commits_to_model_space, file_names, folder_error, parse_positive,
+        safe_file_stem, unquote, StatoChange,
+    };
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
     use codec::Handle;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn base_names_are_valid_file_names() {
+        assert_eq!(base_name(None, "Drawing1"), "Drawing1");
+        assert_eq!(
+            base_name(Some(Path::new("C:/Progetti/Casa Rossi.dwg")), "Drawing1"),
+            "Casa Rossi"
+        );
+        assert_eq!(
+            base_name(Some(Path::new("C:/Progetti/rilievo.v2.dxf")), "x"),
+            "rilievo.v2"
+        );
+        assert_eq!(
+            safe_file_stem("a<b>c:d\"e/f\\g|h?i*j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        assert_eq!(safe_file_stem("tab\u{7}\t"), "tab__");
+        assert_eq!(safe_file_stem("  casa  "), "casa");
+        assert_eq!(safe_file_stem("   "), "Disegno");
+        assert_eq!(base_name(None, ""), "Disegno");
+    }
+
+    #[test]
+    fn folder_argument_drops_the_quotes() {
+        assert_eq!(
+            unquote(r#""C:\Progetti\Casa Rossi""#),
+            r"C:\Progetti\Casa Rossi"
+        );
+        assert_eq!(
+            unquote(r"C:\Progetti\Casa Rossi"),
+            r"C:\Progetti\Casa Rossi"
+        );
+        assert_eq!(unquote(r#"" C:\x ""#), r"C:\x");
+        assert_eq!(unquote(r#""""#), "");
+        assert_eq!(unquote(r#"""#), r#"""#);
+    }
+
+    #[test]
+    fn folder_errors_and_file_lists() {
+        let here = std::env::temp_dir();
+        assert_eq!(folder_error(&here), None);
+        let missing = here.join("archline-cartella-che-non-esiste-mai");
+        assert_eq!(
+            folder_error(&missing),
+            Some(format!(
+                "la cartella {} non esiste. Niente è stato scritto.",
+                missing.display()
+            ))
+        );
+        assert_eq!(
+            file_names(&[
+                PathBuf::from("C:/x/casa_stato-di-fatto.dwg"),
+                PathBuf::from("C:/x/casa_demolizioni-costruzioni.dwg"),
+            ]),
+            "casa_stato-di-fatto.dwg, casa_demolizioni-costruzioni.dwg"
+        );
+    }
 
     fn zone(state: ZoneState) -> Zone {
         Zone {

@@ -6,8 +6,12 @@
 //!
 //! Negli script lo spessore si scrive col punto («0.12»): la virgola farebbe
 //! leggere al runner le coordinate (0;12).
+//!
+//! `AL_ESTRAI` scrive in cartelle nuove sotto la cartella temporanea, tolte a
+//! fine test: mai file o impostazioni dell'utente.
 
-use super::{Message, OpenCADStudio};
+use super::{Message, ModalKind, OpenCADStudio};
+use crate::bim::extract::{file_name, Elaborato};
 use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
 use crate::bim::record;
 use crate::bim::units::DrawingUnit;
@@ -17,10 +21,12 @@ use crate::bim::{
     LAYER_LOCALI_PROGETTO, LAYER_NUOVE,
 };
 use crate::command::StepInput;
+use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_NOTE};
 use codec::entities::Line;
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{CadDocument, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 fn fresh_app() -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
@@ -38,8 +44,10 @@ fn load(app: &mut OpenCADStudio, entities: Vec<EntityType>, insunits: i16) {
 }
 
 /// Una riga intera, come da script: il comando, i suoi argomenti, poi Invio.
+/// La riga va nel JSON con le sue sequenze di escape (i percorsi di Windows
+/// hanno le barre rovesciate).
 fn run(app: &mut OpenCADStudio, cmd: &str) {
-    app.automation_op(&format!(r#"{{"op":"run","cmd":"{cmd}"}}"#));
+    app.automation_op(&serde_json::json!({ "op": "run", "cmd": cmd }).to_string());
     let i = app.active_tab;
     app.finish_pending_history(i);
 }
@@ -999,4 +1007,524 @@ fn stato_without_a_change_does_not_create_layers() {
 
     assert!(doc(&app).layers.get(LAYER_NUOVE).is_none());
     assert_eq!(undo_steps(&app), steps);
+}
+
+// --------------------------------------------------------------- AL_ESTRAI
+
+/// Una cartella nuova sotto la cartella temporanea, tolta a fine test. Il
+/// percorso non ha spazi: il runner degli script divide la riga sugli spazi.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "archline_bim_app_{tag}_{}_{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            !dir.to_string_lossy().contains(' '),
+            "cartella temporanea con spazi: {}",
+            dir.display()
+        );
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// I DWG dello stato di fatto e di demolizioni e costruzioni per il disegno
+/// `base` (lo stato di progetto arriva con la sua geometria).
+fn extracted_paths(dir: &Path, base: &str) -> Vec<PathBuf> {
+    [Elaborato::StatoDiFatto, Elaborato::DemolizioniCostruzioni]
+        .into_iter()
+        .map(|elaborato| dir.join(file_name(base, elaborato)))
+        .collect()
+}
+
+/// Il nome del tab attivo: il nome di base dei file di un disegno mai salvato.
+fn tab_title(app: &OpenCADStudio) -> String {
+    app.tabs[app.active_tab].tab_title.clone()
+}
+
+fn dwg_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("dwg"))
+        })
+        .count()
+}
+
+const MARKER: &[u8] = b"segno: da non sovrascrivere";
+
+/// Sostituisce il contenuto dei file con un segno: un file riscritto non lo ha
+/// più, anche se la data di modifica non cambiasse.
+fn mark(paths: &[PathBuf]) {
+    for path in paths {
+        std::fs::write(path, MARKER).unwrap();
+    }
+}
+
+fn marked(path: &Path) -> bool {
+    std::fs::read(path).unwrap() == MARKER
+}
+
+fn mtimes(paths: &[PathBuf]) -> Vec<std::time::SystemTime> {
+    paths
+        .iter()
+        .map(|path| std::fs::metadata(path).unwrap().modified().unwrap())
+        .collect()
+}
+
+/// Un messaggio dell'interfaccia, come da un clic nella finestra.
+fn send(app: &mut OpenCADStudio, message: Message) {
+    let _ = app.update(message);
+}
+
+fn bim(app: &mut OpenCADStudio, message: BimMsg) {
+    send(app, Message::Bim(message));
+}
+
+fn pick_folder(app: &mut OpenCADStudio, dir: &Path) {
+    bim(app, BimMsg::Picked(Some(dir.to_path_buf())));
+}
+
+#[test]
+fn scripted_extract_writes_three_files() {
+    let tmp = TempDir::new("scritti");
+    let (mut app, _, _) = app_with_two_zones();
+    let before = rilievo_snapshot(&app);
+    let zones = zones_in(doc(&app)).len();
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let history = history(&app);
+    for path in extracted_paths(tmp.path(), &tab_title(&app)) {
+        assert!(path.is_file(), "{}: storia: {history}", path.display());
+        crate::io::load_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let written = dwg_count(tmp.path());
+    assert!(written >= 2, "storia: {history}");
+    assert!(
+        history.contains(&format!(
+            "AL_ESTRAI: scritti {written} file in {}.",
+            tmp.path().display()
+        )),
+        "storia: {history}"
+    );
+    assert!(!history.contains("esistono già"), "un giro solo: {history}");
+    // Da script nessuna finestra e nessun comando che resta aperto.
+    assert_eq!(app.active_modal, None);
+    assert_eq!(active_command(&app), None);
+    // Estrarre non tocca il disegno.
+    assert_eq!(rilievo_snapshot(&app), before);
+    assert_eq!(zones_in(doc(&app)).len(), zones);
+    assert_eq!(undo_steps(&app), steps);
+}
+
+#[test]
+fn scripted_extract_never_overwrites() {
+    let tmp = TempDir::new("rifiuto");
+    let (mut app, _, _) = app_with_two_zones();
+    let line = format!("AL_ESTRAI {}", tmp.path().display());
+    run(&mut app, &line);
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    assert!(
+        paths.iter().all(|path| path.is_file()),
+        "storia: {}",
+        history(&app)
+    );
+    mark(&paths);
+    let before = mtimes(&paths);
+    forget_history(&mut app);
+
+    run(&mut app, &line);
+
+    let history = history(&app);
+    assert!(
+        history.contains("AL_ESTRAI: i file esistono già: "),
+        "storia: {history}"
+    );
+    assert!(
+        history.contains("Niente è stato scritto."),
+        "storia: {history}"
+    );
+    assert!(!history.contains("AL_ESTRAI: scritti"), "storia: {history}");
+    assert_eq!(mtimes(&paths), before, "date di modifica invariate");
+    assert!(paths.iter().all(|path| marked(path)), "file non riscritti");
+}
+
+#[test]
+fn dialog_flow_overwrite_needs_second_ok() {
+    let tmp = TempDir::new("finestra");
+    let (mut app, _, _) = app_with_two_zones();
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+
+    // Senza script AL_ESTRAI apre la finestra, con i suoi valori iniziali.
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(app.active_modal, Some(ModalKind::BimExtract));
+    {
+        let dialog = app.bim_extract.as_ref().expect("finestra aperta");
+        assert_eq!(dialog.dir, None, "disegno mai salvato: nessuna cartella");
+        assert!(dialog.fatto && dialog.comparativa && dialog.progetto);
+        assert_eq!(dialog.layer, "", "nessun layer ricordato nel record");
+        assert!(
+            dialog.layers.iter().any(|layer| layer == LAYER_MURI),
+            "{:?}",
+            dialog.layers
+        );
+        assert!(
+            !dialog.layers.iter().any(|layer| layer.starts_with("AL-")),
+            "{:?}",
+            dialog.layers
+        );
+        assert!(!dialog.confirm_overwrite);
+    }
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(
+        paths.iter().all(|path| path.is_file()),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(app.active_modal, None, "OK chiude la finestra");
+    assert!(app.bim_extract.is_none());
+    mark(&paths);
+
+    // Nuova apertura, stessa cartella: il primo OK chiede conferma e non scrive.
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    forget_history(&mut app);
+    bim(&mut app, BimMsg::Ok);
+    assert_eq!(
+        app.active_modal,
+        Some(ModalKind::BimExtract),
+        "resta aperta"
+    );
+    let dialog = app.bim_extract.as_ref().expect("finestra aperta");
+    assert!(dialog.confirm_overwrite);
+    assert_eq!(dialog.note(), Some(OVERWRITE_NOTE));
+    assert!(paths.iter().all(|path| marked(path)), "niente scritto");
+    assert!(
+        !history(&app).contains("esistono già"),
+        "l'avviso sta nella finestra: {}",
+        history(&app)
+    );
+
+    // Il secondo OK sovrascrive e chiude.
+    bim(&mut app, BimMsg::Ok);
+    assert!(
+        paths.iter().all(|path| !marked(path)),
+        "riscritti; storia: {}",
+        history(&app)
+    );
+    assert_eq!(app.active_modal, None);
+    assert!(app.bim_extract.is_none());
+}
+
+/// Le caselle scelgono i file; cambiarle dopo l'avviso chiede di nuovo conferma.
+#[test]
+fn dialog_toggles_choose_the_files() {
+    let tmp = TempDir::new("caselle");
+    let (mut app, _, _) = app_with_two_zones();
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    for elaborato in [
+        Elaborato::StatoDiFatto,
+        Elaborato::DemolizioniCostruzioni,
+        Elaborato::StatoDiProgetto,
+    ] {
+        bim(&mut app, BimMsg::Toggle(elaborato));
+    }
+    // Nessuna casella: OK non fa nulla.
+    bim(&mut app, BimMsg::Ok);
+    assert_eq!(app.active_modal, Some(ModalKind::BimExtract));
+    assert_eq!(dwg_count(tmp.path()), 0);
+
+    bim(&mut app, BimMsg::Toggle(Elaborato::DemolizioniCostruzioni));
+    bim(&mut app, BimMsg::Ok);
+    assert!(!paths[0].exists(), "stato di fatto non chiesto");
+    assert!(paths[1].is_file(), "storia: {}", history(&app));
+    assert_eq!(app.active_modal, None);
+
+    // Tutte e tre: il file della comparativa c'è già, si chiede conferma; una
+    // casella cambiata dopo l'avviso la ritira.
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(!paths[0].exists(), "niente scritto prima della conferma");
+    bim(&mut app, BimMsg::Toggle(Elaborato::StatoDiProgetto));
+    assert!(!app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert_eq!(app.bim_extract.as_ref().unwrap().note(), None);
+}
+
+#[test]
+fn dialog_remembers_the_new_walls_layer() {
+    let tmp = TempDir::new("layer");
+    let (mut app, _, _) = app_with_two_zones();
+    let steps = undo_steps(&app);
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Layer(LAYER_MURI.to_string()));
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.is_none(), "storia: {}", history(&app));
+    assert_eq!(
+        record::read(doc(&app)).new_walls_layer.as_deref(),
+        Some(LAYER_MURI)
+    );
+    assert_eq!(undo_steps(&app), steps + 1, "un passo di annullamento a sé");
+
+    // Riaperta, la finestra lo propone; lo stesso layer non apre un altro passo.
+    let other = TempDir::new("layer-di-nuovo");
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(app.bim_extract.as_ref().unwrap().layer, LAYER_MURI);
+    pick_folder(&mut app, other.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.is_none(), "storia: {}", history(&app));
+    assert_eq!(dwg_count(other.path()), dwg_count(tmp.path()));
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    undo(&mut app);
+    assert_eq!(record::read(doc(&app)).new_walls_layer, None);
+}
+
+#[test]
+fn dialog_cancel_writes_nothing() {
+    let tmp = TempDir::new("annulla");
+    let (mut app, _, _) = app_with_two_zones();
+    let steps = undo_steps(&app);
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Layer(LAYER_MURI.to_string()));
+    bim(&mut app, BimMsg::Cancel);
+    assert_eq!(app.active_modal, None);
+    assert!(app.bim_extract.is_none());
+
+    // La X e Esc passano da CloseModal: stessa pulizia.
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(app.active_modal, Some(ModalKind::BimExtract));
+    send(&mut app, Message::CloseModal);
+    assert_eq!(app.active_modal, None);
+    assert!(app.bim_extract.is_none());
+
+    // A finestra chiusa una cartella scelta in ritardo e OK non fanno nulla.
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.is_none());
+    assert_eq!(dwg_count(tmp.path()), 0);
+    assert_eq!(record::read(doc(&app)).new_walls_layer, None);
+    assert_eq!(undo_steps(&app), steps);
+}
+
+/// Un disegno salvato: la finestra parte dalla sua cartella e i file prendono
+/// il suo nome.
+#[test]
+fn dialog_starts_in_the_drawing_folder() {
+    let tmp = TempDir::new("cartella");
+    let (mut app, _, _) = app_with_two_zones();
+    let i = app.active_tab;
+    app.tabs[i].current_path = Some(tmp.path().join("casa rilievo.dwg"));
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(
+        app.bim_extract.as_ref().unwrap().dir.as_deref(),
+        Some(tmp.path())
+    );
+    bim(&mut app, BimMsg::Ok);
+
+    for path in extracted_paths(tmp.path(), "casa rilievo") {
+        assert!(
+            path.is_file(),
+            "{}: storia: {}",
+            path.display(),
+            history(&app)
+        );
+    }
+}
+
+/// Un file che non si può scrivere (al suo posto c'è una cartella): dopo la
+/// conferma la finestra si chiude e la riga di comando dice quale file e quali
+/// sono già stati scritti prima dell'errore.
+#[test]
+fn dialog_reports_a_write_error() {
+    let tmp = TempDir::new("errore");
+    let (mut app, _, _) = app_with_two_zones();
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    std::fs::create_dir(&paths[1]).unwrap();
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(!paths[0].exists());
+    forget_history(&mut app);
+    bim(&mut app, BimMsg::Ok);
+
+    assert!(app.bim_extract.is_none());
+    assert_eq!(app.active_modal, None);
+    let history = history(&app);
+    assert!(
+        history.contains(&format!(
+            "AL_ESTRAI: scrittura non riuscita: {}: ",
+            paths[1].display()
+        )),
+        "storia: {history}"
+    );
+    assert!(
+        history.contains(&format!(
+            "(già scritti prima dell'errore: {}).",
+            paths[0].display()
+        )),
+        "storia: {history}"
+    );
+    assert!(paths[0].is_file());
+    assert!(!history.contains("AL_ESTRAI: scritti"), "storia: {history}");
+}
+
+#[test]
+fn extract_refuses_a_missing_folder() {
+    let tmp = TempDir::new("manca");
+    let missing = tmp.path().join("non-esiste");
+    let (mut app, _, _) = app_with_two_zones();
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", missing.display()));
+
+    let history = history(&app);
+    assert!(
+        history.contains(&format!(
+            "AL_ESTRAI: la cartella {} non esiste.",
+            missing.display()
+        )),
+        "storia: {history}"
+    );
+    assert!(!missing.exists(), "nessuna cartella creata");
+    assert_eq!(dwg_count(tmp.path()), 0);
+}
+
+/// Da script, `AL_ESTRAI` senza cartella la chiede in riga di comando; un Invio
+/// a vuoto non scrive nulla.
+#[test]
+fn script_prompts_for_the_folder() {
+    let (mut app, _, _) = app_with_two_zones();
+    app.scripted_dispatch = true;
+    forget_history(&mut app);
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(active_command(&app), Some("AL_ESTRAI"));
+    assert_eq!(app.active_modal, None);
+    assert!(
+        history(&app).contains("Cartella di destinazione:"),
+        "storia: {}",
+        history(&app)
+    );
+
+    feed(&mut app, StepInput::Enter);
+    app.scripted_dispatch = false;
+    assert_eq!(active_command(&app), None);
+    assert!(
+        history(&app).contains("AL_ESTRAI: nessuna cartella indicata."),
+        "storia: {}",
+        history(&app)
+    );
+}
+
+/// In un file .scr la riga dopo `AL_ESTRAI` è la cartella intera, spazi
+/// compresi.
+#[test]
+fn script_file_line_is_the_whole_folder() {
+    let tmp = TempDir::new("scr");
+    let dir = tmp.path().join("Casa Rossi");
+    std::fs::create_dir(&dir).unwrap();
+    let (mut app, _, _) = app_with_two_zones();
+
+    for line in ["AL_ESTRAI".to_string(), dir.display().to_string()] {
+        let task = app.feed_scripted_line(&line);
+        app.drive_headless_task(task).expect("nessun dialogo");
+    }
+
+    for path in extracted_paths(&dir, &tab_title(&app)) {
+        assert!(
+            path.is_file(),
+            "{}: storia: {}",
+            path.display(),
+            history(&app)
+        );
+    }
+    assert_eq!(active_command(&app), None);
+}
+
+/// Senza unità (INSUNITS = 0) la si chiede prima della finestra.
+#[test]
+fn extract_asks_the_unit_before_the_dialog() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Centimetri), 0);
+
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(active_command(&app), Some("AL_UNITA"));
+    assert_eq!(app.active_modal, None);
+
+    answer(&mut app, "CM");
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Centimetri));
+    assert_eq!(app.active_modal, Some(ModalKind::BimExtract));
+}
+
+/// Uno script risponde all'unità e poi dà la cartella, nella stessa riga.
+#[test]
+fn script_answers_the_unit_then_the_folder() {
+    let tmp = TempDir::new("unita");
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Millimetri), 0);
+
+    run(&mut app, &format!("AL_ESTRAI MM {}", tmp.path().display()));
+
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Millimetri));
+    for path in extracted_paths(tmp.path(), &tab_title(&app)) {
+        assert!(
+            path.is_file(),
+            "{}: storia: {}",
+            path.display(),
+            history(&app)
+        );
+    }
+}
+
+#[test]
+fn extract_refuses_inches() {
+    let tmp = TempDir::new("pollici");
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 1);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+    dispatch_line(&mut app, "AL_ESTRAI");
+
+    assert!(
+        history(&app).contains("Unità del disegno non supportata (INSUNITS = 1)"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(app.active_modal, None, "nessuna finestra");
+    assert_eq!(dwg_count(tmp.path()), 0);
 }

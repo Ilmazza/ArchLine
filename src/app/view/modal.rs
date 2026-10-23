@@ -95,6 +95,7 @@ impl OpenCADStudio {
             Some(K::BlockSaveAs) => crate::t!("Save Block As").into_owned(),
             Some(K::Workspaces) => crate::t!("Workspaces").into_owned(),
             Some(K::WorkspaceSaveAs) => crate::t!("Save Workspace As").into_owned(),
+            Some(K::BimExtract) => "Estrai elaborati".to_string(),
             Some(K::PointStyle) => crate::tr!("modal", "point-style"),
             Some(K::AttributeEditor) => crate::tr!("modal", "attribute-editor"),
             Some(K::SaveDialog) => crate::tr!("modal", "save-drawing-as"),
@@ -414,6 +415,10 @@ impl OpenCADStudio {
                 sized_flow(ex, 440, 230, |flow| {
                     crate::ui::window::workspaces::view_save_as(ui, flow)
                 })
+            }
+            super::super::ModalKind::BimExtract => {
+                let state = self.bim_extract.as_ref()?;
+                sized_flow(ex, 460, 300, |flow| crate::ui::window::bim_extract::view(state, flow))
             }
             super::super::ModalKind::Workspaces => {
                 let ui = self.workspace_ui.as_ref()?;

@@ -6,6 +6,7 @@ pub mod attman_dialog;
 pub mod attribute_editor;
 pub mod authoring_palettes;
 pub mod auto_constrain_settings;
+pub mod bim_extract;
 pub mod block_definition;
 pub mod block_edit_picker;
 pub mod block_palette;
