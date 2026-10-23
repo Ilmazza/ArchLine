@@ -6,6 +6,7 @@
 pub mod record;
 pub mod report;
 pub mod units;
+pub mod zone;
 
 /// Layer delle zone demolite (ACI 2, giallo).
 pub const LAYER_DEMOLIZIONI: &str = "AL-DEMOLIZIONI";
