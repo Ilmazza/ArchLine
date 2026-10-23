@@ -6,7 +6,11 @@
 pub mod record;
 pub mod report;
 pub mod units;
+pub mod walls;
 pub mod zone;
+
+#[cfg(test)]
+pub(crate) mod fixtures;
 
 /// Layer delle zone demolite (ACI 2, giallo).
 pub const LAYER_DEMOLIZIONI: &str = "AL-DEMOLIZIONI";

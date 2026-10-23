@@ -88,6 +88,8 @@ pub(crate) use boundary::{
     remap_hatch_associations, ring_source_handles, separated_hatch_path_groups, sources_near_rings,
     BoundarySource,
 };
+// ArchLine (modulo BIM): geometria dei muri filtrata per tipo e layer.
+pub(crate) use boundary::entity_boundary_source_on_plane;
 
 // Parallel tessellation free functions live in `convert::tess` (alongside the
 // other tessellation code); re-exported here so this root and sibling topic

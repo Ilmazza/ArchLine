@@ -76,7 +76,7 @@ fn entity_curves_on_plane(entity: &EntityType, plane: WorkingPlane, tolerance: f
     }
 }
 
-fn entity_boundary_source_on_plane(
+pub(crate) fn entity_boundary_source_on_plane(
     entity: &EntityType,
     plane: WorkingPlane,
     tolerance: f64,
