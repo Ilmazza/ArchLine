@@ -31,6 +31,7 @@ use super::report::Notice;
 use super::units::{area_m2, format_m2, DrawingUnit};
 use super::walls::{
     net_area, rect_from_axis, rect_from_axis_thickness, region_at, AxisMiss, Region, WallRect,
+    FACE_PARALLEL_DEGREES,
 };
 use super::zone::{
     read_zone, zone_hatch, zone_hatch_from_paths, Zone, ZoneGeom, ZoneOrigin, ZoneState,
@@ -107,7 +108,11 @@ enum Step {
     Polygon {
         points: Vec<[f64; 2]>,
     },
-    Select,
+    /// Polilinea chiusa da scegliere; `rejected` se l'oggetto scelto prima
+    /// non lo era.
+    Select {
+        rejected: bool,
+    },
     Varco(Candidate),
     Confirm {
         candidate: Candidate,
@@ -554,9 +559,10 @@ fn outline_area(vertices: &[([f64; 2], f64)]) -> f64 {
 ///   della zona ad asse).
 /// - `Nuovo`: [`Notice::NuovoSuEsistente`] se un tratto di un segmento dei
 ///   muri ha il punto medio strettamente dentro la zona (oltre `tol` dal
-///   bordo) e fuori da ogni zona `Demolito` (bordo compreso). Le facce su cui
-///   il muro nuovo si appoggia stanno sul bordo e non contano: un muro nuovo
-///   che ricalca esattamente un muro esistente non dà avviso.
+///   bordo) e fuori da ogni zona `Demolito` (bordo compreso), oppure se la
+///   zona ricalca un muro esistente non demolito ([`sits_on_a_wall`]). Le
+///   facce su cui il muro nuovo soltanto si appoggia stanno sul bordo e non
+///   contano.
 /// - [`Notice::StessoStatoSovrapposte`] se la zona si sovrappone a una zona
 ///   dello stesso stato senza coincidere (anche quando una sta dentro
 ///   l'altra). Le zone di stato opposto non danno avviso (ricostruzione).
@@ -587,7 +593,13 @@ pub fn validate(candidate: &[Vec<[f64; 2]>], state: ZoneState, snap: &ZoneSnapsh
                 .filter(|z| meets(&bounds(&z.rings), &area, tol))
                 .map(|z| z.rings.as_slice())
                 .collect();
-            if segments().any(|segment| builds_over(candidate, segment, &demolished, tol)) {
+            let walls: Vec<Line> = segments().collect();
+            let max_thickness = snap.unit.metres(MAX_WALL_THICKNESS_M);
+            if walls
+                .iter()
+                .any(|&segment| builds_over(candidate, segment, &demolished, tol))
+                || sits_on_a_wall(&candidate[0], &walls, &demolished, max_thickness, tol)
+            {
                 notices.push(Notice::NuovoSuEsistente);
             }
         }
@@ -724,6 +736,118 @@ fn builds_over(
     })
 }
 
+/// La zona ricalca un muro esistente (decisione R17)? Due lati opposti del
+/// contorno esterno, paralleli entro [`FACE_PARALLEL_DEGREES`] e con le
+/// proiezioni che si coprono, ciascuno coperto per più di metà della sua
+/// lunghezza da segmenti dei muri fuori dalle zone demolite (bordo compreso).
+/// La distanza tra i due lati deve superare `tol`, non superare lo spessore
+/// massimo di un muro (come la ricerca delle facce dall'asse) ed essere minore
+/// della lunghezza di entrambi: sono le facce del muro, non le estremità di
+/// un muro nuovo appoggiato tra due muri (una tramezza in mezzo a un locale o
+/// che chiude un corridoio) né i lati di una zona che riempie un locale.
+fn sits_on_a_wall(
+    outer: &[[f64; 2]],
+    walls: &[Line],
+    demolished: &[&[Vec<[f64; 2]>]],
+    max_thickness: f64,
+    tol: f64,
+) -> bool {
+    let sides: Vec<Line> = outer
+        .iter()
+        .zip(outer.iter().cycle().skip(1))
+        .map(|(&start, &end)| Line { start, end })
+        .filter(|&side| covered_by_walls(side, walls, demolished, tol))
+        .collect();
+    sides.iter().enumerate().any(|(index, &first)| {
+        sides[index + 1..]
+            .iter()
+            .any(|&second| facing(first, second, max_thickness, tol))
+    })
+}
+
+/// Il lato è coperto per più di metà da segmenti dei muri (sovrapposti entro
+/// `tol`) fuori dalle zone demolite?
+fn covered_by_walls(
+    ring_side: Line,
+    walls: &[Line],
+    demolished: &[&[Vec<[f64; 2]>]],
+    tol: f64,
+) -> bool {
+    let length = distance(ring_side.start, ring_side.end);
+    if !(length > tol) {
+        return false;
+    }
+    let tolerance = Tolerance::new(tol);
+    let mut spans: Vec<[f64; 2]> = Vec::new();
+    let mut cuts = vec![0.0, 1.0];
+    for &wall in walls {
+        if let SegmentCrossing::Overlap { a, .. } = segment_crossing(ring_side, wall, tolerance) {
+            let span = [
+                a[0].min(a[1]).clamp(0.0, 1.0),
+                a[0].max(a[1]).clamp(0.0, 1.0),
+            ];
+            cuts.extend(span);
+            spans.push(span);
+        }
+    }
+    if spans.is_empty() {
+        return false;
+    }
+    for edge in demolished.iter().flat_map(|zone| edges(zone)) {
+        match segment_crossing(ring_side, edge, tolerance) {
+            SegmentCrossing::Point { a, .. } => cuts.push(a.clamp(0.0, 1.0)),
+            SegmentCrossing::Overlap { a, .. } => cuts.extend(a.map(|t| t.clamp(0.0, 1.0))),
+            SegmentCrossing::None => {}
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    let covered: f64 = cuts
+        .windows(2)
+        .filter(|pair| {
+            let t = (pair[0] + pair[1]) / 2.0;
+            let p = lerp(ring_side, t);
+            spans.iter().any(|span| span[0] <= t && t <= span[1])
+                && demolished
+                    .iter()
+                    .all(|zone| side(zone, p, tol) == Side::Outside)
+        })
+        .map(|pair| (pair[1] - pair[0]) * length)
+        .sum();
+    covered > length / 2.0
+}
+
+/// I due lati sono le due facce di uno stesso muro? Vedi [`sits_on_a_wall`].
+fn facing(first: Line, second: Line, max_thickness: f64, tol: f64) -> bool {
+    let (a, b) = (
+        distance(first.start, first.end),
+        distance(second.start, second.end),
+    );
+    let d = [
+        (first.end[0] - first.start[0]) / a,
+        (first.end[1] - first.start[1]) / a,
+    ];
+    let e = [
+        (second.end[0] - second.start[0]) / b,
+        (second.end[1] - second.start[1]) / b,
+    ];
+    let sin_limit = FACE_PARALLEL_DEGREES.to_radians().sin();
+    // Opposti: in un anello chiuso i due lati di un muro corrono in versi
+    // contrari.
+    if (d[0] * e[1] - d[1] * e[0]).abs() > sin_limit || d[0] * e[0] + d[1] * e[1] >= 0.0 {
+        return false;
+    }
+    let from = |p: [f64; 2]| [p[0] - first.start[0], p[1] - first.start[1]];
+    let middle = from(lerp(second, 0.5));
+    let gap = (middle[0] * d[1] - middle[1] * d[0]).abs();
+    let along = |p: [f64; 2]| {
+        let v = from(p);
+        v[0] * d[0] + v[1] * d[1]
+    };
+    let (t0, t1) = (along(second.start), along(second.end));
+    let shared = t0.max(t1).min(a) - t0.min(t1).max(0.0);
+    gap > tol && gap <= max_thickness && gap < a.min(b) && shared > tol
+}
+
 /// Le due zone hanno interno in comune senza coincidere? I lati di entrambe
 /// dividono il piano in celle; ogni cella sta tutta dentro o tutta fuori da
 /// ciascuna zona. Si campiona ogni cella: su una retta orizzontale a metà tra
@@ -823,7 +947,11 @@ impl CadCommand for ZoneCommand {
             Step::RectFirst => "Primo angolo:".into(),
             Step::RectSecond { .. } => "Angolo opposto:".into(),
             Step::Polygon { .. } => "Punto del contorno (Invio per chiudere):".into(),
-            Step::Select => "Seleziona una polilinea chiusa:".into(),
+            Step::Select { rejected: false } => "Seleziona una polilinea chiusa:".into(),
+            Step::Select { rejected: true } => {
+                "L'oggetto scelto non è una polilinea chiusa. Seleziona una polilinea chiusa:"
+                    .into()
+            }
             Step::Varco(candidate) => format!(
                 "Zona {}. Varco (passaggio)? [Sì/No] <No>:",
                 format_m2(area_m2(candidate.area, self.snap.unit))
@@ -893,7 +1021,7 @@ impl CadCommand for ZoneCommand {
                 }
             }
             Step::Polygon { .. } => self.polygon_point(p),
-            Step::Select | Step::Varco(_) | Step::Confirm { .. } | Step::Done => {
+            Step::Select { .. } | Step::Varco(_) | Step::Confirm { .. } | Step::Done => {
                 CmdResult::NeedPoint
             }
         }
@@ -921,7 +1049,7 @@ impl CadCommand for ZoneCommand {
                     "I" | "INTERNO" | "PUNTO" => Step::Interior { missed: false },
                     "R" | "RETTANGOLO" => Step::RectFirst,
                     "P" | "POLIGONO" => Step::Polygon { points: Vec::new() },
-                    "S" | "SELEZIONE" => Step::Select,
+                    "S" | "SELEZIONE" => Step::Select { rejected: false },
                     _ => return None,
                 };
                 Some(CmdResult::NeedPoint)
@@ -960,34 +1088,41 @@ impl CadCommand for ZoneCommand {
     }
 
     fn needs_entity_pick(&self) -> bool {
-        matches!(self.step, Step::Select)
+        matches!(self.step, Step::Select { .. })
     }
 
     fn inject_before_entity_pick(&self) -> bool {
-        matches!(self.step, Step::Select)
+        matches!(self.step, Step::Select { .. })
     }
 
     fn entity_pick_highlights_hover(&self) -> bool {
-        matches!(self.step, Step::Select)
+        matches!(self.step, Step::Select { .. })
     }
 
     fn inject_picked_entity(&mut self, entity: EntityType) {
         self.picked = Some(entity);
     }
 
-    /// Solo una `LWPOLYLINE` chiusa: altrimenti si ripete la domanda.
+    /// Solo una `LWPOLYLINE` chiusa: un altro oggetto ripete la domanda con il
+    /// motivo (decisione R18), un clic a vuoto la ripete e basta.
     fn on_entity_pick(&mut self, handle: Handle, _pt: DVec3) -> CmdResult {
-        if !matches!(self.step, Step::Select) {
+        if !matches!(self.step, Step::Select { .. }) {
             return CmdResult::NeedPoint;
         }
-        let candidate = self
-            .picked
-            .take()
-            .filter(|entity| !handle.is_null() && entity.common().handle == handle)
+        let picked = self.picked.take();
+        if handle.is_null() {
+            self.step = Step::Select { rejected: false };
+            return CmdResult::NeedPoint;
+        }
+        let candidate = picked
+            .filter(|entity| entity.common().handle == handle)
             .and_then(|entity| self.polyline_candidate(&entity));
         match candidate {
             Some(candidate) => self.propose(candidate),
-            None => CmdResult::NeedPoint,
+            None => {
+                self.step = Step::Select { rejected: true };
+                CmdResult::NeedPoint
+            }
         }
     }
 
@@ -1514,6 +1649,8 @@ mod tests {
         let mut c = ZoneCommand::new(ZoneState::Demolito, case(Form::Continua));
         need_point_text(c.on_text_input("S"));
         let prompt = "Seleziona una polilinea chiusa:";
+        let rejected =
+            "L'oggetto scelto non è una polilinea chiusa. Seleziona una polilinea chiusa:";
         assert_eq!(c.prompt(), prompt);
         assert!(c.needs_entity_pick() && c.inject_before_entity_pick());
 
@@ -1521,10 +1658,14 @@ mod tests {
             entity.common_mut().handle = Handle::new(handle);
             entity
         };
-        // Una linea: no.
+        // Una linea: no, e si dice perché.
         let line = Line::from_points(Vector3::new(4.0, 0.0, 0.0), Vector3::new(4.0, 3.0, 0.0));
         c.inject_picked_entity(picked(EntityType::Line(line), 0x10));
         need_point(c.on_entity_pick(Handle::new(0x10), pt(4.0, 1.0)));
+        assert_eq!(c.prompt(), rejected);
+        assert!(c.needs_entity_pick(), "si resta a scegliere");
+        // Nessun oggetto sotto il cursore: la domanda e basta.
+        need_point(c.on_entity_pick(Handle::NULL, pt(4.0, 1.0)));
         assert_eq!(c.prompt(), prompt);
         // Una polilinea aperta: no.
         let points: Vec<Vector2> = rect(4.0, 0.0, 4.1, 3.0)
@@ -1534,10 +1675,7 @@ mod tests {
         let open = LwPolyline::from_points(points.clone());
         c.inject_picked_entity(picked(EntityType::LwPolyline(open), 0x11));
         need_point(c.on_entity_pick(Handle::new(0x11), pt(4.0, 1.0)));
-        assert_eq!(c.prompt(), prompt);
-        // Nessun oggetto sotto il cursore: no.
-        need_point(c.on_entity_pick(Handle::NULL, pt(4.0, 1.0)));
-        assert_eq!(c.prompt(), prompt);
+        assert_eq!(c.prompt(), rejected);
         // La polilinea chiusa del tramezzo: sì.
         let mut closed = LwPolyline::from_points(points);
         closed.is_closed = true;
@@ -1623,6 +1761,76 @@ mod tests {
             vec![rect(4.0, 0.0, 4.1, 1.5)],
         )];
         assert_eq!(validate(&across, n, &s), [Notice::NuovoSuEsistente]);
+    }
+
+    #[test]
+    fn new_wall_on_an_existing_wall_asks_confirmation() {
+        // R17: AL_NUOVO sull'asse del tramezzo, spessore 0,10 digitato con la
+        // virgola: la zona ricalca il muro esistente, nelle due forme.
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut c = ZoneCommand::new(ZoneState::Nuovo, case(form));
+            need_point(c.on_point(pt(4.05, 0.0)));
+            need_point(c.on_point(pt(4.05, 3.0)));
+            need_point_text(c.on_text_input("0,10"));
+            assert_eq!(
+                c.prompt(),
+                "La zona nuova si sovrappone a un muro esistente non demolito. Confermi la zona? [Sì/No] <Sì>:",
+                "{form:?}"
+            );
+            let g = zone_of(&committed(c.on_text_input("S").unwrap()));
+            assert_eq!(
+                (g.zone.state, g.zone.origin),
+                (ZoneState::Nuovo, ZoneOrigin::LineaSpessore)
+            );
+            assert!((g.zone.thickness.unwrap() - 0.10).abs() < 1e-9);
+            assert_ring(&g.rings[0], &rect(4.0, 0.0, 4.1, 3.0));
+        }
+        // Con il tramezzo demolito la ricostruzione è consentita: niente.
+        let mut s = case(Form::Continua);
+        s.zones = vec![zone_geom(
+            ZoneState::Demolito,
+            vec![rect(4.0, 0.0, 4.1, 3.0)],
+        )];
+        let mut c = ZoneCommand::new(ZoneState::Nuovo, s);
+        need_point(c.on_point(pt(4.05, 0.0)));
+        need_point(c.on_point(pt(4.05, 3.0)));
+        let g = zone_of(&committed(c.on_text_input("0,10").unwrap()));
+        assert!((g.zone.thickness.unwrap() - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn validate_new_on_a_wall_only_between_its_faces() {
+        let s = case(Form::Continua);
+        let n = ZoneState::Nuovo;
+        // Sul tramezzo, intero o in parte.
+        assert_eq!(
+            validate(&[rect(4.0, 0.0, 4.1, 3.0)], n, &s),
+            [Notice::NuovoSuEsistente]
+        );
+        assert_eq!(
+            validate(&[rect(4.0, 1.0, 4.1, 2.0)], n, &s),
+            [Notice::NuovoSuEsistente]
+        );
+        // Accostato a una faccia sola (controparete in B): niente.
+        assert!(validate(&[rect(4.1, 0.0, 4.3, 3.0)], n, &s).is_empty());
+        // Tramezza nuova in A: le estremità stanno sulle facce, a 3 m.
+        assert!(validate(&[rect(1.94, 0.0, 2.06, 3.0)], n, &s).is_empty());
+        // Una zona che riempie il locale A.
+        assert!(validate(&[rect(0.0, 0.0, 4.0, 3.0)], n, &s).is_empty());
+        // Un muro nuovo che chiude un corridoio largo 1,10 m: le estremità
+        // stanno sulle facce, più vicine dello spessore massimo, ma sono più
+        // corte della distanza tra loro.
+        let wall = |a: [f64; 2], b: [f64; 2]| {
+            let mut line =
+                Line::from_points(Vector3::new(a[0], a[1], 0.0), Vector3::new(b[0], b[1], 0.0));
+            line.common.layer = LAYER_MURI.to_string();
+            EntityType::Line(line)
+        };
+        let corridor = snap(vec![
+            wall([0.0, 0.0], [10.0, 0.0]),
+            wall([0.0, 1.1], [10.0, 1.1]),
+        ]);
+        assert!(validate(&[rect(5.0, 0.0, 5.12, 1.1)], n, &corridor).is_empty());
     }
 
     #[test]

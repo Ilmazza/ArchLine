@@ -519,7 +519,7 @@ pub enum AxisMiss {
 }
 
 /// Quanto può scostarsi dall'asse una faccia per contare come parallela.
-const FACE_PARALLEL_DEGREES: f64 = 0.5;
+pub(super) const FACE_PARALLEL_DEGREES: f64 = 0.5;
 
 /// Il muro attorno all'asse `p1 → p2` (spec §5.1): le sue due facce si cercano
 /// tra i segmenti retti delle sorgenti, una per lato dell'asse. `max_thickness`
