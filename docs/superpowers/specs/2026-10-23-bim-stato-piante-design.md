@@ -291,7 +291,7 @@ che attraversano gli incroci), con arredi, testi e quote di disturbo sui loro la
 4. Locali di fatto e di progetto (§4.2, §5.2, §5.3), `AL_AGGIORNA`.
 5. Barra Ristrutturazione, rapporto finale, caso nel banco di conformità.
 
-## 9. Scelte mie e domande aperte
+## 9. Scelte mie e decisioni di Mauro
 
 **Scelte mie** (non le hai dette tu; da controllare leggendo):
 
