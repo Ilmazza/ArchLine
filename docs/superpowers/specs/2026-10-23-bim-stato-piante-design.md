@@ -182,9 +182,10 @@ soglia** (qualunque linea sui layer dei muri) o con la tolleranza `HPGAPTOL`. Il
 ### 5.3 Varco
 
 Se si demolisce solo una parte di muro per aprire un passaggio, la regione dei due locali si unirebbe senza che
-Mauro l'abbia voluto. Per una zona `demolito` con `varco = sì`, nella geometria di progetto si **riaggiungono i
-due lati lunghi della zona** (quelli che coincidevano con le facce del muro e che la demolizione toglie). Il
-varco diventa così una faccia chiusa a sé: i due locali restano due e **l'area del varco non appartiene a nessun
+Mauro l'abbia voluto. Per una zona `demolito` con `varco = sì`, nel **calcolo dei locali** di progetto si
+**riaggiungono i due lati lunghi della zona** (quelli che coincidevano con le facce del muro e che la demolizione
+toglie), come soglie. Nel disegno estratto quei lati **non** si disegnano: il vano resta aperto in pianta, con le
+due chiusure di estremità (le spallette). Il varco diventa così, per il calcolo, una faccia chiusa a sé: i due locali restano due e **l'area del varco non appartiene a nessun
 locale**; viene riportata a parte nel rapporto. Nel primo giro vale solo per un rettangolo che attraversa il
 muro da faccia a faccia; varchi a L, d'angolo o più larghi dello spessore generano l'avviso «varco non
 supportato». Decisione di Mauro (2026-10-23): l'area del passaggio **non** si conta in nessun locale.
@@ -246,9 +247,11 @@ tutto ciò che è stato escluso, non tagliato, approssimato o segnalato.
 
 ## 6. Interfaccia
 
-- Barra **Ristrutturazione** nel workspace classico, registrata in `src/ui/toolbar_registry.rs`
-  (`COMMAND_BARS`), con i pulsanti Demolisci, Nuovo, Stato, Locale, Aggiorna, Estrai. Un pulsante per comando.
-- Gli stessi comandi da riga di comando e da menu.
+- Sottomenu **Strumenti > Ristrutturazione** nel menu classico (`src/ui/classic_menu.rs`), con Demolisci, Nuovo,
+  Stato, Locale, Aggiorna, Estrai. Un sottomenu con almeno due comandi genera da sé la barra omonima
+  (`src/ui/toolbar_registry.rs`), quindi una sola definizione dà menu e barra; la barra **Ristrutturazione** è
+  visibile nel workspace AutoCAD Classic. Un pulsante per comando.
+- Gli stessi comandi da riga di comando.
 - La finestra di estrazione è minima: cartella, tre caselle, layer dei muri nuovi, OK. Il resto da riga di
   comando.
 - Anteprima: mentre si traccia una zona, il contorno si vede nel colore dello stato.
