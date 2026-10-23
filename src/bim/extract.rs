@@ -6,21 +6,28 @@
 //! e nessun APPID `ARCHLINE_*`, nessun record `ARCHLINE_PROGETTO` (il
 //! documento è nuovo e la copia non porta le voci del dizionario radice). La
 //! copia è quella di `WBLOCK` (`extract_entities_into`): handle nuovi, con i
-//! layer, i tipi di linea, gli stili e i blocchi che le entità usano. Gli
-//! handle che la copia non restituisce sono elencati con `Notice::NonCopiata`.
+//! layer, i tipi di linea, gli stili e i blocchi che le entità usano, più le
+//! impostazioni del disegno che un documento nuovo avrebbe ai valori
+//! predefiniti (vedi `copy_drawing_settings`).
 //!
-//! Limite noto: la copia restituisce anche entità che rimandano a ciò che non
-//! porta con sé (la definizione di un'immagine, il blocco di un riferimento
-//! esterno, gli stili di multileader, multilinea e tabella). Arrivano nel file
-//! senza il loro riferimento e qui non sono elencate.
+//! Restano fuori, ognuno con un `Notice::NonCopiata`: ciò che la copia non
+//! porta intero o che non è 2D (immagini, underlay, OLE, riferimenti esterni,
+//! solidi 3D: vedi `Portability`), gli handle che la copia non restituisce e,
+//! per layout, lo spazio carta.
+//!
+//! Limite noto: gli stili di multileader, multilinea e tabella non sono nella
+//! copia di WBLOCK; quelle entità arrivano con un riferimento allo stile che il
+//! file estratto non ha, e qui non sono elencate.
 //!
 //! Il disegno di lavoro non si tocca: si lavora su una sua copia.
 
 use std::path::{Path, PathBuf};
 
+use codec::objects::ObjectType;
+use codec::tables::BlockRecord;
 use codec::xdata::ExtendedData;
 use codec::{CadDocument, DxfVersion, EntityType, Handle};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::app::copy_to_clipboard_kernel;
 use crate::modules::insert::wblock::extract_entities_into;
@@ -28,8 +35,7 @@ use crate::scene::view::dispatch::set_entity_xdata;
 
 use super::report::Notice;
 use super::units::DrawingUnit;
-use super::zone::zones_in;
-use super::{LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
+use super::{APP_ZONA, LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
 
 /// Prefisso degli APPID di ArchLine (`ARCHLINE_ZONA`, `ARCHLINE_LOCALE`).
 const APP_PREFIX: &str = "ARCHLINE_";
@@ -75,10 +81,13 @@ pub struct Extracted {
 /// Un documento per elaborato chiesto (una volta sola, nell'ordine chiesto),
 /// più gli avvisi senza doppioni.
 ///
-/// - **fatto**: lo spazio modello senza le zone e senza i layer
-///   `AL-LOCALI-PROGETTO`;
+/// - **fatto**: lo spazio modello senza le zone (ogni entità con un record
+///   `ARCHLINE_ZONA`, leggibile o no) e senza i layer `AL-LOCALI-PROGETTO`;
 /// - **comparativa**: lo spazio modello senza i layer `AL-LOCALI` e
 ///   `AL-LOCALI-PROGETTO`, cioè con le zone.
+///
+/// In fondo, se è uscito almeno un documento, un avviso per ogni layout con
+/// entità: lo spazio carta non si estrae.
 ///
 /// `StatoDiProgetto` per ora si salta, senza documento né avviso (Task 12).
 pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
@@ -86,18 +95,16 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         docs: Vec::new(),
         notices: Vec::new(),
     };
+    let zone_app = src.app_ids.get(APP_ZONA).map(|app| app.handle.value());
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
         }
         let handles = match elaborato {
-            Elaborato::StatoDiFatto => {
-                let zones: FxHashSet<Handle> =
-                    zones_in(src).into_iter().map(|zone| zone.handle).collect();
-                model_space_handles(src, |handle, entity| {
-                    !zones.contains(&handle) && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
-                })
-            }
+            Elaborato::StatoDiFatto => model_space_handles(src, |_, entity| {
+                !carries_zone_record(entity, zone_app)
+                    && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
+            }),
             Elaborato::DemolizioniCostruzioni => model_space_handles(src, |_, entity| {
                 !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
             }),
@@ -106,13 +113,71 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         let mut work = src.clone();
         let (out, notices) = copy_out(src, &mut work, &handles);
         ex.docs.push((elaborato, out));
-        for notice in notices {
-            if !ex.notices.contains(&notice) {
-                ex.notices.push(notice);
-            }
-        }
+        push_unique(&mut ex.notices, notices);
+    }
+    if !ex.docs.is_empty() {
+        push_unique(&mut ex.notices, layout_notices(src));
     }
     ex
+}
+
+fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
+    for notice in more {
+        if !notices.contains(&notice) {
+            notices.push(notice);
+        }
+    }
+}
+
+/// L'entità porta un record `ARCHLINE_ZONA` (nome senza distinguere le
+/// maiuscole, come la tabella degli APPID), anche illeggibile o solo come
+/// blocco grezzo letto da un DWG (`zone_app` = handle dell'APPID)?
+fn carries_zone_record(entity: &EntityType, zone_app: Option<u64>) -> bool {
+    let xdata = &entity.common().extended_data;
+    xdata
+        .records()
+        .iter()
+        .any(|record| record.application_name.eq_ignore_ascii_case(APP_ZONA))
+        || zone_app.is_some_and(|app| xdata.raw_dwg_eed.iter().any(|(raw, _)| *raw == app))
+}
+
+/// Un avviso per ogni layout (blocco `*Paper_Space*`) con entità, a parte il
+/// viewport generale (id 1) che ogni layout ha: `kind` = `"Layout <nome>"`,
+/// `handle` = il record del blocco.
+fn layout_notices(doc: &CadDocument) -> Vec<Notice> {
+    doc.block_records
+        .iter()
+        .filter(|record| record.is_paper_space())
+        .filter(|record| {
+            record
+                .entity_handles
+                .iter()
+                .filter_map(|&handle| doc.get_entity(handle))
+                .any(|entity| !matches!(entity, EntityType::Viewport(v) if v.id == 1))
+        })
+        .map(|record| Notice::NonCopiata {
+            handle: record.handle,
+            kind: format!("Layout {}", layout_name(doc, record)),
+        })
+        .collect()
+}
+
+/// Il nome del layout del blocco di carta: l'oggetto `LAYOUT` che lo indica,
+/// altrimenti il nome del blocco.
+fn layout_name(doc: &CadDocument, record: &BlockRecord) -> String {
+    doc.objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::Layout(layout) if layout.block_record == record.handle => {
+                Some(layout.name.clone())
+            }
+            _ => None,
+        })
+        .or_else(|| match doc.objects.get(&record.layout) {
+            Some(ObjectType::Layout(layout)) => Some(layout.name.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| record.name.clone())
 }
 
 /// Gli handle dello spazio modello, in ordine di disegno, che `keep` accetta.
@@ -140,29 +205,47 @@ fn on_layers(entity: &EntityType, layers: &[&str]) -> bool {
     layers.iter().any(|name| layer.eq_ignore_ascii_case(name))
 }
 
-/// Passi 3-6 per gli handle scelti in `work` (copia di `src`): via i nostri
-/// record, copia in un documento nuovo con versione e unità di `src`, tipi di
-/// linea dei layer, avvisi per ciò che non si copia.
+/// Passi 3-6 per gli handle scelti in `work` (copia di `src`): fuori ciò che
+/// la copia non porta intero, via i nostri record, copia in un documento nuovo
+/// con versione, unità e impostazioni di `src`, tipi di linea dei layer, avvisi
+/// per ciò che non si copia (nell'ordine degli handle).
 fn copy_out(
     src: &CadDocument,
     work: &mut CadDocument,
     handles: &[Handle],
 ) -> (CadDocument, Vec<Notice>) {
-    strip_our_xdata(work, handles);
+    let left_out: FxHashSet<Handle> = {
+        let mut portable = Portability::new(work);
+        handles
+            .iter()
+            .copied()
+            .filter(|&handle| {
+                work.get_entity(handle)
+                    .is_some_and(|entity| !portable.entity(entity))
+            })
+            .collect()
+    };
+    let handles_in: Vec<Handle> = handles
+        .iter()
+        .copied()
+        .filter(|handle| !left_out.contains(handle))
+        .collect();
+    strip_our_xdata(work, &handles_in);
 
     let mut out = CadDocument::new();
     out.version = output_version(src.version);
     // L'errore dice solo che non c'era nulla da copiare (nessun handle, o
     // nessuno copiabile): il documento resta vuoto e gli avvisi sotto
     // elencano gli handle non copiati.
-    let _ = extract_entities_into(work, handles, &mut out);
+    let _ = extract_entities_into(work, &handles_in, &mut out);
     out.header.insertion_units = src.header.insertion_units;
+    copy_drawing_settings(src, &mut out);
     copy_layer_linetypes(src, &mut out);
     scrub_our_data(&mut out);
 
     // La copia di WBLOCK passa a `copy_to_clipboard_kernel` gli handle senza
     // `BLOCK`/`ENDBLK`; ciò che il kernel non restituisce non è nel documento.
-    let copyable: Vec<Handle> = handles
+    let copyable: Vec<Handle> = handles_in
         .iter()
         .copied()
         .filter(|&handle| {
@@ -186,6 +269,120 @@ fn copy_out(
         })
         .collect();
     (out, notices)
+}
+
+/// Che cosa la copia di WBLOCK porta intero (spec §5.5: immagini, riferimenti
+/// esterni e 3D si elencano, non si copiano).
+///
+/// Non si portano: le immagini raster, gli underlay (PDF/DWF/DGN) e gli OLE,
+/// che rimandano a definizioni o dati che la copia non prende; i solidi 3D
+/// (`3DSOLID`, `REGION`, `BODY`, `SURFACE`, `MESH`); un `INSERT` di un
+/// riferimento esterno, di un blocco che manca o di un blocco che contiene
+/// (anche in un blocco annidato) un'immagine, un underlay, un OLE o uno di
+/// questi `INSERT`. I solidi 3D dentro un blocco restano: la copia li porta
+/// interi.
+struct Portability<'a> {
+    doc: &'a CadDocument,
+    /// Blocco (nome in maiuscolo) → si copia intero.
+    blocks: FxHashMap<String, bool>,
+}
+
+impl<'a> Portability<'a> {
+    fn new(doc: &'a CadDocument) -> Self {
+        Self {
+            doc,
+            blocks: FxHashMap::default(),
+        }
+    }
+
+    /// L'entità dello spazio modello si copia intera?
+    fn entity(&mut self, entity: &EntityType) -> bool {
+        !matches!(
+            entity,
+            EntityType::Solid3D(_)
+                | EntityType::Region(_)
+                | EntityType::Body(_)
+                | EntityType::Surface(_)
+                | EntityType::Mesh(_)
+        ) && self.member(entity)
+    }
+
+    /// Lo stesso per un'entità dentro un blocco, dove il 3D resta.
+    fn member(&mut self, entity: &EntityType) -> bool {
+        match entity {
+            EntityType::RasterImage(_) | EntityType::Underlay(_) | EntityType::Ole2Frame(_) => {
+                false
+            }
+            EntityType::Insert(insert) => self.block(&insert.block_name),
+            _ => true,
+        }
+    }
+
+    fn block(&mut self, name: &str) -> bool {
+        let key = name.to_ascii_uppercase();
+        if let Some(&known) = self.blocks.get(&key) {
+            return known;
+        }
+        let doc = self.doc;
+        let Some(record) = doc.block_records.get(name) else {
+            self.blocks.insert(key, false);
+            return false;
+        };
+        if record.flags.is_xref || record.flags.is_xref_overlay {
+            self.blocks.insert(key, false);
+            return false;
+        }
+        // In corso: un blocco che contiene sé stesso non si giudica due volte.
+        self.blocks.insert(key.clone(), true);
+        let whole = record
+            .entity_handles
+            .iter()
+            .filter_map(|&handle| doc.get_entity(handle))
+            .all(|entity| self.member(entity));
+        self.blocks.insert(key, whole);
+        whole
+    }
+}
+
+/// Le impostazioni del disegno che un documento nuovo avrebbe ai valori
+/// predefiniti (solo valori, mai handle): LTSCALE, PSLTSCALE, CELTSCALE,
+/// MEASUREMENT, LUNITS, LUPREC, AUNITS, AUPREC, TEXTSIZE, DIMSCALE; colore,
+/// tipo di linea, spessore e stato del layer «0»; carattere, altezza,
+/// larghezza e inclinazione dello stile di testo «Standard». Il tipo di linea
+/// del layer «0», se manca, lo aggiunge [`copy_layer_linetypes`].
+fn copy_drawing_settings(src: &CadDocument, out: &mut CadDocument) {
+    let (from, to) = (&src.header, &mut out.header);
+    to.linetype_scale = from.linetype_scale;
+    to.paper_space_linetype_scaling = from.paper_space_linetype_scaling;
+    to.current_entity_linetype_scale = from.current_entity_linetype_scale;
+    to.measurement = from.measurement;
+    to.linear_unit_format = from.linear_unit_format;
+    to.linear_unit_precision = from.linear_unit_precision;
+    to.angular_unit_format = from.angular_unit_format;
+    to.angular_unit_precision = from.angular_unit_precision;
+    to.text_height = from.text_height;
+    to.dim_scale = from.dim_scale;
+
+    if let (Some(from), Some(to)) = (src.layers.get("0"), out.layers.get_mut("0")) {
+        to.color = from.color;
+        to.color_name = from.color_name.clone();
+        to.book_name = from.book_name.clone();
+        to.line_type = from.line_type.clone();
+        to.line_weight = from.line_weight;
+        to.flags = from.flags;
+    }
+    if let (Some(from), Some(to)) = (
+        src.text_styles.get("Standard"),
+        out.text_styles.get_mut("Standard"),
+    ) {
+        to.font_file = from.font_file.clone();
+        to.big_font_file = from.big_font_file.clone();
+        to.true_type_font = from.true_type_font.clone();
+        to.true_type_font_flags = from.true_type_font_flags;
+        to.height = from.height;
+        to.width_factor = from.width_factor;
+        to.oblique_angle = from.oblique_angle;
+    }
 }
 
 /// La versione del disegno di partenza, se sta tra AC1014 (R14) e AC1032
@@ -1023,5 +1220,287 @@ mod tests {
         let comparativa = crate::io::load_file(&written[1]).unwrap();
         assert_eq!(hatches(&comparativa).len(), 2);
         assert!(crate::bim::zone::zones_in(&comparativa).is_empty());
+    }
+
+    // ---- Correzione prima della revisione (R25-R28) ----
+
+    fn non_copiata(handle: Handle, kind: &str) -> Notice {
+        Notice::NonCopiata {
+            handle,
+            kind: kind.into(),
+        }
+    }
+
+    /// Un'immagine raster la cui definizione sta negli oggetti di `doc`.
+    fn image_entity(doc: &mut CadDocument) -> EntityType {
+        let definition = doc.allocate_handle();
+        let mut def = codec::objects::ImageDefinition::new("foto.png");
+        def.handle = definition;
+        def.owner = doc.header.named_objects_dict_handle;
+        doc.objects
+            .insert(definition, ObjectType::ImageDefinition(def));
+        let mut image = codec::entities::RasterImage::new("foto.png", Vector3::ZERO, 100.0, 100.0);
+        image.definition_handle = Some(definition);
+        EntityType::RasterImage(image)
+    }
+
+    /// R25: immagini, underlay, OLE, riferimenti esterni e solidi 3D restano
+    /// fuori, ognuno con il suo avviso; anche un blocco che contiene
+    /// un'immagine o che manca.
+    #[test]
+    fn images_xrefs_and_3d_are_listed_not_copied() {
+        let mut src = doc_with_zones();
+        let image = image_entity(&mut src);
+        let image = src.add_entity(image).unwrap();
+        crate::app::define_block_raw_doc(&mut src, "XREF_A", Vector3::ZERO, &[]);
+        src.block_records.get_mut("XREF_A").unwrap().flags.is_xref = true;
+        let xref = src
+            .add_entity(EntityType::Insert(Insert::new("XREF_A", Vector3::ZERO)))
+            .unwrap();
+        let solid = src
+            .add_entity(EntityType::Solid3D(codec::entities::Solid3D::new()))
+            .unwrap();
+        // Un blocco qualunque con un'immagine dentro: l'INSERT non si porta
+        // intero.
+        let inner_image = image_entity(&mut src);
+        crate::app::define_block_raw_doc(&mut src, "CON_FOTO", Vector3::ZERO, &[inner_image]);
+        let with_image = src
+            .add_entity(EntityType::Insert(Insert::new("CON_FOTO", Vector3::ZERO)))
+            .unwrap();
+        // Un INSERT di un blocco che non esiste.
+        let missing = src
+            .add_entity(EntityType::Insert(Insert::new("NON_ESISTE", Vector3::ZERO)))
+            .unwrap();
+        // Un blocco normale (con una linea) si copia.
+        let line = lines_on(&src, LAYER_MURI)[0].clone();
+        crate::app::define_block_raw_doc(
+            &mut src,
+            "NORMALE",
+            Vector3::ZERO,
+            &[EntityType::Line(line)],
+        );
+        src.add_entity(EntityType::Insert(Insert::new("NORMALE", Vector3::ZERO)))
+            .unwrap();
+
+        let ex = extract(&src, &opts(&both()));
+        assert_eq!(
+            ex.notices,
+            vec![
+                non_copiata(image, "IMAGE"),
+                non_copiata(xref, "INSERT"),
+                non_copiata(solid, "3DSOLID"),
+                non_copiata(with_image, "INSERT"),
+                non_copiata(missing, "INSERT"),
+            ]
+        );
+        assert_eq!(
+            ex.notices[0].text(),
+            format!("IMAGE {image:X} non copiata nel DWG estratto.")
+        );
+        for (elaborato, out) in &ex.docs {
+            assert!(
+                !out.entities()
+                    .any(|e| matches!(e, EntityType::RasterImage(_) | EntityType::Solid3D(_))),
+                "{elaborato:?}"
+            );
+            let inserts: Vec<&str> = out
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Insert(i) => Some(i.block_name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inserts, vec!["NORMALE"], "{elaborato:?}");
+            assert!(out.block_records.get("XREF_A").is_none());
+            assert!(out.block_records.get("CON_FOTO").is_none());
+            // Rilievo + zone (comparativa) + l'INSERT normale.
+            let expected = match elaborato {
+                Elaborato::DemolizioniCostruzioni => 15,
+                _ => 13,
+            };
+            assert_eq!(model_space_count(out), expected, "{elaborato:?}");
+        }
+
+        let tmp = TempDir::new("r25");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        for ((elaborato, doc), path) in ex.docs.iter().zip(&written) {
+            let loaded =
+                crate::io::load_file(path).unwrap_or_else(|e| panic!("{elaborato:?}: {e}"));
+            assert_eq!(model_space_count(&loaded), model_space_count(doc));
+            assert!(loaded.block_records.get("NORMALE").is_some());
+        }
+    }
+
+    /// R26: un avviso per ogni layout con entità; il solo viewport generale
+    /// (id 1) non conta.
+    #[test]
+    fn layouts_with_entities_are_listed() {
+        let mut src = doc_with_zones();
+        let paper = src.header.paper_space_block_handle;
+        assert!(!paper.is_null());
+        let mut overall = codec::entities::Viewport::new();
+        overall.id = 1;
+        overall.common.owner_handle = paper;
+        src.add_entity(EntityType::Viewport(Box::new(overall)))
+            .unwrap();
+        assert!(extract(&src, &opts(&both())).notices.is_empty());
+
+        let mut note = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
+        note.common.owner_handle = paper;
+        src.add_entity(EntityType::Line(note)).unwrap();
+        let ex = extract(&src, &opts(&both()));
+        assert_eq!(ex.notices, vec![non_copiata(paper, "Layout Layout1")]);
+        assert_eq!(
+            ex.notices[0].text(),
+            format!("Layout Layout1 {paper:X} non copiata nel DWG estratto.")
+        );
+        // Nello spazio modello estratto la linea della carta non c'è.
+        assert_eq!(model_space_count(&ex.docs[0].1), 12);
+        // Solo il progetto (per ora saltato): nessun documento, nessun avviso.
+        assert!(extract(&src, &opts(&[Elaborato::StatoDiProgetto]))
+            .notices
+            .is_empty());
+    }
+
+    /// R27: variabili di testata, layer «0» e stile di testo «Standard».
+    #[test]
+    fn header_layer_zero_and_standard_follow_source() {
+        let mut src = doc_with_zones();
+        let h = &mut src.header;
+        h.linetype_scale = 50.0;
+        h.paper_space_linetype_scaling = !h.paper_space_linetype_scaling;
+        h.current_entity_linetype_scale = 2.0;
+        h.measurement = 1;
+        h.linear_unit_format = 2;
+        h.linear_unit_precision = 3;
+        h.angular_unit_format = 1;
+        h.angular_unit_precision = 2;
+        h.text_height = 0.25;
+        h.dim_scale = 50.0;
+        let psltscale = h.paper_space_linetype_scaling;
+
+        let mut tratteggio = LineType::new("TRATTO_0");
+        tratteggio.description = "_ _ _".into();
+        tratteggio.handle = src.allocate_handle();
+        src.line_types.add(tratteggio).unwrap();
+        let zero = src.layers.get_mut("0").unwrap();
+        zero.color = Color::from_index(3);
+        zero.line_type = "TRATTO_0".into();
+        zero.line_weight = codec::LineWeight::Value(25);
+        zero.flags.locked = true;
+        let standard = src.text_styles.get_mut("Standard").unwrap();
+        standard.font_file = "romans.shx".into();
+        standard.big_font_file = "bigfont.shx".into();
+        standard.height = 0.2;
+        standard.width_factor = 0.8;
+        standard.oblique_angle = 0.25;
+
+        #[track_caller]
+        fn check(out: &CadDocument, psltscale: bool, what: &str) {
+            let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+            let h = &out.header;
+            assert!(close(h.linetype_scale, 50.0), "{what}: LTSCALE");
+            assert_eq!(
+                h.paper_space_linetype_scaling, psltscale,
+                "{what}: PSLTSCALE"
+            );
+            assert!(
+                close(h.current_entity_linetype_scale, 2.0),
+                "{what}: CELTSCALE"
+            );
+            assert_eq!(h.measurement, 1, "{what}: MEASUREMENT");
+            assert_eq!(h.linear_unit_format, 2, "{what}: LUNITS");
+            assert_eq!(h.linear_unit_precision, 3, "{what}: LUPREC");
+            assert_eq!(h.angular_unit_format, 1, "{what}: AUNITS");
+            assert_eq!(h.angular_unit_precision, 2, "{what}: AUPREC");
+            assert!(close(h.text_height, 0.25), "{what}: TEXTSIZE");
+            assert!(close(h.dim_scale, 50.0), "{what}: DIMSCALE");
+            let zero = out.layers.get("0").unwrap();
+            assert_eq!(
+                zero.color,
+                Color::from_index(3),
+                "{what}: colore del layer 0"
+            );
+            assert_eq!(zero.line_type, "TRATTO_0", "{what}");
+            assert_eq!(zero.line_weight, codec::LineWeight::Value(25), "{what}");
+            assert!(zero.flags.locked, "{what}");
+            let lt = out
+                .line_types
+                .get("TRATTO_0")
+                .expect("tipo di linea del layer 0");
+            assert!(!lt.handle.is_null());
+            let standard = out.text_styles.get("Standard").unwrap();
+            assert_eq!(standard.font_file, "romans.shx", "{what}");
+            assert_eq!(standard.big_font_file, "bigfont.shx", "{what}");
+            assert!(close(standard.height, 0.2), "{what}");
+            assert!(close(standard.width_factor, 0.8), "{what}");
+            assert!(close(standard.oblique_angle, 0.25), "{what}");
+        }
+
+        let ex = extract(&src, &opts(&both()));
+        for (_, out) in &ex.docs {
+            check(out, psltscale, "in memoria");
+        }
+        let tmp = TempDir::new("r27");
+        for path in write(&ex, &tmp.0, "casa", false).unwrap() {
+            let loaded = crate::io::load_file(&path).unwrap();
+            check(&loaded, psltscale, "dopo il DWG");
+        }
+        // Gli handle restano quelli di `out`.
+        let out = &ex.docs[0].1;
+        let fresh = CadDocument::new();
+        assert_eq!(
+            out.layers.get("0").unwrap().handle,
+            fresh.layers.get("0").unwrap().handle
+        );
+        assert_eq!(
+            out.text_styles.get("Standard").unwrap().handle,
+            fresh.text_styles.get("Standard").unwrap().handle
+        );
+    }
+
+    /// R28: un record `ARCHLINE_ZONA` illeggibile basta per escludere
+    /// l'entità dallo stato di fatto; nella comparativa resta, senza record.
+    #[test]
+    fn garbage_zone_record_counts_as_zone() {
+        let mut src = doc_with_zones();
+        let zona = Zone {
+            state: ZoneState::Nuovo,
+            origin: ZoneOrigin::Rettangolo,
+            axis: None,
+            thickness: None,
+            height: None,
+            varco: false,
+        };
+        let mut garbage = zone_hatch(&zona, &[vec![[5.0, 1.0], [6.0, 1.0], [6.0, 2.0]]]);
+        let mut rec = ExtendedDataRecord::new(APP_ZONA);
+        rec.add_value(XDataValue::Integer16(9));
+        rec.add_value(XDataValue::String("rotto".into()));
+        let common = garbage.common_mut();
+        common.layer = "ALTRO".into();
+        common.extended_data = codec::xdata::ExtendedData::new();
+        common.extended_data.add_record(rec);
+        let garbage = src.add_entity(garbage).unwrap();
+        assert!(crate::bim::zone::read_zone(garbage, src.get_entity(garbage).unwrap()).is_none());
+        // Anche una LINE con il record (in minuscolo) conta come zona.
+        let mut segnata = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
+        let mut rec = ExtendedDataRecord::new(APP_ZONA.to_ascii_lowercase());
+        rec.add_value(XDataValue::Integer16(1));
+        segnata.common.extended_data.add_record(rec);
+        src.add_entity(EntityType::Line(segnata)).unwrap();
+
+        let ex = extract(&src, &opts(&both()));
+        let (_, fatto) = &ex.docs[0];
+        let (_, comparativa) = &ex.docs[1];
+        assert!(hatches(fatto).is_empty());
+        assert_eq!(model_space_count(fatto), 12);
+        assert_eq!(hatches(comparativa).len(), 3);
+        assert_eq!(model_space_count(comparativa), 16);
+        assert_no_archline_data(fatto);
+        assert_no_archline_data(comparativa);
+        assert!(comparativa
+            .entities()
+            .all(|e| e.common().extended_data.records().is_empty()));
+        assert!(ex.notices.is_empty(), "{:?}", ex.notices);
     }
 }
