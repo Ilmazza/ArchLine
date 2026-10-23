@@ -11,6 +11,7 @@
 //! lato app: qui niente documento e niente undo (il passo lo apre l'host al
 //! commit). Tutto sta sul piano XY del mondo, in unità del disegno.
 
+use std::borrow::Cow;
 use std::iter;
 
 use codec::entities::hatch::BoundaryPathFlags;
@@ -560,9 +561,13 @@ fn outline_area(vertices: &[([f64; 2], f64)]) -> f64 {
 /// - `Nuovo`: [`Notice::NuovoSuEsistente`] se un tratto di un segmento dei
 ///   muri ha il punto medio strettamente dentro la zona (oltre `tol` dal
 ///   bordo) e fuori da ogni zona `Demolito` (bordo compreso), oppure se la
-///   zona ricalca un muro esistente non demolito ([`sits_on_a_wall`]). Le
+///   zona ricalca un muro esistente non demolito ([`sits_on_a_wall`]), oppure
+///   se una zona rettangolare sta stretta tra le due facce di un muro
+///   esistente non demolito, anche più sottile di lui ([`inside_a_wall`]). Le
 ///   facce su cui il muro nuovo soltanto si appoggia stanno sul bordo e non
-///   contano.
+///   contano. Falsi allarmi che restano (costano solo una conferma): un muro
+///   nuovo lungo un corridoio largo fino a 1,50 m, il riempimento di una
+///   nicchia, la chiusura di un vano porta con le linee di soglia disegnate.
 /// - [`Notice::StessoStatoSovrapposte`] se la zona si sovrappone a una zona
 ///   dello stesso stato senza coincidere (anche quando una sta dentro
 ///   l'altra). Le zone di stato opposto non danno avviso (ricostruzione).
@@ -599,6 +604,7 @@ pub fn validate(candidate: &[Vec<[f64; 2]>], state: ZoneState, snap: &ZoneSnapsh
                 .iter()
                 .any(|&segment| builds_over(candidate, segment, &demolished, tol))
                 || sits_on_a_wall(&candidate[0], &walls, &demolished, max_thickness, tol)
+                || inside_a_wall(candidate, snap, max_thickness)
             {
                 notices.push(Notice::NuovoSuEsistente);
             }
@@ -814,6 +820,132 @@ fn covered_by_walls(
         .map(|pair| (pair[1] - pair[0]) * length)
         .sum();
     covered > length / 2.0
+}
+
+/// La zona, se è un rettangolo senza buchi, sta tra le due facce di un muro
+/// esistente non demolito (decisione R20, «tenaglia»)? Si cerca il muro con
+/// `rect_from_axis` sulla mezzeria parallela ai lati lunghi (dal punto medio
+/// di un lato corto a quello dell'altro), entro lo spessore massimo, tra le
+/// sorgenti dei muri senza i tratti dentro le zone `Demolito` (bordo
+/// compreso). Prende il muro nuovo più sottile del vecchio (facce fuori
+/// dalla zona) o allineato a una sola delle sue facce, che né l'interno
+/// stretto né [`sits_on_a_wall`] vedono.
+fn inside_a_wall(candidate: &[Vec<[f64; 2]>], snap: &ZoneSnapshot, max_thickness: f64) -> bool {
+    let [outer] = candidate else {
+        return false;
+    };
+    let Some((p1, p2)) = rectangle_midline(outer, snap.tol) else {
+        return false;
+    };
+    // Le facce si cercano fino allo spessore massimo dalla zona: valgono le
+    // zone demolite fin lì.
+    let reach = bounds(candidate);
+    let demolished: Vec<&[Vec<[f64; 2]>]> = snap
+        .zones
+        .iter()
+        .filter(|z| z.zone.state == ZoneState::Demolito)
+        .filter(|z| meets(&bounds(&z.rings), &reach, snap.tol + max_thickness))
+        .map(|z| z.rings.as_slice())
+        .collect();
+    let standing = if demolished.is_empty() {
+        Cow::Borrowed(&snap.walls)
+    } else {
+        Cow::Owned(standing_walls(&snap.walls, &demolished, snap.tol))
+    };
+    rect_from_axis(&standing, p1, p2, max_thickness, snap.tol).is_ok()
+}
+
+/// La mezzeria lungo i lati lunghi di un anello rettangolare (quattro
+/// vertici, angoli retti), da un lato corto all'altro; `None` per ogni altra
+/// forma.
+fn rectangle_midline(ring: &[[f64; 2]], tol: f64) -> Option<([f64; 2], [f64; 2])> {
+    let [c0, c1, c2, c3] = ring else {
+        return None;
+    };
+    let vector = |a: &[f64; 2], b: &[f64; 2]| [b[0] - a[0], b[1] - a[1]];
+    let sides = [
+        vector(c0, c1),
+        vector(c1, c2),
+        vector(c2, c3),
+        vector(c3, c0),
+    ];
+    let lengths = sides.map(|v| v[0].hypot(v[1]));
+    if lengths.iter().any(|&length| !(length > tol)) {
+        return None;
+    }
+    let right_angles = (0..4).all(|i| {
+        let (u, v) = (sides[i], sides[(i + 1) % 4]);
+        (u[0] * v[0] + u[1] * v[1]).abs() <= 1e-9 * lengths[i] * lengths[(i + 1) % 4]
+    });
+    if !right_angles {
+        return None;
+    }
+    let middle = |a: &[f64; 2], b: &[f64; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    Some(if lengths[0] >= lengths[1] {
+        // Lati lunghi c0-c1 e c2-c3: i corti sono c3-c0 e c1-c2.
+        (middle(c3, c0), middle(c1, c2))
+    } else {
+        (middle(c0, c1), middle(c2, c3))
+    })
+}
+
+/// Le sorgenti dei muri con i soli lati dritti (gli unici che
+/// `rect_from_axis` prende come facce), senza i tratti dentro le zone
+/// demolite, bordo compreso: ogni lato si spezza sui lati delle zone e ogni
+/// pezzo più lungo di `tol` decide dal suo punto medio.
+fn standing_walls(
+    walls: &FxHashMap<Handle, BoundarySource>,
+    demolished: &[&[Vec<[f64; 2]>]],
+    tol: f64,
+) -> FxHashMap<Handle, BoundarySource> {
+    let tolerance = Tolerance::new(tol);
+    let pieces = |line: Line| -> Vec<Line> {
+        let length = distance(line.start, line.end);
+        let mut cuts = vec![0.0, 1.0];
+        for edge in demolished.iter().flat_map(|zone| edges(zone)) {
+            match segment_crossing(line, edge, tolerance) {
+                SegmentCrossing::Point { a, .. } => cuts.push(a.clamp(0.0, 1.0)),
+                SegmentCrossing::Overlap { a, .. } => cuts.extend(a.map(|t| t.clamp(0.0, 1.0))),
+                SegmentCrossing::None => {}
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.windows(2)
+            .filter(|pair| (pair[1] - pair[0]) * length > tol)
+            .filter(|pair| {
+                let p = lerp(line, (pair[0] + pair[1]) / 2.0);
+                demolished
+                    .iter()
+                    .all(|zone| side(zone, p, tol) == Side::Outside)
+            })
+            .map(|pair| Line {
+                start: lerp(line, pair[0]),
+                end: lerp(line, pair[1]),
+            })
+            .collect()
+    };
+    walls
+        .iter()
+        .map(|(&handle, source)| {
+            let kept: Vec<Line> = source
+                .curves
+                .iter()
+                .filter_map(|curve| match curve {
+                    Curve::Line(line) => Some(*line),
+                    _ => None,
+                })
+                .flat_map(&pieces)
+                .collect();
+            let curves = kept.iter().copied().map(Curve::Line).collect();
+            (
+                handle,
+                BoundarySource {
+                    segments: kept,
+                    curves,
+                },
+            )
+        })
+        .collect()
 }
 
 /// I due lati sono le due facce di uno stesso muro? Vedi [`sits_on_a_wall`].
@@ -1820,17 +1952,79 @@ mod tests {
         // Un muro nuovo che chiude un corridoio largo 1,10 m: le estremità
         // stanno sulle facce, più vicine dello spessore massimo, ma sono più
         // corte della distanza tra loro.
+        assert!(validate(&[rect(5.0, 0.0, 5.12, 1.1)], n, &corridor()).is_empty());
+    }
+
+    /// Un corridoio largo 1,10 m tra due linee lunghe 10 m (y = 0 e y = 1,10).
+    fn corridor() -> ZoneSnapshot {
         let wall = |a: [f64; 2], b: [f64; 2]| {
             let mut line =
                 Line::from_points(Vector3::new(a[0], a[1], 0.0), Vector3::new(b[0], b[1], 0.0));
             line.common.layer = LAYER_MURI.to_string();
             EntityType::Line(line)
         };
-        let corridor = snap(vec![
+        snap(vec![
             wall([0.0, 0.0], [10.0, 0.0]),
             wall([0.0, 1.1], [10.0, 1.1]),
-        ]);
-        assert!(validate(&[rect(5.0, 0.0, 5.12, 1.1)], n, &corridor).is_empty());
+        ])
+    }
+
+    #[test]
+    fn new_wall_thinner_than_the_existing_one_is_noticed() {
+        // R20: AL_NUOVO sull'asse del tramezzo con spessore 0,06 (zona
+        // 4,02–4,08): le facce restano fuori dalla zona, nelle due forme.
+        let on_wall = "La zona nuova si sovrappone a un muro esistente non demolito. Confermi la zona? [Sì/No] <Sì>:";
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut c = ZoneCommand::new(ZoneState::Nuovo, case(form));
+            need_point(c.on_point(pt(4.05, 0.0)));
+            need_point(c.on_point(pt(4.05, 3.0)));
+            need_point_text(c.on_text_input("0,06"));
+            assert_eq!(c.prompt(), on_wall, "{form:?}");
+        }
+        // Muro sottile allineato a una faccia (4,00–4,06), dal rettangolo.
+        let mut c = ZoneCommand::new(ZoneState::Nuovo, case(Form::Continua));
+        need_point_text(c.on_text_input("R"));
+        need_point(c.on_point(pt(4.0, 0.0)));
+        need_point(c.on_point(pt(4.06, 3.0)));
+        assert_eq!(c.prompt(), on_wall);
+
+        let n = ZoneState::Nuovo;
+        let thin = [rect(4.02, 0.0, 4.08, 3.0)];
+        let aligned = [rect(4.0, 0.0, 4.06, 3.0)];
+        let s = case(Form::Continua);
+        assert_eq!(validate(&thin, n, &s), [Notice::NuovoSuEsistente]);
+        assert_eq!(validate(&aligned, n, &s), [Notice::NuovoSuEsistente]);
+        // Un pezzo corto: la mezzeria corre lungo i lati lunghi (verticali).
+        assert_eq!(
+            validate(&[rect(4.02, 1.0, 4.08, 1.5)], n, &s),
+            [Notice::NuovoSuEsistente]
+        );
+
+        // Con il tramezzo demolito è una ricostruzione: niente.
+        let mut s = case(Form::Continua);
+        s.zones = vec![zone_geom(
+            ZoneState::Demolito,
+            vec![rect(4.0, 0.0, 4.1, 3.0)],
+        )];
+        assert!(validate(&thin, n, &s).is_empty());
+        assert!(validate(&aligned, n, &s).is_empty());
+        // Demolito solo fino a 1,50: le facce che restano bastano.
+        s.zones = vec![zone_geom(
+            ZoneState::Demolito,
+            vec![rect(4.0, 0.0, 4.1, 1.5)],
+        )];
+        assert_eq!(validate(&thin, n, &s), [Notice::NuovoSuEsistente]);
+
+        // Restano senza avviso: (2;0)-(2;3) 0,12 in A (facce a 2 m) e il muro
+        // trasversale a un corridoio stretto.
+        let s = case(Form::Continua);
+        assert!(validate(&[rect(1.94, 0.0, 2.06, 3.0)], n, &s).is_empty());
+        assert!(validate(&[rect(5.0, 0.0, 5.12, 1.1)], n, &corridor()).is_empty());
+        // Falso allarme dichiarato: un muro nuovo lungo un corridoio stretto.
+        assert_eq!(
+            validate(&[rect(2.0, 0.5, 8.0, 0.62)], n, &corridor()),
+            [Notice::NuovoSuEsistente]
+        );
     }
 
     #[test]
