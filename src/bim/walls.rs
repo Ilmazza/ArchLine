@@ -470,6 +470,196 @@ fn pick_area(exact: Option<f64>, polygon: f64) -> (f64, bool) {
     }
 }
 
+/// Il rettangolo di un muro: la zona da demolire o da costruire, con i lati che
+/// servono a tagliare e a chiudere la geometria di progetto.
+///
+/// `corners` gira in senso antiorario: `c0` e `c1` sono sul lato destro
+/// dell'asse (rispetto al verso `p1 → p2`), `c2` e `c3` sul sinistro; `c0` e
+/// `c3` sono all'estremo `p1`, `c1` e `c2` all'estremo `p2`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WallRect {
+    pub corners: [[f64; 2]; 4],
+    /// La mezzeria del muro, da un estremo all'altro dell'asse indicato.
+    pub axis: ([f64; 2], [f64; 2]),
+    /// Distanza tra le due facce, in unità del disegno.
+    pub thickness: f64,
+}
+
+impl WallRect {
+    /// L'anello `c0..c3`, antiorario (area con segno positiva).
+    pub fn ring(&self) -> Vec<[f64; 2]> {
+        self.corners.to_vec()
+    }
+
+    /// I lati lunghi, sulle facce: `(c0, c1)` a destra e `(c2, c3)` a sinistra.
+    pub fn long_sides(&self) -> [([f64; 2], [f64; 2]); 2] {
+        let [c0, c1, c2, c3] = self.corners;
+        [(c0, c1), (c2, c3)]
+    }
+
+    /// I lati di estremità: `(c1, c2)` dalla parte di `p2` e `(c3, c0)` da
+    /// quella di `p1`.
+    pub fn end_sides(&self) -> [([f64; 2], [f64; 2]); 2] {
+        let [c0, c1, c2, c3] = self.corners;
+        [(c1, c2), (c3, c0)]
+    }
+}
+
+/// Perché due punti sull'asse non danno un muro.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisMiss {
+    /// I due punti coincidono (entro la tolleranza): non c'è un asse.
+    Degenerate,
+    /// Nessuna faccia valida ai lati dell'asse, o nessuna coppia con uno
+    /// spessore entro il limite.
+    NoFaces,
+    /// Una faccia sola: l'altra manca entro il limite di spessore.
+    OneFace,
+}
+
+/// Quanto può scostarsi dall'asse una faccia per contare come parallela.
+const FACE_PARALLEL_DEGREES: f64 = 0.5;
+
+/// Il muro attorno all'asse `p1 → p2` (spec §5.1): le sue due facce si cercano
+/// tra i segmenti retti delle sorgenti, una per lato dell'asse. `max_thickness`
+/// e `tol` sono in unità del disegno.
+///
+/// Con `d = (p2 − p1) / |p2 − p1|` e `n = (−d.y, d.x)` (normale sinistra), un
+/// segmento è candidato se è parallelo a `d` entro 0,5° e la sua proiezione su
+/// `d` copre più di `tol` dell'intervallo `(0, |p2 − p1|)`; il suo scostamento
+/// è `s = (inizio − p1) · n`, letto all'inizio del segmento. La faccia
+/// sinistra è il candidato con `s > tol` più vicino a 0, la destra quello con
+/// `s < −tol`. Una faccia vale solo con `|s| ≤ max_thickness`, e lo spessore
+/// `s_l − s_r` deve rientrare nello stesso limite. Se manca un lato e c'è un
+/// candidato con `|s| ≤ tol` (l'asse è stato dato sulla faccia stessa), quel
+/// candidato fa da lato mancante.
+///
+/// Sono candidati solo i tratti dritti: le `LINE` e i lati dritti delle
+/// polilinee (`Curve::Line` delle sorgenti). Gli `ARC` e i lati ad arco delle
+/// polilinee (bulge) non sono facce, anche se una delle loro corde è parallela
+/// all'asse.
+///
+/// Errori: [`AxisMiss::Degenerate`] se `p1 ≈ p2`; [`AxisMiss::OneFace`] se
+/// resta una faccia sola (anche l'unica faccia su cui cade l'asse, senza
+/// nient'altro entro il limite); [`AxisMiss::NoFaces`] se non ce n'è nessuna,
+/// o se le due più vicine distano più del limite tra loro.
+pub fn rect_from_axis(
+    sources: &FxHashMap<Handle, BoundarySource>,
+    p1: [f64; 2],
+    p2: [f64; 2],
+    max_thickness: f64,
+    tol: f64,
+) -> Result<WallRect, AxisMiss> {
+    let Some((d, length)) = axis_direction(p1, p2).filter(|&(_, length)| length > tol) else {
+        return Err(AxisMiss::Degenerate);
+    };
+    let n = [-d[1], d[0]];
+
+    let mut left: Option<f64> = None;
+    let mut right: Option<f64> = None;
+    let mut on_face: Option<f64> = None;
+    for s in face_offsets(sources, p1, d, n, length, tol) {
+        // Negata, così scarta anche un limite non numerico.
+        if !(s.abs() <= max_thickness) {
+            continue;
+        }
+        if s > tol {
+            left = Some(left.map_or(s, |nearest| nearest.min(s)));
+        } else if s < -tol {
+            right = Some(right.map_or(s, |nearest| nearest.max(s)));
+        } else if on_face.map_or(true, |nearest| s.abs() < nearest.abs()) {
+            on_face = Some(s);
+        }
+    }
+
+    let (s_r, s_l) = match (right, left, on_face) {
+        (Some(right), Some(left), _) => (right, left),
+        (None, Some(left), Some(on_face)) => (on_face, left),
+        (Some(right), None, Some(on_face)) => (right, on_face),
+        (None, None, None) => return Err(AxisMiss::NoFaces),
+        _ => return Err(AxisMiss::OneFace),
+    };
+    if s_l - s_r > max_thickness {
+        return Err(AxisMiss::NoFaces);
+    }
+    Ok(wall_rect(p1, p2, n, s_r, s_l))
+}
+
+/// Il muro di spessore dato, centrato sull'asse `p1 → p2`. `None` se i punti
+/// coincidono (o non sono numeri) o lo spessore non è positivo.
+pub fn rect_from_axis_thickness(p1: [f64; 2], p2: [f64; 2], thickness: f64) -> Option<WallRect> {
+    let (d, length) = axis_direction(p1, p2)?;
+    if !(length > 0.0) || !(thickness > 0.0) || !thickness.is_finite() {
+        return None;
+    }
+    let n = [-d[1], d[0]];
+    Some(wall_rect(p1, p2, n, -thickness / 2.0, thickness / 2.0))
+}
+
+/// Il verso unitario di `p1 → p2` e la distanza; `None` se un valore non è
+/// finito.
+fn axis_direction(p1: [f64; 2], p2: [f64; 2]) -> Option<([f64; 2], f64)> {
+    let delta = [p2[0] - p1[0], p2[1] - p1[1]];
+    let length = delta[0].hypot(delta[1]);
+    (p1.iter().chain(&p2).all(|v| v.is_finite()) && length.is_finite())
+        .then(|| ([delta[0] / length, delta[1] / length], length))
+}
+
+/// Lo scostamento `s` dall'asse di ogni segmento dritto che lo accompagna:
+/// parallelo entro [`FACE_PARALLEL_DEGREES`] e con una proiezione su `d` che
+/// copre più di `tol` di `(0, length)`.
+fn face_offsets(
+    sources: &FxHashMap<Handle, BoundarySource>,
+    p1: [f64; 2],
+    d: [f64; 2],
+    n: [f64; 2],
+    length: f64,
+    tol: f64,
+) -> Vec<f64> {
+    let sin_limit = FACE_PARALLEL_DEGREES.to_radians().sin();
+    let dot = |a: [f64; 2], b: [f64; 2]| a[0] * b[0] + a[1] * b[1];
+    let from_p1 = |p: [f64; 2]| [p[0] - p1[0], p[1] - p1[1]];
+    sources
+        .values()
+        .flat_map(|source| source.curves.iter())
+        .filter_map(|curve| {
+            let Curve::Line(segment) = curve else {
+                return None;
+            };
+            let v = [
+                segment.end[0] - segment.start[0],
+                segment.end[1] - segment.start[1],
+            ];
+            let extent = v[0].hypot(v[1]);
+            // |v × d| / |v| è il seno dell'angolo, qualunque sia il verso.
+            if !(extent > tol) || (v[0] * d[1] - v[1] * d[0]).abs() > sin_limit * extent {
+                return None;
+            }
+            let t0 = dot(from_p1(segment.start), d);
+            let t1 = dot(from_p1(segment.end), d);
+            let covered = t0.max(t1).min(length) - t0.min(t1).max(0.0);
+            (covered > tol).then(|| dot(from_p1(segment.start), n))
+        })
+        .collect()
+}
+
+/// Il rettangolo con le facce a `s_r` (destra) e `s_l` (sinistra) dall'asse
+/// `p1 → p2`, `n` la normale sinistra.
+fn wall_rect(p1: [f64; 2], p2: [f64; 2], n: [f64; 2], s_r: f64, s_l: f64) -> WallRect {
+    let offset = |p: [f64; 2], s: f64| [p[0] + n[0] * s, p[1] + n[1] * s];
+    let middle = (s_r + s_l) / 2.0;
+    WallRect {
+        corners: [
+            offset(p1, s_r),
+            offset(p2, s_r),
+            offset(p2, s_l),
+            offset(p1, s_l),
+        ],
+        axis: (offset(p1, middle), offset(p2, middle)),
+        thickness: s_l - s_r,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,5 +1258,320 @@ mod tests {
         let empty = FxHashMap::default();
         let (area, _) = net_area(&region, &empty, 1e-6);
         assert!((area - 15.75).abs() < 1e-12, "{area}");
+    }
+
+    // ---- Muro tra due punti (spec §5.1) ----
+
+    /// Le sorgenti dei muri di `entities` (disegno in metri) e la tolleranza.
+    fn sources_for(entities: Vec<EntityType>) -> (FxHashMap<Handle, BoundarySource>, f64) {
+        let tol = 1.0e-6;
+        let scene = scene_with(entities, 6);
+        (wall_set(&scene.document, tol).sources, tol)
+    }
+
+    #[track_caller]
+    fn assert_pt(got: [f64; 2], want: [f64; 2]) {
+        assert!(
+            (got[0] - want[0]).abs() < 1e-9 && (got[1] - want[1]).abs() < 1e-9,
+            "{got:?} invece di {want:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_corners(rect: &WallRect, want: [[f64; 2]; 4]) {
+        for (got, want) in rect.corners.iter().zip(want) {
+            assert_pt(*got, want);
+        }
+    }
+
+    #[test]
+    fn axis_on_tramezzo_finds_both_faces() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let (s, tol) = sources_for(case_a(form, M));
+            let r = rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+            let xs: Vec<f64> = r.corners.iter().map(|c| c[0]).collect();
+            assert!(
+                xs.iter()
+                    .all(|x| (x - 4.0).abs() < 1e-9 || (x - 4.1).abs() < 1e-9),
+                "{form:?}: {xs:?}"
+            );
+            assert!((signed_area(&r.ring()) - 0.30).abs() < 1e-9, "{form:?}");
+            // d = (0; 1), n = (-1; 0): la destra dell'asse è x = 4,10.
+            assert_corners(&r, [[4.1, 0.0], [4.1, 3.0], [4.0, 3.0], [4.0, 0.0]]);
+            assert_pt(r.axis.0, [4.05, 0.0]);
+            assert_pt(r.axis.1, [4.05, 3.0]);
+        }
+    }
+
+    #[test]
+    fn axis_in_the_other_direction_keeps_the_ring_counter_clockwise() {
+        let (s, tol) = sources_for(case_a(Form::Continua, M));
+        let r = rect_from_axis(&s, [4.05, 3.0], [4.05, 0.0], 1.5, tol).unwrap();
+        // d = (0; -1), n = (1; 0): la destra è x = 4,00.
+        assert_corners(&r, [[4.0, 3.0], [4.0, 0.0], [4.1, 0.0], [4.1, 3.0]]);
+        assert!((r.thickness - 0.10).abs() < 1e-9);
+        assert!((signed_area(&r.ring()) - 0.30).abs() < 1e-9);
+        assert_pt(r.axis.0, [4.05, 3.0]);
+        assert_pt(r.axis.1, [4.05, 0.0]);
+    }
+
+    #[test]
+    fn axis_off_centre_and_on_a_face() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let (s, tol) = sources_for(case_a(form, M));
+            // (4,02; 0,5)–(4,02; 2,5): stesse facce, y da 0,5 a 2,5, area 0,20.
+            let r = rect_from_axis(&s, [4.02, 0.5], [4.02, 2.5], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+            assert_corners(&r, [[4.1, 0.5], [4.1, 2.5], [4.0, 2.5], [4.0, 0.5]]);
+            assert!((signed_area(&r.ring()) - 0.20).abs() < 1e-9, "{form:?}");
+            // L'asse indicato è fuori centro: la mezzeria no.
+            assert_pt(r.axis.0, [4.05, 0.5]);
+            assert_pt(r.axis.1, [4.05, 2.5]);
+
+            // (4,00; 0)–(4,00; 3,00), sulla faccia sinistra del tramezzo: la
+            // faccia fa da lato mancante (l'altra, x = 0, è oltre il limite).
+            let r = rect_from_axis(&s, [4.0, 0.0], [4.0, 3.0], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+            assert_corners(&r, [[4.1, 0.0], [4.1, 3.0], [4.0, 3.0], [4.0, 0.0]]);
+            assert_pt(r.axis.0, [4.05, 0.0]);
+
+            // Sull'altra faccia (x = 4,10), il lato mancante è il destro.
+            let r = rect_from_axis(&s, [4.1, 0.0], [4.1, 3.0], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+            assert_corners(&r, [[4.1, 0.0], [4.1, 3.0], [4.0, 3.0], [4.0, 0.0]]);
+        }
+    }
+
+    #[test]
+    fn axis_without_faces() {
+        let (s, tol) = sources_for(case_a(Form::Continua, M));
+        // In mezzo al locale A: le facce più vicine (x = 0 e x = 4,00) distano
+        // 2,00, oltre il limite.
+        assert_eq!(
+            rect_from_axis(&s, [2.0, 0.5], [2.0, 2.5], 1.5, tol),
+            Err(AxisMiss::NoFaces)
+        );
+        // A 0,05 dalla faccia x = 0, dentro A, con limite 0,10: un solo lato.
+        assert_eq!(
+            rect_from_axis(&s, [0.05, 0.5], [0.05, 2.5], 0.10, tol),
+            Err(AxisMiss::OneFace)
+        );
+        // Lo stesso a 0,05 dalla faccia x = 4,00, sul lato opposto.
+        assert_eq!(
+            rect_from_axis(&s, [3.95, 0.5], [3.95, 2.5], 0.10, tol),
+            Err(AxisMiss::OneFace)
+        );
+        // Sulla faccia x = 0, nient'altro entro il limite: la faccia sola non
+        // fa un muro.
+        assert_eq!(
+            rect_from_axis(&s, [0.0, 0.5], [0.0, 2.5], 0.10, tol),
+            Err(AxisMiss::OneFace)
+        );
+        // Due punti coincidenti, o più vicini della tolleranza: nessun asse.
+        assert_eq!(
+            rect_from_axis(&s, [4.05, 1.0], [4.05, 1.0], 1.5, tol),
+            Err(AxisMiss::Degenerate)
+        );
+        assert_eq!(
+            rect_from_axis(&s, [4.05, 1.0], [4.05, 1.0 + 0.5 * tol], 1.5, tol),
+            Err(AxisMiss::Degenerate)
+        );
+        // Niente muri.
+        let (none, tol) = sources_for(Vec::new());
+        assert_eq!(
+            rect_from_axis(&none, [0.0, 0.0], [1.0, 0.0], 1.5, tol),
+            Err(AxisMiss::NoFaces)
+        );
+    }
+
+    #[test]
+    fn axis_with_faces_thicker_than_the_limit_is_no_wall() {
+        let (s, tol) = sources_for(case_a(Form::Continua, M));
+        // Ognuna delle due facce sta entro 0,08 dall'asse (0,05), ma lo
+        // spessore (0,10) no.
+        assert_eq!(
+            rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 0.08, tol),
+            Err(AxisMiss::NoFaces)
+        );
+        // Al limite esatto il muro c'è.
+        assert!(rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 0.10 + 1e-9, tol).is_ok());
+    }
+
+    #[test]
+    fn axis_works_in_every_drawing_unit() {
+        for unit in [DrawingUnit::Centimetri, DrawingUnit::Millimetri] {
+            let k = unit.per_metre();
+            let scene = scene_with(case_a(Form::Continua, unit), unit.insunits());
+            let tol = unit.tolerance();
+            let s = wall_set(&scene.document, tol).sources;
+            let max = unit.metres(1.5);
+            let r = rect_from_axis(&s, [4.05 * k, 0.0], [4.05 * k, 3.0 * k], max, tol).unwrap();
+            assert!((r.thickness - 0.10 * k).abs() < 1e-9 * k, "{unit:?}");
+            assert!(
+                (signed_area(&r.ring()) - 0.30 * k * k).abs() < 1e-9 * k * k,
+                "{unit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn axis_of_a_rotated_wall() {
+        // Due facce a 30°, a ±0,15 dall'asse del muro, lunghe oltre l'asse dato.
+        let (sin, cos) = 30.0_f64.to_radians().sin_cos();
+        let (d, n) = ([cos, sin], [-sin, cos]);
+        let origin = [1.0, 1.0];
+        let at = |t: f64, s: f64| {
+            [
+                origin[0] + d[0] * t + n[0] * s,
+                origin[1] + d[1] * t + n[1] * s,
+            ]
+        };
+        let face = |s: f64| {
+            let (a, b) = (at(-1.0, s), at(5.0, s));
+            line([a[0], a[1], 0.0], [b[0], b[1], 0.0])
+        };
+        let (sources, tol) = sources_for(vec![face(0.15), face(-0.15)]);
+        // L'asse dato è spostato di 0,05 a sinistra della mezzeria.
+        let r = rect_from_axis(&sources, at(1.0, 0.05), at(3.0, 0.05), 1.5, tol).unwrap();
+        assert!((r.thickness - 0.30).abs() < 1e-9);
+        assert_corners(
+            &r,
+            [at(1.0, -0.15), at(3.0, -0.15), at(3.0, 0.15), at(1.0, 0.15)],
+        );
+        assert_pt(r.axis.0, at(1.0, 0.0));
+        assert_pt(r.axis.1, at(3.0, 0.0));
+        assert!((signed_area(&r.ring()) - 0.30 * 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn arcs_are_not_faces() {
+        // Una faccia è una linea; l'altra un ARC di 6° (una sola corda, e la
+        // corda è parallela all'asse): l'arco non è una faccia dritta.
+        let half = 3.0_f64.to_radians();
+        let radius = 6.0;
+        let apex = 0.10; // dove l'arco tocca la sua tangente verticale
+        let centre = Vector3::new(apex - radius, 1.5, 0.0);
+        let arc = Arc::from_center_radius_angles(centre, radius, -half, half);
+        let entities = vec![line([0.0, 0.0, 0.0], [0.0, 3.0, 0.0]), EntityType::Arc(arc)];
+        let (sources, tol) = sources_for(entities);
+        let chord_is_vertical = sources.values().any(|source| {
+            source
+                .segments
+                .iter()
+                .any(|seg| (seg.start[0] - seg.end[0]).abs() < 1e-12 && seg.start[0] > 0.05)
+        });
+        assert!(chord_is_vertical, "la prova richiede una corda verticale");
+        // Asse tra la linea (x = 0) e la corda (x ≈ 0,092).
+        assert_eq!(
+            rect_from_axis(&sources, [0.04, 1.2], [0.04, 1.8], 1.5, tol),
+            Err(AxisMiss::OneFace)
+        );
+    }
+
+    #[test]
+    fn faces_must_be_parallel_within_half_a_degree() {
+        let tilted = |degrees: f64| {
+            let dx = 10.0 * degrees.to_radians().tan();
+            vec![
+                line([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]),
+                line([0.2, 0.0, 0.0], [0.2 + dx, 10.0, 0.0]),
+            ]
+        };
+        // 0,4°: è una faccia (lo scostamento si legge all'inizio del segmento).
+        let (s, tol) = sources_for(tilted(0.4));
+        let r = rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).unwrap();
+        assert!((r.thickness - 0.20).abs() < 1e-9);
+        // Anche l'altro verso di disegno.
+        let (s, tol) = sources_for(tilted(-0.4));
+        assert!(rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).is_ok());
+        // 0,6°: no.
+        let (s, tol) = sources_for(tilted(0.6));
+        assert_eq!(
+            rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol),
+            Err(AxisMiss::OneFace)
+        );
+        // Perpendicolare: no, ovviamente.
+        let (s, tol) = sources_for(vec![
+            line([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]),
+            line([-1.0, 0.2, 0.0], [1.0, 0.2, 0.0]),
+        ]);
+        assert_eq!(
+            rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol),
+            Err(AxisMiss::OneFace)
+        );
+    }
+
+    #[test]
+    fn faces_must_cover_the_axis_by_more_than_the_tolerance() {
+        let segment = |from: f64, to: f64| line([0.2, from, 0.0], [0.2, to, 0.0]);
+        let wall = |other: EntityType| {
+            let (s, tol) = sources_for(vec![line([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]), other]);
+            rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol)
+        };
+        // Un tratto che inizia dove finisce l'asse non lo copre.
+        assert_eq!(wall(segment(3.0, 5.0)), Err(AxisMiss::OneFace));
+        // Uno che lo copre di 1 mm sì.
+        assert!(wall(segment(2.999, 5.0)).is_ok());
+        // Uno più corto dell'asse, tutto dentro: sì.
+        assert!(wall(segment(1.0, 2.0)).is_ok());
+        // Uno che finisce prima dell'inizio dell'asse: no.
+        assert_eq!(wall(segment(-5.0, 0.0)), Err(AxisMiss::OneFace));
+    }
+
+    #[test]
+    fn a_wall_from_an_axis_and_a_thickness() {
+        let r = rect_from_axis_thickness([0.0, 0.0], [2.0, 0.0], 0.3).unwrap();
+        assert_corners(&r, [[0.0, -0.15], [2.0, -0.15], [2.0, 0.15], [0.0, 0.15]]);
+        assert!((r.thickness - 0.3).abs() < 1e-12);
+        assert_eq!(r.axis, ([0.0, 0.0], [2.0, 0.0]));
+        assert!((signed_area(&r.ring()) - 0.6).abs() < 1e-12);
+
+        // In diagonale e nell'altro verso: sempre antioraria, centrata.
+        let r = rect_from_axis_thickness([3.0, 3.0], [1.0, 1.0], 0.2).unwrap();
+        assert!((r.thickness - 0.2).abs() < 1e-12);
+        assert!(signed_area(&r.ring()) > 0.0);
+        assert_pt(r.axis.0, [3.0, 3.0]);
+        assert_pt(r.axis.1, [1.0, 1.0]);
+        let h = 0.1 / 2.0_f64.sqrt();
+        assert_corners(
+            &r,
+            [
+                [3.0 - h, 3.0 + h],
+                [1.0 - h, 1.0 + h],
+                [1.0 + h, 1.0 - h],
+                [3.0 + h, 3.0 - h],
+            ],
+        );
+
+        assert_eq!(rect_from_axis_thickness([1.0, 1.0], [1.0, 1.0], 0.3), None);
+        assert_eq!(rect_from_axis_thickness([0.0, 0.0], [2.0, 0.0], 0.0), None);
+        assert_eq!(rect_from_axis_thickness([0.0, 0.0], [2.0, 0.0], -0.1), None);
+        assert_eq!(
+            rect_from_axis_thickness([0.0, 0.0], [2.0, 0.0], f64::NAN),
+            None
+        );
+        assert_eq!(
+            rect_from_axis_thickness([0.0, f64::NAN], [2.0, 0.0], 0.3),
+            None
+        );
+    }
+
+    #[test]
+    fn long_and_end_sides_follow_the_corner_order() {
+        let r = WallRect {
+            corners: [[0.0, -1.0], [4.0, -1.0], [4.0, 1.0], [0.0, 1.0]],
+            axis: ([0.0, 0.0], [4.0, 0.0]),
+            thickness: 2.0,
+        };
+        assert_eq!(r.ring(), r.corners.to_vec());
+        assert_eq!(
+            r.long_sides(),
+            [([0.0, -1.0], [4.0, -1.0]), ([4.0, 1.0], [0.0, 1.0])]
+        );
+        assert_eq!(
+            r.end_sides(),
+            [([4.0, -1.0], [4.0, 1.0]), ([0.0, 1.0], [0.0, -1.0])]
+        );
     }
 }
