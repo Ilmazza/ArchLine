@@ -8,22 +8,21 @@
 //! copia è quella di `WBLOCK` (`extract_entities_into`): handle nuovi, con i
 //! layer, i tipi di linea, gli stili e i blocchi che le entità usano, più le
 //! impostazioni del disegno che un documento nuovo avrebbe ai valori
-//! predefiniti (vedi `copy_drawing_settings`).
+//! predefiniti (vedi `copy_drawing_settings`) e gli stili delle multilinee
+//! (`copy_mline_styles`).
 //!
 //! Restano fuori, ognuno con un `Notice::NonCopiata`: ciò che la copia non
 //! porta intero o che non è 2D (immagini, underlay, OLE, riferimenti esterni,
-//! solidi 3D: vedi `Portability`), gli handle che la copia non restituisce e,
-//! per layout, lo spazio carta.
-//!
-//! Limite noto: gli stili di multileader, multilinea e tabella non sono nella
-//! copia di WBLOCK; quelle entità arrivano con un riferimento allo stile che il
-//! file estratto non ha, e qui non sono elencate.
+//! multileader, tabelle e altre entità con stili per handle, solidi 3D: vedi
+//! `Portability`), gli handle che la copia non restituisce e, per layout, lo
+//! spazio carta.
 //!
 //! Il disegno di lavoro non si tocca: si lavora su una sua copia.
 
 use std::path::{Path, PathBuf};
 
-use codec::objects::ObjectType;
+use codec::entities::MLine;
+use codec::objects::{MLineStyle, ObjectType};
 use codec::tables::BlockRecord;
 use codec::xdata::ExtendedData;
 use codec::{CadDocument, DxfVersion, EntityType, Handle};
@@ -240,6 +239,7 @@ fn copy_out(
     let _ = extract_entities_into(work, &handles_in, &mut out);
     out.header.insertion_units = src.header.insertion_units;
     copy_drawing_settings(src, &mut out);
+    copy_mline_styles(src, &mut out);
     copy_layer_linetypes(src, &mut out);
     scrub_our_data(&mut out);
 
@@ -274,13 +274,19 @@ fn copy_out(
 /// Che cosa la copia di WBLOCK porta intero (spec §5.5: immagini, riferimenti
 /// esterni e 3D si elencano, non si copiano).
 ///
-/// Non si portano: le immagini raster, gli underlay (PDF/DWF/DGN) e gli OLE,
-/// che rimandano a definizioni o dati che la copia non prende; i solidi 3D
-/// (`3DSOLID`, `REGION`, `BODY`, `SURFACE`, `MESH`); un `INSERT` di un
-/// riferimento esterno, di un blocco che manca o di un blocco che contiene
-/// (anche in un blocco annidato) un'immagine, un underlay, un OLE o uno di
-/// questi `INSERT`. I solidi 3D dentro un blocco restano: la copia li porta
-/// interi.
+/// Non si portano:
+/// - le immagini raster, gli underlay (PDF/DWF/DGN) e gli OLE, che rimandano a
+///   definizioni o dati che la copia non prende;
+/// - le entità che rimandano per handle a stili che la copia non porta e non
+///   rimappa: multileader (stile, stile di testo, blocchi delle frecce e del
+///   contenuto), tabelle (stile, blocco `*T`, stili delle celle), tolleranze
+///   (stile di quota), forme (file di forme) e simboli di sezione (stile di
+///   vista); una multilinea il cui stile manca anche in `src` (le altre
+///   portano il loro stile: `copy_mline_styles`);
+/// - i solidi 3D (`3DSOLID`, `REGION`, `BODY`, `SURFACE`, `MESH`);
+/// - un `INSERT` di un riferimento esterno, di un blocco che manca o di un
+///   blocco che contiene (anche in un blocco annidato) una delle entità sopra,
+///   3D escluso: i solidi 3D dentro un blocco restano, la copia li porta interi.
 struct Portability<'a> {
     doc: &'a CadDocument,
     /// Blocco (nome in maiuscolo) → si copia intero.
@@ -310,9 +316,15 @@ impl<'a> Portability<'a> {
     /// Lo stesso per un'entità dentro un blocco, dove il 3D resta.
     fn member(&mut self, entity: &EntityType) -> bool {
         match entity {
-            EntityType::RasterImage(_) | EntityType::Underlay(_) | EntityType::Ole2Frame(_) => {
-                false
-            }
+            EntityType::RasterImage(_)
+            | EntityType::Underlay(_)
+            | EntityType::Ole2Frame(_)
+            | EntityType::MultiLeader(_)
+            | EntityType::Table(_)
+            | EntityType::Tolerance(_)
+            | EntityType::Shape(_)
+            | EntityType::SectionSymbol(_) => false,
+            EntityType::MLine(mline) => mline_style(self.doc, mline).is_some(),
             EntityType::Insert(insert) => self.block(&insert.block_name),
             _ => true,
         }
@@ -481,9 +493,98 @@ fn copy_layer_linetypes(src: &CadDocument, out: &mut CadDocument) {
         .layers
         .iter()
         .map(|layer| layer.line_type.clone())
-        .filter(|name| !name.is_empty())
         .collect();
+    copy_missing_linetypes(src, out, names);
+}
+
+/// Lo stile di una multilinea in `doc`: per handle, altrimenti per nome.
+fn mline_style<'a>(doc: &'a CadDocument, mline: &MLine) -> Option<&'a MLineStyle> {
+    let by_handle = mline.style_handle.and_then(|h| match doc.objects.get(&h) {
+        Some(ObjectType::MLineStyle(style)) => Some(style),
+        _ => None,
+    });
+    by_handle.or_else(|| {
+        doc.objects.values().find_map(|object| match object {
+            ObjectType::MLineStyle(style) if style.name.eq_ignore_ascii_case(&mline.style_name) => {
+                Some(style)
+            }
+            _ => None,
+        })
+    })
+}
+
+/// R30: `ClipboardDeps` non porta gli stili di multilinea, e la copia lascia
+/// alle multilinee l'handle dello stile di `src`. Ogni stile usato (anche dalle
+/// multilinee dentro i blocchi copiati) va in `out`, nel dizionario
+/// `ACAD_MLINESTYLE` con un handle nuovo; uno stile con lo stesso nome (lo
+/// «Standard» del documento nuovo) prende i valori di `src` e tiene il suo
+/// handle. Poi i tipi di linea degli elementi, se mancano. Le multilinee il
+/// cui stile manca anche in `src` non arrivano qui (`Portability`).
+fn copy_mline_styles(src: &CadDocument, out: &mut CadDocument) {
+    let styles: Vec<MLineStyle> = out
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::MLine(mline) => mline_style(src, mline).cloned(),
+            _ => None,
+        })
+        .collect();
+    if styles.is_empty() {
+        return;
+    }
+    let dict = out.header.acad_mlinestyle_dict_handle;
+    let mut placed: FxHashMap<String, Handle> = FxHashMap::default();
+    let mut linetypes = Vec::new();
+    for mut style in styles {
+        let key = style.name.to_ascii_uppercase();
+        if placed.contains_key(&key) {
+            continue;
+        }
+        let Some(ObjectType::Dictionary(entries)) = out.objects.get(&dict) else {
+            // Un documento nuovo il dizionario lo ha sempre; senza, la
+            // multilinea prende lo stile corrente di `out` al salvataggio.
+            placed.insert(key, Handle::NULL);
+            continue;
+        };
+        let existing = entries
+            .entries
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&style.name))
+            .map(|(_, handle)| *handle);
+        let handle = existing.unwrap_or_else(|| out.allocate_handle());
+        if existing.is_none() {
+            if let Some(ObjectType::Dictionary(entries)) = out.objects.get_mut(&dict) {
+                entries.add_entry(&style.name, handle);
+            }
+        }
+        style.handle = handle;
+        style.owner = dict;
+        linetypes.extend(style.elements.iter().map(|e| e.linetype.clone()));
+        out.objects.insert(handle, ObjectType::MLineStyle(style));
+        placed.insert(key, handle);
+    }
+    for entity in out.entities_mut() {
+        if let EntityType::MLine(mline) = entity {
+            let Some(style) = mline_style(src, mline) else {
+                continue;
+            };
+            let handle = placed
+                .get(&style.name.to_ascii_uppercase())
+                .copied()
+                .filter(|handle| !handle.is_null());
+            mline.style_name = style.name.clone();
+            mline.style_handle = handle;
+        }
+    }
+    copy_missing_linetypes(src, out, linetypes);
+}
+
+/// I tipi di linea nominati che `out` non ha, copiati da `src` con un handle
+/// nuovo.
+fn copy_missing_linetypes(src: &CadDocument, out: &mut CadDocument, names: Vec<String>) {
     for name in names {
+        if name.is_empty() {
+            continue;
+        }
         if out.line_types.contains(&name) {
             continue;
         }
@@ -1502,5 +1603,144 @@ mod tests {
             .entities()
             .all(|e| e.common().extended_data.records().is_empty()));
         assert!(ex.notices.is_empty(), "{:?}", ex.notices);
+    }
+
+    /// Lo stile di multilinea `name` nel dizionario `ACAD_MLINESTYLE` di `doc`.
+    fn mline_style_named<'a>(
+        doc: &'a CadDocument,
+        name: &str,
+    ) -> Option<(Handle, &'a codec::objects::MLineStyle)> {
+        let Some(ObjectType::Dictionary(dict)) =
+            doc.objects.get(&doc.header.acad_mlinestyle_dict_handle)
+        else {
+            return None;
+        };
+        let handle = dict
+            .entries
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, h)| *h)?;
+        match doc.objects.get(&handle) {
+            Some(ObjectType::MLineStyle(style)) => Some((handle, style)),
+            _ => None,
+        }
+    }
+
+    /// R30: una multilinea porta con sé il suo stile (con i tipi di linea
+    /// degli elementi), anche quando si chiama come lo «Standard» del
+    /// documento nuovo; multileader e tabelle, che rimandano per handle a
+    /// stili, stili di testo e blocchi che la copia non porta, restano fuori
+    /// ed elencati.
+    #[test]
+    fn mline_styles_travel_and_mleaders_and_tables_are_listed() {
+        let mut src = doc_with_zones();
+        let mut tratto = LineType::new("TRATTO_ML");
+        tratto.handle = src.allocate_handle();
+        src.line_types.add(tratto).unwrap();
+        let dict = src.header.acad_mlinestyle_dict_handle;
+        let mut add_style = |src: &mut CadDocument, name: &str, offset: f64| {
+            let mut style = codec::objects::MLineStyle::new(name);
+            let mut outer = codec::objects::MLineStyleElement::new(offset);
+            outer.linetype = "TRATTO_ML".into();
+            style.add_element(outer);
+            style.add_element(codec::objects::MLineStyleElement::new(-offset));
+            style.description = format!("muro {name}");
+            let handle = src.allocate_handle();
+            style.handle = handle;
+            style.owner = dict;
+            if let Some(ObjectType::Dictionary(d)) = src.objects.get_mut(&dict) {
+                d.entries.retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+                d.add_entry(name, handle);
+            }
+            src.objects.insert(handle, ObjectType::MLineStyle(style));
+            handle
+        };
+        let muro30 = add_style(&mut src, "MURO30", 0.15);
+        let standard = add_style(&mut src, "Standard", 0.05);
+        let mut mline = |style: Handle, name: &str, y: f64| {
+            let mut m = codec::entities::MLine::from_points(&[
+                Vector3::new(10.0, y, 0.0),
+                Vector3::new(14.0, y, 0.0),
+            ]);
+            m.style_handle = Some(style);
+            m.style_name = name.into();
+            EntityType::MLine(m)
+        };
+        src.add_entity(mline(muro30, "MURO30", 0.0)).unwrap();
+        src.add_entity(mline(standard, "Standard", 1.0)).unwrap();
+        let mleader = src
+            .add_entity(EntityType::MultiLeader(Box::new(
+                codec::entities::MultiLeader::new(),
+            )))
+            .unwrap();
+        let table = src
+            .add_entity(EntityType::Table(Box::new(codec::entities::Table::new(
+                Vector3::new(20.0, 0.0, 0.0),
+                2,
+                2,
+            ))))
+            .unwrap();
+
+        let ex = extract(&src, &opts(&both()));
+        assert_eq!(
+            ex.notices,
+            vec![
+                non_copiata(mleader, "MULTILEADER"),
+                non_copiata(table, "ACAD_TABLE"),
+            ]
+        );
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            let mlines: Vec<&codec::entities::MLine> = out
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::MLine(m) => Some(m),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(mlines.len(), 2, "{what}");
+            for (name, offset) in [("MURO30", 0.15), ("Standard", 0.05)] {
+                let (handle, style) =
+                    mline_style_named(out, name).unwrap_or_else(|| panic!("{what}: {name}"));
+                assert_eq!(style.description, format!("muro {name}"), "{what}");
+                assert_eq!(style.elements.len(), 2, "{what}");
+                assert!((style.elements[0].offset - offset).abs() < 1e-12, "{what}");
+                assert!(
+                    style.elements[0].linetype.eq_ignore_ascii_case("TRATTO_ML"),
+                    "{what}"
+                );
+                let users = mlines
+                    .iter()
+                    .filter(|m| m.style_handle == Some(handle))
+                    .count();
+                assert_eq!(users, 1, "{what}: multilinea con lo stile {name}");
+            }
+            assert!(out.line_types.contains("TRATTO_ML"), "{what}");
+            assert!(!out
+                .entities()
+                .any(|e| matches!(e, EntityType::MultiLeader(_) | EntityType::Table(_))));
+        }
+        for (_, out) in &ex.docs {
+            check(out, "in memoria");
+        }
+        let tmp = TempDir::new("r30");
+        for path in write(&ex, &tmp.0, "casa", false).unwrap() {
+            let loaded = crate::io::load_file(&path).unwrap();
+            check(&loaded, "dopo il DWG");
+        }
+    }
+
+    /// R30: una multilinea il cui stile manca anche nel disegno di partenza
+    /// non si copia: resta fuori ed elencata.
+    #[test]
+    fn mline_without_a_style_is_listed() {
+        let mut src = doc_with_zones();
+        let mut m = codec::entities::MLine::from_points(&[Vector3::ZERO, Vector3::UNIT_X]);
+        m.style_handle = Some(Handle::new(0xBEEF));
+        m.style_name = "INESISTENTE".into();
+        let orphan = src.add_entity(EntityType::MLine(m)).unwrap();
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiFatto]));
+        assert_eq!(ex.notices, vec![non_copiata(orphan, "MLINE")]);
+        assert_eq!(model_space_count(&ex.docs[0].1), 12);
     }
 }
