@@ -9,7 +9,11 @@
 //! layer, i tipi di linea, gli stili e i blocchi che le entità usano, più le
 //! impostazioni del disegno che un documento nuovo avrebbe ai valori
 //! predefiniti (vedi `copy_drawing_settings`) e gli stili delle multilinee
-//! (`copy_mline_styles`).
+//! (`copy_mline_styles`). La copia lascia nei record gli handle di `src`:
+//! stili di quota (stile di testo, frecce, tipi di linea), tipi di linea
+//! complessi (stile di testo) e stili di stampa dei layer si ripuntano per nome
+//! su `out`, portando ciò che manca; i blocchi inseriti dentro i blocchi `*D`
+//! delle quote arrivano con le quote.
 //!
 //! Restano fuori, ognuno con un `Notice::NonCopiata`: ciò che la copia non
 //! porta intero o che non è 2D (immagini, underlay, OLE, riferimenti esterni,
@@ -21,14 +25,14 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::entities::MLine;
+use codec::entities::{Insert, MLine};
 use codec::objects::{MLineStyle, ObjectType};
-use codec::tables::BlockRecord;
+use codec::tables::{BlockRecord, DimStyle, TextStyle};
 use codec::xdata::ExtendedData;
-use codec::{CadDocument, DxfVersion, EntityType, Handle};
+use codec::{CadDocument, DxfVersion, EntityType, Handle, Vector3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::app::copy_to_clipboard_kernel;
+use crate::app::{copy_to_clipboard_kernel, paste_entities_kernel, ClipboardDeps, PasteSpace};
 use crate::modules::insert::wblock::extract_entities_into;
 use crate::scene::view::dispatch::set_entity_xdata;
 
@@ -240,7 +244,11 @@ fn copy_out(
     out.header.insertion_units = src.header.insertion_units;
     copy_drawing_settings(src, &mut out);
     copy_mline_styles(src, &mut out);
+    copy_inserted_blocks(src, &mut out);
+    copy_dim_style_references(src, &mut out);
     copy_layer_linetypes(src, &mut out);
+    copy_complex_linetype_styles(src, &mut out);
+    copy_layer_plot_styles(src, &mut out);
     scrub_our_data(&mut out);
 
     // La copia di WBLOCK passa a `copy_to_clipboard_kernel` gli handle senza
@@ -594,6 +602,256 @@ fn copy_missing_linetypes(src: &CadDocument, out: &mut CadDocument, names: Vec<S
         let mut line_type = line_type.clone();
         line_type.handle = out.allocate_handle();
         let _ = out.line_types.add(line_type);
+    }
+}
+
+/// Le definizioni di blocco di `src` nominate che `out` non ha, con i blocchi
+/// annidati e i layer, i tipi di linea e gli stili dei loro membri: la stessa
+/// unione della copia di WBLOCK (`ClipboardDeps` di un `INSERT` di prova,
+/// incollato senza entità).
+fn merge_blocks(src: &CadDocument, out: &mut CadDocument, names: Vec<String>) {
+    let probes: Vec<EntityType> = names
+        .into_iter()
+        .filter(|name| {
+            !name.is_empty()
+                && out.block_records.get(name).is_none()
+                && src.block_records.get(name).is_some()
+        })
+        .map(|name| EntityType::Insert(Insert::new(name, Vector3::ZERO)))
+        .collect();
+    if probes.is_empty() {
+        return;
+    }
+    let deps = ClipboardDeps::capture(src, &probes);
+    paste_entities_kernel(out, &[], &deps, None, PasteSpace::Model);
+}
+
+/// I blocchi `*D` delle quote si copiano con le loro entità, ma i blocchi che
+/// quelle inseriscono (le frecce, nei file di AutoCAD) no: ogni `INSERT` di
+/// `out`, anche dentro un blocco, che nomina un blocco mancante lo riceve da
+/// `src`.
+fn copy_inserted_blocks(src: &CadDocument, out: &mut CadDocument) {
+    let missing: Vec<String> = out
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Insert(insert) if out.block_records.get(&insert.block_name).is_none() => {
+                Some(insert.block_name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    merge_blocks(src, out, missing);
+}
+
+/// Lo stile di testo `style` di `src` in `out`: l'omonimo, oppure, per gli
+/// stili senza nome dei file di forme, quello con lo stesso file; se manca,
+/// una copia con un handle nuovo.
+fn ensure_text_style(out: &mut CadDocument, style: &TextStyle) -> Option<Handle> {
+    let found = if style.name.is_empty() {
+        out.text_styles
+            .iter()
+            .find(|s| s.name.is_empty() && s.font_file.eq_ignore_ascii_case(&style.font_file))
+    } else {
+        out.text_styles.get(&style.name)
+    };
+    if let Some(found) = found {
+        return Some(found.handle);
+    }
+    let mut copy = style.clone();
+    copy.handle = out.allocate_handle();
+    copy.xref_block_record_handle = Handle::NULL;
+    let handle = copy.handle;
+    if copy.name.is_empty() {
+        out.text_styles.add_allow_duplicate(copy);
+    } else {
+        out.text_styles.add(copy).ok()?;
+    }
+    Some(handle)
+}
+
+/// Gli stili di quota arrivano in `out` per nome (`ClipboardDeps`) ma con gli
+/// handle di `src` dentro, e uno stile che `out` ha già (lo «Standard») non
+/// arriva affatto. Ogni stile di `out` con un omonimo in `src` ne prende i
+/// valori (tiene il suo handle); stile di testo (DIMTXSTY), blocchi delle
+/// frecce (DIMBLK, DIMBLK1, DIMBLK2, DIMLDRBLK) e tipi di linea (DIMLTYPE,
+/// DIMLTEX1, DIMLTEX2) si risolvono in `src` per handle (o per nome), si
+/// portano in `out` se mancano e si ripuntano; ciò che in `src` non si
+/// risolve resta nullo (il predefinito).
+fn copy_dim_style_references(src: &CadDocument, out: &mut CadDocument) {
+    let styles: Vec<DimStyle> = out
+        .dim_styles
+        .iter()
+        .filter_map(|style| src.dim_styles.get(&style.name).cloned())
+        .collect();
+    if styles.is_empty() {
+        return;
+    }
+    let text_style = |s: &DimStyle| {
+        src.text_styles
+            .iter()
+            .find(|t| !s.dimtxsty_handle.is_null() && t.handle == s.dimtxsty_handle)
+            .or_else(|| {
+                (!s.dimtxsty.is_empty())
+                    .then(|| src.text_styles.get(&s.dimtxsty))
+                    .flatten()
+            })
+            .cloned()
+    };
+    let block = |handle: Handle, name: &str| {
+        src.block_records
+            .iter()
+            .find(|r| !handle.is_null() && r.handle == handle)
+            .map(|r| r.name.clone())
+            .or_else(|| (!name.is_empty()).then(|| name.to_string()))
+    };
+    let blocks = |s: &DimStyle| {
+        [
+            block(s.dimblk, &s.dimblk_name),
+            block(s.dimblk1, &s.dimblk1_name),
+            block(s.dimblk2, &s.dimblk2_name),
+            block(s.dimldrblk, ""),
+        ]
+    };
+    let line_types = |s: &DimStyle| {
+        [s.dimltex_handle, s.dimltex1_handle, s.dimltex2_handle].map(|handle| {
+            src.line_types
+                .iter()
+                .find(|l| !handle.is_null() && l.handle == handle)
+                .map(|l| l.name.clone())
+        })
+    };
+
+    merge_blocks(src, out, styles.iter().flat_map(blocks).flatten().collect());
+    copy_missing_linetypes(
+        src,
+        out,
+        styles.iter().flat_map(line_types).flatten().collect(),
+    );
+    for from in styles {
+        let text = text_style(&from);
+        let text_handle = text.as_ref().and_then(|t| ensure_text_style(out, t));
+        let [blk, blk1, blk2, ldr] = blocks(&from).map(|name| {
+            name.and_then(|n| out.block_records.get(&n).map(|r| r.handle))
+                .unwrap_or(Handle::NULL)
+        });
+        let [lt, lt1, lt2] = line_types(&from).map(|name| {
+            name.and_then(|n| out.line_types.get(&n).map(|l| l.handle))
+                .unwrap_or(Handle::NULL)
+        });
+        let name = from.name.clone();
+        let Some(to) = out.dim_styles.get_mut(&name) else {
+            continue;
+        };
+        let (handle, xref) = (to.handle, to.xref_handle);
+        *to = from;
+        to.handle = handle;
+        to.xref_handle = xref;
+        to.dimtxsty_handle = text_handle.unwrap_or(Handle::NULL);
+        if let Some(text) = text {
+            to.dimtxsty = text.name;
+        }
+        (to.dimblk, to.dimblk1, to.dimblk2, to.dimldrblk) = (blk, blk1, blk2, ldr);
+        (to.dimltex_handle, to.dimltex1_handle, to.dimltex2_handle) = (lt, lt1, lt2);
+    }
+}
+
+/// Un tipo di linea complesso (testo o forme) nomina il suo stile di testo per
+/// handle, che resta quello di `src` in ogni copia del record. Per ogni tipo
+/// di linea di `out` con un omonimo in `src`, lo stile di ogni elemento
+/// complesso si porta in `out` e si ripunta (nullo se in `src` non si
+/// risolve).
+fn copy_complex_linetype_styles(src: &CadDocument, out: &mut CadDocument) {
+    let plan: Vec<(String, Vec<(usize, Option<TextStyle>)>)> = out
+        .line_types
+        .iter()
+        .filter_map(|line_type| {
+            let from = src.line_types.get(&line_type.name)?;
+            let elements: Vec<_> = from
+                .elements
+                .iter()
+                .enumerate()
+                .filter_map(|(index, element)| {
+                    let complex = element.complex.as_ref()?;
+                    let style = src
+                        .text_styles
+                        .iter()
+                        .find(|s| {
+                            !complex.style_handle.is_null() && s.handle == complex.style_handle
+                        })
+                        .cloned();
+                    Some((index, style))
+                })
+                .collect();
+            (!elements.is_empty()).then(|| (line_type.name.clone(), elements))
+        })
+        .collect();
+    for (name, elements) in plan {
+        let handles: Vec<(usize, Handle)> = elements
+            .into_iter()
+            .map(|(index, style)| {
+                let handle = style.and_then(|s| ensure_text_style(out, &s));
+                (index, handle.unwrap_or(Handle::NULL))
+            })
+            .collect();
+        let Some(line_type) = out.line_types.get_mut(&name) else {
+            continue;
+        };
+        for (index, handle) in handles {
+            if let Some(complex) = line_type
+                .elements
+                .get_mut(index)
+                .and_then(|element| element.complex.as_mut())
+            {
+                complex.style_handle = handle;
+            }
+        }
+    }
+}
+
+/// Le voci del dizionario `ACAD_PLOTSTYLENAME` (dall'intestazione o dal
+/// dizionario radice).
+fn plot_style_entries(doc: &CadDocument) -> Vec<(String, Handle)> {
+    let root = || match doc.objects.get(&doc.header.named_objects_dict_handle) {
+        Some(ObjectType::Dictionary(root)) => root.get("ACAD_PLOTSTYLENAME"),
+        _ => None,
+    };
+    let handle = Some(doc.header.acad_plotstylename_dict_handle)
+        .filter(|h| doc.objects.contains_key(h))
+        .or_else(root);
+    match handle.and_then(|h| doc.objects.get(&h)) {
+        Some(ObjectType::Dictionary(d)) => d.entries.clone(),
+        Some(ObjectType::DictionaryWithDefault(d)) => d.entries.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// `Layer.plotstyle_handle` arriva con l'handle di `src`: si ripunta per nome
+/// allo stile di stampa omonimo di `out`, o a nulla se `out` non lo ha.
+fn copy_layer_plot_styles(src: &CadDocument, out: &mut CadDocument) {
+    let src_names: FxHashMap<Handle, String> = plot_style_entries(src)
+        .into_iter()
+        .map(|(name, handle)| (handle, name))
+        .collect();
+    let out_entries = plot_style_entries(out);
+    let layers: Vec<String> = out.layers.iter().map(|l| l.name.clone()).collect();
+    for name in layers {
+        let Some(from) = src.layers.get(&name) else {
+            continue;
+        };
+        let style = Some(from.plot_style.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| src_names.get(&from.plotstyle_handle).cloned());
+        let handle = style
+            .and_then(|style| {
+                out_entries
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(&style))
+                    .map(|(_, handle)| *handle)
+            })
+            .unwrap_or(Handle::NULL);
+        if let Some(to) = out.layers.get_mut(&name) {
+            to.plotstyle_handle = handle;
+        }
     }
 }
 
@@ -1638,7 +1896,7 @@ mod tests {
         tratto.handle = src.allocate_handle();
         src.line_types.add(tratto).unwrap();
         let dict = src.header.acad_mlinestyle_dict_handle;
-        let mut add_style = |src: &mut CadDocument, name: &str, offset: f64| {
+        let add_style = |src: &mut CadDocument, name: &str, offset: f64| {
             let mut style = codec::objects::MLineStyle::new(name);
             let mut outer = codec::objects::MLineStyleElement::new(offset);
             outer.linetype = "TRATTO_ML".into();
@@ -1657,7 +1915,7 @@ mod tests {
         };
         let muro30 = add_style(&mut src, "MURO30", 0.15);
         let standard = add_style(&mut src, "Standard", 0.05);
-        let mut mline = |style: Handle, name: &str, y: f64| {
+        let mline = |style: Handle, name: &str, y: f64| {
             let mut m = codec::entities::MLine::from_points(&[
                 Vector3::new(10.0, y, 0.0),
                 Vector3::new(14.0, y, 0.0),
@@ -1742,5 +2000,266 @@ mod tests {
         let ex = extract(&src, &opts(&[Elaborato::StatoDiFatto]));
         assert_eq!(ex.notices, vec![non_copiata(orphan, "MLINE")]);
         assert_eq!(model_space_count(&ex.docs[0].1), 12);
+    }
+
+    // ---- Fix round 1 (R31): riferimenti per handle delle tabelle ----
+
+    fn add_text_style(doc: &mut CadDocument, name: &str, font: &str) -> Handle {
+        let mut style = codec::tables::TextStyle::new(name);
+        style.font_file = font.into();
+        style.handle = doc.allocate_handle();
+        let handle = style.handle;
+        doc.text_styles.add(style).unwrap();
+        handle
+    }
+
+    fn add_line_type(doc: &mut CadDocument, line_type: LineType) -> Handle {
+        let mut line_type = line_type;
+        line_type.handle = doc.allocate_handle();
+        let handle = line_type.handle;
+        doc.line_types.add(line_type).unwrap();
+        handle
+    }
+
+    fn handle_of_text_style(
+        doc: &CadDocument,
+        handle: Handle,
+    ) -> Option<&codec::tables::TextStyle> {
+        doc.text_styles.iter().find(|s| s.handle == handle)
+    }
+
+    fn block_named_by(doc: &CadDocument, handle: Handle) -> Option<String> {
+        doc.block_records
+            .iter()
+            .find(|r| r.handle == handle)
+            .map(|r| r.name.clone())
+    }
+
+    fn line_type_named_by(doc: &CadDocument, handle: Handle) -> Option<String> {
+        doc.line_types
+            .iter()
+            .find(|l| l.handle == handle)
+            .map(|l| l.name.clone())
+    }
+
+    /// Il segnaposto `name` del dizionario `ACAD_PLOTSTYLENAME`.
+    fn plot_style_named(doc: &CadDocument, name: &str) -> Option<Handle> {
+        match doc
+            .objects
+            .get(&doc.header.acad_plotstylename_dict_handle)?
+        {
+            ObjectType::DictionaryWithDefault(d) => d
+                .entries
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, h)| *h),
+            ObjectType::Dictionary(d) => d
+                .entries
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, h)| *h),
+            _ => None,
+        }
+    }
+
+    /// R31: uno stile di quota porta con sé stile di testo, tipi di linea e
+    /// blocchi delle frecce (per nome, con gli handle di `out`); lo «Standard»
+    /// modificato tiene i valori di `src`; i blocchi inseriti dentro i blocchi
+    /// `*D` delle quote arrivano; un tipo di linea complesso punta al suo stile
+    /// di testo; lo stile di stampa dei layer punta a quello di `out` o a nulla.
+    #[test]
+    fn dimension_styles_bring_their_text_style_linetypes_and_arrows() {
+        let mut src = doc_with_zones();
+        add_text_style(&mut src, "ROMANS", "romans.shx");
+        let lt_text = add_text_style(&mut src, "LT_TESTO", "simplex.shx");
+        let mut dashed = LineType::new("TRATTEGGIO_Q");
+        dashed.add_element(codec::tables::LineTypeElement::dash(0.5));
+        dashed.add_element(codec::tables::LineTypeElement::space(0.25));
+        dashed.pattern_length = 0.75;
+        add_line_type(&mut src, dashed);
+        let mut gas = LineType::new("GAS_LT");
+        gas.add_element(codec::tables::LineTypeElement::dash(0.5));
+        let mut text = codec::tables::LineTypeElement::space(0.2);
+        text.complex = Some(codec::tables::LineTypeComplexData {
+            content: codec::tables::LineTypeComplexContent::Text { text: "GAS".into() },
+            style_handle: lt_text,
+            scale: 0.1,
+            ..Default::default()
+        });
+        gas.add_element(text);
+        gas.pattern_length = 0.7;
+        add_line_type(&mut src, gas);
+        let mut tubo = codec::entities::Line::from_points(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(8.0, 5.0, 0.0),
+        );
+        tubo.common.linetype = "GAS_LT".into();
+        src.add_entity(EntityType::Line(tubo)).unwrap();
+
+        let arch_tick = crate::entities::arrowheads::resolve(&mut src, "_ArchTick").unwrap();
+        crate::entities::arrowheads::resolve(&mut src, "_Oblique").unwrap();
+        let mut arch = codec::tables::DimStyle::standard();
+        arch.name = "ARCH".into();
+        arch.handle = src.allocate_handle();
+        arch.dimtxsty_handle = src.text_styles.get("ROMANS").unwrap().handle;
+        arch.dimtxsty = "ROMANS".into();
+        arch.dimblk = arch_tick;
+        arch.dimblk1 = arch_tick;
+        arch.dimblk2 = arch_tick;
+        arch.dimldrblk = arch_tick;
+        let dashed = src.line_types.get("TRATTEGGIO_Q").unwrap().handle;
+        arch.dimltex_handle = dashed;
+        arch.dimltex1_handle = dashed;
+        arch.dimltex2_handle = dashed;
+        arch.dimasz = 0.2;
+        src.dim_styles.add(arch).unwrap();
+        let standard = src.dim_styles.get_mut("Standard").unwrap();
+        standard.dimasz = 0.33;
+        standard.dimtxt = 0.44;
+
+        // Il blocco della quota, come lo scrive AutoCAD: le frecce sono
+        // INSERT di blocchi (qui uno che lo stile non nomina).
+        crate::app::define_block_raw_doc(
+            &mut src,
+            "*D7",
+            Vector3::ZERO,
+            &[
+                EntityType::Line(codec::entities::Line::from_points(
+                    Vector3::new(0.0, -1.0, 0.0),
+                    Vector3::new(4.0, -1.0, 0.0),
+                )),
+                EntityType::Insert(Insert::new("_Oblique", Vector3::new(0.0, -1.0, 0.0))),
+            ],
+        );
+        let mut quota = codec::entities::DimensionLinear::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+        );
+        quota.definition_point = Vector3::new(4.0, -1.0, 0.0);
+        quota.base.style_name = "ARCH".into();
+        quota.base.block_name = "*D7".into();
+        src.add_entity(EntityType::Dimension(Box::new(
+            codec::entities::Dimension::Linear(quota),
+        )))
+        .unwrap();
+        let mut sullo_standard = codec::entities::DimensionLinear::new(
+            Vector3::new(4.1, 0.0, 0.0),
+            Vector3::new(8.0, 0.0, 0.0),
+        );
+        sullo_standard.definition_point = Vector3::new(8.0, -1.0, 0.0);
+        sullo_standard.base.style_name = "Standard".into();
+        src.add_entity(EntityType::Dimension(Box::new(
+            codec::entities::Dimension::Linear(sullo_standard),
+        )))
+        .unwrap();
+
+        // Stili di stampa dei layer: MURI su «Normal», TESTI su uno che `out`
+        // non ha.
+        let normal = plot_style_named(&src, "Normal").expect("segnaposto Normal");
+        src.layers.get_mut(LAYER_MURI).unwrap().plotstyle_handle = normal;
+        let mut testi = Layer::new("TESTI");
+        testi.handle = src.allocate_handle();
+        testi.plotstyle_handle = Handle::new(0xFEED);
+        src.layers.add(testi).unwrap();
+        let mut nota = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
+        nota.common.layer = "TESTI".into();
+        src.add_entity(EntityType::Line(nota)).unwrap();
+
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            let arch = out
+                .dim_styles
+                .get("ARCH")
+                .unwrap_or_else(|| panic!("{what}: ARCH"));
+            let text = handle_of_text_style(out, arch.dimtxsty_handle)
+                .unwrap_or_else(|| panic!("{what}: DIMTXSTY non risolto"));
+            assert!(text.name.eq_ignore_ascii_case("ROMANS"), "{what}");
+            assert_eq!(text.font_file, "romans.shx", "{what}");
+            for handle in [arch.dimblk, arch.dimblk1, arch.dimblk2, arch.dimldrblk] {
+                assert_eq!(
+                    block_named_by(out, handle).as_deref(),
+                    Some("_ArchTick"),
+                    "{what}: freccia"
+                );
+            }
+            for handle in [
+                arch.dimltex_handle,
+                arch.dimltex1_handle,
+                arch.dimltex2_handle,
+            ] {
+                assert_eq!(
+                    line_type_named_by(out, handle).as_deref(),
+                    Some("TRATTEGGIO_Q"),
+                    "{what}: tipo di linea della quota"
+                );
+            }
+            assert!((arch.dimasz - 0.2).abs() < 1e-12, "{what}");
+            let standard = out.dim_styles.get("Standard").unwrap();
+            assert!(
+                (standard.dimasz - 0.33).abs() < 1e-12,
+                "{what}: DIMASZ di Standard"
+            );
+            assert!(
+                (standard.dimtxt - 0.44).abs() < 1e-12,
+                "{what}: DIMTXT di Standard"
+            );
+            // Ogni INSERT, anche dentro i blocchi `*D`, punta a un blocco che c'è.
+            assert!(out.block_records.get("_ArchTick").is_some(), "{what}");
+            assert!(
+                out.block_records.get("_Oblique").is_some(),
+                "{what}: freccia del *D"
+            );
+            for entity in out.entities() {
+                if let EntityType::Insert(insert) = entity {
+                    assert!(
+                        out.block_records.get(&insert.block_name).is_some(),
+                        "{what}: INSERT di {} senza blocco",
+                        insert.block_name
+                    );
+                }
+            }
+            // Il tipo di linea complesso punta al suo stile di testo.
+            let gas = out
+                .line_types
+                .get("GAS_LT")
+                .unwrap_or_else(|| panic!("{what}: GAS_LT"));
+            let complex = gas
+                .elements
+                .iter()
+                .find_map(|e| e.complex.as_ref())
+                .unwrap_or_else(|| panic!("{what}: elemento complesso perso"));
+            let style = handle_of_text_style(out, complex.style_handle)
+                .unwrap_or_else(|| panic!("{what}: stile del tipo di linea non risolto"));
+            assert_eq!(style.font_file, "simplex.shx", "{what}");
+            // Stili di stampa dei layer.
+            assert_eq!(
+                Some(out.layers.get(LAYER_MURI).unwrap().plotstyle_handle),
+                plot_style_named(out, "Normal"),
+                "{what}: stile di stampa di MURI"
+            );
+            let testi = out.layers.get("TESTI").unwrap().plotstyle_handle;
+            assert!(
+                testi.is_null() || out.objects.contains_key(&testi),
+                "{what}: stile di stampa di TESTI {testi:?}"
+            );
+        }
+
+        let ex = extract(&src, &opts(&both()));
+        assert!(ex.notices.is_empty(), "{:?}", ex.notices);
+        for (_, out) in &ex.docs {
+            check(out, "in memoria");
+            assert!(out.layers.get("TESTI").unwrap().plotstyle_handle.is_null());
+            assert_eq!(
+                out.entities()
+                    .filter(|e| matches!(e, EntityType::Dimension(_)))
+                    .count(),
+                2
+            );
+        }
+        let tmp = TempDir::new("r31");
+        for path in write(&ex, &tmp.0, "casa", false).unwrap() {
+            let loaded = crate::io::load_file(&path).unwrap();
+            check(&loaded, "dopo il DWG");
+        }
     }
 }
