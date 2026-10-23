@@ -313,8 +313,9 @@ impl OpenCADStudio {
         }
         self.bim_pending = None;
         let layer = initial_new_walls_layer(&self.tabs[i].scene.document);
-        if let Err(error) = self.bim_run_extract(i, &dir, ALL_ELABORATI.to_vec(), layer, false) {
-            self.bim_report_extract_error(error);
+        let result = self.bim_run_extract(i, &dir, ALL_ELABORATI.to_vec(), layer, false);
+        if let Err(WriteError::Exists(paths)) = result {
+            self.command_line.push_error(&exists_text(&paths));
         }
         Task::none()
     }
@@ -436,12 +437,13 @@ impl OpenCADStudio {
                     dialog.confirm_overwrite = true;
                 }
             }
-            result => {
+            // Con la conferma `write` non lo restituisce; se capitasse, lo si dice.
+            Err(WriteError::Exists(paths)) => {
                 self.bim_close_extract();
-                if let Err(error) = result {
-                    self.bim_report_extract_error(error);
-                }
+                self.command_line.push_error(&exists_text(&paths));
             }
+            // Il resto è già nella riga di comando.
+            _ => self.bim_close_extract(),
         }
         Task::none()
     }
@@ -456,9 +458,13 @@ impl OpenCADStudio {
 
     /// Estrae `elaborati` dal disegno `i` e li scrive in `dir` con il nome del
     /// disegno; con `overwrite` falso un file esistente ferma tutto prima di
-    /// scrivere (`Exists`). Riuscita: il layer dei muri nuovi nel record, se è
-    /// cambiato, e il rapporto in riga di comando. Gli errori li riporta il
-    /// chiamante; il testo di `Io` è già una frase.
+    /// scrivere (`Exists`). Dice tutto in riga di comando tranne `Exists`, che
+    /// il chiamante tratta a modo suo (rifiuto o conferma):
+    /// - riuscita: il layer dei muri nuovi nel record, se è cambiato, «scritti
+    ///   n file» e una riga per avviso;
+    /// - errore prima del primo file: la frase, «Niente è stato scritto.»;
+    /// - errore dopo (`Partial`): la frase con i file già scritti, poi gli
+    ///   avvisi, che valgono per quei file rimasti sul disco.
     fn bim_run_extract(
         &mut self,
         i: usize,
@@ -468,15 +474,16 @@ impl OpenCADStudio {
         overwrite: bool,
     ) -> Result<Vec<PathBuf>, WriteError> {
         if let Some(error) = folder_error(dir) {
+            self.command_line.push_error(&format!("AL_ESTRAI: {error}"));
             return Err(WriteError::Io(error));
         }
         let unit = match units::resolve(&self.tabs[i].scene.document) {
             UnitLookup::Known(unit) => unit,
             // Chi chiama ha già chiesto l'unità: qui non si inventa.
             UnitLookup::Unsupported(_) | UnitLookup::Unspecified => {
-                return Err(WriteError::Io(
-                    "unità del disegno non disponibile. Niente è stato scritto.".into(),
-                ));
+                let error = "unità del disegno non disponibile. Niente è stato scritto.";
+                self.command_line.push_error(&format!("AL_ESTRAI: {error}"));
+                return Err(WriteError::Io(error.into()));
             }
         };
         let layer = layer.trim().to_string();
@@ -489,23 +496,37 @@ impl OpenCADStudio {
         let extracted = extract::extract(&self.tabs[i].scene.document, &opts);
         let tab = &self.tabs[i];
         let base = base_name(tab.current_path.as_deref(), &tab.tab_title);
-        let written =
-            extract::write(&extracted, dir, &base, overwrite).map_err(|error| match error {
-                WriteError::Io(message) => {
-                    WriteError::Io(format!("scrittura non riuscita: {message}."))
-                }
-                exists => exists,
-            })?;
-        self.bim_remember_new_walls_layer(i, &layer);
-        self.command_line.push_info(&format!(
-            "AL_ESTRAI: scritti {} file in {}.",
-            written.len(),
-            dir.display()
-        ));
-        for notice in &extracted.notices {
+        let result = extract::write(&extracted, dir, &base, overwrite);
+        match &result {
+            Ok(written) => {
+                self.bim_remember_new_walls_layer(i, &layer);
+                self.command_line.push_info(&format!(
+                    "AL_ESTRAI: scritti {} file in {}.",
+                    written.len(),
+                    dir.display()
+                ));
+                self.bim_push_notices(&extracted.notices);
+            }
+            Err(WriteError::Exists(_)) => {}
+            Err(WriteError::Io(message)) => {
+                self.command_line.push_error(&format!(
+                    "AL_ESTRAI: scrittura non riuscita: {message}. Niente è stato scritto."
+                ));
+            }
+            Err(WriteError::Partial { written, message }) => {
+                self.command_line
+                    .push_error(&partial_failure_text(written, message));
+                self.bim_push_notices(&extracted.notices);
+            }
+        }
+        result
+    }
+
+    /// Una riga per avviso dell'estrazione.
+    fn bim_push_notices(&mut self, notices: &[Notice]) {
+        for notice in notices {
             self.command_line.push_info(&notice.text());
         }
-        Ok(written)
     }
 
     /// Il layer dei muri nuovi va nel record del disegno, in un passo di
@@ -531,17 +552,23 @@ impl OpenCADStudio {
             );
         }
     }
+}
 
-    fn bim_report_extract_error(&mut self, error: WriteError) {
-        let text = match error {
-            WriteError::Exists(paths) => format!(
-                "AL_ESTRAI: i file esistono già: {}. Niente è stato scritto.",
-                file_names(&paths)
-            ),
-            WriteError::Io(message) => format!("AL_ESTRAI: {message}"),
-        };
-        self.command_line.push_error(&text);
-    }
+/// Il rifiuto di `AL_ESTRAI` quando i file esistono già.
+fn exists_text(paths: &[PathBuf]) -> String {
+    format!(
+        "AL_ESTRAI: i file esistono già: {}. Niente è stato scritto.",
+        file_names(paths)
+    )
+}
+
+/// L'errore di una scrittura rimasta a metà: quale file non si è scritto e
+/// perché (`message`), e quali sono già stati scritti e restano sul disco.
+fn partial_failure_text(written: &[PathBuf], message: &str) -> String {
+    format!(
+        "AL_ESTRAI: scrittura non riuscita: {message} (già scritti prima dell'errore: {}).",
+        file_names(written)
+    )
 }
 
 /// Perché `dir` non va bene come cartella di destinazione, se non va bene.
@@ -796,8 +823,8 @@ fn last_new_thickness(zones: &[ZoneGeom]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_name, commits_to_model_space, file_names, folder_error, parse_positive,
-        safe_file_stem, unquote, StatoChange,
+        base_name, commits_to_model_space, exists_text, file_names, folder_error, parse_positive,
+        partial_failure_text, safe_file_stem, unquote, StatoChange,
     };
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
@@ -838,6 +865,26 @@ mod tests {
         assert_eq!(unquote(r#"" C:\x ""#), r"C:\x");
         assert_eq!(unquote(r#""""#), "");
         assert_eq!(unquote(r#"""#), r#"""#);
+    }
+
+    #[test]
+    fn extract_error_texts() {
+        let fatto = PathBuf::from("C:/x/casa_stato-di-fatto.dwg");
+        let comparativa = PathBuf::from("C:/x/casa_demolizioni-costruzioni.dwg");
+        assert_eq!(
+            exists_text(&[fatto.clone(), comparativa]),
+            concat!(
+                "AL_ESTRAI: i file esistono già: casa_stato-di-fatto.dwg, ",
+                "casa_demolizioni-costruzioni.dwg. Niente è stato scritto."
+            )
+        );
+        assert_eq!(
+            partial_failure_text(&[fatto], "C:/x/b.dwg: Accesso negato."),
+            concat!(
+                "AL_ESTRAI: scrittura non riuscita: C:/x/b.dwg: Accesso negato. ",
+                "(già scritti prima dell'errore: casa_stato-di-fatto.dwg)."
+            )
+        );
     }
 
     #[test]

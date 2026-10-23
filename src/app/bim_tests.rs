@@ -1364,13 +1364,72 @@ fn dialog_starts_in_the_drawing_folder() {
     }
 }
 
-/// Un file che non si può scrivere (al suo posto c'è una cartella): dopo la
-/// conferma la finestra si chiude e la riga di comando dice quale file e quali
-/// sono già stati scritti prima dell'errore.
+/// Una linea nello spazio carta del layout: l'estrazione non la porta e lo
+/// dice con un avviso `NonCopiata` («Layout <nome> <handle> non copiata…»).
+/// Restituisce la parte finale, fissa, di quella riga.
+fn add_paper_space_line(app: &mut OpenCADStudio) -> String {
+    let i = app.active_tab;
+    let doc = &mut app.tabs[i].scene.document;
+    let paper = doc.header.paper_space_block_handle;
+    assert!(!paper.is_null(), "il disegno ha uno spazio carta");
+    let mut note = Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
+    note.common.owner_handle = paper;
+    doc.add_entity(EntityType::Line(note)).unwrap();
+    format!("{paper:X} non copiata nel DWG estratto.")
+}
+
+/// `then` compare nella storia dopo `first`.
+fn comes_after(history: &str, first: &str, then: &str) -> bool {
+    matches!((history.find(first), history.find(then)), (Some(a), Some(b)) if a < b)
+}
+
+/// Da riga di comando, dopo «scritti n file» una riga per ogni avviso.
+#[test]
+fn scripted_extract_reports_the_notices() {
+    let tmp = TempDir::new("avvisi");
+    let (mut app, _, _) = app_with_two_zones();
+    let notice = add_paper_space_line(&mut app);
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let history = history(&app);
+    assert!(
+        comes_after(&history, "AL_ESTRAI: scritti ", &notice),
+        "storia: {history}"
+    );
+    assert!(history.contains("Layout "), "storia: {history}");
+}
+
+/// Dalla finestra lo stesso rapporto, con i suoi avvisi.
+#[test]
+fn dialog_extract_reports_the_notices() {
+    let tmp = TempDir::new("avvisi-finestra");
+    let (mut app, _, _) = app_with_two_zones();
+    let notice = add_paper_space_line(&mut app);
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    forget_history(&mut app);
+
+    bim(&mut app, BimMsg::Ok);
+
+    assert!(app.bim_extract.is_none());
+    let history = history(&app);
+    assert!(
+        comes_after(&history, "AL_ESTRAI: scritti ", &notice),
+        "storia: {history}"
+    );
+}
+
+/// Un file che non si può scrivere (al suo posto c'è una cartella). Se si
+/// ferma dopo il primo file, la riga di comando dice quale file e quali sono
+/// già stati scritti, e gli avvisi seguono: valgono per i file rimasti. Se si
+/// ferma al primo, niente è stato scritto e non ci sono avvisi da dare.
 #[test]
 fn dialog_reports_a_write_error() {
     let tmp = TempDir::new("errore");
     let (mut app, _, _) = app_with_two_zones();
+    let notice = add_paper_space_line(&mut app);
     let paths = extracted_paths(tmp.path(), &tab_title(&app));
     std::fs::create_dir(&paths[1]).unwrap();
 
@@ -1384,23 +1443,46 @@ fn dialog_reports_a_write_error() {
 
     assert!(app.bim_extract.is_none());
     assert_eq!(app.active_modal, None);
-    let history = history(&app);
-    assert!(
-        history.contains(&format!(
-            "AL_ESTRAI: scrittura non riuscita: {}: ",
-            paths[1].display()
-        )),
-        "storia: {history}"
+    assert!(paths[0].is_file());
+    let partial = history(&app);
+    let error = format!(
+        "AL_ESTRAI: scrittura non riuscita: {}: ",
+        paths[1].display()
     );
+    assert!(comes_after(&partial, &error, &notice), "storia: {partial}");
+    let written = paths[0].file_name().unwrap().to_string_lossy();
     assert!(
-        history.contains(&format!(
-            "(già scritti prima dell'errore: {}).",
+        partial.contains(&format!("(già scritti prima dell'errore: {written}).")),
+        "storia: {partial}"
+    );
+    assert!(!partial.contains("AL_ESTRAI: scritti"), "storia: {partial}");
+
+    // Si ferma al primo file: niente scritto, nessun avviso.
+    std::fs::remove_file(&paths[0]).unwrap();
+    std::fs::create_dir(&paths[0]).unwrap();
+    std::fs::remove_dir(&paths[1]).unwrap();
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    forget_history(&mut app);
+    bim(&mut app, BimMsg::Ok);
+
+    assert!(app.bim_extract.is_none());
+    assert!(!paths[1].exists(), "il secondo file non si scrive");
+    let refused = history(&app);
+    assert!(
+        refused.contains(&format!(
+            "AL_ESTRAI: scrittura non riuscita: {}: ",
             paths[0].display()
         )),
-        "storia: {history}"
+        "storia: {refused}"
     );
-    assert!(paths[0].is_file());
-    assert!(!history.contains("AL_ESTRAI: scritti"), "storia: {history}");
+    assert!(
+        refused.contains("Niente è stato scritto."),
+        "storia: {refused}"
+    );
+    assert!(!refused.contains(&notice), "storia: {refused}");
 }
 
 #[test]

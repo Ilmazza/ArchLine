@@ -864,14 +864,22 @@ pub fn file_name(base: &str, e: Elaborato) -> String {
 pub enum WriteError {
     /// I file che esistono già: non si è scritto nulla.
     Exists(Vec<PathBuf>),
+    /// Errore prima di scrivere il primo file: non si è scritto nulla.
     Io(String),
+    /// Errore dopo aver scritto `written`, che restano sul disco; `message`
+    /// dice quale file non si è scritto e perché.
+    Partial {
+        written: Vec<PathBuf>,
+        message: String,
+    },
 }
 
 /// Scrive un DWG per documento in `dir`, con il nome di [`file_name`] e la
 /// versione del documento. Senza `overwrite`, se anche uno solo dei file
 /// esiste non scrive nulla e restituisce tutti quelli che esistono. Un errore
-/// di scrittura ferma il giro: i file già scritti restano (ognuno è scritto
-/// accanto e poi sostituito, quindi mai a metà) e il messaggio li nomina.
+/// di scrittura ferma il giro: al primo file è `Io`, dopo è `Partial` con i
+/// file già scritti, che restano (ognuno è scritto accanto e poi sostituito,
+/// quindi mai a metà).
 pub fn write(
     ex: &Extracted,
     dir: &Path,
@@ -898,24 +906,18 @@ pub fn write(
         }
     }
     for (done, ((_, doc), path)) in ex.docs.iter().zip(&paths).enumerate() {
-        crate::io::save_as_version(doc, path, doc.version)
-            .map_err(|e| WriteError::Io(write_failure(path, &e, &paths[..done])))?;
+        if let Err(e) = crate::io::save_as_version(doc, path, doc.version) {
+            let message = format!("{}: {e}", path.display());
+            return Err(match done {
+                0 => WriteError::Io(message),
+                _ => WriteError::Partial {
+                    written: paths[..done].to_vec(),
+                    message,
+                },
+            });
+        }
     }
     Ok(paths)
-}
-
-/// Il messaggio di un file che non si è potuto scrivere: il file, l'errore e,
-/// se ce ne sono, i file scritti prima di lui, che restano sul disco.
-fn write_failure(path: &Path, error: &str, written: &[PathBuf]) -> String {
-    let mut text = format!("{}: {error}", path.display());
-    if !written.is_empty() {
-        let names: Vec<String> = written.iter().map(|p| p.display().to_string()).collect();
-        text.push_str(&format!(
-            " (già scritti prima dell'errore: {})",
-            names.join(", ")
-        ));
-    }
-    text
 }
 
 #[cfg(test)]
@@ -1524,43 +1526,35 @@ mod tests {
         ));
     }
 
-    /// Il secondo file non si scrive (al suo posto c'è una cartella): il primo
-    /// resta sul disco e il messaggio lo nomina; se si ferma al primo, nessun
-    /// file da nominare.
+    /// Il secondo file non si scrive (al suo posto c'è una cartella): `Partial`
+    /// con il primo, che resta sul disco; se si ferma al primo, `Io`.
     #[test]
-    fn write_io_error_names_the_files_already_written() {
+    fn write_error_after_the_first_file_is_partial() {
         let tmp = TempDir::new("parziale");
         let ex = extract(&doc_with_zones(), &opts(&both()));
         let first = tmp.0.join("casa_stato-di-fatto.dwg");
         let second = tmp.0.join("casa_demolizioni-costruzioni.dwg");
         std::fs::create_dir(&second).unwrap();
 
-        let Err(WriteError::Io(message)) = write(&ex, &tmp.0, "casa", true) else {
-            panic!("atteso un errore di scrittura");
+        let Err(WriteError::Partial { written, message }) = write(&ex, &tmp.0, "casa", true) else {
+            panic!("atteso un errore dopo il primo file");
         };
+        assert_eq!(written, vec![first.clone()]);
         assert!(first.is_file());
         assert!(
-            message.starts_with(&second.display().to_string()),
-            "{message}"
-        );
-        assert!(
-            message.ends_with(&format!(
-                " (già scritti prima dell'errore: {})",
-                first.display()
-            )),
+            message.starts_with(&format!("{}: ", second.display())),
             "{message}"
         );
 
         std::fs::remove_file(&first).unwrap();
         std::fs::create_dir(&first).unwrap();
         let Err(WriteError::Io(message)) = write(&ex, &tmp.0, "casa", true) else {
-            panic!("atteso un errore di scrittura");
+            panic!("atteso un errore al primo file");
         };
         assert!(
-            message.starts_with(&first.display().to_string()),
+            message.starts_with(&format!("{}: ", first.display())),
             "{message}"
         );
-        assert!(!message.contains("già scritti"), "{message}");
     }
 
     #[test]
