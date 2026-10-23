@@ -220,11 +220,18 @@ impl OpenCADStudio {
         if modified > 0 {
             let handles: Vec<Handle> = plan.changes.iter().map(|(handle, _)| *handle).collect();
             let new_zones: HashMap<Handle, Zone> = plan.changes.into_iter().collect();
+            let mut layers_created = false;
             self.apply_property_op(i, "AL_STATO", &handles, |app, handle| {
                 let Some(new) = new_zones.get(&handle) else {
                     return;
                 };
                 let doc = &mut app.tabs[i].scene.document;
+                // Dopo un PURGE l'altro layer `AL-*` può non esserci più: si
+                // ricrea qui, nello stesso passo di annullamento della zona.
+                if zone::missing_layers(doc) {
+                    zone::ensure_layers(doc);
+                    layers_created = true;
+                }
                 if let Some(entity) = doc.get_entity_mut(handle) {
                     zone::restyle(entity, new);
                 }
@@ -232,6 +239,9 @@ impl OpenCADStudio {
                 // grezzo, che al salvataggio prevale sul record: lo scarta.
                 set_entity_xdata(doc, handle, APP_ZONA, Some(zone::encode(new)));
             });
+            if layers_created {
+                self.refresh_layer_panel();
+            }
         }
         if plan.varco_on_new {
             self.command_line

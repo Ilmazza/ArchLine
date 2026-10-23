@@ -917,3 +917,86 @@ fn stato_survives_a_dwg_save_and_reload() {
     assert_eq!(hatch.common().color, Color::from_index(ACI_ROSSO));
     assert!(!missing_layers(&reread));
 }
+
+/// Dopo un PURGE un disegno con sole zone demolite non ha più `AL-NUOVE` (e
+/// viceversa): `AL_STATO` che sposta una zona su un layer assente lo ricrea nello
+/// stesso passo di annullamento, e un solo annullamento riporta zona e tabella
+/// dei layer come prima.
+#[test]
+fn stato_recreates_a_purged_target_layer_in_the_same_undo_step() {
+    for (command, to_state, purged, aci) in [
+        ("AL_STATO N", ZoneState::Nuovo, LAYER_NUOVE, ACI_ROSSO),
+        (
+            "AL_STATO D",
+            ZoneState::Demolito,
+            LAYER_DEMOLIZIONI,
+            ACI_GIALLO,
+        ),
+    ] {
+        let (mut app, demolita, nuova) = app_with_two_zones();
+        // Resta una sola zona, dell'altro stato: il layer di arrivo è vuoto.
+        let (handle, gone) = match to_state {
+            ZoneState::Nuovo => (demolita, nuova),
+            ZoneState::Demolito => (nuova, demolita),
+        };
+        let i = app.active_tab;
+        app.tabs[i].scene.document.remove_entity(gone);
+        let _ = app.tabs[i].scene.document.layers.remove(purged);
+        assert!(
+            doc(&app).layers.get(purged).is_none(),
+            "{command}: layer tolto"
+        );
+        let before = entity_of(&app, handle);
+        let was_missing = missing_layers(doc(&app));
+        assert!(was_missing);
+        select(&mut app, &[handle]);
+        let steps = undo_steps(&app);
+
+        run(&mut app, command);
+
+        assert_eq!(
+            zone_of(&app, handle).state,
+            to_state,
+            "{command}: storia: {}",
+            history(&app)
+        );
+        assert_eq!(
+            layer_color(&app, purged),
+            Some(Color::from_index(aci)),
+            "{command}: il layer c'è di nuovo, col suo colore"
+        );
+        assert_eq!(
+            doc(&app).get_entity(handle).unwrap().common().layer,
+            purged,
+            "{command}: la zona sta sul layer"
+        );
+        assert!(
+            !missing_layers(doc(&app)),
+            "{command}: layer e APPID a posto"
+        );
+        assert_eq!(undo_steps(&app), steps + 1, "{command}: un solo passo");
+
+        undo(&mut app);
+        assert_eq!(entity_of(&app, handle), before, "{command}: zona com'era");
+        assert!(
+            doc(&app).layers.get(purged).is_none(),
+            "{command}: lo stesso annullamento toglie il layer ricreato"
+        );
+        assert_eq!(missing_layers(doc(&app)), was_missing);
+    }
+}
+
+/// Se nessuna zona cambia, il layer mancante non si ricrea e non nasce un passo.
+#[test]
+fn stato_without_a_change_does_not_create_layers() {
+    let (mut app, demolita, _) = app_with_two_zones();
+    let i = app.active_tab;
+    let _ = app.tabs[i].scene.document.layers.remove(LAYER_NUOVE);
+    select(&mut app, &[demolita]);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_STATO D");
+
+    assert!(doc(&app).layers.get(LAYER_NUOVE).is_none());
+    assert_eq!(undo_steps(&app), steps);
+}
