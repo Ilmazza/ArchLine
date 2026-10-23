@@ -8,13 +8,14 @@
 //! piano si ignorano e si contano, mai in silenzio. `boundary_sources_on_plane`
 //! di upstream (tutti i fili visibili) non si tocca.
 
-use codec::entities::{Hatch, HatchStyleType};
+use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType};
 use codec::{CadDocument, EntityType, Handle};
 use kernel::geom2d::{contains, distance_to, signed_area, Curve, Line, Tolerance};
+use kernel::tessellation::DEFAULT_ANGLE;
 use rustc_hash::FxHashMap;
 
 use crate::command::WorkingPlane;
-use crate::entities::hatch::boundary_area;
+use crate::entities::hatch::{boundary_area, edge_curve};
 use crate::scene::{
     boundary_faces, entity_boundary_source_on_plane, exact_hatch_paths, BoundarySource,
 };
@@ -26,6 +27,10 @@ use super::LAYER_PREFIX;
 /// 7,5°: su un cerchio circa lo 0,3 % in meno). Oltre, la ricostruzione ha
 /// preso una curva sbagliata: vale il poligono, dichiarato approssimato.
 const MAX_EXACT_DRIFT: f64 = 0.05;
+
+/// Quante tolleranze può distare un vertice delle facce (saldato entro la
+/// tolleranza) dal percorso esatto, e viceversa.
+const WELD_SLACK: f64 = 4.0;
 
 /// I muri del disegno.
 #[derive(Clone)]
@@ -216,14 +221,20 @@ fn face_inside(outer: &[Curve], inner: &[[f64; 2]], tol: f64) -> bool {
 /// Superficie netta della regione, in unità del disegno al quadrato: contorno
 /// meno buchi. Esatta (`true`) quando viene dai percorsi che
 /// `exact_hatch_paths` ricostruisce sulle curve vere dei muri (archi compresi),
-/// misurati con `boundary_area` come una campitura. Se la ricostruzione non dà
-/// un percorso per anello, o un percorso ha un'area non finita, nulla o
-/// lontana da quella del suo anello ([`MAX_EXACT_DRIFT`]), vale la formula del
-/// laccio sugli anelli (archi in corde) e il risultato è `false`.
+/// misurati con `boundary_area` come una campitura. Altrimenti vale la formula
+/// del laccio sugli anelli (archi in corde) e il risultato è `false`.
 ///
-/// Il controllo è per anello, non solo sul totale: `exact_hatch_paths` chiude
-/// una polilinea a «D» (un arco e la sua corda nella stessa entità) come un
-/// cerchio intero, e su un'isola piccola l'errore sparirebbe nel totale.
+/// Un percorso esatto vale solo se, per il suo anello:
+/// - segue l'anello ([`path_follows_ring`]): ogni punto del percorso sta a
+///   meno della freccia delle corde (più la tolleranza) dall'anello, e ogni
+///   vertice dell'anello dal percorso. È il controllo che conta:
+///   `exact_hatch_paths` chiude una polilinea a «D» (un arco e la sua corda
+///   nella stessa entità) come un cerchio intero, e quando la corda è un lato
+///   di un locale grande (una nicchia) l'arco in più vale pochi punti
+///   percentuali dell'area, ma sta a un raggio dalla corda;
+/// - ha un'area finita, positiva e vicina a quella dell'anello
+///   ([`MAX_EXACT_DRIFT`]). Costa poco e copre ciò che la geometria non vede:
+///   un verso sbagliato nell'integrale di `boundary_area` su un contorno giusto.
 pub fn net_area(
     region: &Region,
     sources: &FxHashMap<Handle, BoundarySource>,
@@ -236,10 +247,11 @@ pub fn net_area(
     let paths = exact_hatch_paths(&rings, &exterior, sources, tol);
     let faithful = paths.len() == rings.len()
         && paths.iter().zip(&rings).all(|(path, ring)| {
-            credible(
-                boundary_area(&hatch_of(vec![path.clone()])),
-                signed_area(ring).abs(),
-            )
+            path_follows_ring(path, ring, tol)
+                && credible(
+                    boundary_area(&hatch_of(vec![path.clone()])),
+                    signed_area(ring).abs(),
+                )
         });
     let exact = faithful.then(|| boundary_area(&hatch_of(paths)));
     let polygon = signed_area(&region.outer).abs()
@@ -251,8 +263,54 @@ pub fn net_area(
     pick_area(exact, polygon)
 }
 
+/// Il percorso esatto `path` ricalca l'anello `ring` delle facce? Le facce
+/// vedono ogni arco come corde da [`DEFAULT_ANGLE`] al più, quindi un punto
+/// dell'arco vero dista dalla sua corda al più la freccia `r (1 − cos θ/2)`.
+/// Si ammette il doppio della freccia del raggio maggiore del percorso (i
+/// vertici agli incroci con le corde stanno sulle corde, non sull'arco) più
+/// [`WELD_SLACK`] tolleranze, e si controlla nei due versi: i punti del
+/// percorso (campionati come le facce) verso l'anello, i vertici dell'anello
+/// verso le curve del percorso. Ellissi e spline non hanno una freccia nota:
+/// il percorso non vale come esatto.
+fn path_follows_ring(path: &BoundaryPath, ring: &[[f64; 2]], tol: f64) -> bool {
+    let mut curves = Vec::with_capacity(path.edges.len());
+    let mut radius: f64 = 0.0;
+    for edge in &path.edges {
+        match edge {
+            BoundaryEdge::Line(_) => {}
+            BoundaryEdge::CircularArc(arc) => radius = radius.max(arc.radius.abs()),
+            _ => return false,
+        }
+        let Some(curve) = edge_curve(edge) else {
+            return false;
+        };
+        curves.push(curve);
+    }
+    if curves.is_empty() || ring.len() < 3 {
+        return false;
+    }
+    let allowed = WELD_SLACK * tol + 2.0 * radius * (1.0 - (DEFAULT_ANGLE / 2.0).cos());
+    let ring_edges = face_curves(ring);
+    let near_ring = |point: [f64; 2]| {
+        ring_edges
+            .iter()
+            .any(|edge| distance_to(edge, point) <= allowed)
+    };
+    let near_path = |point: [f64; 2]| {
+        curves
+            .iter()
+            .any(|curve| distance_to(curve, point) <= allowed)
+    };
+    curves.iter().all(|curve| {
+        curve
+            .tessellate_angle(DEFAULT_ANGLE)
+            .into_iter()
+            .all(&near_ring)
+    }) && ring.iter().all(|&vertex| near_path(vertex))
+}
+
 /// Una campitura (stile normale: pari pieno, dispari vuoto) sui percorsi dati.
-fn hatch_of(paths: Vec<codec::entities::BoundaryPath>) -> Hatch {
+fn hatch_of(paths: Vec<BoundaryPath>) -> Hatch {
     let mut hatch = Hatch::new();
     hatch.style = HatchStyleType::Normal;
     hatch.paths = paths;
@@ -671,7 +729,7 @@ mod tests {
         assert!((area - half_disc).abs() < 0.01 * half_disc, "{area}");
 
         // Come isola in un locale 6 × 6: sul totale lo scarto (π/2 su 34,4 m²)
-        // resterebbe sotto il 5 %, il controllo per anello lo vede.
+        // resterebbe sotto il 5 %, i controlli per anello lo vedono.
         let corners = [[-3.0, -3.0], [3.0, -3.0], [3.0, 3.0], [-3.0, 3.0]];
         let mut entities: Vec<EntityType> = (0..4)
             .map(|i| {
@@ -689,6 +747,51 @@ mod tests {
         let island = signed_area(&region.holes[0]).abs();
         assert!((area - (36.0 - island)).abs() < 1e-9, "{area}");
         assert!((area - (36.0 - half_disc)).abs() < 0.01, "{area}");
+    }
+
+    #[test]
+    fn d_niche_on_a_room_side_is_not_exact() {
+        // Locale 8 × 5 con una nicchia semicircolare (r = 1) nella parete nord,
+        // disegnata come «D» chiusa: la sua corda è il lato del locale tra
+        // (3; 5) e (5; 5), la faccia del muro si interrompe lì. La superficie
+        // vera è 40,00 (tutti lati dritti).
+        let half_disc = std::f64::consts::FRAC_PI_2;
+        let tol = M.tolerance();
+        let mut entities: Vec<EntityType> = [
+            ([0.0, 0.0], [8.0, 0.0]),
+            ([8.0, 0.0], [8.0, 5.0]),
+            ([8.0, 5.0], [5.0, 5.0]),
+            ([3.0, 5.0], [0.0, 5.0]),
+            ([0.0, 5.0], [0.0, 0.0]),
+        ]
+        .iter()
+        .map(|&(a, b)| on(LAYER_MURI, line([a[0], a[1], 0.0], [b[0], b[1], 0.0])))
+        .collect();
+        entities.push(d_shape([4.0, 5.0]));
+        let scene = scene_with(entities, 6);
+        let walls = wall_set(&scene.document, tol);
+        let region = region_at(&faces(&walls.sources, tol), [4.0, 2.5], tol).unwrap();
+        assert!(region.holes.is_empty(), "la nicchia è fuori dal locale");
+
+        // Premessa: upstream ricostruisce la corda come il mezzo cerchio della
+        // nicchia (40 + π/2) e lo scarto, 3,9 %, passerebbe il controllo
+        // sull'area. Se upstream corregge `edge_curve`, la premessa cade e il
+        // test va rivisto: allora 40,00 può tornare esatto.
+        let wrong = boundary_area(&hatch_of(exact_hatch_paths(
+            &[region.outer.clone()],
+            &[true],
+            &walls.sources,
+            tol,
+        )));
+        assert!(
+            (wrong - (40.0 + half_disc)).abs() < 1e-9,
+            "premessa: {wrong}"
+        );
+        assert!(credible(wrong, 40.0), "premessa: sotto il 5 %");
+
+        let (area, exact) = net_area(&region, &walls.sources, tol);
+        assert!(!exact, "nessuna area sbagliata dichiarata esatta: {area}");
+        assert_m2(area, 40.0, "nicchia");
     }
 
     #[test]
