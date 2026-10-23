@@ -36,6 +36,8 @@ pub(crate) mod dim_viewport;
 #[cfg(test)]
 mod dialog_flow_tests;
 #[cfg(test)]
+mod bim_tests;
+#[cfg(test)]
 mod dimension_preview_tests;
 mod dock;
 mod document;
@@ -899,6 +901,8 @@ pub(super) struct OpenCADStudio {
     /// `MIRRTEXT`) — the next command-line entry is its new value, empty keeps
     /// the current one.
     pending_setvar: Option<String>,
+    /// BIM (ArchLine): il comando `AL_*` da rilanciare dopo la scelta dell'unità (`AL_UNITA`).
+    pub(crate) bim_pending: Option<String>,
     /// DELOBJ system variable (0–3), shared by every open drawing.
     delete_objects: i16,
     /// Cursor is hovering over the UCS icon body — drives the hover highlight.
@@ -4970,6 +4974,7 @@ impl OpenCADStudio {
             block_usage_last_persist: None,
             awaiting_vports: false,
             pending_setvar: None,
+            bim_pending: None,
             delete_objects: 1,
             ucs_icon_hover: false,
             ucs_icon_selected: false,

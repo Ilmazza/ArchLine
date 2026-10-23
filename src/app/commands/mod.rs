@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod attdef;
 mod attman;
+mod bim;
 mod block_cmdline;
 mod blocks;
 mod blockvars;
@@ -509,6 +510,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_table_export(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_bim(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_styleprops(cmd, i) {
