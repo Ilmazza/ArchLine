@@ -297,3 +297,54 @@ fn off_plane_walls_are_reported() {
         history(&app)
     );
 }
+
+/// R21: in un layout senza finestra attiva (spazio carta) i comandi si
+/// rifiutano e non creano nulla: né domanda dell'unità, né record, né layer,
+/// né passi di annullamento.
+#[test]
+fn paper_space_is_refused() {
+    for (command, insunits) in [
+        ("AL_DEMOLISCI 4.05,0 4.05,3 N", 6),
+        ("AL_NUOVO 2,0 2,3 0.12", 6),
+        ("AL_DEMOLISCI", 0),
+    ] {
+        let mut app = fresh_app();
+        load(
+            &mut app,
+            case_a(Form::Continua, DrawingUnit::Metri),
+            insunits,
+        );
+        let i = app.active_tab;
+        app.tabs[i].scene.set_current_layout("Layout1".to_string());
+        assert!(app.tabs[i].scene.active_viewport.is_none(), "spazio carta");
+        let before = rilievo_snapshot(&app);
+        let steps = undo_steps(&app);
+        let name = command.split(' ').next().unwrap();
+
+        run(&mut app, command);
+
+        assert!(
+            history(&app).contains(&format!(
+                "{name}: i comandi di ristrutturazione lavorano solo nello spazio modello."
+            )),
+            "{command}: {}",
+            history(&app)
+        );
+        assert_eq!(active_command(&app), None, "{command}: nessuna domanda");
+        assert!(
+            !doc(&app)
+                .entities()
+                .any(|e| matches!(e, EntityType::Hatch(_))),
+            "{command}: nessuna campitura, in nessuno spazio"
+        );
+        assert!(missing_layers(doc(&app)), "{command}: nessun layer");
+        assert_eq!(
+            record::read(doc(&app)).unit,
+            None,
+            "{command}: nessun record"
+        );
+        assert_eq!(undo_steps(&app), steps, "{command}: nessun passo");
+        assert_eq!(app.bim_pending, None);
+        assert_eq!(rilievo_snapshot(&app), before);
+    }
+}

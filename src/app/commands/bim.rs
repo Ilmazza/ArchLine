@@ -14,6 +14,7 @@ use crate::bim::units::{self, DrawingUnit, UnitLookup};
 use crate::bim::walls;
 use crate::bim::zone::{self, ZoneGeom, ZoneState};
 use crate::command::{CadCommand, KeywordCommand};
+use crate::scene::Scene;
 use codec::CadDocument;
 use iced::Task;
 
@@ -45,6 +46,20 @@ impl OpenCADStudio {
         }
     }
 
+    /// I comandi `AL_*` lavorano nello spazio modello, dove stanno muri e zone.
+    /// Altrove (spazio carta, editor di blocchi) lo dicono e non fanno nulla:
+    /// né domanda dell'unità, né layer, né passi di annullamento. Va chiamato
+    /// per primo.
+    fn bim_in_model_space(&mut self, i: usize, cmd: &str) -> bool {
+        if commits_to_model_space(&self.tabs[i].scene) {
+            return true;
+        }
+        self.command_line.push_error(&format!(
+            "{cmd}: i comandi di ristrutturazione lavorano solo nello spazio modello."
+        ));
+        false
+    }
+
     /// L'unità del disegno di `i`. Se manca la chiede (`AL_UNITA`) e ricorda
     /// `cmd` da rilanciare dopo la risposta; se non è supportata lo dice. In
     /// entrambi i casi `None`: il comando non parte.
@@ -68,6 +83,9 @@ impl OpenCADStudio {
     /// `AL_DEMOLISCI` / `AL_NUOVO`: unità, layer (la prima volta), istantanea,
     /// poi [`ZoneCommand`].
     fn bim_start_zone(&mut self, i: usize, cmd: &str, state: ZoneState) -> Task<Message> {
+        if !self.bim_in_model_space(i, cmd) {
+            return Task::none();
+        }
         let Some(unit) = self.bim_unit_or_ask(i, cmd) else {
             return self.finish_dispatch(cmd);
         };
@@ -141,6 +159,15 @@ impl OpenCADStudio {
     }
 }
 
+/// Ciò che un comando crea ora finisce nello spazio modello? È la regola con
+/// cui `Scene::add_entity` sceglie il blocco proprietario: nell'editor di
+/// blocchi il blocco, in un layout senza finestra attiva (PSPACE) il layout,
+/// altrimenti (modello, o finestra attiva in un layout: MSPACE) il modello.
+fn commits_to_model_space(scene: &Scene) -> bool {
+    scene.block_edit_block.is_none()
+        && (scene.current_layout == "Model" || scene.active_viewport.is_some())
+}
+
 /// L'istantanea della geometria per [`ZoneCommand`] e il numero di entità muro
 /// rimaste fuori dal piano XY. Le facce si saldano anche sui vuoti entro
 /// `HPGAPTOL`, come HATCH; il resto usa la tolleranza dell'unità.
@@ -169,4 +196,31 @@ fn last_new_thickness(zones: &[ZoneGeom]) -> Option<f64> {
         .filter_map(|z| Some((z.handle.value(), z.zone.thickness?)))
         .max_by_key(|&(handle, _)| handle)
         .map(|(_, thickness)| thickness)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commits_to_model_space;
+    use crate::scene::Scene;
+    use codec::Handle;
+
+    #[test]
+    fn model_space_or_entered_viewport_only() {
+        let mut scene = Scene::new();
+        assert!(commits_to_model_space(&scene), "modello");
+        scene.current_layout = "Layout1".into();
+        assert!(
+            !commits_to_model_space(&scene),
+            "layout senza finestra attiva (PSPACE)"
+        );
+        scene.active_viewport = Some(Handle::new(0x99));
+        assert!(
+            commits_to_model_space(&scene),
+            "finestra attiva in un layout (MSPACE)"
+        );
+        scene.current_layout = "Model".into();
+        scene.active_viewport = None;
+        scene.block_edit_block = Some(Handle::new(0x42));
+        assert!(!commits_to_model_space(&scene), "editor di blocchi");
+    }
 }
