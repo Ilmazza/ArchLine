@@ -1,6 +1,6 @@
 # BIM, parte 1: stato (demolito / nuovo) e piante di ristrutturazione
 
-Stato: bozza dopo la verifica del costruttore, in attesa di tre risposte di Mauro (§9). Branch `claude/bim-stato-piante`. Data: 2026-10-23.
+Stato: pronta per l'approvazione di Mauro (risposte alle tre domande ricevute il 2026-10-23, §9). Branch `claude/bim-stato-piante`. Data: 2026-10-23.
 
 ## 1. Contesto e scopo
 
@@ -49,7 +49,8 @@ lasciare il modello dati pronto per le successive (§4.1: altezza, asse e spesso
 - Stati diversi da demolito e nuovo (niente «temporaneo», nessuna fase numerata). «Esistente» è l'assenza di
   zona.
 - Impostazioni di colore o di layer modificabili da finestra: nel primo giro sono costanti nel codice.
-- Pulizia automatica delle giunzioni con i muri adiacenti (vedi §5.4 e la domanda 3 del §9).
+- Pulizia automatica delle giunzioni con i muri adiacenti (decisione di Mauro, §5.4 punto 4: si lasciano
+  com'è e si elencano).
 - Un plugin: il modulo sta dentro ArchLine, in file propri.
 
 **Anti-obiettivi** (sarebbe un fallimento anche se tutto il resto funziona)
@@ -131,8 +132,10 @@ con barra dedicata nel workspace classico.
 
 ### 5.0 Quali entità formano la geometria dei muri
 
-La ricerca di locali, zone da punto interno e geometria di progetto usa **solo `LINE`, `ARC`, `LWPOLYLINE` e
-`POLYLINE` dei layer acceso e non congelati**, **escludendo i layer `AL-*`**. Testi, quote, blocchi, campiture e
+Nei rilievi di Mauro i muri stanno su layer propri, separati da arredi, quote e testi (risposta del
+2026-10-23), quindi spegnere i layer che disturbano è un gesto già abituale. La ricerca di locali, zone da punto
+interno e geometria di progetto usa **solo `LINE`, `ARC`, `LWPOLYLINE` e `POLYLINE` dei layer acceso e non
+congelati**, **escludendo i layer `AL-*`**. Testi, quote, blocchi, campiture e
 immagini non contano come muri. Ne segue che ciò che Mauro vuole fuori (per esempio gli arredi) si ottiene come
 in AutoCAD, spegnendo o congelando quei layer; un arredo chiuso lasciato acceso dentro un locale conta come
 isola e viene sottratto dall'area. Il rapporto elenca le isole trovate in ogni locale, così si vede.
@@ -184,8 +187,7 @@ due lati lunghi della zona** (quelli che coincidevano con le facce del muro e ch
 varco diventa così una faccia chiusa a sé: i due locali restano due e **l'area del varco non appartiene a nessun
 locale**; viene riportata a parte nel rapporto. Nel primo giro vale solo per un rettangolo che attraversa il
 muro da faccia a faccia; varchi a L, d'angolo o più larghi dello spessore generano l'avviso «varco non
-supportato». Se Mauro vuole l'area del varco dentro un locale, la regola e i valori del caso B cambiano (§9,
-domanda 2).
+supportato». Decisione di Mauro (2026-10-23): l'area del passaggio **non** si conta in nessun locale.
 
 ### 5.4 Stato di progetto
 
@@ -206,8 +208,8 @@ La geometria di progetto si calcola dall'esistente, senza unioni booleane di pol
    sovrapposte solo in parte non si risolvono e generano un avviso.
 4. **Giunzioni.** Il modulo **non pulisce** le giunzioni con muri adiacenti: dove un lato di estremità
    coincide con una linea esistente (per esempio un tramezzo che si appoggia a un muro) il segmento resta com'è
-   e **il rapporto elenca la posizione** («giunzione da verificare»). Se Mauro vuole la pulizia automatica è
-   un lavoro a parte (domanda 3).
+   e **il rapporto elenca la posizione** («giunzione da verificare»). Decisione di Mauro (2026-10-23): le
+   giunzioni si lasciano com'è e si ritoccano in AutoCAD; la pulizia automatica sarebbe un lavoro a parte.
 5. **Elementi puntuali** (blocchi, testi) con punto d'inserimento dentro una zona `demolito` non entrano nel
    progetto; sono elencati.
 6. **Entità non tagliabili** (spline, ellissi, quote, immagini, riferimenti esterni, campiture) restano intere
@@ -307,12 +309,8 @@ che attraversano gli incroci), con arredi, testi e quote di disturbo sui loro la
 - layer dei muri nuovi scelto all'estrazione, con proposta;
 - un DWG per elaborato, versione come il disegno di partenza, solo spazio modello.
 
-**Domande per Mauro** (cambiano ciò che si costruisce):
+**Decisioni di Mauro (2026-10-23)**, risposte alle domande della verifica:
 
-1. Nel tuo rilievo i muri stanno su layer propri, separati da arredi, quote e testi, così che si possano
-   spegnere gli altri layer quando serve?
-2. L'area del passaggio nello spessore di un muro (vano porta o varco) la conti nel locale o la escludi? Ho
-   messo «esclusa» come ipotesi. Se la conti, in quale locale, o a metà tra i due?
-3. Dove un tramezzo demolito o nuovo si appoggia a un altro muro, accetti che il modulo lasci la giunzione
-   com'è e ti elenchi le posizioni da ritoccare in AutoCAD, oppure vuoi la pulizia automatica (che costa un
-   lavoro in più e sarebbe una parte a sé)?
+1. I muri del rilievo stanno su layer propri, separati da arredi, quote e testi (§5.0).
+2. L'area del varco si **esclude** dai locali (§5.3).
+3. Le giunzioni con i muri adiacenti si **lasciano com'è**, con l'elenco nel rapporto (§5.4 punto 4).
