@@ -9,26 +9,37 @@
 //!
 //! # Come si numerano e si parametrizzano i segmenti
 //!
-//! * `LINE` e `ARC`: un solo segmento, l'indice 0.
-//! * Polilinee: un segmento per vertice, nell'ordine dei vertici; il segmento
-//!   `i` va dal vertice `i` al vertice `i + 1` e prende bulge e larghezze dal
-//!   vertice `i`. In una polilinea chiusa l'ultimo segmento, quello di
-//!   chiusura, torna al vertice 0 (indice = numero di vertici − 1), con il
-//!   bulge dell'ultimo vertice. È lo stesso ordine delle curve di
-//!   `BoundarySource.curves`.
-//! * Il parametro `t` corre da 0 a 1 **nel verso dell'entità**: `LINE` da
-//!   `start` a `end`, `ARC` dall'angolo iniziale a quello finale in senso
-//!   antiorario, segmento di polilinea dal suo vertice di partenza a quello
-//!   di arrivo. Su un segmento dritto è lineare nella lunghezza; su un `ARC`
-//!   e su un segmento con bulge è lineare nell'**angolo** (lo sweep), cioè
-//!   `punto(t)` sta all'angolo `inizio + sweep · t`. Non è lineare nella
-//!   corda.
-//! * Attenzione per chi parte da `BoundarySource.curves`: il kernel
-//!   rappresenta un segmento con bulge **negativo** come un arco antiorario
-//!   con gli estremi scambiati (`Curve::segments`), quindi il suo parametro
-//!   corre al contrario. Per quei segmenti l'intervallo da passare qui è
-//!   `[1 − t1, 1 − t0]`. Vale per entità sul piano di default (normale +Z);
-//!   le coordinate dei pezzi sono quelle proprie dell'entità (OCS).
+//! Gli intervalli di `removed` sono espressi **nella stessa forma in cui li dà
+//! il kernel sulle curve di `BoundarySource.curves`**, così il chiamante non
+//! deve convertire nulla: l'elemento `k` di `removed` riguarda la curva `k` di
+//! `BoundarySource.curves` e il suo intervallo è il parametro normalizzato
+//! 0..1 *di quella curva*, nel verso e con la parametrizzazione che la curva
+//! ha, cioè ciò che restituisce `kernel::geom2d::inside_spans(&zona, &curva,
+//! tolleranza)` (coppie `[t0, t1]` già in 0..1 per una curva limitata; vedi
+//! `kernel_curve_intervals_are_taken_as_they_are` e le prove con
+//! `inside_spans`). Qui dentro si fa l'eventuale inversione.
+//!
+//! * Indice: `LINE` e `ARC` hanno un solo segmento, l'indice 0. Le polilinee un
+//!   segmento per vertice, nell'ordine dei vertici: il segmento `i` va dal
+//!   vertice `i` al vertice `i + 1` e prende bulge e larghezze dal vertice
+//!   `i`; in una polilinea chiusa l'ultimo segmento, quello di chiusura, torna
+//!   al vertice 0 (indice = numero di vertici − 1) con il bulge dell'ultimo
+//!   vertice.
+//! * Parametrizzazione, quella della curva del kernel: su un segmento dritto
+//!   `t` è lineare nella **lunghezza**; su un arco (un `ARC`, un segmento con
+//!   bulge) è lineare nell'**angolo**, cioè `punto(t)` sta all'angolo
+//!   `inizio + sweep · t`, non nella corda.
+//! * Verso: la curva del kernel è un arco *sempre antiorario*. Perciò per
+//!   alcuni archi il suo `t` corre al contrario del verso dell'entità, e
+//!   `kept_pieces` lo rovescia da sé (`t → 1 − t`): per un segmento con bulge
+//!   negativo (`Curve::segments` lo rappresenta con gli estremi scambiati) e,
+//!   in generale, quando il passaggio dall'OCS dell'entità al piano XY è uno
+//!   specchio (normale −Z: un `ARC` con normale −Z, un bulge positivo con
+//!   normale −Z). Nei segmenti dritti il verso coincide sempre. Il criterio è
+//!   preso dalle stesse funzioni che producono le curve (`entity_curve`, piano
+//!   di lavoro XY predefinito come in `walls.rs`).
+//! * Le coordinate dei pezzi sono quelle proprie dell'entità (OCS); l'ordine
+//!   dei pezzi è quello del verso dell'entità.
 //!
 //! # Cosa viene restituito
 //!
@@ -88,10 +99,18 @@ pub const MIN_PIECE_REL: f64 = 1.0e-9;
 
 /// I pezzi che restano di `entity` togliendo gli intervalli `removed`.
 ///
-/// `removed` è un elenco di `(indice del segmento, [t0, t1])` con `t` in 0..1
-/// nel verso dell'entità; la numerazione dei segmenti e la parametrizzazione
-/// sono nella documentazione del modulo. Con tutto tolto restituisce un
-/// elenco vuoto.
+/// `removed` è un elenco di `(k, [t0, t1])`: `k` è l'indice della curva in
+/// `BoundarySource.curves` (un segmento di polilinea, nell'ordine dei vertici
+/// col segmento di chiusura per ultimo; 0 per `LINE` e `ARC`) e `[t0, t1]` è
+/// l'intervallo da togliere nel parametro normalizzato 0..1 **di quella
+/// curva**, nel suo verso e nella sua parametrizzazione: lineare nella
+/// lunghezza su un segmento dritto, lineare nell'angolo su un arco, ossia
+/// esattamente le coppie di `kernel::geom2d::inside_spans` su quella curva. Il
+/// chiamante passa gli intervalli del kernel così come sono; se il verso della
+/// curva è opposto a quello dell'entità (bulge negativo, normale −Z) lo
+/// rovescia questa funzione. Dettagli, identità dei pezzi e lunghezze
+/// trascurabili sono nella documentazione del modulo. Con tutto tolto
+/// restituisce un elenco vuoto.
 pub fn kept_pieces(entity: &EntityType, removed: &[(usize, [f64; 2])]) -> Vec<EntityType> {
     let pieces = match entity {
         EntityType::Line(line) => cut_line(entity, line, removed),
@@ -180,13 +199,42 @@ fn kept_of(removed: &[[f64; 2]]) -> Vec<[f64; 2]> {
     kept
 }
 
-/// Gli intervalli di `removed` che riguardano il segmento `index`.
-fn raw_for(removed: &[(usize, [f64; 2])], index: usize) -> Vec<[f64; 2]> {
+/// Gli intervalli di `removed` che riguardano il segmento `index`, nel verso
+/// dell'entità. Con `reversed` la curva del kernel corre al contrario
+/// dell'entità: `[t0, t1]` diventa `[1 − t1, 1 − t0]`.
+fn raw_for(removed: &[(usize, [f64; 2])], index: usize, reversed: bool) -> Vec<[f64; 2]> {
     removed
         .iter()
         .filter(|(segment, _)| *segment == index)
-        .map(|(_, interval)| *interval)
+        .map(|(_, [a, b])| {
+            if reversed {
+                [1.0 - b, 1.0 - a]
+            } else {
+                [*a, *b]
+            }
+        })
         .collect()
+}
+
+/// Il passaggio dall'OCS dell'entità al piano XY di lavoro predefinito è uno
+/// specchio (normale −Z)? Lo stesso calcolo di `entity_boundary_source_on_plane`:
+/// gli assi del piano dell'entità proiettati su XY, con il segno del loro
+/// determinante. In uno specchio il kernel ribalta gli archi (`Curve::transformed`
+/// scambia gli estremi) e i bulge (`Polyline` cambia segno).
+fn mirrors_into_xy(entity: &EntityType) -> bool {
+    crate::entities::curve::entity_curve(entity).is_some_and(|curve| {
+        let (x, y) = (curve.plane.x_axis, curve.plane.y_axis);
+        x[0] * y[1] - x[1] * y[0] < 0.0
+    })
+}
+
+/// Il parametro della curva del kernel di un arco corre al contrario del
+/// verso dell'entità? Gli archi del kernel sono sempre antiorari: un arco in
+/// senso orario (bulge negativo) è rappresentato con gli estremi scambiati, e
+/// uno specchio inverte il verso di tutti. `clockwise` è il verso dell'arco
+/// nell'OCS dell'entità (un `ARC` è sempre antiorario).
+fn kernel_curve_reversed(clockwise: bool, mirrored: bool) -> bool {
+    clockwise != mirrored
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +248,8 @@ fn lerp3(a: Vector3, b: Vector3, t: f64) -> Vector3 {
 fn cut_line(entity: &EntityType, line: &Line, removed: &[(usize, [f64; 2])]) -> Vec<EntityType> {
     let length = line.start.distance(&line.end);
     let eps = MIN_PIECE_REL * length;
-    let cuts = merged_removed(&raw_for(removed, 0), length, eps);
+    // Un segmento dritto ha lo stesso verso nell'entità e nella curva.
+    let cuts = merged_removed(&raw_for(removed, 0, false), length, eps);
     if cuts.is_empty() {
         return vec![entity.clone()];
     }
@@ -220,7 +269,8 @@ fn cut_arc(entity: &EntityType, arc: &Arc, removed: &[(usize, [f64; 2])]) -> Vec
     let span = arc_span(arc.start_angle, arc.end_angle);
     let length = arc.radius.abs() * span;
     let eps = MIN_PIECE_REL * length;
-    let cuts = merged_removed(&raw_for(removed, 0), length, eps);
+    let reversed = kernel_curve_reversed(false, mirrors_into_xy(entity));
+    let cuts = merged_removed(&raw_for(removed, 0, reversed), length, eps);
     if cuts.is_empty() {
         return vec![entity.clone()];
     }
@@ -289,16 +339,21 @@ struct Seg {
     w1: f64,
     arc: Option<BulgeArc>,
     length: f64,
+    /// Il parametro della curva del kernel corre al contrario del segmento.
+    reversed: bool,
 }
 
 impl Seg {
-    fn new(vertices: &[Vtx], from: usize, to: usize) -> Self {
+    fn new(vertices: &[Vtx], from: usize, to: usize, mirrored: bool) -> Self {
         let (a, b) = (&vertices[from], &vertices[to]);
         let arc = BulgeArc::from_bulge(a.pos, b.pos, a.bulge);
         let length = match &arc {
             Some(arc) => arc.radius * arc.sweep.abs(),
             None => (b.pos[0] - a.pos[0]).hypot(b.pos[1] - a.pos[1]),
         };
+        let reversed = arc
+            .as_ref()
+            .is_some_and(|arc| kernel_curve_reversed(arc.sweep < 0.0, mirrored));
         Seg {
             from,
             to,
@@ -311,6 +366,7 @@ impl Seg {
             w1: a.end_width,
             arc,
             length,
+            reversed,
         }
     }
 
@@ -382,15 +438,17 @@ fn cut_polyline(
         n if closed => n,
         n => n - 1,
     };
+    // Lo specchio conta solo se c'è un arco (e costa una costruzione di curva).
+    let mirrored = vertices.iter().any(|v| v.bulge != 0.0) && mirrors_into_xy(entity);
     let segments: Vec<Seg> = (0..segment_count)
-        .map(|i| Seg::new(&vertices, i, (i + 1) % count))
+        .map(|i| Seg::new(&vertices, i, (i + 1) % count, mirrored))
         .collect();
     let eps = MIN_PIECE_REL * segments.iter().map(|s| s.length).sum::<f64>();
 
     let cuts: Vec<Vec<[f64; 2]>> = segments
         .iter()
         .enumerate()
-        .map(|(i, seg)| merged_removed(&raw_for(removed, i), seg.length, eps))
+        .map(|(i, seg)| merged_removed(&raw_for(removed, i, seg.reversed), seg.length, eps))
         .collect();
     if cuts.iter().all(Vec::is_empty) {
         return vec![entity.clone()];
@@ -513,10 +571,13 @@ fn heavy_piece(original: &Polyline2D, nodes: &[Node]) -> Polyline2D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::WorkingPlane;
+    use crate::scene::entity_boundary_source_on_plane;
     use codec::entities::polyline::VertexFlags;
     use codec::entities::{Arc, EntityCommon, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
     use codec::types::{Color, LineWeight, Transparency};
     use codec::{Handle, Vector2, Vector3};
+    use kernel::geom2d::{inside_spans, Curve, Line as KernelLine, Tolerance};
     use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
     const TOL: f64 = 1.0e-9;
@@ -773,12 +834,14 @@ mod tests {
     }
 
     #[test]
-    fn negative_bulge_keeps_its_sign_and_t_follows_the_polyline_direction() {
+    fn negative_bulge_keeps_its_sign_and_takes_the_kernel_curve_parameter() {
         // (1;0) -> (0;-1) in senso orario attorno all'origine: bulge negativo.
         let bulge = -(FRAC_PI_2 / 4.0).tan();
         let poly = decorated_lw(&[([1.0, 0.0], bulge), ([0.0, -1.0], 0.0)], false);
-        // t = 0 è il vertice 0: tolgo il primo quarto, resta [0,25; 1].
-        let pieces = kept_pieces(&EntityType::LwPolyline(poly), &[(0, [0.0, 0.25])]);
+        // La curva del kernel di un bulge negativo corre dal vertice 1 al
+        // vertice 0: il suo ultimo quarto [0,75; 1] è il primo quarto
+        // dell'entità, dal vertice 0. Resta il resto, [0,25; 1] dell'entità.
+        let pieces = kept_pieces(&EntityType::LwPolyline(poly), &[(0, [0.75, 1.0])]);
         assert_eq!(pieces.len(), 1);
         let got = lw(&pieces[0]);
         let a = -(FRAC_PI_2 * 0.25);
@@ -1156,61 +1219,203 @@ mod tests {
         assert!(!kept_pieces(&EntityType::Arc(arc), &[(0, [0.4, 0.6])]).is_empty());
     }
 
-    /// Il contratto sul parametro, verificato contro le curve che il chiamante
-    /// avrà davvero (`BoundarySource.curves`): per `LINE`, `ARC` e segmenti con
-    /// bulge positivo `t` coincide con quello della curva; per un bulge
-    /// negativo la curva del kernel corre al contrario e vale `1 - t`.
+    // ---- Contratto sul parametro, contro le curve vere del kernel ----
+
+    fn source_curves(entity: &EntityType) -> Vec<Curve> {
+        entity_boundary_source_on_plane(entity, WorkingPlane::default(), 1.0e-6, None)
+            .expect("curve del muro")
+            .curves
+    }
+
+    /// Gli estremi in coordinate del mondo di un pezzo di un solo segmento.
+    fn curve_ends(piece: &EntityType) -> [[f64; 2]; 2] {
+        let curves = source_curves(piece);
+        assert_eq!(curves.len(), 1, "il pezzo deve avere un solo segmento");
+        [curves[0].point_at(0.0), curves[0].point_at(1.0)]
+    }
+
+    fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
+        (a[0] - b[0]).hypot(a[1] - b[1])
+    }
+
+    /// Stessi due estremi, in un verso o nell'altro.
+    fn same_ends(got: [[f64; 2]; 2], want: [[f64; 2]; 2]) -> bool {
+        let direct = dist(got[0], want[0]) < TOL && dist(got[1], want[1]) < TOL;
+        let swapped = dist(got[0], want[1]) < TOL && dist(got[1], want[0]) < TOL;
+        direct || swapped
+    }
+
+    /// Polilinea di muro a quota 0 con la normale data.
+    fn flat_poly(points: &[([f64; 2], f64)], normal_z: f64) -> LwPolyline {
+        let mut poly = decorated_lw(points, false);
+        poly.elevation = 0.0;
+        poly.normal = Vector3::new(0.0, 0.0, normal_z);
+        poly
+    }
+
+    fn flat_arc(center: [f64; 2], radius: f64, from: f64, to: f64, normal_z: f64) -> Arc {
+        let mut arc = Arc::from_center_radius_angles(
+            Vector3::new(center[0], center[1], 0.0),
+            radius,
+            from,
+            to,
+        );
+        arc.normal = Vector3::new(0.0, 0.0, normal_z);
+        arc
+    }
+
+    fn zone(min: [f64; 2], max: [f64; 2]) -> Vec<Curve> {
+        let corners = [min, [max[0], min[1]], max, [min[0], max[1]]];
+        (0..4)
+            .map(|i| {
+                Curve::Line(KernelLine {
+                    start: corners[i],
+                    end: corners[(i + 1) % 4],
+                })
+            })
+            .collect()
+    }
+
+    /// Gli intervalli che dà il kernel per la parte della curva dentro la
+    /// zona, pronti da passare così come sono a `kept_pieces`.
+    fn removed_by_zone(curves: &[Curve], zone: &[Curve]) -> Vec<(usize, [f64; 2])> {
+        let tolerance = Tolerance::new(1.0e-6);
+        curves
+            .iter()
+            .enumerate()
+            .flat_map(|(k, curve)| {
+                inside_spans(zone, curve, tolerance)
+                    .into_iter()
+                    .map(move |span| (k, span))
+            })
+            .collect()
+    }
+
+    /// Il contratto: l'intervallo è quello della curva di `BoundarySource`,
+    /// nel suo parametro e nel suo verso, per ogni tipo di segmento e anche
+    /// con la normale −Z (specchio). Tolgo il tratto [0,3; 0,6] della curva e
+    /// i due pezzi che restano devono avere per estremi i punti di quella
+    /// stessa curva a 0 e 0,3, e a 0,6 e 1.
     #[test]
-    fn parameter_contract_against_boundary_source_curves() {
-        use crate::command::WorkingPlane;
-        use crate::scene::entity_boundary_source_on_plane;
-
-        let curve_point = |entity: &EntityType, t: f64| {
-            let source =
-                entity_boundary_source_on_plane(entity, WorkingPlane::default(), 1.0e-6, None)
-                    .expect("curve del muro");
-            source.curves[0].point_at(t)
+    fn kernel_curve_intervals_are_taken_as_they_are() {
+        let arcs = |bulge: f64, normal_z: f64| {
+            EntityType::LwPolyline(flat_poly(
+                &[([0.0, 0.0], bulge), ([4.0, 0.0], 0.0)],
+                normal_z,
+            ))
         };
-        let t = 0.3;
-        let first_vertex = |entity: &EntityType| match &kept_pieces(entity, &[(0, [0.0, t])])[0] {
-            EntityType::LwPolyline(p) => xy(&p.vertices[0]),
-            EntityType::Line(l) => [l.start.x, l.start.y],
-            EntityType::Arc(a) => [
-                a.center.x + a.radius * a.start_angle.cos(),
-                a.center.y + a.radius * a.start_angle.sin(),
-            ],
-            other => panic!("tipo inatteso {other:?}"),
-        };
+        let mut heavy = Polyline2D::new();
+        heavy.add_vertex(Vertex2D::new(Vector3::new(0.0, 0.0, 0.0)).with_bulge(-0.5));
+        heavy.add_vertex(Vertex2D::new(Vector3::new(4.0, 0.0, 0.0)));
+        let cases: Vec<(&str, EntityType)> = vec![
+            (
+                "LINE",
+                EntityType::Line(decorated_line([1.0, 2.0], [9.0, 5.0])),
+            ),
+            (
+                "ARC",
+                EntityType::Arc(flat_arc([1.0, 1.0], 3.0, 0.2, 2.5, 1.0)),
+            ),
+            (
+                "ARC normale -Z",
+                EntityType::Arc(flat_arc([-1.0, 1.0], 3.0, 0.2, 2.5, -1.0)),
+            ),
+            ("bulge positivo", arcs(0.5, 1.0)),
+            ("bulge negativo", arcs(-0.5, 1.0)),
+            ("bulge positivo, normale -Z", arcs(0.5, -1.0)),
+            ("bulge negativo, normale -Z", arcs(-0.5, -1.0)),
+            ("segmento dritto, normale -Z", arcs(0.0, -1.0)),
+            ("POLYLINE 2D, bulge negativo", EntityType::Polyline2D(heavy)),
+        ];
+        for (name, entity) in cases {
+            let curve = source_curves(&entity).remove(0);
+            let pieces = kept_pieces(&entity, &[(0, [0.3, 0.6])]);
+            assert_eq!(pieces.len(), 2, "{name}: {pieces:?}");
+            let found: Vec<_> = pieces.iter().map(curve_ends).collect();
+            let wanted = [
+                [curve.point_at(0.0), curve.point_at(0.3)],
+                [curve.point_at(0.6), curve.point_at(1.0)],
+            ];
+            for want in wanted {
+                assert!(
+                    found.iter().any(|got| same_ends(*got, want)),
+                    "{name}: nessun pezzo con gli estremi {want:?}, trovati {found:?}"
+                );
+            }
+        }
+    }
 
-        let straight = EntityType::Line(decorated_line([1.0, 2.0], [9.0, 5.0]));
-        assert_xy(first_vertex(&straight), curve_point(&straight, t), "LINE");
-
-        let arc = EntityType::Arc(Arc::from_center_radius_angles(
-            Vector3::new(1.0, 1.0, 0.0),
-            3.0,
-            0.2,
-            2.5,
-        ));
-        assert_xy(first_vertex(&arc), curve_point(&arc, t), "ARC");
-
-        // Quota 0: una polilinea in quota non è sul piano XY dei muri.
-        let flat = |bulge: f64| {
-            let mut poly = decorated_lw(&[([0.0, 0.0], bulge), ([4.0, 0.0], 0.0)], false);
-            poly.elevation = 0.0;
-            EntityType::LwPolyline(poly)
-        };
-        let positive = flat(0.5);
-        assert_xy(
-            first_vertex(&positive),
-            curve_point(&positive, t),
-            "bulge positivo",
+    /// Un bulge negativo tagliato da una zona vera: gli intervalli di
+    /// `inside_spans` sulla curva del kernel, senza alcuna conversione, tolgono
+    /// la parte dentro la zona, cioè la testa dell'entità, e resta la coda.
+    #[test]
+    fn negative_bulge_cut_by_a_zone_keeps_the_right_piece() {
+        // (0;0) -> (4;0) con bulge −0,5: arco orario che si alza fino a y = 1,
+        // centro (2; −1,5), raggio 2,5. La zona copre x ∈ [−1; 1,5].
+        let entity =
+            EntityType::LwPolyline(flat_poly(&[([0.0, 0.0], -0.5), ([4.0, 0.0], 0.0)], 1.0));
+        let removed = removed_by_zone(&source_curves(&entity), &zone([-1.0, -1.0], [1.5, 3.0]));
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        let pieces = kept_pieces(&entity, &removed);
+        assert_eq!(pieces.len(), 1, "{pieces:?}");
+        let got = lw(&pieces[0]);
+        let cut_y = -1.5 + (2.5f64 * 2.5 - 0.5 * 0.5).sqrt();
+        assert_xy(xy(&got.vertices[0]), [1.5, cut_y], "punto di taglio");
+        assert_xy(xy(&got.vertices[1]), [4.0, 0.0], "estremo rimasto");
+        let angle = |p: [f64; 2]| (p[1] + 1.5).atan2(p[0] - 2.0);
+        let sweep = angle([1.5, cut_y]) - angle([4.0, 0.0]);
+        near(
+            got.vertices[0].bulge,
+            -(sweep / 4.0).tan(),
+            "bulge dopo il taglio",
         );
+        assert!(got.vertices[0].bulge < 0.0);
+    }
 
-        let negative = flat(-0.5);
-        assert_xy(
-            first_vertex(&negative),
-            curve_point(&negative, 1.0 - t),
-            "bulge negativo",
+    /// Lo stesso per un `ARC` con normale −Z, la cui curva del kernel è
+    /// specchiata e quindi corre al contrario.
+    #[test]
+    fn arc_with_negative_normal_cut_by_a_zone_keeps_the_right_piece() {
+        // OCS: centro (−2; 0), raggio 2, da 0° a 180°. Nel mondo (x → −x) è la
+        // semicirconferenza superiore da (0;0) a (4;0), centro (2;0). La zona
+        // x ∈ [−1; 1] toglie il tratto vicino a (0;0): x = 2 − 2 cos θ ≤ 1, cioè
+        // θ ≤ 60° nell'OCS dell'entità. Restano gli angoli da 60° a 180°.
+        let entity = EntityType::Arc(flat_arc([-2.0, 0.0], 2.0, 0.0, PI, -1.0));
+        let removed = removed_by_zone(&source_curves(&entity), &zone([-1.0, -1.0], [1.0, 3.0]));
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        let pieces = kept_pieces(&entity, &removed);
+        assert_eq!(pieces.len(), 1, "{pieces:?}");
+        let EntityType::Arc(got) = &pieces[0] else {
+            panic!("attesto un ARC")
+        };
+        near_angle(got.start_angle, PI / 3.0, "angolo iniziale");
+        near_angle(got.end_angle, PI, "angolo finale");
+        assert_eq!(got.normal, Vector3::new(0.0, 0.0, -1.0));
+    }
+
+    /// Il segmento di chiusura con bulge negativo di una polilinea chiusa:
+    /// l'intervallo è quello della sua curva (l'ultima), il pezzo attraversa
+    /// la chiusura.
+    #[test]
+    fn closing_segment_with_negative_bulge_takes_the_kernel_curve_parameter() {
+        let mut poly = decorated_lw(
+            &[([0.0, 0.0], 0.0), ([4.0, 0.0], 0.0), ([4.0, 4.0], -0.5)],
+            true,
         );
+        poly.elevation = 0.0;
+        let entity = EntityType::LwPolyline(poly);
+        let curves = source_curves(&entity);
+        assert_eq!(curves.len(), 3, "una curva per segmento, chiusura compresa");
+        let pieces = kept_pieces(&entity, &[(2, [0.3, 0.6])]);
+        assert_eq!(pieces.len(), 1, "{pieces:?}");
+        let got = lw(&pieces[0]);
+        let first = xy(&got.vertices[0]);
+        let last = xy(got.vertices.last().unwrap());
+        let want = [curves[2].point_at(0.3), curves[2].point_at(0.6)];
+        assert!(
+            same_ends([first, last], want),
+            "{first:?} {last:?} invece di {want:?}"
+        );
+        assert!(!got.is_closed);
     }
 }
