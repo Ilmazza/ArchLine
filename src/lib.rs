@@ -2,6 +2,7 @@
 #![recursion_limit = "512"]
 
 pub mod app;
+pub mod bim;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod command;

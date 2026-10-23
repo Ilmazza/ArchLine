@@ -1,0 +1,243 @@
+//! Avvisi del modulo BIM: i comandi li raccolgono e li scrivono in riga di
+//! comando. Coordinate in unità del disegno, aree già in m².
+
+use codec::Handle;
+
+use super::units::format_m2;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Notice {
+    /// Entità del rilievo fuori dal piano XY, ignorate.
+    FuoriPiano {
+        count: usize,
+    },
+    ZonaSenzaMuri,
+    NuovoSuEsistente,
+    StessoStatoSovrapposte,
+    ConfiniNonRimossi {
+        at: [f64; 2],
+    },
+    GiunzioneDaVerificare {
+        at: [f64; 2],
+    },
+    TaglioNonChiuso {
+        at: [f64; 2],
+    },
+    NuoveSovrapposte {
+        at: [f64; 2],
+    },
+    VarcoNonSupportato {
+        at: [f64; 2],
+    },
+    NonTagliata {
+        handle: Handle,
+        kind: String,
+    },
+    Esclusa {
+        handle: Handle,
+        kind: String,
+    },
+    NonCopiata {
+        handle: Handle,
+        kind: String,
+    },
+    LocaleFuso {
+        names: Vec<String>,
+        area_m2: f64,
+    },
+    LocaleSenzaNome {
+        area_m2: f64,
+    },
+    SemeInMuroNuovo {
+        name: String,
+    },
+    LocaleNonChiuso {
+        name: String,
+    },
+    Isole {
+        name: String,
+        count: usize,
+    },
+    Varco {
+        area_m2: f64,
+    },
+    ContornoApprossimato {
+        name: String,
+    },
+}
+
+impl Notice {
+    pub fn text(&self) -> String {
+        match self {
+            Self::FuoriPiano { count } => format!("{count} entità fuori dal piano XY ignorate."),
+            Self::ZonaSenzaMuri => "La zona demolita non incrocia nessuna linea del rilievo.".into(),
+            Self::NuovoSuEsistente => {
+                "La zona nuova si sovrappone a un muro esistente non demolito.".into()
+            }
+            Self::StessoStatoSovrapposte => {
+                "La zona si sovrappone in parte a un'altra zona dello stesso stato.".into()
+            }
+            Self::ConfiniNonRimossi { at } => format!(
+                "Zona senza asse in ({:.2}; {:.2}): i confini non sono stati rimossi.",
+                at[0], at[1]
+            ),
+            Self::GiunzioneDaVerificare { at } => {
+                format!("Giunzione da verificare in ({:.2}; {:.2}).", at[0], at[1])
+            }
+            Self::TaglioNonChiuso { at } => {
+                format!("Taglio non chiuso in ({:.2}; {:.2}).", at[0], at[1])
+            }
+            Self::NuoveSovrapposte { at } => format!(
+                "Zone nuove sovrapposte solo in parte in ({:.2}; {:.2}).",
+                at[0], at[1]
+            ),
+            Self::VarcoNonSupportato { at } => format!(
+                "Varco non supportato in ({:.2}; {:.2}): serve un rettangolo che attraversi il muro.",
+                at[0], at[1]
+            ),
+            Self::NonTagliata { handle, kind } => {
+                format!("{kind} {handle:X} attraversa una zona demolita: lasciata intera.")
+            }
+            Self::Esclusa { handle, kind } => {
+                format!("{kind} {handle:X} dentro una zona demolita: esclusa dal progetto.")
+            }
+            Self::NonCopiata { handle, kind } => {
+                format!("{kind} {handle:X} non copiata nel DWG estratto.")
+            }
+            Self::LocaleFuso { names, area_m2 } => format!(
+                "Locali {} fusi in uno ({}): nome da confermare.",
+                names.join(" + "),
+                format_m2(*area_m2)
+            ),
+            Self::LocaleSenzaNome { area_m2 } => {
+                format!("Locale senza nome ({}).", format_m2(*area_m2))
+            }
+            Self::SemeInMuroNuovo { name } => {
+                format!("Il locale di progetto {name} cade dentro un muro nuovo.")
+            }
+            Self::LocaleNonChiuso { name } => {
+                format!("Il locale {name} non è più chiuso: lasciato com'era.")
+            }
+            Self::Isole { name, count } => format!("Locale {name}: {count} isole sottratte."),
+            Self::Varco { area_m2 } => format!("Varco {} escluso dai locali.", format_m2(*area_m2)),
+            Self::ContornoApprossimato { name } => {
+                format!("Locale {name}: contorno curvo approssimato.")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// I testi sono quelli della spec, parola per parola.
+    #[test]
+    fn notice_texts() {
+        let at = [1.0, 2.5];
+        let h = Handle::new(0x2A);
+        let kind = || "LINE".to_string();
+        let cases = [
+            (
+                Notice::FuoriPiano { count: 3 },
+                "3 entità fuori dal piano XY ignorate.",
+            ),
+            (
+                Notice::ZonaSenzaMuri,
+                "La zona demolita non incrocia nessuna linea del rilievo.",
+            ),
+            (
+                Notice::NuovoSuEsistente,
+                "La zona nuova si sovrappone a un muro esistente non demolito.",
+            ),
+            (
+                Notice::StessoStatoSovrapposte,
+                "La zona si sovrappone in parte a un'altra zona dello stesso stato.",
+            ),
+            (
+                Notice::ConfiniNonRimossi { at },
+                "Zona senza asse in (1.00; 2.50): i confini non sono stati rimossi.",
+            ),
+            (
+                Notice::GiunzioneDaVerificare { at },
+                "Giunzione da verificare in (1.00; 2.50).",
+            ),
+            (
+                Notice::TaglioNonChiuso { at },
+                "Taglio non chiuso in (1.00; 2.50).",
+            ),
+            (
+                Notice::NuoveSovrapposte { at },
+                "Zone nuove sovrapposte solo in parte in (1.00; 2.50).",
+            ),
+            (
+                Notice::VarcoNonSupportato { at },
+                "Varco non supportato in (1.00; 2.50): serve un rettangolo che attraversi il muro.",
+            ),
+            (
+                Notice::NonTagliata {
+                    handle: h,
+                    kind: kind(),
+                },
+                "LINE 2A attraversa una zona demolita: lasciata intera.",
+            ),
+            (
+                Notice::Esclusa {
+                    handle: h,
+                    kind: kind(),
+                },
+                "LINE 2A dentro una zona demolita: esclusa dal progetto.",
+            ),
+            (
+                Notice::NonCopiata {
+                    handle: h,
+                    kind: kind(),
+                },
+                "LINE 2A non copiata nel DWG estratto.",
+            ),
+            (
+                Notice::LocaleFuso {
+                    names: vec!["Cucina".into(), "Pranzo".into()],
+                    area_m2: 11.905,
+                },
+                "Locali Cucina + Pranzo fusi in uno (11,91 m²): nome da confermare.",
+            ),
+            (
+                Notice::LocaleSenzaNome { area_m2: 4.0 },
+                "Locale senza nome (4,00 m²).",
+            ),
+            (
+                Notice::SemeInMuroNuovo {
+                    name: "Bagno".into(),
+                },
+                "Il locale di progetto Bagno cade dentro un muro nuovo.",
+            ),
+            (
+                Notice::LocaleNonChiuso {
+                    name: "Bagno".into(),
+                },
+                "Il locale Bagno non è più chiuso: lasciato com'era.",
+            ),
+            (
+                Notice::Isole {
+                    name: "Bagno".into(),
+                    count: 2,
+                },
+                "Locale Bagno: 2 isole sottratte.",
+            ),
+            (
+                Notice::Varco { area_m2: 0.09 },
+                "Varco 0,09 m² escluso dai locali.",
+            ),
+            (
+                Notice::ContornoApprossimato {
+                    name: "Bagno".into(),
+                },
+                "Locale Bagno: contorno curvo approssimato.",
+            ),
+        ];
+        for (notice, text) in cases {
+            assert_eq!(notice.text(), text);
+        }
+    }
+}
