@@ -3,7 +3,7 @@
 
 use codec::Handle;
 
-use super::units::format_m2;
+use super::units::{format_decimal, format_m2};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
@@ -66,11 +66,18 @@ pub enum Notice {
     },
 }
 
+/// `(4,05; 0,00)`: coordinate con due decimali e virgola, come le aree.
+fn point(at: &[f64; 2]) -> String {
+    format!("({}; {})", format_decimal(at[0]), format_decimal(at[1]))
+}
+
 impl Notice {
     pub fn text(&self) -> String {
         match self {
             Self::FuoriPiano { count } => format!("{count} entità fuori dal piano XY ignorate."),
-            Self::ZonaSenzaMuri => "La zona demolita non incrocia nessuna linea del rilievo.".into(),
+            Self::ZonaSenzaMuri => {
+                "La zona demolita non incrocia nessuna linea del rilievo.".into()
+            }
             Self::NuovoSuEsistente => {
                 "La zona nuova si sovrappone a un muro esistente non demolito.".into()
             }
@@ -78,22 +85,21 @@ impl Notice {
                 "La zona si sovrappone in parte a un'altra zona dello stesso stato.".into()
             }
             Self::ConfiniNonRimossi { at } => format!(
-                "Zona senza asse in ({:.2}; {:.2}): i confini non sono stati rimossi.",
-                at[0], at[1]
+                "Zona senza asse in {}: i confini non sono stati rimossi.",
+                point(at)
             ),
             Self::GiunzioneDaVerificare { at } => {
-                format!("Giunzione da verificare in ({:.2}; {:.2}).", at[0], at[1])
+                format!("Giunzione da verificare in {}.", point(at))
             }
             Self::TaglioNonChiuso { at } => {
-                format!("Taglio non chiuso in ({:.2}; {:.2}).", at[0], at[1])
+                format!("Taglio non chiuso in {}.", point(at))
             }
-            Self::NuoveSovrapposte { at } => format!(
-                "Zone nuove sovrapposte solo in parte in ({:.2}; {:.2}).",
-                at[0], at[1]
-            ),
+            Self::NuoveSovrapposte { at } => {
+                format!("Zone nuove sovrapposte solo in parte in {}.", point(at))
+            }
             Self::VarcoNonSupportato { at } => format!(
-                "Varco non supportato in ({:.2}; {:.2}): serve un rettangolo che attraversi il muro.",
-                at[0], at[1]
+                "Varco non supportato in {}: serve un rettangolo che attraversi il muro.",
+                point(at)
             ),
             Self::NonTagliata { handle, kind } => {
                 format!("{kind} {handle:X} attraversa una zona demolita: lasciata intera.")
@@ -156,23 +162,23 @@ mod tests {
             ),
             (
                 Notice::ConfiniNonRimossi { at },
-                "Zona senza asse in (1.00; 2.50): i confini non sono stati rimossi.",
+                "Zona senza asse in (1,00; 2,50): i confini non sono stati rimossi.",
             ),
             (
                 Notice::GiunzioneDaVerificare { at },
-                "Giunzione da verificare in (1.00; 2.50).",
+                "Giunzione da verificare in (1,00; 2,50).",
             ),
             (
                 Notice::TaglioNonChiuso { at },
-                "Taglio non chiuso in (1.00; 2.50).",
+                "Taglio non chiuso in (1,00; 2,50).",
             ),
             (
                 Notice::NuoveSovrapposte { at },
-                "Zone nuove sovrapposte solo in parte in (1.00; 2.50).",
+                "Zone nuove sovrapposte solo in parte in (1,00; 2,50).",
             ),
             (
                 Notice::VarcoNonSupportato { at },
-                "Varco non supportato in (1.00; 2.50): serve un rettangolo che attraversi il muro.",
+                "Varco non supportato in (1,00; 2,50): serve un rettangolo che attraversi il muro.",
             ),
             (
                 Notice::NonTagliata {
@@ -239,5 +245,17 @@ mod tests {
         for (notice, text) in cases {
             assert_eq!(notice.text(), text);
         }
+        // Virgola decimale anche per le coordinate; negative e arrotondate.
+        assert_eq!(
+            Notice::GiunzioneDaVerificare { at: [4.05, 0.0] }.text(),
+            "Giunzione da verificare in (4,05; 0,00)."
+        );
+        assert_eq!(
+            Notice::TaglioNonChiuso {
+                at: [-1250.5, 0.004]
+            }
+            .text(),
+            "Taglio non chiuso in (-1250,50; 0,00)."
+        );
     }
 }

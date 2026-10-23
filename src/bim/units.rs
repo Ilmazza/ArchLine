@@ -94,13 +94,19 @@ pub fn area_m2(area: f64, unit: DrawingUnit) -> f64 {
     area / (k * k)
 }
 
-/// `12,00 m²`: due decimali, virgola. L'arrotondamento va sui centesimi
-/// (mezzo verso l'alto), non sulla rappresentazione binaria di `{:.2}`.
-pub fn format_m2(m2: f64) -> String {
-    let cents = (m2 * 100.0).round() as i64;
+/// `12,00`: due decimali, virgola. L'arrotondamento va sui centesimi (mezzo
+/// via dallo zero), non sulla rappresentazione binaria di `{:.2}`. Serve alle
+/// aree (`format_m2`) e alle coordinate degli avvisi.
+pub fn format_decimal(value: f64) -> String {
+    let cents = (value * 100.0).round() as i64;
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
-    format!("{sign}{},{:02} m²", abs / 100, abs % 100)
+    format!("{sign}{},{:02}", abs / 100, abs % 100)
+}
+
+/// `12,00 m²`.
+pub fn format_m2(m2: f64) -> String {
+    format!("{} m²", format_decimal(m2))
 }
 
 #[cfg(test)]
@@ -142,5 +148,9 @@ mod tests {
         assert_eq!(format_m2(12.0), "12,00 m²");
         assert_eq!(format_m2(0.09), "0,09 m²");
         assert_eq!(format_m2(11.905), "11,91 m²");
+        assert_eq!(format_decimal(4.05), "4,05");
+        assert_eq!(format_decimal(0.0), "0,00");
+        assert_eq!(format_decimal(-1250.5), "-1250,50");
+        assert_eq!(format_decimal(-0.001), "0,00");
     }
 }
