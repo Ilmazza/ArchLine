@@ -510,10 +510,11 @@ impl WallRect {
 pub enum AxisMiss {
     /// I due punti coincidono (entro la tolleranza): non c'è un asse.
     Degenerate,
-    /// Nessuna faccia valida ai lati dell'asse, o nessuna coppia con uno
-    /// spessore entro il limite.
+    /// Nessuna faccia valida ai lati dell'asse, oppure due facce valide una
+    /// per una ma più distanti tra loro dello spessore massimo.
     NoFaces,
-    /// Una faccia sola: l'altra manca entro il limite di spessore.
+    /// Una faccia sola: l'altra manca entro il limite di spessore (anche
+    /// l'asse caduto sull'unica faccia vicina).
     OneFace,
 }
 
@@ -527,12 +528,18 @@ const FACE_PARALLEL_DEGREES: f64 = 0.5;
 /// Con `d = (p2 − p1) / |p2 − p1|` e `n = (−d.y, d.x)` (normale sinistra), un
 /// segmento è candidato se è parallelo a `d` entro 0,5° e la sua proiezione su
 /// `d` copre più di `tol` dell'intervallo `(0, |p2 − p1|)`; il suo scostamento
-/// è `s = (inizio − p1) · n`, letto all'inizio del segmento. La faccia
-/// sinistra è il candidato con `s > tol` più vicino a 0, la destra quello con
-/// `s < −tol`. Una faccia vale solo con `|s| ≤ max_thickness`, e lo spessore
-/// `s_l − s_r` deve rientrare nello stesso limite. Se manca un lato e c'è un
-/// candidato con `|s| ≤ tol` (l'asse è stato dato sulla faccia stessa), quel
-/// candidato fa da lato mancante.
+/// è `s = (P − p1) · n`, con `P` il punto del segmento a metà dell'intervallo
+/// in cui la sua proiezione copre `(0, |p2 − p1|)` (per un segmento parallelo
+/// è lo stesso ovunque; per uno inclinato fino a 0,5° è lo scostamento dove
+/// serve, non all'inizio del segmento). La faccia sinistra è il candidato con
+/// `s > tol` più vicino a 0, la destra quello con `s < −tol`. Una faccia vale
+/// solo con `|s| ≤ max_thickness`, e lo spessore `s_l − s_r` deve rientrare
+/// nello stesso limite.
+///
+/// Se l'asse cade su una faccia (un candidato con `|s| ≤ tol`), quella è un
+/// lato e l'altro è il candidato valido più vicino per `|s|` da una parte o
+/// dall'altra (a pari distanza, il sinistro): la regola sinistra/destra
+/// sceglierebbe, accanto a un corridoio stretto, la faccia di là dal corridoio.
 ///
 /// Sono candidati solo i tratti dritti: le `LINE` e i lati dritti delle
 /// polilinee (`Curve::Line` delle sorgenti). Gli `ARC` e i lati ad arco delle
@@ -542,7 +549,7 @@ const FACE_PARALLEL_DEGREES: f64 = 0.5;
 /// Errori: [`AxisMiss::Degenerate`] se `p1 ≈ p2`; [`AxisMiss::OneFace`] se
 /// resta una faccia sola (anche l'unica faccia su cui cade l'asse, senza
 /// nient'altro entro il limite); [`AxisMiss::NoFaces`] se non ce n'è nessuna,
-/// o se le due più vicine distano più del limite tra loro.
+/// o se le due scelte distano più del limite tra loro.
 pub fn rect_from_axis(
     sources: &FxHashMap<Handle, BoundarySource>,
     p1: [f64; 2],
@@ -555,29 +562,36 @@ pub fn rect_from_axis(
     };
     let n = [-d[1], d[0]];
 
-    let mut left: Option<f64> = None;
-    let mut right: Option<f64> = None;
-    let mut on_face: Option<f64> = None;
-    for s in face_offsets(sources, p1, d, n, length, tol) {
-        // Negata, così scarta anche un limite non numerico.
-        if !(s.abs() <= max_thickness) {
-            continue;
-        }
-        if s > tol {
-            left = Some(left.map_or(s, |nearest| nearest.min(s)));
-        } else if s < -tol {
-            right = Some(right.map_or(s, |nearest| nearest.max(s)));
-        } else if on_face.map_or(true, |nearest| s.abs() < nearest.abs()) {
-            on_face = Some(s);
-        }
-    }
+    // Un limite non numerico scarta tutto (il confronto è positivo).
+    let valid: Vec<f64> = face_offsets(sources, p1, d, n, length, tol)
+        .into_iter()
+        .filter(|s| s.abs() <= max_thickness)
+        .collect();
+    let on_face = nearest_to_axis(valid.iter().copied().filter(|s| s.abs() <= tol));
 
-    let (s_r, s_l) = match (right, left, on_face) {
-        (Some(right), Some(left), _) => (right, left),
-        (None, Some(left), Some(on_face)) => (on_face, left),
-        (Some(right), None, Some(on_face)) => (right, on_face),
-        (None, None, None) => return Err(AxisMiss::NoFaces),
-        _ => return Err(AxisMiss::OneFace),
+    let (s_r, s_l) = if let Some(face) = on_face {
+        let other = nearest_to_axis(valid.iter().copied().filter(|s| s.abs() > tol));
+        match other {
+            Some(other) if other > 0.0 => (face, other),
+            Some(other) => (other, face),
+            None => return Err(AxisMiss::OneFace),
+        }
+    } else {
+        let left = valid
+            .iter()
+            .copied()
+            .filter(|&s| s > tol)
+            .min_by(f64::total_cmp);
+        let right = valid
+            .iter()
+            .copied()
+            .filter(|&s| s < -tol)
+            .max_by(f64::total_cmp);
+        match (right, left) {
+            (Some(right), Some(left)) => (right, left),
+            (None, None) => return Err(AxisMiss::NoFaces),
+            _ => return Err(AxisMiss::OneFace),
+        }
     };
     if s_l - s_r > max_thickness {
         return Err(AxisMiss::NoFaces);
@@ -596,6 +610,12 @@ pub fn rect_from_axis_thickness(p1: [f64; 2], p2: [f64; 2], thickness: f64) -> O
     Some(wall_rect(p1, p2, n, -thickness / 2.0, thickness / 2.0))
 }
 
+/// Lo scostamento più vicino all'asse per `|s|`; a pari `|s|` il sinistro
+/// (positivo), così il risultato non dipende dall'ordine delle sorgenti.
+fn nearest_to_axis(offsets: impl Iterator<Item = f64>) -> Option<f64> {
+    offsets.min_by(|a, b| a.abs().total_cmp(&b.abs()).then(b.total_cmp(a)))
+}
+
 /// Il verso unitario di `p1 → p2` e la distanza; `None` se un valore non è
 /// finito.
 fn axis_direction(p1: [f64; 2], p2: [f64; 2]) -> Option<([f64; 2], f64)> {
@@ -607,7 +627,8 @@ fn axis_direction(p1: [f64; 2], p2: [f64; 2]) -> Option<([f64; 2], f64)> {
 
 /// Lo scostamento `s` dall'asse di ogni segmento dritto che lo accompagna:
 /// parallelo entro [`FACE_PARALLEL_DEGREES`] e con una proiezione su `d` che
-/// copre più di `tol` di `(0, length)`.
+/// copre più di `tol` di `(0, length)`. `s` è quello del punto del segmento a
+/// metà dell'intervallo coperto.
 fn face_offsets(
     sources: &FxHashMap<Handle, BoundarySource>,
     p1: [f64; 2],
@@ -637,8 +658,18 @@ fn face_offsets(
             }
             let t0 = dot(from_p1(segment.start), d);
             let t1 = dot(from_p1(segment.end), d);
-            let covered = t0.max(t1).min(length) - t0.min(t1).max(0.0);
-            (covered > tol).then(|| dot(from_p1(segment.start), n))
+            let (from, to) = (t0.min(t1).max(0.0), t0.max(t1).min(length));
+            if !(to - from > tol) {
+                return None;
+            }
+            // t1 ≠ t0: il segmento copre più di `tol`. Il punto al centro del
+            // tratto coperto, sul segmento.
+            let along = ((from + to) / 2.0 - t0) / (t1 - t0);
+            let point = [
+                segment.start[0] + along * v[0],
+                segment.start[1] + along * v[1],
+            ];
+            Some(dot(from_p1(point), n))
         })
         .collect()
 }
@@ -1344,6 +1375,51 @@ mod tests {
     }
 
     #[test]
+    fn axis_on_a_face_pairs_it_with_the_nearest_face_on_either_side() {
+        // R13: sulla faccia di un muro che confina con un corridoio stretto
+        // (meno di 1,50 m) la controfaccia è la più vicina per |s|, non la
+        // più vicina del lato sinistro o destro.
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            // Una faccia in A a 1,10 da x = 4,00; una in B a 1,10 da x = 4,10.
+            let mut entities = case_a(form, M);
+            entities.push(line([2.9, 0.0, 0.0], [2.9, 3.0, 0.0]));
+            entities.push(line([5.2, 0.0, 0.0], [5.2, 3.0, 0.0]));
+            let (s, tol) = sources_for(entities);
+            for (x, up) in [(4.0, true), (4.1, true), (4.0, false), (4.1, false)] {
+                let (p1, p2) = if up {
+                    ([x, 0.0], [x, 3.0])
+                } else {
+                    ([x, 3.0], [x, 0.0])
+                };
+                let r = rect_from_axis(&s, p1, p2, 1.5, tol).unwrap();
+                assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?} x={x} {up}");
+                let mut xs: Vec<f64> = r.corners.iter().map(|c| c[0]).collect();
+                xs.sort_by(f64::total_cmp);
+                assert_pt([xs[0], xs[3]], [4.0, 4.1]);
+                assert!((signed_area(&r.ring()) - 0.30).abs() < 1e-9, "{form:?}");
+                assert_pt(r.axis.0, [4.05, p1[1]]);
+            }
+            // Senza il corridoio il risultato è lo stesso (la regola del brief).
+            let (plain, tol) = sources_for(case_a(form, M));
+            let r = rect_from_axis(&plain, [4.0, 0.0], [4.0, 3.0], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+        }
+    }
+
+    #[test]
+    fn axis_on_a_face_with_two_equally_near_faces_takes_the_left() {
+        // Due facce a ±0,10 dalla faccia su cui cade l'asse: pareggio, a
+        // sinistra (d = (0; 1), n = (-1; 0), la sinistra è x minore).
+        let (s, tol) = sources_for(vec![
+            line([0.0, 0.0, 0.0], [0.0, 3.0, 0.0]),
+            line([-0.1, 0.0, 0.0], [-0.1, 3.0, 0.0]),
+            line([0.1, 0.0, 0.0], [0.1, 3.0, 0.0]),
+        ]);
+        let r = rect_from_axis(&s, [0.0, 0.5], [0.0, 2.5], 1.5, tol).unwrap();
+        assert_corners(&r, [[0.0, 0.5], [0.0, 2.5], [-0.1, 2.5], [-0.1, 0.5]]);
+    }
+
+    #[test]
     fn axis_without_faces() {
         let (s, tol) = sources_for(case_a(Form::Continua, M));
         // In mezzo al locale A: le facce più vicine (x = 0 e x = 4,00) distano
@@ -1385,6 +1461,29 @@ mod tests {
         );
     }
 
+    /// Asse sull'unica faccia entro il limite: `OneFace`, non `NoFaces` (c'è
+    /// una faccia, manca la controfaccia).
+    #[test]
+    fn axis_on_the_only_face_is_one_face() {
+        let (s, tol) = sources_for(case_a(Form::Continua, M));
+        // Sulla faccia x = 0: x = -0,30 dista 0,30, oltre il limite 0,10.
+        assert_eq!(
+            rect_from_axis(&s, [0.0, 0.5], [0.0, 2.5], 0.10, tol),
+            Err(AxisMiss::OneFace)
+        );
+        // Col limite a 0,30 la controfaccia c'è: il muro esterno.
+        let r = rect_from_axis(&s, [0.0, 0.5], [0.0, 2.5], 0.30 + 1e-9, tol).unwrap();
+        assert!((r.thickness - 0.30).abs() < 1e-9);
+        // Una sola linea nel disegno, e l'asse ci cade sopra.
+        let (single, tol) = sources_for(vec![line([0.0, 0.0, 0.0], [0.0, 3.0, 0.0])]);
+        assert_eq!(
+            rect_from_axis(&single, [0.0, 0.5], [0.0, 2.5], 1.5, tol),
+            Err(AxisMiss::OneFace)
+        );
+    }
+
+    /// Due facce valide una per una ma troppo distanti tra loro per essere lo
+    /// stesso muro: `NoFaces`.
     #[test]
     fn axis_with_faces_thicker_than_the_limit_is_no_wall() {
         let (s, tol) = sources_for(case_a(Form::Continua, M));
@@ -1396,6 +1495,39 @@ mod tests {
         );
         // Al limite esatto il muro c'è.
         assert!(rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 0.10 + 1e-9, tol).is_ok());
+    }
+
+    #[test]
+    fn skewed_face_is_measured_where_it_covers_the_axis() {
+        // R14: la faccia destra è inclinata di 0,3° (x = 0,2 + y·tan); lo
+        // scostamento si legge a metà del tratto in cui copre l'asse, non
+        // all'inizio del segmento: gli angoli stanno sulla faccia lì.
+        let tan = 0.3_f64.to_radians().tan();
+        let skewed = |y: f64| [0.2 + y * tan, y];
+        let long = {
+            let (a, b) = (skewed(0.0), skewed(10.0));
+            line([a[0], a[1], 0.0], [b[0], b[1], 0.0])
+        };
+        let wall = line([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]);
+        let (s, tol) = sources_for(vec![wall.clone(), long]);
+        // Asse y da 4 a 6: la faccia sta a x = 0,2 + 5·tan alla sua metà.
+        let x = 0.2 + 5.0 * tan;
+        let r = rect_from_axis(&s, [0.1, 4.0], [0.1, 6.0], 1.5, tol).unwrap();
+        assert_corners(&r, [[x, 4.0], [x, 6.0], [0.0, 6.0], [0.0, 4.0]]);
+        assert!((r.thickness - x).abs() < 1e-9);
+        assert_pt(r.axis.0, [x / 2.0, 4.0]);
+
+        // Una faccia che copre solo da y = 5 a y = 10 (lo stesso filo): vale la
+        // metà del tratto coperto (da 5 a 6), y = 5,5.
+        let (a, b) = (skewed(5.0), skewed(10.0));
+        let short = line([a[0], a[1], 0.0], [b[0], b[1], 0.0]);
+        let (s, tol) = sources_for(vec![wall, short]);
+        let x = 0.2 + 5.5 * tan;
+        let r = rect_from_axis(&s, [0.1, 4.0], [0.1, 6.0], 1.5, tol).unwrap();
+        assert_corners(&r, [[x, 4.0], [x, 6.0], [0.0, 6.0], [0.0, 4.0]]);
+        // Lo stesso con l'asse nel verso opposto.
+        let r = rect_from_axis(&s, [0.1, 6.0], [0.1, 4.0], 1.5, tol).unwrap();
+        assert_corners(&r, [[0.0, 6.0], [0.0, 4.0], [x, 4.0], [x, 6.0]]);
     }
 
     #[test]
@@ -1478,13 +1610,16 @@ mod tests {
                 line([0.2, 0.0, 0.0], [0.2 + dx, 10.0, 0.0]),
             ]
         };
-        // 0,4°: è una faccia (lo scostamento si legge all'inizio del segmento).
+        // 0,4°: è una faccia; lo scostamento si legge a metà del tratto
+        // coperto dall'asse (y = 1,5), dove la faccia sta a x = 0,2 + 1,5·tan.
+        let tan = 0.4_f64.to_radians().tan();
         let (s, tol) = sources_for(tilted(0.4));
         let r = rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).unwrap();
-        assert!((r.thickness - 0.20).abs() < 1e-9);
+        assert!((r.thickness - (0.2 + 1.5 * tan)).abs() < 1e-9);
         // Anche l'altro verso di disegno.
         let (s, tol) = sources_for(tilted(-0.4));
-        assert!(rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).is_ok());
+        let r = rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).unwrap();
+        assert!((r.thickness - (0.2 - 1.5 * tan)).abs() < 1e-9);
         // 0,6°: no.
         let (s, tol) = sources_for(tilted(0.6));
         assert_eq!(
