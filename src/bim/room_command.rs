@@ -26,7 +26,7 @@ use super::zone::{zones_in, ZoneState};
 
 /// L'altezza dei testi dei locali sta in `rooms`, perché la usa anche
 /// l'estrazione (che non dipende dai comandi).
-pub use super::rooms::{room_text_height, DEFAULT_ROOM_TEXT_M};
+pub use super::rooms::{room_text_height, TextFallback, DEFAULT_ROOM_TEXT_M};
 
 /// La geometria che [`RoomCommand`] legge, preparata all'avvio
 /// ([`room_snapshot`]). In unità del disegno, sul piano XY del mondo.
@@ -683,7 +683,9 @@ mod tests {
     #[test]
     fn fatto_commits_outline_and_label() {
         let snap = case_snap(Form::Continua);
-        assert_eq!(snap.text_height, 2.5, "TEXTSIZE del disegno");
+        // TEXTSIZE del documento nuovo è 2,5: in un disegno in metri non è
+        // plausibile (fix finale, punto 6) e il testo è alto 0,25 m.
+        assert_eq!(snap.text_height, 0.25, "ripiego di TEXTSIZE");
         let mut c = RoomCommand::new(snap);
         need(c.on_point(pt(2.0, 1.5)));
         need_text(c.on_text_input("A"));
@@ -701,7 +703,7 @@ mod tests {
         };
         assert_eq!(text.value, "A\\PS = 12,00 m²");
         assert_eq!(text.common.layer, LAYER_LOCALI);
-        assert_eq!(text.height, 2.5);
+        assert_eq!(text.height, 0.25);
         assert!(near(text.insertion_point, [2.0, 1.5]));
         let room = Room {
             phase: Phase::Fatto,

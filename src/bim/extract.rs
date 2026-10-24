@@ -3664,7 +3664,9 @@ mod tests {
                     })
                     .unwrap();
                 assert!(near(xy(label.insertion_point), [2.0, 1.5]), "{what}");
-                assert!((label.height - 2.5).abs() < 1e-9, "{what}: TEXTSIZE");
+                // TEXTSIZE 2,5 in un disegno in metri non è plausibile: 0,25
+                // m (fix finale, punto 6).
+                assert!((label.height - 0.25).abs() < 1e-9, "{what}: TEXTSIZE");
                 let outlines = outlines_on(out, LAYER_LOCALI);
                 assert_eq!(outlines.len(), 1, "{what}");
                 assert!(outlines[0].is_closed, "{what}");

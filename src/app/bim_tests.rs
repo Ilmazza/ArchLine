@@ -2061,7 +2061,10 @@ fn locale_fatto_writes_outline_and_label() {
     assert!((polyline_area(outline) - 12.0).abs() < 1e-9);
     let text = mtext(&text);
     assert_eq!(text.value, "A\\PS = 12,00 m²");
-    assert_eq!(text.height, doc(&app).header.text_height);
+    // Il documento nuovo ha TEXTSIZE 2,5, non plausibile in metri: 0,25 m
+    // (fix finale, punto 6).
+    assert_eq!(doc(&app).header.text_height, 2.5);
+    assert_eq!(text.height, 0.25);
     assert!(near(text.insertion_point, [2.0, 1.5]));
     let room = Room {
         phase: Phase::Fatto,
@@ -2352,6 +2355,32 @@ fn locale_asks_the_unit_and_falls_back_on_the_text_height() {
     assert!((text.height - 25.0).abs() < 1e-9, "{}", text.height);
     assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Centimetri));
     assert_eq!(doc(&app).header.insertion_units, 0);
+}
+
+/// Fix finale, punto 6: un disegno in metri con `TEXTSIZE` 2,5 (nato da un
+/// modello in millimetri come acadiso): il testo del locale è alto 0,25 m, non
+/// 2,5 m, e la riga di comando dice perché.
+#[test]
+fn locale_in_metres_with_an_implausible_textsize_falls_back() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.text_height = 2.5;
+
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+
+    let history = history(&app);
+    assert!(
+        history.contains(
+            "AL_LOCALE: TEXTSIZE del disegno (2,50) è implausibile (oltre 1 m): i testi dei \
+             locali sono alti 0,25 m."
+        ),
+        "storia: {history}"
+    );
+    let (_, (_, text)) = room_parts(&app);
+    let text = mtext(&text);
+    assert_eq!(text.value, "A\\PS = 12,00 m²");
+    assert!((text.height - 0.25).abs() < 1e-12, "{}", text.height);
 }
 
 #[test]

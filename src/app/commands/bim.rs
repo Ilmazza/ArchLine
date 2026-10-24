@@ -16,7 +16,9 @@ use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::record;
 use crate::bim::refresh::{has_fatto_rooms, refresh_rooms, RoomEdit};
 use crate::bim::report::Notice;
-use crate::bim::room_command::{room_snapshot, room_text_height, RoomCommand, DEFAULT_ROOM_TEXT_M};
+use crate::bim::room_command::{
+    room_snapshot, room_text_height, RoomCommand, TextFallback, DEFAULT_ROOM_TEXT_M,
+};
 use crate::bim::units::{self, format_decimal, DrawingUnit, UnitLookup};
 use crate::bim::walls;
 use crate::bim::zone::{self, Zone, ZoneGeom, ZoneState};
@@ -174,15 +176,23 @@ impl OpenCADStudio {
         let doc = &self.tabs[i].scene.document;
         let (snap, off_plane) = room_snapshot(doc, unit, room_tolerance(unit));
         let (_, fallback_height) = room_text_height(doc, unit);
+        let textsize = doc.header.text_height;
         if off_plane > 0 {
             self.command_line
                 .push_info(&Notice::FuoriPiano { count: off_plane }.text());
         }
-        if fallback_height {
-            self.command_line.push_info(&format!(
+        match fallback_height {
+            Some(TextFallback::NotPositive) => self.command_line.push_info(&format!(
                 "AL_LOCALE: TEXTSIZE del disegno non è positiva: i testi dei locali sono alti {} m.",
                 format_decimal(DEFAULT_ROOM_TEXT_M)
-            ));
+            )),
+            Some(TextFallback::Implausible) => self.command_line.push_info(&format!(
+                "AL_LOCALE: TEXTSIZE del disegno ({}) è implausibile (oltre 1 m): i testi dei \
+                 locali sono alti {} m.",
+                format_decimal(textsize),
+                format_decimal(DEFAULT_ROOM_TEXT_M)
+            )),
+            None => {}
         }
         let command = RoomCommand::new(snap);
         self.command_line.push_info(&command.prompt());

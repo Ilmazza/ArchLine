@@ -129,18 +129,40 @@ const JOIN: &str = " + ";
 const TO_CONFIRM: &str = " (da confermare)";
 
 /// L'altezza dei testi dei locali, in metri, quando il disegno non ne dà una
-/// (`TEXTSIZE` non positiva): un parametro di aspetto, non una misura.
+/// plausibile (`TEXTSIZE` non positiva o oltre [`MAX_ROOM_TEXT_M`]): un
+/// parametro di aspetto, non una misura.
 pub const DEFAULT_ROOM_TEXT_M: f64 = 0.25;
 
+/// Oltre questa altezza, in metri, `TEXTSIZE` non è un testo di pianta: è un
+/// disegno in metri nato da un modello in millimetri (acadiso ha 2,5, cioè
+/// etichette alte 2,5 m).
+pub const MAX_ROOM_TEXT_M: f64 = 1.0;
+
+/// Perché i testi dei locali hanno l'altezza di ripiego.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFallback {
+    /// `TEXTSIZE` non positiva (o non un numero).
+    NotPositive,
+    /// `TEXTSIZE` oltre [`MAX_ROOM_TEXT_M`].
+    Implausible,
+}
+
 /// L'altezza dei testi dei locali (`AL_LOCALE`, estrazione): `TEXTSIZE` del
-/// disegno se positiva, altrimenti [`DEFAULT_ROOM_TEXT_M`] in unità del
-/// disegno, con `true`.
-pub fn room_text_height(doc: &CadDocument, unit: DrawingUnit) -> (f64, bool) {
+/// disegno se positiva e non oltre [`MAX_ROOM_TEXT_M`], altrimenti
+/// [`DEFAULT_ROOM_TEXT_M`] in unità del disegno, con il motivo (fix finale,
+/// punto 6, per `Implausible`).
+pub fn room_text_height(doc: &CadDocument, unit: DrawingUnit) -> (f64, Option<TextFallback>) {
     let height = doc.header.text_height;
-    if height.is_finite() && height > 0.0 {
-        (height, false)
+    let fallback = if !(height.is_finite() && height > 0.0) {
+        Some(TextFallback::NotPositive)
+    } else if height > unit.metres(MAX_ROOM_TEXT_M) {
+        Some(TextFallback::Implausible)
     } else {
-        (unit.metres(DEFAULT_ROOM_TEXT_M), true)
+        None
+    };
+    match fallback {
+        None => (height, None),
+        Some(_) => (unit.metres(DEFAULT_ROOM_TEXT_M), fallback),
     }
 }
 
@@ -1426,6 +1448,30 @@ mod tests {
     /// Dentro A o B del caso A.
     fn in_a_or_b(p: [f64; 2]) -> bool {
         inside_box(p, [0.0, 0.0], [4.0, 3.0]) || inside_box(p, [4.1, 0.0], [8.0, 3.0])
+    }
+
+    /// Fix finale, punto 6: `TEXTSIZE` oltre 1 m non è un'altezza di testo
+    /// plausibile (un disegno in metri nato da acadiso ha 2,5: etichette alte
+    /// 2,5 m). Ripiego a 0,25 m, con il motivo. In millimetri 2,5 resta.
+    #[test]
+    fn room_text_height_falls_back_on_an_implausible_textsize() {
+        let (m, mm) = (DrawingUnit::Metri, DrawingUnit::Millimetri);
+        let mut doc = CadDocument::new();
+        for (unit, textsize, want) in [
+            (m, 2.5, (0.25, Some(TextFallback::Implausible))),
+            (m, 1.0, (1.0, None)),
+            (m, 0.25, (0.25, None)),
+            (m, 0.0, (0.25, Some(TextFallback::NotPositive))),
+            (m, f64::NAN, (0.25, Some(TextFallback::NotPositive))),
+            (mm, 2.5, (2.5, None)),
+            (mm, 250.0, (250.0, None)),
+            (mm, 1000.0, (1000.0, None)),
+            (mm, 1500.0, (250.0, Some(TextFallback::Implausible))),
+            (mm, -1.0, (250.0, Some(TextFallback::NotPositive))),
+        ] {
+            doc.header.text_height = textsize;
+            assert_eq!(room_text_height(&doc, unit), want, "{unit:?} {textsize}");
+        }
     }
 
     // -----------------------------------------------------------------------
