@@ -12,8 +12,8 @@
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{
-    refresh_rooms, room_snapshot, room_text_height, RoomCommand, RoomEdit, ZoneCommand,
-    ZoneSnapshot, DEFAULT_ROOM_TEXT_M,
+    has_fatto_rooms, refresh_rooms, room_snapshot, room_text_height, RoomCommand, RoomEdit,
+    ZoneCommand, ZoneSnapshot, DEFAULT_ROOM_TEXT_M,
 };
 use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::record;
@@ -195,11 +195,18 @@ impl OpenCADStudio {
     /// `AL_AGGIORNA` (spec §4.2): ogni locale di fatto si rimisura sul rilievo
     /// attuale ([`refresh_rooms`]); contorno e testo cambiano sul posto, con lo
     /// stesso handle, in un solo passo di annullamento e solo se qualcosa
-    /// cambia. Un locale su un layer bloccato non si tocca e si conta. In
-    /// fondo il riepilogo e gli avvisi, una riga ciascuno.
+    /// cambia. Un locale su un layer bloccato non si tocca e si conta. Una riga
+    /// per ogni locale cambiato, con l'area di prima e quella nuova (R58), poi
+    /// il riepilogo e gli avvisi. Senza locali di fatto lo dice e basta, senza
+    /// chiedere l'unità.
     fn bim_update_rooms(&mut self, i: usize) -> Task<Message> {
         const CMD: &str = "AL_AGGIORNA";
         if !self.bim_in_model_space(i, CMD) {
+            return Task::none();
+        }
+        if !has_fatto_rooms(&self.tabs[i].scene.document) {
+            self.command_line
+                .push_info("AL_AGGIORNA: nessun locale di fatto nel disegno.");
             return Task::none();
         }
         let Some(unit) = self.bim_unit_or_ask(i, CMD) else {
@@ -208,13 +215,16 @@ impl OpenCADStudio {
         self.bim_pending = None;
         let refresh = refresh_rooms(&self.tabs[i].scene.document, unit, room_tolerance(unit));
         let scene = &self.tabs[i].scene;
-        let (locked, free): (Vec<_>, Vec<_>) = refresh.changed.into_iter().partition(|edits| {
-            edits
+        let (locked, free): (Vec<_>, Vec<_>) = refresh.changed.into_iter().partition(|change| {
+            change
+                .edits
                 .iter()
                 .any(|(handle, _)| scene.is_layer_locked(*handle))
         });
         let updated = free.len();
-        let edits: HashMap<Handle, RoomEdit> = free.into_iter().flatten().collect();
+        let lines: Vec<Notice> = free.iter().map(|change| change.notice()).collect();
+        let edits: HashMap<Handle, RoomEdit> =
+            free.into_iter().flat_map(|change| change.edits).collect();
         if !edits.is_empty() {
             let mut handles: Vec<Handle> = edits.keys().copied().collect();
             handles.sort_by_key(|handle| handle.value());
@@ -228,6 +238,7 @@ impl OpenCADStudio {
             });
             self.finish_pending_history(i);
         }
+        self.bim_push_notices(&lines);
         self.command_line
             .push_info(&format!("{CMD}: {updated} locali aggiornati."));
         if !locked.is_empty() {

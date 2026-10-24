@@ -1527,15 +1527,21 @@ impl RoomCommand {
             return CmdResult::NeedPoint;
         };
         let number = number.trim().to_string();
-        let FoundRoom { seed, measured, .. } = found;
+        let FoundRoom {
+            seed,
+            measured,
+            others,
+        } = found;
         let entities = match self.phase {
+            // R59: un locale che contiene il seme di un altro (R54) porta il
+            // «da confermare» anche nell'etichetta del disegno.
             Phase::Fatto => room_entities(
                 &Computed {
                     name,
                     number,
                     area_m2: measured.area_m2,
                     region: measured.region,
-                    confirm: false,
+                    confirm: !others.is_empty(),
                     exact: measured.exact,
                     islands: measured.islands,
                     seed,
@@ -1756,11 +1762,33 @@ impl RoomEdit {
     }
 }
 
+/// Un locale di fatto che `AL_AGGIORNA` riscrive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoomChange {
+    pub name: String,
+    /// L'area del contorno di prima, in m²; `None` senza un contorno chiuso.
+    pub old_area_m2: Option<f64>,
+    pub new_area_m2: f64,
+    /// Le modifiche alle sue entità, ognuna col suo handle.
+    pub edits: Vec<(Handle, RoomEdit)>,
+}
+
+impl RoomChange {
+    /// La riga che dice quale locale cambia, da quanto a quanto (R58).
+    pub fn notice(&self) -> Notice {
+        Notice::LocaleAggiornato {
+            name: self.name.clone(),
+            old_m2: self.old_area_m2,
+            new_m2: self.new_area_m2,
+        }
+    }
+}
+
 /// Il ricalcolo dei locali di fatto di un disegno ([`refresh_rooms`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoomsRefresh {
-    /// Per ogni locale in cui qualcosa cambia, le modifiche alle sue entità.
-    pub changed: Vec<Vec<(Handle, RoomEdit)>>,
+    /// I locali in cui qualcosa cambia, nell'ordine di disegno.
+    pub changed: Vec<RoomChange>,
     /// Gli avvisi, locale per locale, nell'ordine di disegno.
     pub notices: Vec<Notice>,
 }
@@ -1820,8 +1848,10 @@ fn fatto_parts(doc: &CadDocument, tol: f64) -> Vec<FattoParts<'_>> {
 /// `AL_AGGIORNA` (spec §4.2): ogni locale di fatto si rimisura sui muri
 /// attuali attorno al suo seme, alla tolleranza dei locali `tol`
 /// (`rooms::measure_at`). Se il locale c'è, il contorno prende i vertici
-/// nuovi e il testo l'etichetta nuova (solo dove cambiano: un contorno uguale
-/// partendo da un altro vertice non cambia); se non è più chiuso,
+/// nuovi e il testo l'etichetta nuova, solo dove cambiano: il contorno si
+/// confronta alla tolleranza di base, e uno uguale partendo da un altro
+/// vertice non cambia. Ogni locale cambiato porta nome, area di prima (dal
+/// contorno di prima) e area nuova ([`RoomChange::notice`], R58). Se non è più chiuso,
 /// [`Notice::LocaleNonChiuso`] e niente cambia. Un locale senza contorno o
 /// senza testo lo dice ([`Notice::ContornoMancante`],
 /// [`Notice::TestoMancante`]) e aggiorna la parte che ha. Se la regione di un
@@ -1940,7 +1970,9 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
             };
             let fresh = room_entities(&computed, Phase::Fatto, &walls.sources, 0.0, tol);
             if let Some(EntityType::LwPolyline(new)) = fresh.into_iter().next() {
-                if !same_outline(old, &new, tol) {
+                // R59: alla tolleranza di base, non a `HPGAPTOL`: il testo si
+                // confronta per intero e il contorno deve seguirlo.
+                if !same_outline(old, &new, base) {
                     edits.push((
                         handle,
                         RoomEdit::Contorno {
@@ -1958,10 +1990,36 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
             }
         }
         if !edits.is_empty() {
-            out.changed.push(edits);
+            out.changed.push(RoomChange {
+                name: name.clone(),
+                old_area_m2: parts
+                    .outline
+                    .and_then(|(_, old)| outline_area_m2(old, unit)),
+                new_area_m2: measured.area_m2,
+                edits,
+            });
         }
     }
     out
+}
+
+/// L'area chiusa da un contorno, archi compresi (come il comando AREA), in
+/// m²; `None` se il contorno non è chiuso o non si misura.
+fn outline_area_m2(outline: &LwPolyline, unit: DrawingUnit) -> Option<f64> {
+    if !outline.is_closed || outline.vertices.len() < 3 {
+        return None;
+    }
+    let (area, _) =
+        crate::modules::draw::inquiry::area::measure(&EntityType::LwPolyline(outline.clone()))?;
+    area.is_finite().then(|| area_m2(area.abs(), unit))
+}
+
+/// Il disegno ha locali di fatto (un contorno o un testo) nello spazio
+/// modello?
+pub fn has_fatto_rooms(doc: &CadDocument) -> bool {
+    rooms_in(doc)
+        .iter()
+        .any(|(_, room, part)| room.phase == Phase::Fatto && *part != RoomPart::Seme)
 }
 
 /// Lo stesso contorno: stessa chiusura, stessi vertici entro `tol` e stessi
@@ -3161,7 +3219,7 @@ mod room_tests {
             "Superficie netta 11,91 m² (1 isola). Nome del locale:"
         );
         need_text(c.on_text_input("A"));
-        assert_eq!(c.prompt(), "Locale A: 1 isole sottratte. Numero <nessuno>:");
+        assert_eq!(c.prompt(), "Locale A: 1 isola sottratta. Numero <nessuno>:");
 
         // Review Focus 3: vuoto di 2 mm sulla faccia ovest di A.
         let mut entities = case_a(Form::Continua, M);
@@ -3246,6 +3304,19 @@ mod room_tests {
             c.prompt(),
             "Locali A + B fusi in uno (23,70 m²): nome da confermare. Numero <nessuno>:"
         );
+        // R59: il «da confermare» va anche nell'etichetta del disegno; il
+        // nome nel record resta quello dato.
+        let entities = committed(c.on_enter());
+        let EntityType::MText(text) = &entities[1] else {
+            panic!("testo")
+        };
+        assert_eq!(text.value, "A (da confermare)\\PS = 23,70 m²");
+        let rec = text
+            .common
+            .extended_data
+            .get_record(APP_LOCALE)
+            .expect("XDATA");
+        assert_eq!(decode(rec).unwrap().0.name, "A");
         // Nel progetto i semi si raggruppano all'estrazione.
         let mut c = RoomCommand::new(snap);
         need_text(c.on_text_input("F"));
@@ -3257,7 +3328,13 @@ mod room_tests {
     #[test]
     fn refresh_rooms_edits_only_what_changes() {
         let mut scene = scene_of(case_a(Form::Continua, M));
+        assert!(!has_fatto_rooms(&scene.document));
+        assert_eq!(
+            refresh_rooms(&scene.document, M, TOL),
+            RoomsRefresh::default()
+        );
         let (outline, text) = write_room(&mut scene, "A", [2.0, 1.5]);
+        assert!(has_fatto_rooms(&scene.document));
         assert_eq!(
             refresh_rooms(&scene.document, M, TOL),
             RoomsRefresh::default(),
@@ -3272,9 +3349,15 @@ mod room_tests {
         }
         let refresh = refresh_rooms(&scene.document, M, TOL);
         assert!(refresh.notices.is_empty(), "{:?}", refresh.notices);
-        let [edits] = &refresh.changed[..] else {
+        let [change] = &refresh.changed[..] else {
             panic!("{:?}", refresh.changed)
         };
+        // R58: quale locale, da quanto a quanto (il prima dal contorno di prima).
+        assert_eq!(change.name, "A");
+        assert!((change.old_area_m2.expect("contorno") - 12.0).abs() < 1e-9);
+        assert!((change.new_area_m2 - 11.7).abs() < 1e-9);
+        assert_eq!(change.notice().text(), "Locale A: 12,00 → 11,70 m².");
+        let edits = &change.edits;
         assert_eq!(edits.len(), 2, "{edits:?}");
         assert_eq!(edits[0].0, outline);
         let RoomEdit::Contorno { vertices, closed } = &edits[0].1 else {
@@ -3341,15 +3424,66 @@ mod room_tests {
                 Notice::ContornoMancante { name: "A".into() },
             ]
         );
+        let [change] = &refresh.changed[..] else {
+            panic!("{:?}", refresh.changed)
+        };
         assert_eq!(
-            refresh.changed,
-            [vec![(
+            change.edits,
+            [(
                 a_text,
                 RoomEdit::Testo {
                     value: "A\\PS = 12,00 m²".into()
                 }
-            )]]
+            )]
         );
+        // Senza contorno l'area di prima non si sa.
+        assert_eq!(change.old_area_m2, None);
+        assert_eq!(change.notice().text(), "Locale A: aggiornato a 12,00 m².");
+    }
+
+    /// R59: il contorno si confronta alla tolleranza di base anche con
+    /// `HPGAPTOL`: un muro spostato di 4 mm con la tolleranza a 5 mm cambia
+    /// testo e contorno insieme.
+    #[test]
+    fn refresh_rooms_compares_outlines_at_the_base_tolerance() {
+        const GAP: f64 = 0.005;
+        let mut scene = scene_of(case_a(Form::ChiusaPerMuro, M));
+        let mut c = RoomCommand::new(room_snapshot(&scene.document, M, GAP).0);
+        need(c.on_point(pt(2.0, 1.5)));
+        need_text(c.on_text_input("A"));
+        let handles: Vec<Handle> = committed(c.on_enter())
+            .into_iter()
+            .map(|entity| scene.add_entity(entity))
+            .collect();
+        assert_eq!(
+            refresh_rooms(&scene.document, M, GAP),
+            RoomsRefresh::default()
+        );
+        // Tutto il tramezzo 4 mm più a est.
+        let tramezzo = scene
+            .document
+            .entities()
+            .find(|entity| is_tramezzo(entity))
+            .map(|entity| entity.common().handle)
+            .expect("tramezzo");
+        if let Some(EntityType::LwPolyline(polyline)) = scene.document.get_entity_mut(tramezzo) {
+            for vertex in &mut polyline.vertices {
+                vertex.location.x += 0.004;
+            }
+        }
+        let refresh = refresh_rooms(&scene.document, M, GAP);
+        let [change] = &refresh.changed[..] else {
+            panic!("{:?}", refresh.changed)
+        };
+        assert_eq!(change.notice().text(), "Locale A: 12,00 → 12,01 m².");
+        let [(outline, RoomEdit::Contorno { vertices, .. }), (text, RoomEdit::Testo { value })] =
+            &change.edits[..]
+        else {
+            panic!("contorno e testo: {:?}", change.edits)
+        };
+        assert_eq!((*outline, *text), (handles[0], handles[1]));
+        assert_eq!(value, "A\\PS = 12,01 m²");
+        assert!(vertices.iter().any(|v| (v.location.x - 4.004).abs() < 1e-9));
     }
 
     /// R54 e R55 in `AL_AGGIORNA`: una volta per gruppo, e i locali fusi

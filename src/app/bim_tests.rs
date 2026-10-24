@@ -27,7 +27,7 @@ use crate::bim::{
 };
 use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_NOTE};
-use codec::entities::{Line, LwPolyline, MText};
+use codec::entities::{Arc, Line, LwPolyline, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{CadDocument, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
@@ -2046,8 +2046,13 @@ fn aggiorna_follows_the_survey() {
     run(&mut app, "AL_AGGIORNA");
 
     let log = history(&app);
+    // R58: quale locale e da quanto a quanto, prima del riepilogo.
     assert!(
-        log.contains("AL_AGGIORNA: 1 locali aggiornati."),
+        comes_after(
+            &log,
+            "Locale A: 12,00 → 11,70 m².",
+            "AL_AGGIORNA: 1 locali aggiornati."
+        ),
         "storia: {log}"
     );
     let ((new_outline_handle, new_outline), (new_text_handle, text)) = room_parts(&app);
@@ -2310,6 +2315,11 @@ fn aggiorna_updates_a_lone_text_and_says_so() {
         history.contains("Locale A: c'è il testo ma non il contorno."),
         "storia: {history}"
     );
+    // Senza contorno l'area di prima non si sa.
+    assert!(
+        history.contains("Locale A: aggiornato a 11,70 m²."),
+        "storia: {history}"
+    );
     assert!(
         history.contains("AL_AGGIORNA: 1 locali aggiornati."),
         "storia: {history}"
@@ -2320,4 +2330,148 @@ fn aggiorna_updates_a_lone_text_and_says_so() {
         1,
         "nessun contorno nuovo"
     );
+}
+
+/// R59: senza locali di fatto `AL_AGGIORNA` lo dice, senza chiedere l'unità
+/// (INSUNITS = 0) e senza passi di annullamento. Un seme di progetto non è un
+/// locale di fatto.
+#[test]
+fn aggiorna_without_rooms_says_so() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 0);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let log = history(&app);
+    assert!(
+        log.contains("AL_AGGIORNA: nessun locale di fatto nel disegno."),
+        "storia: {log}"
+    );
+    assert!(!log.contains("Unità del disegno"), "storia: {log}");
+    assert_eq!(active_command(&app), None);
+    assert_eq!(record::read(doc(&app)).unit, None);
+    assert_eq!(undo_steps(&app), steps);
+
+    // Con il solo seme di un locale di progetto è lo stesso.
+    run(&mut app, "AL_UNITA M");
+    run(&mut app, "AL_LOCALE F 3,1 Soggiorno");
+    assert_eq!(on_layer(&app, LAYER_LOCALI_PROGETTO).len(), 1);
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+    assert!(
+        history(&app).contains("AL_AGGIORNA: nessun locale di fatto nel disegno."),
+        "storia: {}",
+        history(&app)
+    );
+}
+
+/// R59: con `HPGAPTOL` a 5 mm, un tramezzo spostato di 4 mm cambia l'etichetta
+/// e anche il contorno (confrontato alla tolleranza di base).
+#[test]
+fn aggiorna_with_hpgaptol_moves_the_outline_too() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::ChiusaPerMuro, DrawingUnit::Metri), 6);
+    dispatch_line(&mut app, "HPGAPTOL 0.005");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let ((outline_handle, _), (text_handle, _)) = room_parts(&app);
+    let tramezzo = doc(&app)
+        .entities()
+        .find(|e| {
+            matches!(e, EntityType::LwPolyline(p) if e.common().layer == LAYER_MURI
+                && p.vertices.iter().any(|v| near(Vector3::new(v.location.x, v.location.y, 0.0), [4.1, 3.0])))
+        })
+        .map(|e| e.common().handle)
+        .expect("tramezzo");
+    let i = app.active_tab;
+    if let Some(EntityType::LwPolyline(p)) = app.tabs[i].scene.document.get_entity_mut(tramezzo) {
+        for v in &mut p.vertices {
+            v.location.x += 0.004;
+        }
+    }
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    assert!(
+        history.contains("Locale A: 12,00 → 12,01 m²."),
+        "storia: {history}"
+    );
+    let ((outline, new_outline), (text, new_text)) = room_parts(&app);
+    assert_eq!((outline, text), (outline_handle, text_handle));
+    assert_eq!(mtext(&new_text).value, "A\\PS = 12,01 m²");
+    assert!(
+        polyline(&new_outline)
+            .vertices
+            .iter()
+            .any(|v| (v.location.x - 4.004).abs() < 1e-9),
+        "il contorno segue il tramezzo"
+    );
+    dispatch_line(&mut app, "HPGAPTOL 0");
+}
+
+/// R59: un locale con una parete ad arco (mezzo disco sopra un rettangolo
+/// 2 × 1). Il contorno porta l'arco vero; rimisurato uguale non cambia (nessun
+/// passo); con la parete sud spostata l'arco resta e l'area di prima tiene
+/// conto dell'arco.
+#[test]
+fn aggiorna_keeps_true_arcs() {
+    let wall = |a: [f64; 2], b: [f64; 2]| {
+        let mut line =
+            Line::from_points(Vector3::new(a[0], a[1], 0.0), Vector3::new(b[0], b[1], 0.0));
+        line.common.layer = LAYER_MURI.to_string();
+        EntityType::Line(line)
+    };
+    let mut arc = Arc::from_center_radius_angles(Vector3::ZERO, 1.0, 0.0, std::f64::consts::PI);
+    arc.common.layer = LAYER_MURI.to_string();
+    let entities = vec![
+        wall([-1.0, -1.0], [1.0, -1.0]),
+        wall([1.0, -1.0], [1.0, 0.0]),
+        EntityType::Arc(arc),
+        wall([-1.0, 0.0], [-1.0, -1.0]),
+    ];
+    let mut app = fresh_app();
+    load(&mut app, entities, 6);
+    run(&mut app, "AL_LOCALE 0,-0.5 Abside");
+    let ((_, outline), (_, text)) = room_parts(&app);
+    // 2 × 1 + π/2 = 3,5708.
+    assert_eq!(mtext(&text).value, "Abside\\PS = 3,57 m²");
+    let has_arc = |entity: &EntityType| {
+        polyline(entity)
+            .vertices
+            .iter()
+            .any(|v| v.bulge.abs() > 1e-6)
+    };
+    assert!(has_arc(&outline), "arco vero nel contorno");
+
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+    assert!(
+        history(&app).contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps, "nessun passo");
+    assert_eq!(room_parts(&app).0 .1, outline);
+
+    // La parete sud da y = -1 a y = -0,9: 1,8 + π/2 = 3,3708.
+    let south = survey_line(&app, [-1.0, -1.0], [1.0, -1.0]);
+    let i = app.active_tab;
+    if let Some(EntityType::Line(line)) = app.tabs[i].scene.document.get_entity_mut(south) {
+        line.start.y = -0.9;
+        line.end.y = -0.9;
+    }
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+    let history = history(&app);
+    assert!(
+        history.contains("Locale Abside: 3,57 → 3,37 m²."),
+        "storia: {history}"
+    );
+    let ((_, new_outline), (_, new_text)) = room_parts(&app);
+    assert_eq!(mtext(&new_text).value, "Abside\\PS = 3,37 m²");
+    assert!(has_arc(&new_outline), "l'arco resta");
+    assert_eq!(undo_steps(&app), steps + 1);
 }

@@ -75,6 +75,13 @@ pub enum Notice {
     LocaleNonChiuso {
         name: String,
     },
+    /// Un locale di fatto riscritto da `AL_AGGIORNA`: l'area di prima (dal
+    /// contorno di prima, se c'era) e quella nuova, in m².
+    LocaleAggiornato {
+        name: String,
+        old_m2: Option<f64>,
+        new_m2: f64,
+    },
     /// Un locale di fatto di cui nel disegno c'è il testo ma non il contorno.
     ContornoMancante {
         name: String,
@@ -169,12 +176,27 @@ impl Notice {
             Self::LocaleNonChiuso { name } => {
                 format!("Il locale {name} non è più chiuso: lasciato com'era.")
             }
+            Self::LocaleAggiornato {
+                name,
+                old_m2: Some(old),
+                new_m2,
+            } => format!(
+                "Locale {name}: {} → {}.",
+                format_decimal(*old),
+                format_m2(*new_m2)
+            ),
+            Self::LocaleAggiornato {
+                name,
+                old_m2: None,
+                new_m2,
+            } => format!("Locale {name}: aggiornato a {}.", format_m2(*new_m2)),
             Self::ContornoMancante { name } => {
                 format!("Locale {name}: c'è il testo ma non il contorno.")
             }
             Self::TestoMancante { name } => {
                 format!("Locale {name}: c'è il contorno ma non il testo.")
             }
+            Self::Isole { name, count: 1 } => format!("Locale {name}: 1 isola sottratta."),
             Self::Isole { name, count } => format!("Locale {name}: {count} isole sottratte."),
             Self::Varco { area_m2 } => format!("Varco {} escluso dai locali.", format_m2(*area_m2)),
             Self::ContornoApprossimato { name } => {
@@ -304,6 +326,22 @@ mod tests {
                 "Il locale Bagno non è più chiuso: lasciato com'era.",
             ),
             (
+                Notice::LocaleAggiornato {
+                    name: "Bagno".into(),
+                    old_m2: Some(12.0),
+                    new_m2: 11.706,
+                },
+                "Locale Bagno: 12,00 → 11,71 m².",
+            ),
+            (
+                Notice::LocaleAggiornato {
+                    name: "Bagno".into(),
+                    old_m2: None,
+                    new_m2: 11.7,
+                },
+                "Locale Bagno: aggiornato a 11,70 m².",
+            ),
+            (
                 Notice::ContornoMancante {
                     name: "Bagno".into(),
                 },
@@ -321,6 +359,13 @@ mod tests {
                     count: 2,
                 },
                 "Locale Bagno: 2 isole sottratte.",
+            ),
+            (
+                Notice::Isole {
+                    name: "Bagno".into(),
+                    count: 1,
+                },
+                "Locale Bagno: 1 isola sottratta.",
             ),
             (
                 Notice::Varco { area_m2: 0.09 },
