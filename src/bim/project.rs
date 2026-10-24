@@ -340,31 +340,36 @@ impl ZoneInfo<'_> {
     }
 }
 
-/// Le zone utili, senza doppioni (il primo vince) e senza anelli esterni
-/// degeneri.
+/// Le zone utili, senza doppioni e senza anelli esterni degeneri. Tra due
+/// doppioni vince il primo, ma uno con il varco prende il posto di uno senza
+/// (fix finale, punto 6: il varco non sparisce in silenzio).
 fn prepare(zones: &[ZoneGeom], tol: f64) -> Vec<ZoneInfo<'_>> {
     let mut infos: Vec<ZoneInfo> = Vec::new();
     for geom in zones {
         let Some(outer) = geom.rings.first().filter(|ring| ring.len() >= 3) else {
             continue;
         };
-        if infos
+        let twin = infos
             .iter()
-            .any(|seen| same_zone(seen.geom, geom, RING_SLACK * tol))
-        {
+            .position(|seen| same_zone(seen.geom, geom, RING_SLACK * tol));
+        if twin.is_some_and(|k| !geom.zone.varco || infos[k].geom.zone.varco) {
             continue;
         }
         let edges = ring_edges(&geom.rings);
         if edges.is_empty() {
             continue;
         }
-        infos.push(ZoneInfo {
+        let info = ZoneInfo {
             rect: axis_rect(geom, tol),
             bounds: bounds_of(geom.rings.iter().flatten().copied()),
             centroid: centroid(outer),
             edges,
             geom,
-        });
+        };
+        match twin {
+            Some(k) => infos[k] = info,
+            None => infos.push(info),
+        }
     }
     infos
 }
@@ -1870,6 +1875,36 @@ mod tests {
             .map(|offset| FIRST_SYNTHETIC_HANDLE + offset)
             .collect();
         assert_eq!(synthetic, want);
+    }
+
+    /// Fix finale, punto 6: due zone doppie che differiscono solo per il varco
+    /// (una demolizione ripetuta, una delle due con il varco): vale quella con
+    /// il varco, in qualunque ordine. Prima vinceva la prima e il varco poteva
+    /// sparire in silenzio.
+    #[test]
+    fn duplicate_zones_keep_the_varco() {
+        for varco_first in [false, true] {
+            let plain = axis_zone([4.05, 1.0], [4.05, 1.9], false);
+            let varco = axis_zone([4.05, 1.0], [4.05, 1.9], true);
+            let zones = if varco_first {
+                vec![varco, plain]
+            } else {
+                vec![plain, varco]
+            };
+            let pg = project(case_a(Form::Continua, DrawingUnit::Metri), zones);
+            let rooms: Vec<&EntityType> = pg.room_entities.iter().map(|(_, e)| e).collect();
+            assert!(
+                rooms.iter().any(|e| is_line(e, [4.0, 1.0], [4.0, 1.9])),
+                "varco per primo: {varco_first}"
+            );
+            assert!(
+                rooms.iter().any(|e| is_line(e, [4.1, 1.0], [4.1, 1.9])),
+                "varco per primo: {varco_first}"
+            );
+            assert!(!has_line(&pg, [4.0, 1.0], [4.0, 1.9]), "{varco_first}");
+            assert!(has_line(&pg, [4.0, 1.0], [4.1, 1.0]), "{varco_first}");
+            assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+        }
     }
 
     /// Un disegno con handle già oltre 0xF000_0000: i sintetici partono sopra.
