@@ -268,16 +268,19 @@ impl OpenCADStudio {
         rec.unit = Some(unit);
         record::write(doc, &rec);
         let saved = record::read(doc).unit == Some(unit);
-        self.tabs[i].dirty = true;
-        self.finish_pending_history(i);
         let pending = self.bim_pending.take();
         if !saved {
-            // Senza dizionario radice il record non si scrive: rilanciare
-            // chiederebbe di nuovo, all'infinito.
+            // Senza dizionario radice il record non si scrive: nessun passo di
+            // annullamento vuoto e il disegno non risulta modificato (come
+            // `bim_remember_new_walls_layer`). Rilanciare chiederebbe di
+            // nuovo, all'infinito.
+            self.drop_unchanged_pending_history(i);
             self.command_line
                 .push_error("AL_UNITA: impossibile salvare l'unità nel disegno.");
             return Task::none();
         }
+        self.tabs[i].dirty = true;
+        self.finish_pending_history(i);
         match pending {
             Some(cmd) => self.dispatch_command(&cmd),
             None => Task::none(),
@@ -478,7 +481,8 @@ impl OpenCADStudio {
             progetto: true,
             layer: proposed_new_walls_layer(doc).unwrap_or_default(),
             layers,
-            confirm_overwrite: false,
+            files_exist: false,
+            overwrite: false,
         };
         self.bim_extract = Some(dialog);
         self.active_modal = Some(ModalKind::BimExtract);
@@ -514,37 +518,37 @@ impl OpenCADStudio {
             // Il browser non sceglie cartelle.
             #[cfg(target_arch = "wasm32")]
             BimMsg::Browse => {}
-            BimMsg::Picked(Some(dir)) => {
-                dialog.dir = Some(dir);
-                // Altra cartella, altri file: la conferma di prima non vale.
-                dialog.confirm_overwrite = false;
-            }
+            BimMsg::Picked(Some(dir)) => dialog.set_dir(dir),
             BimMsg::Picked(None) => {}
             BimMsg::Toggle(elaborato) => dialog.toggle(elaborato),
-            BimMsg::Layer(name) => dialog.layer = name,
+            BimMsg::Layer(name) => dialog.set_layer(name),
+            BimMsg::Overwrite(on) => dialog.set_overwrite(on),
             BimMsg::Ok => return self.bim_extract_ok(),
             BimMsg::Cancel => self.bim_close_extract(),
         }
         Task::none()
     }
 
-    /// OK della finestra. Se i file esistono e non c'è ancora la conferma, la
-    /// finestra lo dice e resta aperta: niente è stato scritto. Lo stesso, con
-    /// un errore in riga di comando, se manca il layer dei muri nuovi per lo
-    /// stato di progetto. Altrimenti estrae (sovrascrivendo solo dopo la
-    /// conferma), ricorda il layer dei muri nuovi se ha scritto lo stato di
+    /// OK (o «Sovrascrivi») della finestra. Se i file esistono e la casella
+    /// «Sovrascrivi i file esistenti» non è accesa, la finestra lo dice, mostra
+    /// la casella spenta e resta aperta: niente è stato scritto, e un altro OK
+    /// (doppio clic) non fa nulla finché la casella è spenta. Lo stesso, con un
+    /// errore in riga di comando, se manca il layer dei muri nuovi per lo stato
+    /// di progetto. Altrimenti estrae (sovrascrivendo solo con la casella
+    /// accesa), ricorda il layer dei muri nuovi se ha scritto lo stato di
     /// progetto, si chiude e il rapporto va in riga di comando.
     fn bim_extract_ok(&mut self) -> Task<Message> {
         let Some(dialog) = self.bim_extract.as_ref() else {
             return Task::none();
         };
+        // `can_ok` è falso anche dopo l'avviso con la casella spenta.
         let Some(dir) = dialog.dir.clone().filter(|_| dialog.can_ok()) else {
             return Task::none();
         };
         let tab_id = dialog.tab_id;
         let elaborati = dialog.elaborati();
         let layer = dialog.layer.trim().to_string();
-        let overwrite = dialog.confirm_overwrite;
+        let overwrite = dialog.overwrite_confirmed();
         let Some(i) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             self.bim_close_extract();
             self.command_line
@@ -567,7 +571,7 @@ impl OpenCADStudio {
             }
             Err(WriteError::Exists(_)) if !overwrite => {
                 if let Some(dialog) = self.bim_extract.as_mut() {
-                    dialog.confirm_overwrite = true;
+                    dialog.found_existing();
                 }
             }
             // Con la conferma `write` non lo restituisce; se capitasse, lo si dice.

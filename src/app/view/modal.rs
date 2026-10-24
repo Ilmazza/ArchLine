@@ -418,7 +418,7 @@ impl OpenCADStudio {
             }
             super::super::ModalKind::BimExtract => {
                 let state = self.bim_extract.as_ref()?;
-                sized_flow(ex, 460, 300, |flow| crate::ui::window::bim_extract::view(state, flow))
+                sized_flow(ex, 460, 330, |flow| crate::ui::window::bim_extract::view(state, flow))
             }
             super::super::ModalKind::Workspaces => {
                 let ui = self.workspace_ui.as_ref()?;

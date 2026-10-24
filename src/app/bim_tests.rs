@@ -26,7 +26,7 @@ use crate::bim::{
     LAYER_LOCALI_PROGETTO, LAYER_NUOVE,
 };
 use crate::command::StepInput;
-use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_NOTE};
+use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_BUTTON, OVERWRITE_NOTE};
 use codec::entities::{Arc, Line, LwPolyline, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{CadDocument, Color, EntityType, Handle, Vector3};
@@ -219,6 +219,30 @@ fn known_unit_from_the_record_is_not_asked_again() {
 
     run(&mut app, "AL_NUOVO");
     assert_eq!(active_command(&app), Some("AL_NUOVO"));
+}
+
+/// Fix finale, punto 2: un disegno senza dizionario radice non può tenere il
+/// record. `AL_UNITA` lo dice e non lascia un passo di annullamento vuoto né
+/// segna il disegno come modificato.
+#[test]
+fn unit_record_that_cannot_be_written_leaves_no_undo_step() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 0);
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.named_objects_dict_handle = Handle::NULL;
+    app.tabs[i].dirty = false;
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_UNITA M");
+
+    assert!(
+        history(&app).contains("AL_UNITA: impossibile salvare l'unità nel disegno."),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(record::read(doc(&app)).unit, None);
+    assert_eq!(undo_steps(&app), steps, "nessun passo vuoto");
+    assert!(!app.tabs[i].dirty, "il disegno non è cambiato");
 }
 
 #[test]
@@ -1185,8 +1209,12 @@ fn scripted_extract_never_overwrites() {
     assert!(paths.iter().all(|path| marked(path)), "file non riscritti");
 }
 
+/// Fix finale, punto 2: con file esistenti il primo OK avvisa, mostra la
+/// casella «Sovrascrivi i file esistenti» (spenta) e il pulsante diventa
+/// «Sovrascrivi»; un secondo OK senza casella (doppio clic) non scrive nulla.
+/// Solo con la casella accesa i file si riscrivono.
 #[test]
-fn dialog_flow_overwrite_needs_second_ok() {
+fn dialog_flow_overwrite_needs_the_checkbox() {
     let tmp = TempDir::new("finestra");
     let (mut app, _, _) = app_with_two_zones();
     let paths = extracted_paths(tmp.path(), &tab_title(&app));
@@ -1212,7 +1240,8 @@ fn dialog_flow_overwrite_needs_second_ok() {
             "{:?}",
             dialog.layers
         );
-        assert!(!dialog.confirm_overwrite);
+        assert!(!dialog.files_exist && !dialog.overwrite);
+        assert_eq!(dialog.ok_label(), "OK");
     }
     pick_folder(&mut app, tmp.path());
     bim(&mut app, BimMsg::Ok);
@@ -1224,8 +1253,9 @@ fn dialog_flow_overwrite_needs_second_ok() {
     assert_eq!(app.active_modal, None, "OK chiude la finestra");
     assert!(app.bim_extract.is_none());
     mark(&paths);
+    let before = mtimes(&paths);
 
-    // Nuova apertura, stessa cartella: il primo OK chiede conferma e non scrive.
+    // Nuova apertura, stessa cartella: il primo OK avvisa e non scrive.
     dispatch_line(&mut app, "AL_ESTRAI");
     pick_folder(&mut app, tmp.path());
     forget_history(&mut app);
@@ -1236,8 +1266,11 @@ fn dialog_flow_overwrite_needs_second_ok() {
         "resta aperta"
     );
     let dialog = app.bim_extract.as_ref().expect("finestra aperta");
-    assert!(dialog.confirm_overwrite);
+    assert!(dialog.files_exist);
+    assert!(!dialog.overwrite, "la casella nasce spenta");
     assert_eq!(dialog.note(), Some(OVERWRITE_NOTE));
+    assert_eq!(dialog.ok_label(), OVERWRITE_BUTTON);
+    assert!(!dialog.can_ok(), "senza casella «Sovrascrivi» è spento");
     assert!(paths.iter().all(|path| marked(path)), "niente scritto");
     assert!(
         !history(&app).contains("esistono già"),
@@ -1245,7 +1278,16 @@ fn dialog_flow_overwrite_needs_second_ok() {
         history(&app)
     );
 
-    // Il secondo OK sovrascrive e chiude.
+    // Il secondo OK, senza la casella (doppio clic): ancora niente.
+    bim(&mut app, BimMsg::Ok);
+    assert_eq!(app.active_modal, Some(ModalKind::BimExtract));
+    assert!(paths.iter().all(|path| marked(path)), "niente scritto");
+    assert_eq!(mtimes(&paths), before, "date di modifica invariate");
+    assert!(!history(&app).contains("AL_ESTRAI: scritti"));
+
+    // Con la casella accesa «Sovrascrivi» riscrive e chiude.
+    bim(&mut app, BimMsg::Overwrite(true));
+    assert!(app.bim_extract.as_ref().unwrap().can_ok());
     bim(&mut app, BimMsg::Ok);
     assert!(
         paths.iter().all(|path| !marked(path)),
@@ -1254,6 +1296,54 @@ fn dialog_flow_overwrite_needs_second_ok() {
     );
     assert_eq!(app.active_modal, None);
     assert!(app.bim_extract.is_none());
+}
+
+/// La casella si spegne quando cambia ciò che si scrive: un'altra cartella
+/// (avviso via, pulsante di nuovo OK), un elaborato in più o in meno (lo
+/// stesso), un altro layer dei muri nuovi (l'avviso resta: stessi file).
+#[test]
+fn dialog_overwrite_checkbox_resets_when_the_choice_changes() {
+    let tmp = TempDir::new("casella");
+    let other = TempDir::new("casella-altrove");
+    let (mut app, _, _) = app_with_two_zones();
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+    assert!(paths.iter().all(|path| path.is_file()));
+    mark(&paths);
+
+    let dialog = |app: &OpenCADStudio| app.bim_extract.clone().expect("finestra aperta");
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    bim(&mut app, BimMsg::Overwrite(true));
+    assert!(dialog(&app).overwrite);
+
+    // Altra cartella: casella spenta, avviso via.
+    pick_folder(&mut app, other.path());
+    let d = dialog(&app);
+    assert!(!d.overwrite && !d.files_exist, "{d:?}");
+    assert_eq!(d.ok_label(), "OK");
+
+    // Di nuovo la cartella con i file: l'avviso torna, con la casella spenta.
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Ok);
+    assert!(dialog(&app).files_exist && !dialog(&app).overwrite);
+    assert!(paths.iter().all(|path| marked(path)), "niente scritto");
+
+    // Un altro layer: la casella si spegne, l'avviso resta.
+    bim(&mut app, BimMsg::Overwrite(true));
+    bim(&mut app, BimMsg::Layer("MURI-NUOVI".to_string()));
+    let d = dialog(&app);
+    assert!(d.files_exist && !d.overwrite, "{d:?}");
+    bim(&mut app, BimMsg::Ok);
+    assert!(paths.iter().all(|path| marked(path)), "niente scritto");
+
+    // Un elaborato tolto: casella e avviso via.
+    bim(&mut app, BimMsg::Overwrite(true));
+    bim(&mut app, BimMsg::Toggle(Elaborato::StatoDiFatto));
+    let d = dialog(&app);
+    assert!(!d.overwrite && !d.files_exist, "{d:?}");
+    assert!(paths.iter().all(|path| marked(path)), "niente scritto");
 }
 
 /// Le caselle scelgono i file; cambiarle dopo l'avviso chiede di nuovo conferma.
@@ -1287,10 +1377,10 @@ fn dialog_toggles_choose_the_files() {
     dispatch_line(&mut app, "AL_ESTRAI");
     pick_folder(&mut app, tmp.path());
     bim(&mut app, BimMsg::Ok);
-    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(app.bim_extract.as_ref().unwrap().files_exist);
     assert!(!paths[0].exists(), "niente scritto prima della conferma");
     bim(&mut app, BimMsg::Toggle(Elaborato::StatoDiProgetto));
-    assert!(!app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(!app.bim_extract.as_ref().unwrap().files_exist);
     assert_eq!(app.bim_extract.as_ref().unwrap().note(), None);
 }
 
@@ -1452,9 +1542,10 @@ fn dialog_reports_a_write_error() {
     dispatch_line(&mut app, "AL_ESTRAI");
     pick_folder(&mut app, tmp.path());
     bim(&mut app, BimMsg::Ok);
-    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(app.bim_extract.as_ref().unwrap().files_exist);
     assert!(!paths[0].exists());
     forget_history(&mut app);
+    bim(&mut app, BimMsg::Overwrite(true));
     bim(&mut app, BimMsg::Ok);
 
     assert!(app.bim_extract.is_none());
@@ -1480,8 +1571,9 @@ fn dialog_reports_a_write_error() {
     dispatch_line(&mut app, "AL_ESTRAI");
     pick_folder(&mut app, tmp.path());
     bim(&mut app, BimMsg::Ok);
-    assert!(app.bim_extract.as_ref().unwrap().confirm_overwrite);
+    assert!(app.bim_extract.as_ref().unwrap().files_exist);
     forget_history(&mut app);
+    bim(&mut app, BimMsg::Overwrite(true));
     bim(&mut app, BimMsg::Ok);
 
     assert!(app.bim_extract.is_none());
