@@ -67,3 +67,59 @@ python -m unittest discover -s tests/conformance -p "test_*.py" -v
 
 `fake_converter.py` imita `--export` e puo' corrompere gli accenti, perdere un'entita' o andare in crash
 (`FAKE_CONVERTER_MODE`): prova che il banco *puo'* fallire, non solo passare. La suite impiega circa 40 secondi.
+`test_bim_extract.py` prova le funzioni di `bim_extract.py` (tolleranze sui segmenti, scelta della cartella senza
+spazi, protocollo `--serve` con un server imitato da uno script Python); non lancia ArchLine.
+
+## Estrazione BIM
+
+`bim_extract.py` prova i comandi BIM di ArchLine (`AL_DEMOLISCI`, `AL_NUOVO`, `AL_ESTRAI`) su un disegno sintetico e
+legge i tre DWG estratti con ezdxf come oracolo. Non usa `run.py` ne' `expected.json`: non misura una fedelta' in
+percentuale ma verifica fatti precisi, e ogni controllo e' `OK` o `FALLITO` (niente `ATTESO`).
+
+```
+python tests/conformance/bim_extract.py target\release\ArchLine.exe
+python tests/conformance/bim_extract.py target\release\ArchLine.exe --keep C:\ocs-bench\prova
+```
+
+Senza argomento prova `target\release\ArchLine.exe`. Exit: 0 tutti OK, 1 almeno un controllo FALLITO, 2 errore del
+banco (eseguibile mancante, nessuna cartella senza spazi, l'app non risponde: la cartella di lavoro resta per la
+diagnosi), 77 ezdxf non installato. Impiega pochi secondi. L'eseguibile va costruito prima
+(`cargo build --release --bin ArchLine`); se e' in uso la build dice "Accesso negato".
+
+**Cosa fa.** ezdxf costruisce il caso A (forma Continua, in metri, `$INSUNITS = 6`, DXF R2018): contorno esterno e
+due locali, A di 4,00 x 3,00 m e B di 3,90 x 3,00 m, con un tramezzo da 0,10 m in mezzo; dodici `LINE` sul layer
+`MURI`. `ArchLine --serve` apre il disegno ed esegue `AL_DEMOLISCI 4.05,0 4.05,3 N` (demolisce il tramezzo),
+`AL_NUOVO 2,0.5 2,2.5 0.12` (muro nuovo da 0,12 m) e `AL_ESTRAI <cartella>`, che scrive
+`casoA_stato-di-fatto.dwg`, `casoA_demolizioni-costruzioni.dwg` e `casoA_stato-di-progetto.dwg`. Ogni DWG si
+riconverte con `ArchLine --export x.dwg x.dxf` (ezdxf non legge DWG) e si legge con ezdxf.
+
+**Cosa controlla** (una riga per controllo):
+
+- la sessione: comandi completati senza errori ne' token non consumati, uscita pulita (exit 0);
+- il DXF di partenza resta identico byte per byte (SHA-256 prima e dopo): i comandi non scrivono il disegno di lavoro;
+- i tre DWG si riconvertono con `--export` e ezdxf li legge;
+- stato di fatto: le dodici `LINE` `MURI` hanno gli stessi estremi del DXF di partenza (entro 1e-6 m), nessuna campitura;
+- demolizioni e costruzioni: lo stesso rilievo, piu' due `HATCH` solide (`solid_fill = 1`), una di colore 2 su
+  `AL-DEMOLIZIONI` e una di colore 1 su `AL-NUOVE`;
+- stato di progetto: le due `LINE` di chiusura (4,00; 0)-(4,10; 0) e (4,00; 3,00)-(4,10; 3,00); nessuna `LINE` lungo
+  le facce demolite del tramezzo (x = 4,00 e x = 4,10, con 0 < y < 3,00); le due facce del muro nuovo, x = 1,94 e
+  x = 2,06 per y da 0,50 a 2,50, sul layer `MURI` (il piu' frequente tra i muri, quello che `AL_ESTRAI` propone);
+- nei tre file nessuna entita' (oggetti e voci di tabella compresi) con XDATA il cui APPID inizia con `ARCHLINE` e
+  nessun APPID `ARCHLINE*` in tabella; nessuna entita' fuori dallo spazio modello.
+
+**Isolamento.** L'app parte con `APPDATA` e `LOCALAPPDATA` puntati a una cartella temporanea (`config\Roaming` e
+`config\Local` nella cartella di lavoro), cosi' il vero `settings.json` in `%APPDATA%\OpenCADStudio` non si legge e
+non si riscrive (elenco dei recenti, dialoghi "una tantum"). Il disegno di prova e' sintetico: non usare mai un
+disegno dell'utente.
+
+**Percorsi senza spazi.** La riga di `run` si divide sugli spazi, quindi la cartella di lavoro (disegno, cartella
+`out` degli estratti, configurazione) deve avere un percorso senza spazi. Lo script usa `tempfile.mkdtemp()` nella
+cartella temporanea di sistema; se il suo percorso ha spazi (un utente "Mario Rossi"), ripiega su `C:\ocs-bench`
+(radice del disco di sistema), che crea; se nemmeno quella va bene si ferma con exit 2 e un messaggio che elenca i
+tentativi. `--keep DIR` usa una cartella a scelta (senza spazi, nuova o vuota: `AL_ESTRAI` non sovrascrive) e la lascia com'e'. Se un controllo fallisce la
+cartella temporanea resta, con i DXF riconvertiti e `serve.stderr.txt`.
+
+**Limiti.** Un solo caso sintetico. Lo "spazio modello" e' controllato solo nel senso che i layout non hanno
+entita': il caso non ha contenuto nello spazio carta, quindi quel controllo non distingue un'estrazione che
+copiasse anche i layout. I DWG si verificano in modo indiretto (riletti da ArchLine stesso). Aree, nomi e testi dei
+locali non si controllano qui: stanno nei test Rust (`cargo test --locked --lib bim::`, `app::bim_tests`).
