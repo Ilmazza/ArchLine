@@ -2586,3 +2586,251 @@ fn aggiorna_drops_the_note_when_the_gap_closes() {
     assert_eq!(label_of(&app, "B"), ["B\\PS = 11,70 m²"]);
     assert_eq!(label_of(&app, "A"), ["A\\PS = 12,00 m²"]);
 }
+
+// ------------------------------------------------- Locali negli elaborati
+
+/// I testi (`MTEXT`) sul layer `layer` di un documento, in ordine alfabetico.
+fn labels_in(doc: &CadDocument, layer: &str) -> Vec<String> {
+    let mut labels: Vec<String> = doc
+        .entities()
+        .filter(|e| e.common().layer.eq_ignore_ascii_case(layer))
+        .filter_map(|e| match e {
+            EntityType::MText(t) => Some(t.value.clone()),
+            _ => None,
+        })
+        .collect();
+    labels.sort();
+    labels
+}
+
+/// Le polilinee del rilievo (layer `MURI`) di `doc` sono quelle di `survey`:
+/// stesse in numero, e per ognuna una con la stessa chiusura e gli stessi
+/// vertici (entro 1e-6) e bulge.
+#[track_caller]
+fn same_survey_polylines(doc: &CadDocument, survey: &[(Handle, EntityType)], what: &str) {
+    let found: Vec<&LwPolyline> = doc
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::LwPolyline(p) if p.common.layer == LAYER_MURI => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), survey.len(), "{what}");
+    for (_, entity) in survey {
+        let original = polyline(entity);
+        let same = |p: &&LwPolyline| {
+            p.is_closed == original.is_closed
+                && p.vertices.len() == original.vertices.len()
+                && p.vertices.iter().zip(&original.vertices).all(|(a, b)| {
+                    (a.location.x - b.location.x).abs() <= 1e-6
+                        && (a.location.y - b.location.y).abs() <= 1e-6
+                        && (a.bulge - b.bulge).abs() <= 1e-9
+                })
+        };
+        assert!(
+            found.iter().any(same),
+            "{what}: manca la polilinea {:?}",
+            original.vertices
+        );
+    }
+}
+
+/// Spec §7, «Originali intatti», per tutto il giro: caso A a polilinee, un
+/// varco nel tramezzo (`AL_DEMOLISCI`, poi `AL_STATO V`), un muro nuovo in B,
+/// i locali di fatto A e B, un locale di progetto, `AL_AGGIORNA` e
+/// `AL_ESTRAI`. Dopo ogni comando le entità del rilievo hanno lo stesso
+/// handle, la stessa geometria e gli stessi attributi; i tre DWG si rileggono,
+/// nel fatto e nella comparativa il rilievo è lo stesso al micron, nel
+/// progetto ci sono i locali ricalcolati.
+#[test]
+fn full_flow_never_touches_the_survey() {
+    let tmp = TempDir::new("giro-completo");
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::ChiusaPerMuro, DrawingUnit::Metri), 6);
+    let before = rilievo_snapshot(&app);
+    assert_eq!(before.len(), 5, "cinque polilinee chiuse");
+    let step = |app: &mut OpenCADStudio, cmd: &str| {
+        run(app, cmd);
+        assert_eq!(active_command(app), None, "{cmd}: storia: {}", history(app));
+        assert_eq!(
+            rilievo_snapshot(app),
+            before,
+            "{cmd}: il rilievo è cambiato; storia: {}",
+            history(app)
+        );
+    };
+
+    step(&mut app, "AL_DEMOLISCI 4.05,1 4.05,1.9 N");
+    step(&mut app, "AL_NUOVO 6,0 6,3 0.12");
+    let demolita = zones_in(doc(&app))
+        .iter()
+        .find(|z| z.zone.state == ZoneState::Demolito)
+        .map(|z| z.handle)
+        .expect("zona demolita");
+    select(&mut app, &[demolita]);
+    step(&mut app, "AL_STATO V");
+    assert!(zone_of(&app, demolita).varco, "storia: {}", history(&app));
+    select(&mut app, &[]);
+    step(&mut app, "AL_LOCALE 2,1.5 A");
+    step(&mut app, "AL_LOCALE 7,1.5 B");
+    step(&mut app, "AL_LOCALE F 5,1.5 Studio");
+    assert!(
+        history(&app).contains("Superficie netta 5,52 m²"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(
+        labels_in(doc(&app), LAYER_LOCALI),
+        ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]
+    );
+    forget_history(&mut app);
+    step(&mut app, "AL_AGGIORNA");
+    assert!(
+        history(&app).contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {}",
+        history(&app)
+    );
+    let rooms = on_layer(&app, LAYER_LOCALI);
+    let seeds = on_layer(&app, LAYER_LOCALI_PROGETTO);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+    step(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let log = history(&app);
+    assert!(
+        log.contains(&format!(
+            "AL_ESTRAI: scritti 3 file in {}.",
+            tmp.path().display()
+        )),
+        "storia: {log}"
+    );
+    assert!(
+        log.contains(&Notice::Varco { area_m2: 0.09 }.text()),
+        "storia: {log}"
+    );
+    // L'estrazione non tocca né i locali né la storia degli annullamenti.
+    assert_eq!(on_layer(&app, LAYER_LOCALI), rooms);
+    assert_eq!(on_layer(&app, LAYER_LOCALI_PROGETTO), seeds);
+    assert_eq!(undo_steps(&app), steps);
+
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    let loaded: Vec<CadDocument> = paths
+        .iter()
+        .map(|path| {
+            assert!(path.is_file(), "{}: storia: {log}", path.display());
+            crate::io::load_file(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        })
+        .collect();
+    let (fatto, comparativa, progetto) = (&loaded[0], &loaded[1], &loaded[2]);
+    same_survey_polylines(fatto, &before, "stato di fatto");
+    same_survey_polylines(comparativa, &before, "demolizioni e costruzioni");
+    assert_eq!(
+        labels_in(fatto, LAYER_LOCALI),
+        ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]
+    );
+    assert!(labels_in(comparativa, LAYER_LOCALI).is_empty());
+    assert_eq!(
+        comparativa
+            .entities()
+            .filter(|e| matches!(e, EntityType::Hatch(_)))
+            .count(),
+        2,
+        "le due zone"
+    );
+    // Progetto: A resta (il varco non lo unisce), B diviso dal muro nuovo,
+    // la parte senza seme di fatto prende il nome del seme di progetto.
+    assert_eq!(
+        labels_in(progetto, LAYER_LOCALI),
+        [
+            "A\\PS = 12,00 m²",
+            "B\\PS = 5,82 m²",
+            "Studio\\PS = 5,52 m²"
+        ]
+    );
+    assert!(labels_in(progetto, LAYER_LOCALI_PROGETTO).is_empty());
+    for (path, out) in paths.iter().zip(&loaded) {
+        assert!(
+            !out.app_ids.iter().any(|a| a.name.starts_with("ARCHLINE")),
+            "{}: APPID nostro",
+            path.display()
+        );
+        assert!(
+            out.entities().all(|e| e
+                .common()
+                .extended_data
+                .records()
+                .iter()
+                .all(|r| !r.application_name.starts_with("ARCHLINE"))),
+            "{}: XDATA nostro",
+            path.display()
+        );
+    }
+}
+
+/// R61, lato app: `AL_ESTRAI` misura i locali con `HPGAPTOL`, come
+/// `AL_LOCALE` e `AL_AGGIORNA`. Un vuoto di 2 mm all'angolo di A, A scritto
+/// con HPGAPTOL 5 mm, poi la faccia del tramezzo spostata a mano: l'estratto
+/// dice 11,70 (fatto e progetto), con le righe dell'etichetta vecchia e della
+/// tolleranza; il disegno di lavoro resta a 12,00. Con HPGAPTOL 0 A non è
+/// chiuso e resta com'era.
+#[test]
+fn extract_measures_rooms_with_hpgaptol() {
+    let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+    let west = entities
+        .iter_mut()
+        .find_map(|e| match e {
+            EntityType::Line(l) if near(l.start, [0.0, 3.0]) && near(l.end, [0.0, 0.0]) => Some(l),
+            _ => None,
+        })
+        .expect("faccia ovest di A");
+    west.end = Vector3::new(0.0, 0.002, 0.0);
+    let mut app = fresh_app();
+    load(&mut app, entities, 6);
+    dispatch_line(&mut app, "HPGAPTOL 0.005");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let (_, (text, _)) = room_parts(&app);
+    assert_eq!(mtext(&entity_of(&app, text)).value, "A\\PS = 12,00 m²");
+    move_tramezzo_face(&mut app);
+    let survey = rilievo_snapshot(&app);
+    let tmp = TempDir::new("hpgaptol");
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let log = history(&app);
+    let stale = "Locale A: etichetta nel disegno 12,00 → 11,70 m² nell'estratto.";
+    assert!(
+        comes_after(&log, "AL_ESTRAI: scritti 3 file", stale),
+        "storia: {log}"
+    );
+    let tolerance = Notice::ChiusoPerTolleranza { name: "A".into() }.text();
+    assert_eq!(log.matches(&tolerance).count(), 1, "storia: {log}");
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    let load_dwg = |path: &Path| crate::io::load_file(path).unwrap();
+    assert_eq!(
+        labels_in(&load_dwg(&paths[0]), LAYER_LOCALI),
+        ["A\\PS = 11,70 m²"]
+    );
+    assert_eq!(
+        labels_in(&load_dwg(&paths[2]), LAYER_LOCALI),
+        ["A\\PS = 11,70 m²"]
+    );
+    assert_eq!(mtext(&entity_of(&app, text)).value, "A\\PS = 12,00 m²");
+    assert_eq!(rilievo_snapshot(&app), survey);
+
+    dispatch_line(&mut app, "HPGAPTOL 0");
+    let tmp = TempDir::new("senza-hpgaptol");
+    forget_history(&mut app);
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+    let log = history(&app);
+    assert!(
+        log.contains("Il locale A non è più chiuso: lasciato com'era."),
+        "storia: {log}"
+    );
+    assert!(!log.contains(stale), "storia: {log}");
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    assert_eq!(
+        labels_in(&load_dwg(&paths[0]), LAYER_LOCALI),
+        ["A\\PS = 12,00 m²"]
+    );
+}

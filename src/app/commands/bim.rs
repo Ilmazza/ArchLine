@@ -636,6 +636,9 @@ impl OpenCADStudio {
             new_walls_layer: layer.clone(),
             unit,
             tol: unit.tolerance(),
+            // R61: i locali dell'estratto alla tolleranza di `AL_LOCALE` e
+            // `AL_AGGIORNA`, cioè con `HPGAPTOL`.
+            room_tol: room_tolerance(unit),
         };
         let extracted = extract::extract(&self.tabs[i].scene.document, &opts);
         let tab = &self.tabs[i];

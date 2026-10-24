@@ -319,6 +319,16 @@ fn label_area_m2(value: &str) -> Option<f64> {
     number.replace(',', ".").parse::<f64>().ok()
 }
 
+/// I locali di fatto del disegno, uno per locale: contorno e testo accoppiati
+/// per seme entro `tol`, come li accoppia [`refresh_rooms`]. Per i locali di
+/// progetto dell'estrazione (`rooms::project_rooms`).
+pub fn fatto_rooms(doc: &CadDocument, tol: f64) -> Vec<Room> {
+    fatto_parts(doc, tol)
+        .into_iter()
+        .map(|parts| parts.room)
+        .collect()
+}
+
 /// Il disegno ha locali di fatto (un contorno o un testo) nello spazio
 /// modello?
 pub fn has_fatto_rooms(doc: &CadDocument) -> bool {

@@ -1,7 +1,10 @@
 //! Estrazione degli elaborati in DWG 2D ordinari (spec §5.5): lo stato di
-//! fatto (il rilievo senza zone), demolizioni e costruzioni (il rilievo con le
-//! campiture gialle e rosse) e lo stato di progetto (la geometria di
-//! [`project_geometry`], spec §5.4, con i muri nuovi sul layer scelto).
+//! fatto (il rilievo senza zone, con i locali di fatto ricalcolati),
+//! demolizioni e costruzioni (il rilievo con le campiture gialle e rosse) e lo
+//! stato di progetto (la geometria di [`project_geometry`], spec §5.4, con i
+//! muri nuovi sul layer scelto e i locali di progetto con il loro contorno).
+//! I locali si misurano alla tolleranza dei locali (`ExtractOptions::room_tol`,
+//! con `HPGAPTOL`), come in `AL_LOCALE` e `AL_AGGIORNA`.
 //!
 //! Il file estratto si apre senza ArchLine: solo spazio modello, nessun XDATA
 //! e nessun APPID `ARCHLINE_*`, nessun record `ARCHLINE_PROGETTO` (il
@@ -22,9 +25,10 @@
 //! `Portability`), gli handle che la copia non restituisce e, per layout, lo
 //! spazio carta.
 //!
-//! Il disegno di lavoro non si tocca: si lavora su una sua copia, e le entità
-//! nuove dello stato di progetto (pezzi dei muri tagliati, chiusure, muri
-//! nuovi) entrano solo in quella copia, prima della copia nel documento nuovo.
+//! Il disegno di lavoro non si tocca: si lavora su una sua copia. I locali di
+//! fatto ricalcolati cambiano lì, sugli stessi handle, e le entità nuove dello
+//! stato di progetto (pezzi dei muri tagliati, chiusure, muri nuovi, contorni
+//! e testi dei locali) entrano solo lì, prima della copia nel documento nuovo.
 
 use std::path::{Path, PathBuf};
 
@@ -40,10 +44,14 @@ use crate::modules::insert::wblock::extract_entities_into;
 use crate::scene::view::dispatch::set_entity_xdata;
 
 use super::project::project_geometry;
+use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
+use super::rooms::{
+    measure_at, project_rooms, room_entities, room_text_height, rooms_in, Phase, Room, RoomPart,
+};
 use super::units::DrawingUnit;
-use super::walls::{is_wall_entity, wall_set};
-use super::zone::zones_in;
+use super::walls::{faces as wall_faces, is_wall_entity, sources_of, wall_set, Region, WallSet};
+use super::zone::{zones_in, ZoneGeom};
 use super::{APP_ZONA, LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
 
 /// Il layer dei muri nuovi quando il nome dato è vuoto.
@@ -54,6 +62,9 @@ const APP_PREFIX: &str = "ARCHLINE_";
 
 /// Il tipo nell'avviso quando l'handle non porta a nessuna entità.
 const UNKNOWN_KIND: &str = "Entità";
+
+/// Il colore del layer dei locali quando lo si crea (come `zone::ensure_layers`).
+const ACI_ROOMS: i16 = 7;
 
 /// Gli elaborati in pianta che si estraggono.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,8 +93,13 @@ pub struct ExtractOptions {
     /// si crea nel DWG di progetto.
     pub new_walls_layer: String,
     pub unit: DrawingUnit,
-    /// Tolleranza geometrica, in unità del disegno.
+    /// Tolleranza geometrica, in unità del disegno: muri, tagli e geometria di
+    /// progetto.
     pub tol: f64,
+    /// Tolleranza dei locali, in unità del disegno: `max(unit.tolerance(),
+    /// HPGAPTOL)`, la stessa di `AL_LOCALE` e `AL_AGGIORNA` (R61). Sotto `tol`
+    /// vale `tol`.
+    pub room_tol: f64,
 }
 
 /// I documenti estratti, nell'ordine chiesto, e gli avvisi.
@@ -96,15 +112,19 @@ pub struct Extracted {
 /// più gli avvisi senza doppioni.
 ///
 /// - **fatto**: lo spazio modello senza le zone (ogni entità con un record
-///   `ARCHLINE_ZONA`, leggibile o no) e senza i layer `AL-LOCALI-PROGETTO`;
+///   `ARCHLINE_ZONA`, leggibile o no) e senza i layer `AL-LOCALI-PROGETTO`,
+///   con i locali di fatto ricalcolati da capo come in `AL_AGGIORNA`
+///   ([`refresh_fatto_rooms`]);
 /// - **comparativa**: lo spazio modello senza i layer `AL-LOCALI` e
 ///   `AL-LOCALI-PROGETTO`, cioè con le zone;
 /// - **progetto**: la pianta di [`project_geometry`] — i muri non toccati, i
 ///   pezzi di quelli tagliati, le chiusure e i muri nuovi (questi sul layer dei
 ///   muri nuovi, creato se manca: [`ensure_new_walls_layer`]) — più le entità
 ///   non muro dello spazio modello tranne le zone, i layer `AL-LOCALI*` e le
-///   entità escluse (dentro una zona demolita); prima i suoi avvisi, poi
-///   [`Notice::FuoriPiano`] per i muri fuori piano, che non si tagliano.
+///   entità escluse (dentro una zona demolita), più i locali di progetto
+///   ([`project_room_entities`]) con contorno e testo su `AL-LOCALI`; prima
+///   gli avvisi della geometria, poi [`Notice::FuoriPiano`] per i muri fuori
+///   piano, che non si tagliano, poi quelli dei locali.
 ///
 /// I tre documenti passano dalla stessa copia ([`copy_out`]). In fondo, se è
 /// uscito almeno un documento, un avviso per ogni layout con entità: lo
@@ -122,6 +142,8 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         let mut work = src.clone();
         let (out, notices) = match elaborato {
             Elaborato::StatoDiFatto => {
+                let rooms = refresh_fatto_rooms(&mut work, opts.unit, room_tol(opts));
+                push_unique(&mut ex.notices, rooms);
                 let handles = model_space_handles(src, |_, entity| {
                     !carries_zone_record(entity, zone_app)
                         && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
@@ -137,7 +159,8 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
             Elaborato::StatoDiProgetto => {
                 let layer = new_walls_layer_name(src, &opts.new_walls_layer);
                 let walls = wall_set(src, opts.tol);
-                let pg = project_geometry(src, &walls, &zones_in(src), &layer, opts.tol);
+                let zones = zones_in(src);
+                let pg = project_geometry(src, &walls, &zones, &layer, opts.tol);
                 let wall_handles: FxHashSet<Handle> =
                     walls.entities.iter().map(|(handle, _)| *handle).collect();
                 let kept: FxHashSet<Handle> = pg.kept_originals.iter().copied().collect();
@@ -152,6 +175,9 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
                     }
                 });
                 handles.extend(add_drawn(&mut work, &pg.drawn));
+                let (rooms, room_notices) =
+                    project_room_entities(src, &walls, &pg.room_entities, &zones, opts);
+                handles.extend(add_drawn(&mut work, &rooms));
                 push_unique(&mut ex.notices, pg.notices);
                 if walls.off_plane > 0 {
                     push_unique(
@@ -161,7 +187,12 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
                         }],
                     );
                 }
-                copy_out(src, &mut work, &handles, Some(&layer))
+                push_unique(&mut ex.notices, room_notices);
+                let (mut out, notices) = copy_out(src, &mut work, &handles, Some(&layer));
+                if !rooms.is_empty() {
+                    ensure_rooms_layer(src, &mut out);
+                }
+                (out, notices)
             }
         };
         ex.docs.push((elaborato, out));
@@ -179,6 +210,144 @@ fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
             notices.push(notice);
         }
     }
+}
+
+/// La tolleranza dei locali: `opts.room_tol`, ma mai sotto `opts.tol` (né
+/// non numerica).
+fn room_tol(opts: &ExtractOptions) -> f64 {
+    if opts.room_tol.is_finite() && opts.room_tol > opts.tol {
+        opts.room_tol
+    } else {
+        opts.tol
+    }
+}
+
+/// Stato di fatto (spec §4.2, §5.5: «l'estrazione ricalcola sempre da capo e
+/// non si fida mai di ciò che è scritto»): i locali di fatto di `work` si
+/// rimisurano come in `AL_AGGIORNA` ([`refresh_rooms`], alla tolleranza dei
+/// locali `room_tol`) e le modifiche vanno sulle loro entità in `work`, con
+/// gli stessi handle; `src` non si tocca. Come in `AL_AGGIORNA` restano
+/// com'erano, con il loro avviso, i locali non più chiusi e quelli fusi da un
+/// vuoto; tutti i locali si ricalcolano, anche quelli su un layer bloccato
+/// (l'estratto è un documento nuovo). Gli avvisi del ricalcolo, poi una riga
+/// ([`Notice::EtichettaDaAggiornare`]) per ogni locale la cui etichetta
+/// nell'estratto non è quella scritta nel disegno di lavoro, che è quindi
+/// vecchio. Il solo contorno cambiato non dà righe.
+fn refresh_fatto_rooms(work: &mut CadDocument, unit: DrawingUnit, room_tol: f64) -> Vec<Notice> {
+    let refresh = refresh_rooms(work, unit, room_tol);
+    let mut notices = refresh.notices;
+    for change in refresh.changed {
+        for (handle, edit) in &change.edits {
+            if let Some(entity) = work.get_entity_mut(*handle) {
+                edit.apply_to(entity);
+            }
+        }
+        if change.label_changed {
+            notices.push(Notice::EtichettaDaAggiornare {
+                name: change.name,
+                drawing_m2: change.old_area_m2,
+                extract_m2: change.new_area_m2,
+            });
+        }
+    }
+    notices
+}
+
+/// I locali di progetto (spec §5.4) come entità da disegnare nello stato di
+/// progetto, con i loro avvisi. Si calcolano con `rooms::project_rooms` sulla
+/// geometria di progetto (`pg_room_entities`, con le soglie dei varchi:
+/// sorgenti a `opts.tol`, facce alla tolleranza dei locali), dai semi del
+/// disegno: un `Room` per locale di fatto (contorno e testo accoppiati per
+/// seme, [`fatto_rooms`]) e i semi di progetto. Le regioni di fatto si
+/// misurano sul rilievo, alla stessa tolleranza. Ogni locale dà contorno e
+/// testo (`rooms::room_entities`) su `AL-LOCALI`, con l'altezza dei testi di
+/// `AL_LOCALE` (`room_text_height`); l'XDATA lo toglie [`add_drawn`]. Senza
+/// semi niente, nemmeno gli avvisi (un varco senza locali non ha nulla da
+/// dire).
+fn project_room_entities(
+    src: &CadDocument,
+    walls: &WallSet,
+    pg_room_entities: &[(Handle, EntityType)],
+    zones: &[ZoneGeom],
+    opts: &ExtractOptions,
+) -> (Vec<EntityType>, Vec<Notice>) {
+    let (unit, tol) = (opts.unit, room_tol(opts));
+    let fatto = fatto_rooms(src, tol);
+    let progetto: Vec<Room> = rooms_in(src)
+        .into_iter()
+        .filter(|(_, room, part)| room.phase == Phase::Progetto && *part == RoomPart::Seme)
+        .map(|(_, room, _)| room)
+        .collect();
+    if fatto.is_empty() && progetto.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let fatto_regions: Vec<Region> = if fatto.is_empty() {
+        Vec::new()
+    } else {
+        let faces = wall_faces(&walls.sources, tol);
+        // R47: le facce alla tolleranza di base una volta sola, se servono
+        // (come in `refresh_rooms`).
+        let base = unit.tolerance();
+        let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
+        fatto
+            .iter()
+            .filter_map(|room| {
+                measure_at(
+                    &faces,
+                    base_faces.as_deref(),
+                    &walls.sources,
+                    room.seed,
+                    unit,
+                    tol,
+                )
+                .map(|found| found.region)
+            })
+            .collect()
+    };
+    let (pg_sources, _) = sources_of(pg_room_entities, opts.tol);
+    let pg_faces = wall_faces(&pg_sources, tol);
+    let (computed, notices) = project_rooms(
+        &pg_faces,
+        &pg_sources,
+        &fatto,
+        &fatto_regions,
+        &progetto,
+        zones,
+        unit,
+        tol,
+    );
+    let text_height = room_text_height(src, unit).0;
+    let entities = computed
+        .iter()
+        .flat_map(|room| room_entities(room, Phase::Progetto, &pg_sources, text_height, tol))
+        .collect();
+    (entities, notices)
+}
+
+/// Il layer dei locali in `out` (stato di progetto). La copia lo porta con le
+/// entità che lo usano quando `src` lo ha; altrimenti (un disegno con i soli
+/// semi, o il layer tolto) lo si crea qui con un handle nuovo, da quello di
+/// `src` se c'è, o come `zone::ensure_layers` (colore 7). Senza, il DWG
+/// metterebbe i locali sul layer «0».
+fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) {
+    if out.layers.contains(LAYER_LOCALI) {
+        return;
+    }
+    let mut layer = Layer::new(LAYER_LOCALI);
+    match src.layers.get(LAYER_LOCALI) {
+        Some(from) => {
+            layer.color = from.color;
+            layer.color_name = from.color_name.clone();
+            layer.book_name = from.book_name.clone();
+            layer.line_type = from.line_type.clone();
+            layer.line_weight = from.line_weight;
+        }
+        None => layer.color = codec::Color::from_index(ACI_ROOMS),
+    }
+    let line_type = layer.line_type.clone();
+    layer.handle = out.allocate_handle();
+    let _ = out.layers.add(layer);
+    copy_missing_linetypes(src, out, vec![line_type]);
 }
 
 /// L'entità porta un record `ARCHLINE_ZONA` (nome senza distinguere le
@@ -1109,7 +1278,12 @@ mod tests {
 
     use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
     use crate::bim::record::{self, ProjectRecord};
-    use crate::bim::walls::{rect_from_axis, rect_from_axis_thickness, wall_set};
+    use crate::bim::rooms::{
+        measure_at, room_entities, room_text_height, seed_entity, Computed, Phase, Room,
+    };
+    use crate::bim::walls::{
+        faces as wall_faces, rect_from_axis, rect_from_axis_thickness, wall_set,
+    };
     use crate::bim::zone::{ensure_layers, zone_hatch, Zone, ZoneOrigin, ZoneState};
     use crate::bim::{
         APP_LOCALE, APP_ZONA, LAYER_LOCALI, LAYER_LOCALI_PROGETTO, MAX_WALL_THICKNESS_M,
@@ -1124,17 +1298,23 @@ mod tests {
             new_walls_layer: "MURI".into(),
             unit: DrawingUnit::Metri,
             tol: 1e-6,
+            room_tol: 1e-6,
         }
     }
 
     /// Il caso A in metri (INSUNITS 6) nella forma data, con i layer `AL-*`.
     fn case_a_doc(form: Form) -> CadDocument {
+        case_a_doc_in(form, M)
+    }
+
+    /// Il caso A nell'unità data (con il suo INSUNITS), con i layer `AL-*`.
+    fn case_a_doc_in(form: Form, unit: DrawingUnit) -> CadDocument {
         let mut doc = CadDocument::new();
-        doc.header.insertion_units = 6;
+        doc.header.insertion_units = unit.insunits();
         let mut muri = Layer::new(LAYER_MURI);
         muri.handle = doc.allocate_handle();
         doc.layers.add(muri).unwrap();
-        for entity in case_a(form, M) {
+        for entity in case_a(form, unit) {
             doc.add_entity(entity).unwrap();
         }
         ensure_layers(&mut doc);
@@ -1144,10 +1324,27 @@ mod tests {
     /// Una zona demolita «muro tra due punti» sull'asse `p1`-`p2`, sulle facce
     /// dei muri di `doc`.
     fn add_demolition(doc: &mut CadDocument, p1: [f64; 2], p2: [f64; 2]) -> Handle {
-        let tol = M.tolerance();
+        add_demolition_in(doc, M, p1, p2)
+    }
+
+    /// Lo stesso nell'unità data; `p1` e `p2` in metri.
+    fn add_demolition_in(
+        doc: &mut CadDocument,
+        unit: DrawingUnit,
+        p1: [f64; 2],
+        p2: [f64; 2],
+    ) -> Handle {
+        let tol = unit.tolerance();
         let walls = wall_set(doc, tol);
-        let rect = rect_from_axis(&walls.sources, p1, p2, M.metres(MAX_WALL_THICKNESS_M), tol)
-            .expect("muro sull'asse");
+        let at = |p: [f64; 2]| [unit.metres(p[0]), unit.metres(p[1])];
+        let rect = rect_from_axis(
+            &walls.sources,
+            at(p1),
+            at(p2),
+            unit.metres(MAX_WALL_THICKNESS_M),
+            tol,
+        )
+        .expect("muro sull'asse");
         let demolita = Zone {
             state: ZoneState::Demolito,
             origin: ZoneOrigin::MuroDuePunti,
@@ -3104,5 +3301,586 @@ mod tests {
         }
         doc.add_entity(line_on("ALFA", 4.0)).unwrap();
         assert_eq!(propose_new_walls_layer(&doc), Some("Bordi".into()));
+    }
+
+    // ---- Locali (Task 15) ----
+
+    /// Il locale di fatto attorno a `seed` (in unità del disegno) scritto in
+    /// `doc` come lo scrive `AL_LOCALE`: contorno e testo misurati sul rilievo
+    /// alla tolleranza dei locali `tol`, con l'altezza di testo del disegno.
+    /// Gli handle del contorno e del testo.
+    fn write_room(
+        doc: &mut CadDocument,
+        unit: DrawingUnit,
+        tol: f64,
+        name: &str,
+        seed: [f64; 2],
+    ) -> (Handle, Handle) {
+        let walls = wall_set(doc, unit.tolerance());
+        let faces = wall_faces(&walls.sources, tol);
+        let found =
+            measure_at(&faces, None, &walls.sources, seed, unit, tol).expect("locale chiuso");
+        let computed = Computed {
+            name: name.into(),
+            number: String::new(),
+            area_m2: found.area_m2,
+            region: found.region,
+            confirm: false,
+            exact: found.exact,
+            islands: found.islands,
+            seed,
+        };
+        let height = room_text_height(doc, unit).0;
+        let handles: Vec<Handle> =
+            room_entities(&computed, Phase::Fatto, &walls.sources, height, tol)
+                .into_iter()
+                .map(|entity| doc.add_entity(entity).unwrap())
+                .collect();
+        (handles[0], handles[1])
+    }
+
+    /// Il seme di un locale di progetto, come lo scrive `AL_LOCALE` in fase di
+    /// progetto.
+    fn write_seed(doc: &mut CadDocument, name: &str, seed: [f64; 2]) -> Handle {
+        let room = Room {
+            phase: Phase::Progetto,
+            name: name.into(),
+            number: String::new(),
+            seed,
+        };
+        doc.add_entity(seed_entity(&room, 2.5)).unwrap()
+    }
+
+    /// Le entità dello spazio modello su `layer`, in ordine di disegno.
+    fn model_on<'a>(doc: &'a CadDocument, layer: &str) -> Vec<&'a EntityType> {
+        doc.block_records
+            .iter()
+            .filter(|r| r.is_model_space())
+            .flat_map(|r| r.entity_handles.iter())
+            .filter_map(|&h| doc.get_entity(h))
+            .filter(|e| e.common().layer.eq_ignore_ascii_case(layer))
+            .collect()
+    }
+
+    /// I testi (`MTEXT`) su `layer`, in ordine di disegno.
+    fn labels_on(doc: &CadDocument, layer: &str) -> Vec<String> {
+        model_on(doc, layer)
+            .into_iter()
+            .filter_map(|e| match e {
+                EntityType::MText(t) => Some(t.value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Le polilinee su `layer`, in ordine di disegno.
+    fn outlines_on<'a>(doc: &'a CadDocument, layer: &str) -> Vec<&'a LwPolyline> {
+        model_on(doc, layer)
+            .into_iter()
+            .filter_map(|e| match e {
+                EntityType::LwPolyline(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// L'area dei vertici (lati dritti).
+    fn polygon_area(p: &LwPolyline) -> f64 {
+        let v = &p.vertices;
+        let twice: f64 = (0..v.len())
+            .map(|k| {
+                let (a, b) = (v[k].location, v[(k + 1) % v.len()].location);
+                a.x * b.y - b.x * a.y
+            })
+            .sum();
+        twice.abs() / 2.0
+    }
+
+    /// Toglie un'entità dal disegno e dallo spazio modello (come CANCELLA).
+    fn erase(doc: &mut CadDocument, handle: Handle) {
+        doc.remove_entity(handle).expect("entità da cancellare");
+        for record in doc.block_records.iter_mut() {
+            record.entity_handles.retain(|&h| h != handle);
+        }
+    }
+
+    /// La faccia del tramezzo verso A passa da x = 4,00 a 3,90 (in metri):
+    /// A diventa 3,90 × 3,00 = 11,70 m². Una modifica a mano del rilievo,
+    /// senza `AL_AGGIORNA`.
+    fn move_tramezzo_face(doc: &mut CadDocument, form: Form, unit: DrawingUnit) {
+        let (from, to) = (unit.metres(4.0), unit.metres(3.9));
+        let on = |x: f64| (x - from).abs() < 1e-9;
+        let handle = doc
+            .entities()
+            .find(|e| match e {
+                EntityType::Line(l) => form == Form::Continua && on(l.start.x) && on(l.end.x),
+                EntityType::LwPolyline(p) => {
+                    form == Form::ChiusaPerMuro
+                        && p.common.layer == LAYER_MURI
+                        && p.vertices.iter().filter(|v| on(v.location.x)).count() == 2
+                        && p.vertices
+                            .iter()
+                            .any(|v| (v.location.x - unit.metres(4.1)).abs() < 1e-9)
+                }
+                _ => false,
+            })
+            .map(|e| e.common().handle)
+            .expect("faccia del tramezzo");
+        match doc.get_entity_mut(handle) {
+            Some(EntityType::Line(l)) => {
+                l.start.x = to;
+                l.end.x = to;
+            }
+            Some(EntityType::LwPolyline(p)) => {
+                for v in &mut p.vertices {
+                    if on(v.location.x) {
+                        v.location.x = to;
+                    }
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Il tramezzo del caso A a polilinee si ferma 2 mm prima del muro nord: A
+    /// e B diventano una regione sola (R54).
+    fn open_tramezzo(doc: &mut CadDocument) {
+        let handle = doc
+            .entities()
+            .find(|e| {
+                matches!(e, EntityType::LwPolyline(p) if p.vertices.iter().any(|v| near(xy2(v.location), [4.1, 3.0])))
+            })
+            .map(|e| e.common().handle)
+            .expect("tramezzo");
+        if let Some(EntityType::LwPolyline(p)) = doc.get_entity_mut(handle) {
+            for v in &mut p.vertices {
+                if (v.location.y - 3.0).abs() < 1e-9 {
+                    v.location.y = 2.998;
+                }
+            }
+        }
+    }
+
+    fn xy2(v: Vector2) -> [f64; 2] {
+        [v.x, v.y]
+    }
+
+    /// Il caso A a linee continue con l'angolo (0; 0) di A aperto di 2 mm sulla
+    /// faccia ovest (Review Focus 3).
+    fn case_a_with_corner_gap() -> CadDocument {
+        let mut doc = case_a_doc(Form::Continua);
+        let west = doc
+            .entities()
+            .find(|e| matches!(e, EntityType::Line(l) if near(xy(l.start), [0.0, 3.0]) && near(xy(l.end), [0.0, 0.0])))
+            .map(|e| e.common().handle)
+            .expect("faccia ovest di A");
+        if let Some(EntityType::Line(l)) = doc.get_entity_mut(west) {
+            l.end = Vector3::new(0.0, 0.002, 0.0);
+        }
+        doc
+    }
+
+    /// Spec §4.2 e §5.5: lo stato di fatto ricalcola da capo i locali di fatto
+    /// e non si fida di ciò che è scritto. Locale A scritto (12,00), poi la
+    /// faccia del tramezzo da x = 4,00 a 3,90 senza `AL_AGGIORNA`: nel DWG di
+    /// fatto contorno e testo dicono 11,70, senza il nostro XDATA; il disegno
+    /// di lavoro resta a 12,00; una riga dice che la sua etichetta è vecchia.
+    #[test]
+    fn fatto_recomputes_stale_labels() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut src = case_a_doc(form);
+            let (outline, text) = write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+            move_tramezzo_face(&mut src, form, M);
+            let written = (
+                src.get_entity(outline).unwrap().clone(),
+                src.get_entity(text).unwrap().clone(),
+            );
+
+            let ex = extract(&src, &opts(&[Elaborato::StatoDiFatto]));
+            assert_eq!(
+                sorted_texts(&ex.notices),
+                ["Locale A: etichetta nel disegno 12,00 → 11,70 m² nell'estratto."],
+                "{form:?}"
+            );
+
+            #[track_caller]
+            fn check(out: &CadDocument, what: &str) {
+                assert_eq!(labels_on(out, LAYER_LOCALI), ["A\\PS = 11,70 m²"], "{what}");
+                let outlines = outlines_on(out, LAYER_LOCALI);
+                assert_eq!(outlines.len(), 1, "{what}");
+                let outline = outlines[0];
+                assert!(outline.is_closed, "{what}");
+                assert!((polygon_area(outline) - 11.7).abs() < 1e-9, "{what}");
+                let at = |x: f64| {
+                    outline
+                        .vertices
+                        .iter()
+                        .any(|v| (v.location.x - x).abs() < 1e-9)
+                };
+                assert!(at(3.9) && !at(4.0), "{what}: il contorno segue il tramezzo");
+                assert_no_archline_data(out);
+            }
+            check(&ex.docs[0].1, &format!("{form:?} in memoria"));
+            // Il disegno di lavoro non cambia: contorno e testo di prima.
+            assert_eq!(src.get_entity(outline), Some(&written.0), "{form:?}");
+            assert_eq!(src.get_entity(text), Some(&written.1), "{form:?}");
+            let EntityType::MText(old) = &written.1 else {
+                panic!("testo del locale");
+            };
+            assert_eq!(old.value, "A\\PS = 12,00 m²");
+
+            let tmp = TempDir::new("fatto-ricalcolo");
+            let paths = write(&ex, &tmp.0, "casa", false).unwrap();
+            let loaded = crate::io::load_file(&paths[0]).unwrap();
+            check(&loaded, &format!("{form:?} dopo il DWG"));
+        }
+    }
+
+    /// Spec §5.4 e §7, caso A: con i locali A e B scritti e il tramezzo
+    /// demolito per intero, nello stato di progetto i due locali sono uno solo,
+    /// «A + B (da confermare)» da 24,00 m², con contorno e testo nuovi sul
+    /// layer `AL-LOCALI` (testo sul seme di A), senza XDATA; il seme di
+    /// progetto non c'è. Lo stato di fatto tiene A e B com'erano, la
+    /// comparativa nessun locale. Un solo `LocaleFuso`.
+    #[test]
+    fn progetto_has_merged_room_label() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut src = case_a_doc(form);
+            write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+            write_room(&mut src, M, 1e-6, "B", [6.0, 1.5]);
+            add_demolition(&mut src, [4.05, 0.0], [4.05, 3.0]);
+            let before: Vec<EntityType> = src.entities().cloned().collect();
+
+            let ex = extract(&src, &opts(&all_three()));
+            let fused = Notice::LocaleFuso {
+                names: vec!["A".into(), "B".into()],
+                area_m2: 24.0,
+            }
+            .text();
+            assert_eq!(
+                ex.notices.iter().filter(|n| n.text() == fused).count(),
+                1,
+                "{form:?}: {:?}",
+                ex.notices
+            );
+            assert!(
+                ex.notices.iter().all(|n| matches!(
+                    n,
+                    Notice::LocaleFuso { .. } | Notice::GiunzioneDaVerificare { .. }
+                )),
+                "{form:?}: {:?}",
+                ex.notices
+            );
+            let (fatto, comparativa) = (&ex.docs[0].1, &ex.docs[1].1);
+            assert_eq!(
+                labels_on(fatto, LAYER_LOCALI),
+                ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"],
+                "{form:?}"
+            );
+            assert!(model_on(comparativa, LAYER_LOCALI).is_empty(), "{form:?}");
+
+            #[track_caller]
+            fn check(out: &CadDocument, what: &str) {
+                assert_eq!(
+                    labels_on(out, LAYER_LOCALI),
+                    ["A + B (da confermare)\\PS = 24,00 m²"],
+                    "{what}"
+                );
+                let label = model_on(out, LAYER_LOCALI)
+                    .into_iter()
+                    .find_map(|e| match e {
+                        EntityType::MText(t) => Some(t),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(near(xy(label.insertion_point), [2.0, 1.5]), "{what}");
+                assert!((label.height - 2.5).abs() < 1e-9, "{what}: TEXTSIZE");
+                let outlines = outlines_on(out, LAYER_LOCALI);
+                assert_eq!(outlines.len(), 1, "{what}");
+                assert!(outlines[0].is_closed, "{what}");
+                assert!((polygon_area(outlines[0]) - 24.0).abs() < 1e-9, "{what}");
+                assert!(model_on(out, LAYER_LOCALI_PROGETTO).is_empty(), "{what}");
+                let layer = out.layers.get(LAYER_LOCALI).expect("layer dei locali");
+                assert!(!layer.handle.is_null(), "{what}");
+                assert_eq!(
+                    out.layers
+                        .iter()
+                        .filter(|l| l.handle == layer.handle)
+                        .count(),
+                    1,
+                    "{what}: handle doppio"
+                );
+                assert_no_zone_hatches(out);
+                assert_no_archline_data(out);
+            }
+            check(&ex.docs[2].1, &format!("{form:?} in memoria"));
+            assert!(
+                src.entities().cloned().collect::<Vec<_>>() == before,
+                "{form:?}: il disegno di lavoro è cambiato"
+            );
+
+            let tmp = TempDir::new("progetto-locali");
+            let paths = write(&ex, &tmp.0, "casa", false).unwrap();
+            let loaded = crate::io::load_file(&paths[2]).unwrap();
+            check(&loaded, &format!("{form:?} dopo il DWG"));
+        }
+    }
+
+    /// I semi di progetto danno il nome; i loro avvisi vanno tra quelli
+    /// dell'estrazione, una volta sola; i semi non entrano nel DWG. Un disegno
+    /// con i soli semi, senza il layer `AL-LOCALI` (tolto a mano): il layer
+    /// nasce nel progetto con un handle suo e il colore 7.
+    #[test]
+    fn progetto_seeds_name_the_rooms_and_bring_the_rooms_layer() {
+        let mut src = doc_with_demolition(Form::Continua);
+        add_new_wall(&mut src, [6.0, 0.0], [6.0, 3.0], 0.12);
+        write_seed(&mut src, "Soggiorno", [2.0, 1.5]);
+        write_seed(&mut src, "Bagno", [6.0, 1.5]);
+        src.layers.remove(LAYER_LOCALI).expect("layer dei locali");
+        assert!(src.layers.get(LAYER_LOCALI).is_none());
+
+        let ex = extract(&src, &opts(&all_three()));
+        let in_wall = Notice::SemeInMuroNuovo {
+            name: "Bagno".into(),
+        };
+        assert_eq!(
+            ex.notices.iter().filter(|n| **n == in_wall).count(),
+            1,
+            "{:?}",
+            ex.notices
+        );
+        // Fatto e comparativa: niente locali, nessun avviso dei locali.
+        for (_, out) in &ex.docs[..2] {
+            assert!(model_on(out, LAYER_LOCALI).is_empty());
+            assert!(model_on(out, LAYER_LOCALI_PROGETTO).is_empty());
+        }
+
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            // A + tramezzo + la parte di B fino al muro nuovo: 5,94 × 3.
+            assert_eq!(
+                labels_on(out, LAYER_LOCALI),
+                ["Soggiorno\\PS = 17,82 m²"],
+                "{what}"
+            );
+            assert!(model_on(out, LAYER_LOCALI_PROGETTO).is_empty(), "{what}");
+            assert!(
+                !out.entities()
+                    .any(|e| matches!(e, EntityType::MText(t) if t.value == "Bagno")),
+                "{what}: il seme è nel DWG"
+            );
+            let layer = out.layers.get(LAYER_LOCALI).expect("layer dei locali");
+            assert!(!layer.handle.is_null(), "{what}");
+            assert_eq!(layer.color, Color::from_index(7), "{what}");
+            assert_no_archline_data(out);
+        }
+        check(&ex.docs[2].1, "in memoria");
+        let tmp = TempDir::new("progetto-semi");
+        let paths = write(&ex, &tmp.0, "casa", false).unwrap();
+        check(&crate::io::load_file(&paths[2]).unwrap(), "dopo il DWG");
+    }
+
+    /// R55 e R50 nell'estrazione: un locale non più chiuso e due locali fusi da
+    /// un vuoto restano com'erano nello stato di fatto, con i loro avvisi, e
+    /// non danno la riga dell'etichetta.
+    #[test]
+    fn fatto_leaves_open_and_fused_rooms_as_they_were() {
+        // Non chiuso: la faccia sud di A cancellata dopo aver scritto A.
+        let mut src = case_a_doc(Form::Continua);
+        write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+        let written: Vec<EntityType> = model_on(&src, LAYER_LOCALI).into_iter().cloned().collect();
+        let south = src
+            .entities()
+            .find(|e| matches!(e, EntityType::Line(l) if near(xy(l.start), [0.0, 0.0]) && near(xy(l.end), [4.0, 0.0])))
+            .map(|e| e.common().handle)
+            .expect("faccia sud di A");
+        erase(&mut src, south);
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiFatto]));
+        assert_eq!(
+            ex.notices,
+            [Notice::LocaleNonChiuso { name: "A".into() }],
+            "{:?}",
+            ex.notices
+        );
+        let out = &ex.docs[0].1;
+        assert_eq!(labels_on(out, LAYER_LOCALI), ["A\\PS = 12,00 m²"]);
+        let outlines = outlines_on(out, LAYER_LOCALI);
+        let EntityType::LwPolyline(old) = &written[0] else {
+            panic!("contorno");
+        };
+        assert_eq!(outlines.len(), 1);
+        assert_eq!(outlines[0].vertices, old.vertices, "contorno com'era");
+
+        // Fusi: il tramezzo a polilinea si ferma 2 mm prima del muro nord.
+        let mut src = case_a_doc(Form::ChiusaPerMuro);
+        write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+        write_room(&mut src, M, 1e-6, "B", [6.0, 1.5]);
+        let written: Vec<Vec<codec::entities::LwVertex>> = outlines_on(&src, LAYER_LOCALI)
+            .into_iter()
+            .map(|p| p.vertices.clone())
+            .collect();
+        open_tramezzo(&mut src);
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiFatto]));
+        assert_eq!(
+            sorted_texts(&ex.notices),
+            [
+                "Locali A + B fusi in uno (23,70 m²): nome da confermare.",
+                "Locali A + B lasciati com'erano.",
+            ],
+            "{:?}",
+            ex.notices
+        );
+        let out = &ex.docs[0].1;
+        assert_eq!(
+            labels_on(out, LAYER_LOCALI),
+            ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]
+        );
+        let outlines: Vec<_> = outlines_on(out, LAYER_LOCALI)
+            .into_iter()
+            .map(|p| p.vertices.clone())
+            .collect();
+        assert_eq!(outlines, written, "contorni com'erano");
+    }
+
+    /// R61: i locali dell'estratto si misurano alla tolleranza dei locali
+    /// (`room_tol`, cioè con `HPGAPTOL`), i muri e i tagli a `tol`. Un vuoto di
+    /// 2 mm all'angolo di A: A scritto con HPGAPTOL 5 mm (12,00), poi la faccia
+    /// del tramezzo a 3,90. Senza HPGAPTOL A non è chiuso, nel fatto e nel
+    /// progetto, e resta com'era; con HPGAPTOL 5 mm vale 11,70 in tutti e due,
+    /// con l'avviso della tolleranza.
+    #[test]
+    fn rooms_use_the_rooms_tolerance() {
+        let hpgaptol = 0.005;
+        let mut src = case_a_with_corner_gap();
+        write_room(&mut src, M, hpgaptol, "A", [2.0, 1.5]);
+        assert_eq!(labels_on(&src, LAYER_LOCALI), ["A\\PS = 12,00 m²"]);
+        move_tramezzo_face(&mut src, Form::Continua, M);
+        let elaborati = [Elaborato::StatoDiFatto, Elaborato::StatoDiProgetto];
+
+        let ex = extract(&src, &opts(&elaborati));
+        assert_eq!(
+            ex.notices,
+            [Notice::LocaleNonChiuso { name: "A".into() }],
+            "una volta sola per i due elaborati"
+        );
+        assert_eq!(labels_on(&ex.docs[0].1, LAYER_LOCALI), ["A\\PS = 12,00 m²"]);
+        assert!(model_on(&ex.docs[1].1, LAYER_LOCALI).is_empty());
+
+        let mut o = opts(&elaborati);
+        o.room_tol = hpgaptol;
+        let ex = extract(&src, &o);
+        assert_eq!(
+            sorted_texts(&ex.notices),
+            [
+                "Locale A: chiuso solo dalla tolleranza HPGAPTOL, superficie da verificare.",
+                "Locale A: etichetta nel disegno 12,00 → 11,70 m² nell'estratto.",
+            ],
+            "{:?}",
+            ex.notices
+        );
+        assert_eq!(labels_on(&ex.docs[0].1, LAYER_LOCALI), ["A\\PS = 11,70 m²"]);
+        assert_eq!(labels_on(&ex.docs[1].1, LAYER_LOCALI), ["A\\PS = 11,70 m²"]);
+        // Una `room_tol` sotto `tol` vale `tol`.
+        let mut o = opts(&elaborati);
+        o.room_tol = 0.0;
+        assert_eq!(
+            extract(&src, &o).notices,
+            [Notice::LocaleNonChiuso { name: "A".into() }]
+        );
+    }
+
+    /// Caso C nell'estrazione: in millimetri e in centimetri il locale fuso di
+    /// progetto dice 24,00 m²; senza `TEXTSIZE` il testo è alto 0,25 m nelle
+    /// unità del disegno, come in `AL_LOCALE`. Il contorno è in unità del
+    /// disegno.
+    #[test]
+    fn progetto_rooms_in_mm_and_cm() {
+        for unit in [DrawingUnit::Millimetri, DrawingUnit::Centimetri] {
+            let mut src = case_a_doc_in(Form::Continua, unit);
+            src.header.text_height = 0.0;
+            let tol = unit.tolerance();
+            let at = |x: f64, y: f64| [unit.metres(x), unit.metres(y)];
+            write_room(&mut src, unit, tol, "A", at(2.0, 1.5));
+            write_room(&mut src, unit, tol, "B", at(6.0, 1.5));
+            add_demolition_in(&mut src, unit, [4.05, 0.0], [4.05, 3.0]);
+            let o = ExtractOptions {
+                elaborati: all_three().to_vec(),
+                new_walls_layer: LAYER_MURI.into(),
+                unit,
+                tol,
+                room_tol: tol,
+            };
+            let ex = extract(&src, &o);
+            assert_eq!(
+                sorted_texts(&ex.notices),
+                ["Locali A + B fusi in uno (24,00 m²): nome da confermare."],
+                "{unit:?}"
+            );
+            assert_eq!(
+                labels_on(&ex.docs[0].1, LAYER_LOCALI),
+                ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"],
+                "{unit:?}"
+            );
+            let out = &ex.docs[2].1;
+            assert_eq!(
+                labels_on(out, LAYER_LOCALI),
+                ["A + B (da confermare)\\PS = 24,00 m²"],
+                "{unit:?}"
+            );
+            let label = model_on(out, LAYER_LOCALI)
+                .into_iter()
+                .find_map(|e| match e {
+                    EntityType::MText(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(
+                (label.height - unit.metres(0.25)).abs() < 1e-9,
+                "{unit:?}: {}",
+                label.height
+            );
+            let outlines = outlines_on(out, LAYER_LOCALI);
+            assert_eq!(outlines.len(), 1, "{unit:?}");
+            let k = unit.per_metre();
+            assert!(
+                (polygon_area(outlines[0]) - 24.0 * k * k).abs() < 1e-6 * k * k,
+                "{unit:?}"
+            );
+            assert_eq!(out.header.insertion_units, unit.insunits());
+        }
+    }
+
+    /// Il ricalcolo dei locali lavora sulla copia: il disegno di lavoro, i suoi
+    /// handle e i locali scritti restano quelli di prima anche quando
+    /// l'estratto cambia contorni e testi.
+    #[test]
+    fn room_recalculation_never_touches_the_source() {
+        let mut src = case_a_doc(Form::Continua);
+        write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+        write_room(&mut src, M, 1e-6, "B", [6.0, 1.5]);
+        write_seed(&mut src, "Studio", [6.0, 1.0]);
+        move_tramezzo_face(&mut src, Form::Continua, M);
+        let before: Vec<EntityType> = src.entities().cloned().collect();
+        let next_handle = src.next_handle();
+        let ex = extract(&src, &opts(&all_three()));
+        assert_eq!(ex.docs.len(), 3);
+        assert!(
+            src.entities().cloned().collect::<Vec<_>>() == before,
+            "il disegno di lavoro è cambiato"
+        );
+        assert_eq!(src.next_handle(), next_handle, "handle presi da src");
+        assert_eq!(
+            labels_on(&src, LAYER_LOCALI),
+            ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]
+        );
+        assert_eq!(
+            labels_on(&ex.docs[0].1, LAYER_LOCALI),
+            ["A\\PS = 11,70 m²", "B\\PS = 11,70 m²"]
+        );
+        // Progetto (nessuna zona): B prende il nome del seme di progetto.
+        assert_eq!(
+            labels_on(&ex.docs[2].1, LAYER_LOCALI),
+            ["A\\PS = 11,70 m²", "Studio\\PS = 11,70 m²"]
+        );
     }
 }

@@ -88,6 +88,15 @@ pub enum Notice {
         name: String,
         area_m2: f64,
     },
+    /// Un locale di fatto la cui etichetta nel disegno di lavoro non è quella
+    /// dell'estratto (il disegno è vecchio: lo aggiorna `AL_AGGIORNA`).
+    /// L'area che dice l'etichetta del disegno, se si legge, e quella
+    /// dell'estratto, in m². È un'informazione, non un errore.
+    EtichettaDaAggiornare {
+        name: String,
+        drawing_m2: Option<f64>,
+        extract_m2: f64,
+    },
     /// Un locale di fatto di cui nel disegno c'è il testo ma non il contorno.
     ContornoMancante {
         name: String,
@@ -200,6 +209,25 @@ impl Notice {
                 "Locale {name}: contorno aggiornato ({}).",
                 format_m2(*area_m2)
             ),
+            Self::EtichettaDaAggiornare {
+                name,
+                drawing_m2,
+                extract_m2,
+            } => match drawing_m2
+                .map(format_decimal)
+                .filter(|old| *old != format_decimal(*extract_m2))
+            {
+                Some(old) => format!(
+                    "Locale {name}: etichetta nel disegno {old} → {} nell'estratto.",
+                    format_m2(*extract_m2)
+                ),
+                // L'etichetta non dice l'area, o dice la stessa (cambia la
+                // nota «da confermare»).
+                None => format!(
+                    "Locale {name}: etichetta nel disegno da aggiornare ({} nell'estratto).",
+                    format_m2(*extract_m2)
+                ),
+            },
             Self::ContornoMancante { name } => {
                 format!("Locale {name}: c'è il testo ma non il contorno.")
             }
@@ -357,6 +385,30 @@ mod tests {
                     area_m2: 11.91,
                 },
                 "Locale Bagno: contorno aggiornato (11,91 m²).",
+            ),
+            (
+                Notice::EtichettaDaAggiornare {
+                    name: "A".into(),
+                    drawing_m2: Some(12.0),
+                    extract_m2: 11.7,
+                },
+                "Locale A: etichetta nel disegno 12,00 → 11,70 m² nell'estratto.",
+            ),
+            (
+                Notice::EtichettaDaAggiornare {
+                    name: "A".into(),
+                    drawing_m2: None,
+                    extract_m2: 11.704,
+                },
+                "Locale A: etichetta nel disegno da aggiornare (11,70 m² nell'estratto).",
+            ),
+            (
+                Notice::EtichettaDaAggiornare {
+                    name: "B".into(),
+                    drawing_m2: Some(23.7),
+                    extract_m2: 23.7002,
+                },
+                "Locale B: etichetta nel disegno da aggiornare (23,70 m² nell'estratto).",
             ),
             (
                 Notice::ContornoMancante {

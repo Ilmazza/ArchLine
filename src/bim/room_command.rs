@@ -24,9 +24,9 @@ use super::units::{format_m2, DrawingUnit};
 use super::walls::{faces as wall_faces, sources_of, wall_set};
 use super::zone::{zones_in, ZoneState};
 
-/// L'altezza dei testi dei locali, in metri, quando il disegno non ne dà una
-/// (`TEXTSIZE` non positiva): un parametro di aspetto, non una misura.
-pub const DEFAULT_ROOM_TEXT_M: f64 = 0.25;
+/// L'altezza dei testi dei locali sta in `rooms`, perché la usa anche
+/// l'estrazione (che non dipende dai comandi).
+pub use super::rooms::{room_text_height, DEFAULT_ROOM_TEXT_M};
 
 /// La geometria che [`RoomCommand`] legge, preparata all'avvio
 /// ([`room_snapshot`]). In unità del disegno, sul piano XY del mondo.
@@ -97,17 +97,6 @@ fn same_ring(a: &[[f64; 2]], b: &[[f64; 2]], tol: f64) -> bool {
     };
     let reversed: Vec<[f64; 2]> = b.iter().rev().copied().collect();
     n == b.len() && (n == 0 || rotated(b) || rotated(&reversed))
-}
-
-/// L'altezza dei testi dei locali: `TEXTSIZE` del disegno se positiva,
-/// altrimenti [`DEFAULT_ROOM_TEXT_M`] in unità del disegno, con `true`.
-pub fn room_text_height(doc: &CadDocument, unit: DrawingUnit) -> (f64, bool) {
-    let height = doc.header.text_height;
-    if height.is_finite() && height > 0.0 {
-        (height, false)
-    } else {
-        (unit.metres(DEFAULT_ROOM_TEXT_M), true)
-    }
 }
 
 /// I locali di fatto del disegno, uno per locale: contorno e testo dello

@@ -128,6 +128,22 @@ const JOIN: &str = " + ";
 /// Dopo il nome di un locale fuso.
 const TO_CONFIRM: &str = " (da confermare)";
 
+/// L'altezza dei testi dei locali, in metri, quando il disegno non ne dà una
+/// (`TEXTSIZE` non positiva): un parametro di aspetto, non una misura.
+pub const DEFAULT_ROOM_TEXT_M: f64 = 0.25;
+
+/// L'altezza dei testi dei locali (`AL_LOCALE`, estrazione): `TEXTSIZE` del
+/// disegno se positiva, altrimenti [`DEFAULT_ROOM_TEXT_M`] in unità del
+/// disegno, con `true`.
+pub fn room_text_height(doc: &CadDocument, unit: DrawingUnit) -> (f64, bool) {
+    let height = doc.header.text_height;
+    if height.is_finite() && height > 0.0 {
+        (height, false)
+    } else {
+        (unit.metres(DEFAULT_ROOM_TEXT_M), true)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Fatto,
