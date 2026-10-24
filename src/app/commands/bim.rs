@@ -11,13 +11,12 @@
 //! sta in `crate::bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
-use crate::bim::commands::{
-    has_fatto_rooms, refresh_rooms, room_snapshot, room_text_height, RoomCommand, RoomEdit,
-    ZoneCommand, ZoneSnapshot, DEFAULT_ROOM_TEXT_M,
-};
+use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
 use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::record;
+use crate::bim::refresh::{has_fatto_rooms, refresh_rooms, RoomEdit};
 use crate::bim::report::Notice;
+use crate::bim::room_command::{room_snapshot, room_text_height, RoomCommand, DEFAULT_ROOM_TEXT_M};
 use crate::bim::units::{self, format_decimal, DrawingUnit, UnitLookup};
 use crate::bim::walls;
 use crate::bim::zone::{self, Zone, ZoneGeom, ZoneState};

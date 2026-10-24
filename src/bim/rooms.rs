@@ -1135,6 +1135,17 @@ fn strictly_in(curves: &[Curve], p: [f64; 2], tolerance: Tolerance) -> bool {
         && contains(curves, p, tolerance)
 }
 
+/// `p` sta nella regione: dentro il contorno esterno, bordo compreso, e non
+/// strettamente dentro un buco.
+pub(crate) fn region_holds(region: &Region, p: [f64; 2], tol: f64) -> bool {
+    let tolerance = Tolerance::new(tol);
+    contains(&ring_curves(&region.outer), p, tolerance)
+        && !region
+            .holes
+            .iter()
+            .any(|hole| strictly_in(&ring_curves(hole), p, tolerance))
+}
+
 fn ring_lines(ring: &[[f64; 2]]) -> Vec<Line> {
     ring.iter()
         .zip(ring.iter().cycle().skip(1))
@@ -1143,7 +1154,7 @@ fn ring_lines(ring: &[[f64; 2]]) -> Vec<Line> {
         .collect()
 }
 
-fn ring_curves(ring: &[[f64; 2]]) -> Vec<Curve> {
+pub(crate) fn ring_curves(ring: &[[f64; 2]]) -> Vec<Curve> {
     ring_lines(ring).into_iter().map(Curve::Line).collect()
 }
 
