@@ -857,7 +857,11 @@ fn inside_a_wall(candidate: &[Vec<[f64; 2]>], snap: &ZoneSnapshot, max_thickness
 
 /// La mezzeria lungo i lati lunghi di un anello rettangolare (quattro
 /// vertici, angoli retti), da un lato corto all'altro; `None` per ogni altra
-/// forma.
+/// forma. Un angolo è retto se lo scarto, misurato come distanza, sta entro
+/// `tol`: `|u·v| / max(|u|, |v|)` è quanto l'estremo del lato più corto esce
+/// dalla perpendicolare a quello più lungo (fix finale, punto 4: la soglia
+/// relativa 1e-9 non reggeva l'arrotondamento dei lati a coordinate
+/// georiferite, circa 1e-9 m, e la tenaglia si spegneva in silenzio).
 fn rectangle_midline(ring: &[[f64; 2]], tol: f64) -> Option<([f64; 2], [f64; 2])> {
     let [c0, c1, c2, c3] = ring else {
         return None;
@@ -875,7 +879,8 @@ fn rectangle_midline(ring: &[[f64; 2]], tol: f64) -> Option<([f64; 2], [f64; 2])
     }
     let right_angles = (0..4).all(|i| {
         let (u, v) = (sides[i], sides[(i + 1) % 4]);
-        (u[0] * v[0] + u[1] * v[1]).abs() <= 1e-9 * lengths[i] * lengths[(i + 1) % 4]
+        let longer = lengths[i].max(lengths[(i + 1) % 4]);
+        (u[0] * v[0] + u[1] * v[1]).abs() / longer <= tol
     });
     if !right_angles {
         return None;
@@ -2025,6 +2030,79 @@ mod tests {
             validate(&[rect(2.0, 0.5, 8.0, 0.62)], n, &corridor()),
             [Notice::NuovoSuEsistente]
         );
+    }
+
+    /// L'istantanea di `entities` nell'unità data, alla sua tolleranza.
+    fn snap_in(entities: Vec<EntityType>, unit: DrawingUnit) -> ZoneSnapshot {
+        let scene = scene_with(entities, unit.insunits());
+        let tol = unit.tolerance();
+        let set = walls::wall_set(&scene.document, tol);
+        let faces = walls::faces(&set.sources, tol);
+        ZoneSnapshot {
+            walls: set.sources,
+            faces,
+            zones: Vec::new(),
+            unit,
+            tol,
+            last_thickness: None,
+        }
+    }
+
+    /// Fix finale, punto 4: la tenaglia (R20) a coordinate georiferite. Un
+    /// muro esistente da 0,30 m ruotato di 30° attorno a (2 300 000; 4 640 000)
+    /// m e un muro nuovo da 0,12 m sulla sua mezzeria (zona di
+    /// `rect_from_axis_thickness`, come in `AL_NUOVO`): l'avviso
+    /// `NuovoSuEsistente` c'è, in metri e in millimetri. Con la soglia relativa
+    /// 1e-9 sugli angoli retti l'arrotondamento dei lati (circa 1e-9 m)
+    /// spegneva la tenaglia in silenzio. Vicino all'origine: invariato.
+    #[test]
+    fn thin_new_wall_on_a_georeferenced_rotated_wall_is_noticed() {
+        let (sin, cos) = 30.0_f64.to_radians().sin_cos();
+        let (d, n) = ([cos, sin], [-sin, cos]);
+        for (origin_m, unit) in [
+            ([2_300_000.0, 4_640_000.0], DrawingUnit::Metri),
+            ([2_300_000.0, 4_640_000.0], DrawingUnit::Millimetri),
+            ([1.0, 1.0], DrawingUnit::Metri),
+            ([1.0, 1.0], DrawingUnit::Millimetri),
+        ] {
+            let k = unit.per_metre();
+            let at = |t: f64, s: f64| {
+                [
+                    origin_m[0] * k + (d[0] * t + n[0] * s) * k,
+                    origin_m[1] * k + (d[1] * t + n[1] * s) * k,
+                ]
+            };
+            let face = |s: f64| {
+                let (a, b) = (at(0.0, s), at(6.0, s));
+                let mut line = Line::from_points(
+                    Vector3::new(a[0], a[1], 0.0),
+                    Vector3::new(b[0], b[1], 0.0),
+                );
+                line.common.layer = LAYER_MURI.to_string();
+                EntityType::Line(line)
+            };
+            let s = snap_in(vec![face(0.15), face(-0.15)], unit);
+            let rect = walls::rect_from_axis_thickness(at(1.0, 0.0), at(4.0, 0.0), 0.12 * k)
+                .expect("rettangolo");
+            let what = format!("{origin_m:?} {unit:?}");
+            assert!(
+                rectangle_midline(&rect.ring(), s.tol).is_some(),
+                "{what}: angoli retti entro la tolleranza"
+            );
+            assert_eq!(
+                validate(&[rect.ring()], ZoneState::Nuovo, &s),
+                [Notice::NuovoSuEsistente],
+                "{what}"
+            );
+            // Un quadrilatero fuori squadra di 0,1° non è un rettangolo.
+            let mut skewed = rect.ring();
+            let shift = (4.0 - 1.0) * 0.1_f64.to_radians().tan() * k;
+            skewed[1][0] += n[0] * shift;
+            skewed[1][1] += n[1] * shift;
+            skewed[2][0] += n[0] * shift;
+            skewed[2][1] += n[1] * shift;
+            assert_eq!(rectangle_midline(&skewed, s.tol), None, "{what}");
+        }
     }
 
     #[test]
