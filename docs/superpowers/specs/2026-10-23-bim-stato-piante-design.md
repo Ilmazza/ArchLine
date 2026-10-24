@@ -223,7 +223,17 @@ Le regole sul nome sono meccaniche e dichiarate:
 - altrimenti, se cadono uno o più semi di fatto, il nome è l'unione meccanica dei nomi di fatto con « + »,
   marcato «da confermare» (il modulo non inventa nessun nome nuovo: unisce quelli di Mauro);
 - una regione senza nessun seme esce nel DWG come polilinea con la superficie e la dicitura «(senza nome)», ed
-  è elencata nel rapporto.
+  è elencata nel rapporto, ma solo se il suo punto interno cade dentro il contorno esterno di un locale di
+  fatto (misurato sul rilievo): per esempio la parte di un locale di fatto separata da un muro nuovo. Non ogni
+  vano, cavedio o spazio esterno dell'edificio; le facce che stanno dentro una zona non sono locali (quella di
+  un varco dà la riga con l'area del varco). Quindi in un disegno senza locali di fatto non esce nessun
+  «(senza nome)», e senza nessun seme (né di fatto né di progetto) non escono locali di progetto né la riga
+  del varco.
+
+  *Nota (2026-10-24, fix finale).* La frase di prima («una regione senza nessun seme esce … «(senza nome)»»)
+  prometteva più di quanto fa il codice: la regola è quella di `rooms::project_rooms` (passo 3 nella
+  documentazione del modulo `src/bim/rooms.rs`), riassunta qui sopra. Le facce vicine a una zona si guardano
+  solo per riconoscere quelle della zona stessa, che non sono mai locali.
 
 ### 5.5 Estrazione
 
@@ -242,7 +252,8 @@ esterni, blocchi con attributi non copiabili) è elencato nel rapporto. Nel DWG 
 di linea e stili di testo copiati dal disegno di partenza, **nessun XDATA nostro**, nessuna dipendenza da
 ArchLine. I nomi dei file derivano dal disegno (`<nome>_stato-di-fatto.dwg`,
 `<nome>_demolizioni-costruzioni.dwg`, `<nome>_stato-di-progetto.dwg`); un file esistente non si sovrascrive
-senza conferma. La versione DWG è quella del disegno di partenza. Un rapporto finale in riga di comando elenca
+senza conferma (nella finestra, la casella «Sovrascrivi i file esistenti», spenta, e il pulsante «Sovrascrivi»;
+da riga di comando e da script mai). La versione DWG è quella del disegno di partenza. Un rapporto finale in riga di comando elenca
 tutto ciò che è stato escluso, non tagliato, approssimato o segnalato.
 
 ## 6. Interfaccia
