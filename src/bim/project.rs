@@ -13,13 +13,19 @@
 //!    l'asse e il lato più vicino è un lato lungo (una faccia del muro tolto),
 //!    altrimenti resta. Una zona senza asse che tocca un muro dà un solo
 //!    [`Notice::ConfiniNonRimossi`], nel baricentro del suo contorno esterno.
+//!    Rete di sicurezza (R40): un tratto che resta parallelo a un lato lungo,
+//!    nella sua fascia e lungo l'asse, è una faccia del muro demolito non tolta
+//!    (facce non parallele all'asse o tra loro) → [`Notice::FacciaNonTolta`].
 //! 2. **Chiusure** (zone demolite con asse). Per ciascun lato di estremità:
 //!    se coincide (collineare, sovrapposto per più di `tol`) con un tratto di
 //!    muro che resta → [`Notice::GiunzioneDaVerificare`] nel punto medio del
 //!    tratto comune e nessuna linea; altrimenti, con entrambi gli estremi a
 //!    non più di `tol` da muri che restano → una `LINE` con gli attributi del
 //!    muro più vicino al primo estremo; altrimenti [`Notice::TaglioNonChiuso`]
-//!    a metà del lato.
+//!    a metà del lato. Poi i muri appoggiati a T su un lato lungo (R39): le
+//!    loro teste libere sul lato si chiudono a coppie con una `LINE` sul lato,
+//!    con gli attributi della curva della prima; una testa spaiata dà
+//!    [`Notice::TaglioNonChiuso`] (vedi [`abutment_closures`]).
 //! 3. **Varco** (zona demolita con `varco`). Con l'asse, i due lati lunghi
 //!    vanno solo in `room_entities`, come `LINE` (soglie per il calcolo dei
 //!    locali): nel disegno il vano resta aperto, chiuso dalle due spallette
@@ -94,7 +100,9 @@ use crate::entities::traits::EntityTypeOps;
 
 use super::clip::kept_pieces;
 use super::report::Notice;
-use super::walls::{is_bim_layer, rect_from_axis_thickness, WallRect, WallSet};
+use super::walls::{
+    is_bim_layer, rect_from_axis_thickness, WallRect, WallSet, FACE_PARALLEL_DEGREES,
+};
 use super::zone::{ZoneGeom, ZoneState};
 use super::{APP_LOCALE, APP_ZONA};
 
@@ -191,8 +199,12 @@ pub fn project_geometry(
         })
         .collect();
 
-    // 2. Chiusure.
-    let closures = closures(
+    // Facce del muro demolito rimaste (R40): facce non parallele all'asse.
+    leftover_faces(&demolished, &remaining_lines, tolerance, &mut notices);
+
+    // 2. Chiusure: lati di estremità, poi teste dei muri appoggiati a T sui
+    // lati lunghi (R39). Passano tutte dalla cancellazione del punto 4.
+    let mut closures = closures(
         walls,
         &demolished,
         &remaining,
@@ -200,6 +212,13 @@ pub fn project_geometry(
         tolerance,
         &mut notices,
     );
+    closures.extend(abutment_closures(
+        walls,
+        &demolished,
+        &remaining,
+        tolerance,
+        &mut notices,
+    ));
 
     // 3. Varchi.
     let mut thresholds = Vec::new();
@@ -753,6 +772,149 @@ fn closures(
         }
     }
     out
+}
+
+/// Le teste dei muri che si appoggiano a T su un lato lungo di una zona
+/// demolita con asse (R39): tolto il muro, le loro facce resterebbero aperte.
+///
+/// I lati lunghi si fondono quando sono collineari e si toccano (due
+/// demolizioni di seguito sullo stesso muro), poi su ognuno si raccolgono le
+/// teste: gli estremi delle curve che restano a non più di `tol` dal lato e a
+/// più di `tol` dai suoi capi (gli angoli sono della regola 2), su curve non
+/// parallele al lato entro [`FACE_PARALLEL_DEGREES`] (una faccia parallela è
+/// una faccia non tolta, vedi [`leftover_faces`]). Gli estremi nello stesso
+/// punto si contano per parità: due curve che si toccano lì continuano l'una
+/// nell'altra, non sono una testa. Le teste, in ordine lungo il lato, si
+/// chiudono a coppie (1-2, 3-4, …) con una `LINE` sul lato, con gli attributi
+/// della curva della prima testa; una testa spaiata dà
+/// [`Notice::TaglioNonChiuso`] dove sta. Una chiusura con il punto medio
+/// strettamente dentro un'altra zona demolita non serve: la demolizione
+/// continua di là.
+fn abutment_closures(
+    walls: &WallSet,
+    demolished: &[&ZoneInfo],
+    remaining: &[(usize, Curve)],
+    tolerance: Tolerance,
+    notices: &mut Vec<Notice>,
+) -> Vec<Closure> {
+    let tol = tolerance.linear();
+    let sin_limit = FACE_PARALLEL_DEGREES.to_radians().sin();
+    let sides = merge_collinear(
+        demolished
+            .iter()
+            .filter_map(|zone| zone.rect.as_ref())
+            .flat_map(|rect| rect.long_sides())
+            .collect(),
+        tol,
+    );
+    let mut out = Vec::new();
+    for (a, b) in sides {
+        let length = distance(a, b);
+        if !(length > 2.0 * tol) {
+            continue;
+        }
+        let u = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
+        let mut heads: Vec<(f64, [f64; 2], usize)> = Vec::new();
+        for (wall, curve) in remaining {
+            for t in [0.0, 1.0] {
+                let p = curve.point_at(t);
+                let along = dot(sub(p, a), u);
+                if segment_distance(p, a, b) > tol || along <= tol || along >= length - tol {
+                    continue;
+                }
+                let tangent = curve.tangent_at(t);
+                let speed = norm(tangent);
+                if !(speed > 0.0) || cross(tangent, u).abs() <= sin_limit * speed {
+                    continue;
+                }
+                heads.push((along, p, *wall));
+            }
+        }
+        heads.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut free: Vec<([f64; 2], usize)> = Vec::new();
+        let mut first = 0;
+        while first < heads.len() {
+            let mut next = first + 1;
+            while next < heads.len() && heads[next].0 - heads[next - 1].0 <= tol {
+                next += 1;
+            }
+            if (next - first) % 2 == 1 {
+                free.push((heads[first].1, heads[first].2));
+            }
+            first = next;
+        }
+        let mut pairs = free.chunks_exact(2);
+        for pair in &mut pairs {
+            let ((p, wall), (q, _)) = (pair[0], pair[1]);
+            let middle = midpoint(p, q);
+            if demolished
+                .iter()
+                .any(|zone| zone.locate(middle, tolerance) == Place::In)
+            {
+                continue;
+            }
+            out.push(Closure {
+                side: (p, q),
+                line: closure_line(p, q, &walls.entities[wall].1),
+            });
+        }
+        for &(p, _) in pairs.remainder() {
+            notices.push(Notice::TaglioNonChiuso { at: p });
+        }
+    }
+    out
+}
+
+/// La rete di sicurezza del punto 1 (R40): un tratto di muro che resta
+/// parallelo (entro [`FACE_PARALLEL_DEGREES`]) a un lato lungo di una zona
+/// demolita con asse, nella sua fascia (a non più di `tan 0,5° · |asse| + tol`
+/// dal lato) e sovrapposto all'intervallo dell'asse per più di `tol`, è una
+/// faccia del muro demolito rimasta in piedi: facce non parallele all'asse o
+/// tra loro (muro a spessore variabile). Un [`Notice::FacciaNonTolta`] a metà
+/// del tratto sovrapposto.
+fn leftover_faces(
+    demolished: &[&ZoneInfo],
+    remaining_lines: &[Segment],
+    tolerance: Tolerance,
+    notices: &mut Vec<Notice>,
+) {
+    let tol = tolerance.linear();
+    let angle = FACE_PARALLEL_DEGREES.to_radians();
+    let (sin_limit, tan_limit) = (angle.sin(), angle.tan());
+    for zone in demolished {
+        let Some(rect) = &zone.rect else {
+            continue;
+        };
+        let band = tan_limit * distance(rect.axis.0, rect.axis.1) + tol;
+        for (a, b) in rect.long_sides() {
+            let side = distance(a, b);
+            if !(side > tol) {
+                continue;
+            }
+            let u = [(b[0] - a[0]) / side, (b[1] - a[1]) / side];
+            for &(p, q) in remaining_lines {
+                let v = sub(q, p);
+                let length = norm(v);
+                if !(length > tol) || cross(v, u).abs() > sin_limit * length {
+                    continue;
+                }
+                let (tp, tq) = (dot(sub(p, a), u), dot(sub(q, a), u));
+                let (lo, hi) = (tp.min(tq).max(0.0), tp.max(tq).min(side));
+                if !(hi - lo > tol) {
+                    continue;
+                }
+                // tq ≠ tp: il tratto è parallelo al lato e lungo più di tol.
+                let at = |t: f64| lerp2(p, q, (t - tp) / (tq - tp));
+                let (from, to) = (at(lo), at(hi));
+                let off = |x: [f64; 2]| cross(u, sub(x, a)).abs();
+                if off(from) <= band && off(to) <= band {
+                    notices.push(Notice::FacciaNonTolta {
+                        at: midpoint(from, to),
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Una `LINE` da `a` a `b` con gli attributi di `wall` (layer, colore, tipo
@@ -1335,10 +1497,25 @@ mod tests {
     /// Zona demolita «muro tra due punti»: il rettangolo di `rect_from_axis`
     /// sulle facce del caso A (il tramezzo è lo stesso nelle due forme).
     fn axis_zone(p1: [f64; 2], p2: [f64; 2], varco: bool) -> ZoneGeom {
-        let scene = scene_with(case_a(Form::Continua, DrawingUnit::Metri), 6);
+        axis_zone_on(case_a(Form::Continua, DrawingUnit::Metri), p1, p2)
+            .map(|mut zone| {
+                zone.zone.varco = varco;
+                zone
+            })
+            .expect("muro")
+    }
+
+    /// Zona demolita «muro tra due punti» sulle facce delle entità date.
+    fn axis_zone_on(entities: Vec<EntityType>, p1: [f64; 2], p2: [f64; 2]) -> Option<ZoneGeom> {
+        let scene = scene_with(entities, 6);
         let sources = wall_set(&scene.document, TOL).sources;
-        let rect = rect_from_axis(&sources, p1, p2, MAX_WALL_THICKNESS_M, TOL).expect("muro");
-        axis_zone_with(ZoneState::Demolito, ZoneOrigin::MuroDuePunti, rect, varco)
+        let rect = rect_from_axis(&sources, p1, p2, MAX_WALL_THICKNESS_M, TOL).ok()?;
+        Some(axis_zone_with(
+            ZoneState::Demolito,
+            ZoneOrigin::MuroDuePunti,
+            rect,
+            false,
+        ))
     }
 
     /// Zona nuova «linea + spessore».
@@ -1437,7 +1614,8 @@ mod tests {
             | Notice::GiunzioneDaVerificare { at }
             | Notice::TaglioNonChiuso { at }
             | Notice::NuoveSovrapposte { at }
-            | Notice::VarcoNonSupportato { at } => Some(*at),
+            | Notice::VarcoNonSupportato { at }
+            | Notice::FacciaNonTolta { at } => Some(*at),
             _ => None,
         }
     }
@@ -2081,5 +2259,305 @@ mod tests {
             &pg.notices,
             &[Notice::ConfiniNonRimossi { at: [0.25, 6.0] }],
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 1: muri appoggiati a T (R39), facce fuori squadra (R40)
+    // -----------------------------------------------------------------------
+
+    fn wall_line(a: [f64; 2], b: [f64; 2]) -> EntityType {
+        let mut line = codec::entities::Line::from_points(
+            Vector3::new(a[0], a[1], 0.0),
+            Vector3::new(b[0], b[1], 0.0),
+        );
+        line.common.layer = LAYER_MURI.into();
+        EntityType::Line(line)
+    }
+
+    fn closed_lw(corners: &[[f64; 2]]) -> EntityType {
+        let mut poly = lw(
+            LAYER_MURI,
+            &corners.iter().map(|&c| (c, 0.0)).collect::<Vec<_>>(),
+        );
+        if let EntityType::LwPolyline(poly) = &mut poly {
+            poly.is_closed = true;
+        }
+        poly
+    }
+
+    /// Il caso A con un muro W nel locale A, facce y = 1,00 e y = 1,20 da
+    /// x = 1,00 a x = 4,00, appoggiato a T al tramezzo. Continua: la faccia del
+    /// tramezzo x = 4,00 è interrotta tra 1,00 e 1,20 e W è chiuso da una linea
+    /// a x = 1,00; ChiusaPerMuro: W è una polilinea chiusa.
+    fn case_a_with_w(form: Form) -> Vec<EntityType> {
+        let mut entities = case_a(form, DrawingUnit::Metri);
+        match form {
+            Form::Continua => {
+                // Il lato destro del locale A, (4;0)-(4;3).
+                entities[5] = wall_line([4.0, 0.0], [4.0, 1.0]);
+                entities.push(wall_line([4.0, 1.2], [4.0, 3.0]));
+                entities.push(wall_line([1.0, 1.0], [4.0, 1.0]));
+                entities.push(wall_line([1.0, 1.2], [4.0, 1.2]));
+                entities.push(wall_line([1.0, 1.0], [1.0, 1.2]));
+            }
+            Form::ChiusaPerMuro => {
+                entities.push(closed_lw(&[[1.0, 1.0], [4.0, 1.0], [4.0, 1.2], [1.0, 1.2]]));
+            }
+        }
+        entities
+    }
+
+    /// R39: tolto il tramezzo, la testa di W si chiude sul lato lungo.
+    #[test]
+    fn wall_abutting_the_long_side_is_closed() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let scene = scene_with(case_a_with_w(form), 6);
+            let pg = project_on(&scene, vec![axis_zone([4.05, 0.0], [4.05, 3.0], false)]);
+            assert!(
+                has_line(&pg, [4.0, 1.0], [4.0, 1.2]),
+                "{form:?}: {:?}",
+                pg.drawn
+            );
+            let head = pg
+                .drawn
+                .iter()
+                .find(|e| is_line(e, [4.0, 1.0], [4.0, 1.2]))
+                .expect("testa");
+            assert_eq!(head.common().layer, LAYER_MURI);
+            assert_eq!(head.common().handle, Handle::NULL);
+            // Il resto del tramezzo è sparito.
+            let left = pg.drawn.iter().chain(kept(&pg));
+            assert!(!stretch_on(left, [4.0, 4.0], (0.0, 1.0)), "{form:?}");
+            assert!(!stretch_on(
+                pg.drawn.iter().chain(kept(&pg)),
+                [4.0, 4.0],
+                (1.2, 3.0)
+            ));
+            assert!(!stretch_on(
+                pg.drawn.iter().chain(kept(&pg)),
+                [4.1, 4.1],
+                (0.0, 3.0)
+            ));
+            // La testa chiude anche i locali.
+            assert!(pg
+                .room_entities
+                .iter()
+                .any(|(_, e)| is_line(e, [4.0, 1.0], [4.0, 1.2])));
+            match form {
+                Form::Continua => {
+                    assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+                    assert!(has_line(&pg, [4.0, 0.0], [4.1, 0.0]));
+                    assert!(has_line(&pg, [4.0, 3.0], [4.1, 3.0]));
+                }
+                Form::ChiusaPerMuro => assert_notices(
+                    &pg.notices,
+                    &[giunzione([4.05, 0.0]), giunzione([4.05, 3.0])],
+                ),
+            }
+        }
+    }
+
+    /// R39: una testa sola sul lato lungo (una faccia senza la sua compagna).
+    #[test]
+    fn unpaired_head_on_the_long_side_reports_taglio_non_chiuso() {
+        let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+        entities.push(wall_line([1.0, 1.0], [4.0, 1.0]));
+        let pg = project(entities, vec![axis_zone([4.05, 0.0], [4.05, 3.0], false)]);
+        assert_notices(&pg.notices, &[Notice::TaglioNonChiuso { at: [4.0, 1.0] }]);
+        assert!(!pg
+            .drawn
+            .iter()
+            .filter_map(line_ends)
+            .any(|(a, b)| (a[0] - 4.0).abs() < 1e-6 && (b[0] - 4.0).abs() < 1e-6));
+    }
+
+    /// R39: la testa passa dalla cancellazione a coppie come le altre
+    /// chiusure: un tramezzo ricostruito sopra la copre, e la sua faccia resta
+    /// aperta dove W si appoggia, come nel rilievo.
+    #[test]
+    fn head_closure_is_cancelled_by_a_rebuilt_wall() {
+        let pg = project(
+            case_a_with_w(Form::Continua),
+            vec![
+                axis_zone([4.05, 0.0], [4.05, 3.0], false),
+                new_zone([4.05, 0.0], [4.05, 3.0], 0.10),
+            ],
+        );
+        assert!(!has_line(&pg, [4.0, 1.0], [4.0, 1.2]), "{:?}", pg.drawn);
+        assert!(has_line(&pg, [4.0, 0.0], [4.0, 1.0]), "{:?}", pg.drawn);
+        assert!(has_line(&pg, [4.0, 1.2], [4.0, 3.0]), "{:?}", pg.drawn);
+        assert!(has_line(&pg, [4.1, 0.0], [4.1, 3.0]), "{:?}", pg.drawn);
+        assert_eq!(pg.drawn.len(), 3, "{:?}", pg.drawn);
+        assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+    }
+
+    /// R39: con due demolizioni di seguito i lati lunghi collineari si fondono
+    /// e la testa di W, a cavallo del confine tra le zone, si chiude lo stesso.
+    #[test]
+    fn head_across_two_adjacent_demolitions_is_closed() {
+        let pg = project(
+            case_a_with_w(Form::Continua),
+            vec![
+                axis_zone([4.05, 0.0], [4.05, 1.1], false),
+                axis_zone([4.05, 1.1], [4.05, 3.0], false),
+            ],
+        );
+        assert!(has_line(&pg, [4.0, 1.0], [4.0, 1.2]), "{:?}", pg.drawn);
+        assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+    }
+
+    /// Rotazione di `deg` gradi attorno a (4,10; 1,5).
+    fn rotate(p: [f64; 2], deg: f64) -> [f64; 2] {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let (x, y) = (p[0] - 4.10, p[1] - 1.5);
+        [4.10 + x * cos - y * sin, 1.5 + x * sin + y * cos]
+    }
+
+    fn rotated(entities: Vec<EntityType>, deg: f64) -> Vec<EntityType> {
+        entities
+            .into_iter()
+            .map(|mut entity| {
+                match &mut entity {
+                    EntityType::Line(line) => {
+                        for p in [&mut line.start, &mut line.end] {
+                            let q = rotate([p.x, p.y], deg);
+                            (p.x, p.y) = (q[0], q[1]);
+                        }
+                    }
+                    EntityType::LwPolyline(poly) => {
+                        for v in &mut poly.vertices {
+                            let q = rotate([v.location.x, v.location.y], deg);
+                            (v.location.x, v.location.y) = (q[0], q[1]);
+                        }
+                    }
+                    _ => {}
+                }
+                entity
+            })
+            .collect()
+    }
+
+    /// Il punto con x = 4,05 sulla retta y = `y` del caso A ruotato: un asse
+    /// indicato a occhio, verticale, con gli estremi sulle facce dei muri sud e
+    /// nord.
+    fn vertical_click(y: f64, deg: f64) -> [f64; 2] {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let qx = 4.10 + (4.05 - 4.10 + (y - 1.5) * sin) / cos;
+        [4.05, rotate([qx, y], deg)[1]]
+    }
+
+    /// Un tratto dritto sulla retta per `a` e `b`, dentro il segmento `ab`?
+    fn stretch_along<'a>(
+        entities: impl IntoIterator<Item = &'a EntityType>,
+        a: [f64; 2],
+        b: [f64; 2],
+    ) -> bool {
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let u = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
+        let off = |p: [f64; 2]| ((p[0] - a[0]) * u[1] - (p[1] - a[1]) * u[0]).abs();
+        let along = |p: [f64; 2]| (p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1];
+        entities.into_iter().flat_map(curves_of).any(|curve| {
+            let Curve::Line(line) = curve else {
+                return false;
+            };
+            let (s, e) = (along(line.start), along(line.end));
+            off(line.start) <= 1e-6
+                && off(line.end) <= 1e-6
+                && s.max(e).min(length) - s.min(e).max(0.0) > 1e-6
+        })
+    }
+
+    /// R40 (a): il caso A ruotato di 0,3° attorno a (4,10; 1,5) e un asse
+    /// indicato verticale a x = 4,05: la zona segue le facce del tramezzo, la
+    /// demolizione non lascia tratti di faccia e chiude (o segnala le
+    /// giunzioni) come nel caso dritto.
+    #[test]
+    fn demolition_follows_faces_out_of_square_with_the_axis() {
+        let deg = 0.3;
+        let (p1, p2) = (vertical_click(0.0, deg), vertical_click(3.0, deg));
+        assert!((p1[0] - p2[0]).abs() < 1e-15, "asse verticale");
+        let r = |x: f64, y: f64| rotate([x, y], deg);
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let entities = rotated(case_a(form, DrawingUnit::Metri), deg);
+            let zone = axis_zone_on(entities.clone(), p1, p2).expect("muro");
+            let pg = project(entities, vec![zone]);
+            let left = pg.drawn.iter().chain(kept(&pg));
+            assert!(!stretch_along(left, r(4.0, 0.0), r(4.0, 3.0)), "{form:?}");
+            let left = pg.drawn.iter().chain(kept(&pg));
+            assert!(!stretch_along(left, r(4.1, 0.0), r(4.1, 3.0)), "{form:?}");
+            match form {
+                Form::Continua => {
+                    assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+                    assert!(has_line(&pg, r(4.0, 0.0), r(4.1, 0.0)), "{:?}", pg.drawn);
+                    assert!(has_line(&pg, r(4.0, 3.0), r(4.1, 3.0)), "{:?}", pg.drawn);
+                    assert_eq!(pg.drawn.len(), 2, "{:?}", pg.drawn);
+                }
+                Form::ChiusaPerMuro => assert_notices(
+                    &pg.notices,
+                    &[giunzione(r(4.05, 0.0)), giunzione(r(4.05, 3.0))],
+                ),
+            }
+        }
+    }
+
+    /// R40 (b): tramezzo a spessore variabile (faccia sinistra verticale,
+    /// destra a 0,4°): nessun rettangolo lo copre, e le facce rimaste in piedi
+    /// sono segnalate.
+    #[test]
+    fn variable_thickness_wall_reports_leftover_faces() {
+        let tan = 0.4_f64.to_radians().tan();
+        let top = [4.1 + 3.0 * tan, 3.0];
+        let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+        // Il locale B: alto (8;3)-(4,10;3) e lato sinistro (4,10;3)-(4,10;0).
+        entities[10] = wall_line([8.0, 3.0], top);
+        entities[11] = wall_line(top, [4.1, 0.0]);
+        let zone = axis_zone_on(entities.clone(), [4.05, 0.0], [4.05, 3.0]).expect("muro");
+        let pg = project(entities, vec![zone]);
+        let leftovers: Vec<[f64; 2]> = pg
+            .notices
+            .iter()
+            .filter_map(|n| match n {
+                Notice::FacciaNonTolta { at } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(leftovers.len(), 2, "{:?}", pg.notices);
+        // La metà alta della faccia sinistra, da (4; 1,5) a (4; 3).
+        assert!(
+            leftovers.iter().any(|&p| near(p, [4.0, 2.25])),
+            "{leftovers:?}"
+        );
+        // La metà alta della faccia destra, sulla faccia.
+        assert!(
+            leftovers.iter().any(|&p| {
+                (p[0] - (4.1 + p[1] * tan)).abs() < 1e-6 && (2.2..2.3).contains(&p[1])
+            }),
+            "{leftovers:?}"
+        );
+        // Gli altri avvisi dicono che i tagli non si chiudono (le estremità
+        // del rettangolo, perpendicolari alla bisettrice, non stanno sulle
+        // facce dei muri sud e nord).
+        assert!(
+            pg.notices.iter().all(|n| matches!(
+                n,
+                Notice::FacciaNonTolta { .. } | Notice::TaglioNonChiuso { .. }
+            )),
+            "{:?}",
+            pg.notices
+        );
+    }
+
+    /// R40 (b) non scatta nei casi dritti né su una faccia parallela lontana
+    /// più della fascia.
+    #[test]
+    fn no_leftover_face_without_a_face_in_the_band() {
+        let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+        // Una linea parallela a 3 cm dalla faccia x = 4,00, fuori dalla fascia
+        // (tan 0,5° · 3 m = 2,6 cm).
+        entities.push(wall_line([3.97, 0.5], [3.97, 2.5]));
+        // E una a 2 cm: dentro la fascia, segnalata.
+        entities.push(wall_line([4.12, 0.5], [4.12, 2.5]));
+        let pg = project(entities, vec![axis_zone([4.05, 0.0], [4.05, 3.0], false)]);
+        assert_notices(&pg.notices, &[Notice::FacciaNonTolta { at: [4.12, 1.5] }]);
     }
 }

@@ -29,6 +29,11 @@ pub enum Notice {
     VarcoNonSupportato {
         at: [f64; 2],
     },
+    /// Un tratto di faccia del muro demolito resta: facce non parallele
+    /// all'asse della zona (o tra loro).
+    FacciaNonTolta {
+        at: [f64; 2],
+    },
     NonTagliata {
         handle: Handle,
         kind: String,
@@ -99,6 +104,10 @@ impl Notice {
             }
             Self::VarcoNonSupportato { at } => format!(
                 "Varco non supportato in {}: serve un rettangolo che attraversi il muro.",
+                point(at)
+            ),
+            Self::FacciaNonTolta { at } => format!(
+                "Faccia del muro demolito non tolta in {}: facce non parallele all'asse.",
                 point(at)
             ),
             Self::NonTagliata { handle, kind } => {
@@ -179,6 +188,10 @@ mod tests {
             (
                 Notice::VarcoNonSupportato { at },
                 "Varco non supportato in (1,00; 2,50): serve un rettangolo che attraversi il muro.",
+            ),
+            (
+                Notice::FacciaNonTolta { at },
+                "Faccia del muro demolito non tolta in (1,00; 2,50): facce non parallele all'asse.",
             ),
             (
                 Notice::NonTagliata {

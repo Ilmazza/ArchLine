@@ -546,6 +546,18 @@ pub(super) const FACE_PARALLEL_DEGREES: f64 = 0.5;
 /// polilinee (bulge) non sono facce, anche se una delle loro corde è parallela
 /// all'asse.
 ///
+/// Il rettangolo segue le facce scelte, non l'asse indicato: il suo verso è
+/// la media dei versi delle due facce (concordi con `d`), `p1` e `p2` si
+/// proiettano sulla nuova mezzeria e gli scostamenti delle facce si
+/// rimisurano lungo la nuova normale, nei loro punti `P`. Con due facce
+/// parallele tra loro, anche un asse dato a occhio (fuori squadra fino a
+/// 0,5°) dà lati lunghi esattamente sulle facce. Con facce parallele all'asse
+/// entro l'arrotondamento (seno sotto 1e-12) vale il verso dell'asse, così i
+/// risultati non cambiano di un bit. Con facce non parallele tra loro (muro a
+/// spessore variabile) ogni faccia taglia il suo lato lungo nel suo punto
+/// `P`: metà faccia resta fuori dalla zona e la geometria di progetto lo
+/// segnala (`Notice::FacciaNonTolta`).
+///
 /// Errori: [`AxisMiss::Degenerate`] se `p1 ≈ p2`; [`AxisMiss::OneFace`] se
 /// resta una faccia sola (anche l'unica faccia su cui cade l'asse, senza
 /// nient'altro entro il limite); [`AxisMiss::NoFaces`] se non ce n'è nessuna,
@@ -563,40 +575,72 @@ pub fn rect_from_axis(
     let n = [-d[1], d[0]];
 
     // Un limite non numerico scarta tutto (il confronto è positivo).
-    let valid: Vec<f64> = face_offsets(sources, p1, d, n, length, tol)
+    let valid: Vec<FaceCandidate> = face_candidates(sources, p1, d, n, length, tol)
         .into_iter()
-        .filter(|s| s.abs() <= max_thickness)
+        .filter(|face| face.s.abs() <= max_thickness)
         .collect();
-    let on_face = nearest_to_axis(valid.iter().copied().filter(|s| s.abs() <= tol));
+    let on_face = nearest_to_axis(valid.iter().filter(|face| face.s.abs() <= tol));
 
-    let (s_r, s_l) = if let Some(face) = on_face {
-        let other = nearest_to_axis(valid.iter().copied().filter(|s| s.abs() > tol));
+    let (right, left) = if let Some(face) = on_face {
+        let other = nearest_to_axis(valid.iter().filter(|face| face.s.abs() > tol));
         match other {
-            Some(other) if other > 0.0 => (face, other),
+            Some(other) if other.s > 0.0 => (face, other),
             Some(other) => (other, face),
             None => return Err(AxisMiss::OneFace),
         }
     } else {
         let left = valid
             .iter()
-            .copied()
-            .filter(|&s| s > tol)
-            .min_by(f64::total_cmp);
+            .filter(|face| face.s > tol)
+            .min_by(|a, b| a.s.total_cmp(&b.s));
         let right = valid
             .iter()
-            .copied()
-            .filter(|&s| s < -tol)
-            .max_by(f64::total_cmp);
+            .filter(|face| face.s < -tol)
+            .max_by(|a, b| a.s.total_cmp(&b.s));
         match (right, left) {
             (Some(right), Some(left)) => (right, left),
             (None, None) => return Err(AxisMiss::NoFaces),
             _ => return Err(AxisMiss::OneFace),
         }
     };
-    if s_l - s_r > max_thickness {
+    if left.s - right.s > max_thickness {
         return Err(AxisMiss::NoFaces);
     }
-    Ok(wall_rect(p1, p2, n, s_r, s_l))
+    Ok(
+        along_faces(p1, p2, d, right, left)
+            .unwrap_or_else(|| wall_rect(p1, p2, n, right.s, left.s)),
+    )
+}
+
+/// Il rettangolo orientato sulle due facce scelte (vedi [`rect_from_axis`]).
+/// `None` (vale il rettangolo sull'asse indicato) se il verso medio delle
+/// facce è quello dell'asse entro l'arrotondamento, se è nullo o se,
+/// rimisurato, lo spessore non è positivo.
+fn along_faces(
+    p1: [f64; 2],
+    p2: [f64; 2],
+    d: [f64; 2],
+    right: &FaceCandidate,
+    left: &FaceCandidate,
+) -> Option<WallRect> {
+    let sum = [right.dir[0] + left.dir[0], right.dir[1] + left.dir[1]];
+    let norm = sum[0].hypot(sum[1]);
+    if !(norm > 0.0) {
+        return None;
+    }
+    let along = [sum[0] / norm, sum[1] / norm];
+    if (along[0] * d[1] - along[1] * d[0]).abs() <= 1.0e-12 {
+        return None;
+    }
+    let n = [-along[1], along[0]];
+    let offset = |p: [f64; 2]| (p[0] - p1[0]) * n[0] + (p[1] - p1[1]) * n[1];
+    let (s_r, s_l) = (offset(right.point), offset(left.point));
+    if !(s_l - s_r > 0.0) {
+        return None;
+    }
+    let reach = (p2[0] - p1[0]) * along[0] + (p2[1] - p1[1]) * along[1];
+    let end = [p1[0] + along[0] * reach, p1[1] + along[1] * reach];
+    Some(wall_rect(p1, end, n, s_r, s_l))
 }
 
 /// Il muro di spessore dato, centrato sull'asse `p1 → p2`. `None` se i punti
@@ -610,10 +654,12 @@ pub fn rect_from_axis_thickness(p1: [f64; 2], p2: [f64; 2], thickness: f64) -> O
     Some(wall_rect(p1, p2, n, -thickness / 2.0, thickness / 2.0))
 }
 
-/// Lo scostamento più vicino all'asse per `|s|`; a pari `|s|` il sinistro
-/// (positivo), così il risultato non dipende dall'ordine delle sorgenti.
-fn nearest_to_axis(offsets: impl Iterator<Item = f64>) -> Option<f64> {
-    offsets.min_by(|a, b| a.abs().total_cmp(&b.abs()).then(b.total_cmp(a)))
+/// La faccia più vicina all'asse per `|s|`; a pari `|s|` la sinistra
+/// (positiva), così il risultato non dipende dall'ordine delle sorgenti.
+fn nearest_to_axis<'a>(
+    faces: impl Iterator<Item = &'a FaceCandidate>,
+) -> Option<&'a FaceCandidate> {
+    faces.min_by(|a, b| a.s.abs().total_cmp(&b.s.abs()).then(b.s.total_cmp(&a.s)))
 }
 
 /// Il verso unitario di `p1 → p2` e la distanza; `None` se un valore non è
@@ -625,18 +671,28 @@ fn axis_direction(p1: [f64; 2], p2: [f64; 2]) -> Option<([f64; 2], f64)> {
         .then(|| ([delta[0] / length, delta[1] / length], length))
 }
 
-/// Lo scostamento `s` dall'asse di ogni segmento dritto che lo accompagna:
-/// parallelo entro [`FACE_PARALLEL_DEGREES`] e con una proiezione su `d` che
-/// copre più di `tol` di `(0, length)`. `s` è quello del punto del segmento a
-/// metà dell'intervallo coperto.
-fn face_offsets(
+/// Un segmento dritto che può essere una faccia del muro.
+struct FaceCandidate {
+    /// Scostamento dall'asse lungo `n`, misurato in `point`.
+    s: f64,
+    /// Il verso del segmento, unitario e concorde con `d`.
+    dir: [f64; 2],
+    /// Il punto del segmento a metà del tratto in cui copre l'asse.
+    point: [f64; 2],
+}
+
+/// Ogni segmento dritto che accompagna l'asse: parallelo entro
+/// [`FACE_PARALLEL_DEGREES`] e con una proiezione su `d` che copre più di
+/// `tol` di `(0, length)`. `s` è quello del punto del segmento a metà
+/// dell'intervallo coperto.
+fn face_candidates(
     sources: &FxHashMap<Handle, BoundarySource>,
     p1: [f64; 2],
     d: [f64; 2],
     n: [f64; 2],
     length: f64,
     tol: f64,
-) -> Vec<f64> {
+) -> Vec<FaceCandidate> {
     let sin_limit = FACE_PARALLEL_DEGREES.to_radians().sin();
     let dot = |a: [f64; 2], b: [f64; 2]| a[0] * b[0] + a[1] * b[1];
     let from_p1 = |p: [f64; 2]| [p[0] - p1[0], p[1] - p1[1]];
@@ -669,7 +725,12 @@ fn face_offsets(
                 segment.start[0] + along * v[0],
                 segment.start[1] + along * v[1],
             ];
-            Some(dot(from_p1(point), n))
+            let sign = if t1 >= t0 { 1.0 } else { -1.0 };
+            Some(FaceCandidate {
+                s: dot(from_p1(point), n),
+                dir: [sign * v[0] / extent, sign * v[1] / extent],
+                point,
+            })
         })
         .collect()
 }
@@ -1497,12 +1558,37 @@ mod tests {
         assert!(rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 0.10 + 1e-9, tol).is_ok());
     }
 
+    /// Gli angoli del rettangolo orientato sul verso `dir` (unitario, concorde
+    /// con l'asse): lato destro per `right`, sinistro per `left`, estremità
+    /// perpendicolari a `dir` per `p1` e per la proiezione di `p2`.
+    fn oriented(
+        p1: [f64; 2],
+        p2: [f64; 2],
+        dir: [f64; 2],
+        right: [f64; 2],
+        left: [f64; 2],
+    ) -> [[f64; 2]; 4] {
+        let n = [-dir[1], dir[0]];
+        let dot = |a: [f64; 2], b: [f64; 2]| a[0] * b[0] + a[1] * b[1];
+        let from = |p: [f64; 2]| [p[0] - p1[0], p[1] - p1[1]];
+        let (s_r, s_l) = (dot(from(right), n), dot(from(left), n));
+        let reach = dot(from(p2), dir);
+        let at = |t: f64, s: f64| [p1[0] + dir[0] * t + n[0] * s, p1[1] + dir[1] * t + n[1] * s];
+        [at(0.0, s_r), at(reach, s_r), at(reach, s_l), at(0.0, s_l)]
+    }
+
     #[test]
     fn skewed_face_is_measured_where_it_covers_the_axis() {
         // R14: la faccia destra è inclinata di 0,3° (x = 0,2 + y·tan); lo
-        // scostamento si legge a metà del tratto in cui copre l'asse, non
-        // all'inizio del segmento: gli angoli stanno sulla faccia lì.
+        // scostamento si legge a metà del tratto in cui copre l'asse (il punto
+        // P della faccia), non all'inizio del segmento.
+        // R40: le due facce non sono parallele (muro a spessore variabile): il
+        // rettangolo segue la bisettrice, inclinata di 0,15°, e ogni lato lungo
+        // passa per il punto P della sua faccia. Prima il rettangolo seguiva
+        // l'asse verticale indicato.
         let tan = 0.3_f64.to_radians().tan();
+        let (sin, cos) = 0.15_f64.to_radians().sin_cos();
+        let up = [sin, cos];
         let skewed = |y: f64| [0.2 + y * tan, y];
         let long = {
             let (a, b) = (skewed(0.0), skewed(10.0));
@@ -1510,24 +1596,61 @@ mod tests {
         };
         let wall = line([0.0, 0.0, 0.0], [0.0, 10.0, 0.0]);
         let (s, tol) = sources_for(vec![wall.clone(), long]);
-        // Asse y da 4 a 6: la faccia sta a x = 0,2 + 5·tan alla sua metà.
-        let x = 0.2 + 5.0 * tan;
-        let r = rect_from_axis(&s, [0.1, 4.0], [0.1, 6.0], 1.5, tol).unwrap();
-        assert_corners(&r, [[x, 4.0], [x, 6.0], [0.0, 6.0], [0.0, 4.0]]);
-        assert!((r.thickness - x).abs() < 1e-9);
-        assert_pt(r.axis.0, [x / 2.0, 4.0]);
+        // Asse y da 4 a 6: P = (0,2 + 5·tan; 5) a destra, (0; 5) a sinistra.
+        let (p1, p2) = ([0.1, 4.0], [0.1, 6.0]);
+        let r = rect_from_axis(&s, p1, p2, 1.5, tol).unwrap();
+        assert_corners(&r, oriented(p1, p2, up, skewed(5.0), [0.0, 5.0]));
+        // Spessore perpendicolare alla bisettrice, misurato tra i due P.
+        assert!((r.thickness - (0.2 + 5.0 * tan) * cos).abs() < 1e-9);
+        let c = r.corners;
+        assert_pt(
+            r.axis.0,
+            [(c[0][0] + c[3][0]) / 2.0, (c[0][1] + c[3][1]) / 2.0],
+        );
 
         // Una faccia che copre solo da y = 5 a y = 10 (lo stesso filo): vale la
         // metà del tratto coperto (da 5 a 6), y = 5,5.
         let (a, b) = (skewed(5.0), skewed(10.0));
         let short = line([a[0], a[1], 0.0], [b[0], b[1], 0.0]);
         let (s, tol) = sources_for(vec![wall, short]);
-        let x = 0.2 + 5.5 * tan;
-        let r = rect_from_axis(&s, [0.1, 4.0], [0.1, 6.0], 1.5, tol).unwrap();
-        assert_corners(&r, [[x, 4.0], [x, 6.0], [0.0, 6.0], [0.0, 4.0]]);
-        // Lo stesso con l'asse nel verso opposto.
-        let r = rect_from_axis(&s, [0.1, 6.0], [0.1, 4.0], 1.5, tol).unwrap();
-        assert_corners(&r, [[0.0, 6.0], [0.0, 4.0], [x, 4.0], [x, 6.0]]);
+        let r = rect_from_axis(&s, p1, p2, 1.5, tol).unwrap();
+        assert_corners(&r, oriented(p1, p2, up, skewed(5.5), [0.0, 5.0]));
+        // Lo stesso con l'asse nel verso opposto: verso e lati si scambiano.
+        let r = rect_from_axis(&s, p2, p1, 1.5, tol).unwrap();
+        assert_corners(&r, oriented(p2, p1, [-sin, -cos], [0.0, 5.0], skewed(5.5)));
+    }
+
+    /// R40: un muro a facce parallele tra loro ma fuori squadra rispetto
+    /// all'asse indicato (dato a occhio, senza ORTHO): il rettangolo segue le
+    /// facce, che stanno sui lati lunghi; `p1` e `p2` si proiettano sulla
+    /// mezzeria.
+    #[test]
+    fn faces_parallel_to_each_other_take_the_rectangle_with_them() {
+        let (sin, cos) = 0.3_f64.to_radians().sin_cos();
+        let face = |x: f64| line([x, 0.0, 0.0], [x + 10.0 * sin, 10.0 * cos, 0.0]);
+        let (s, tol) = sources_for(vec![face(0.0), face(0.2)]);
+        let r = rect_from_axis(&s, [0.1, 1.0], [0.1, 3.0], 1.5, tol).unwrap();
+        let on_face = |p: [f64; 2], x: f64| {
+            // Distanza dalla retta della faccia che parte da (x; 0).
+            ((p[0] - x) * cos - p[1] * sin).abs()
+        };
+        let c = r.corners;
+        for (corner, x) in [(c[0], 0.2), (c[1], 0.2), (c[2], 0.0), (c[3], 0.0)] {
+            assert!(on_face(corner, x) < 1e-9, "{corner:?} non sulla faccia {x}");
+        }
+        // Spessore vero, perpendicolare alle facce.
+        assert!((r.thickness - 0.2 * cos).abs() < 1e-9);
+        // Estremità perpendicolari alle facce, per p1 e per la proiezione di p2.
+        let along = |p: [f64; 2]| p[0] * sin + p[1] * cos;
+        assert!((along(c[0]) - along([0.1, 1.0])).abs() < 1e-9);
+        assert!((along(c[3]) - along([0.1, 1.0])).abs() < 1e-9);
+        assert!((along(c[1]) - along([0.1, 3.0])).abs() < 1e-9);
+        assert!((along(c[2]) - along([0.1, 3.0])).abs() < 1e-9);
+        // La mezzeria è la parallela a metà tra le facce (quella che parte da
+        // (0,1; 0)).
+        assert!(on_face(r.axis.0, 0.1) < 1e-9, "{:?}", r.axis);
+        assert!(on_face(r.axis.1, 0.1) < 1e-9, "{:?}", r.axis);
+        assert!((signed_area(&r.ring()) - r.thickness * 2.0 * cos).abs() < 1e-9);
     }
 
     #[test]
@@ -1612,14 +1735,18 @@ mod tests {
         };
         // 0,4°: è una faccia; lo scostamento si legge a metà del tratto
         // coperto dall'asse (y = 1,5), dove la faccia sta a x = 0,2 + 1,5·tan.
+        // Le facce non sono parallele tra loro (R40): il rettangolo segue la
+        // bisettrice, a 0,2°, e lo spessore tra i due punti si misura lungo la
+        // sua normale (× cos 0,2°).
         let tan = 0.4_f64.to_radians().tan();
+        let half = 0.2_f64.to_radians().cos();
         let (s, tol) = sources_for(tilted(0.4));
         let r = rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).unwrap();
-        assert!((r.thickness - (0.2 + 1.5 * tan)).abs() < 1e-9);
+        assert!((r.thickness - (0.2 + 1.5 * tan) * half).abs() < 1e-9);
         // Anche l'altro verso di disegno.
         let (s, tol) = sources_for(tilted(-0.4));
         let r = rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol).unwrap();
-        assert!((r.thickness - (0.2 - 1.5 * tan)).abs() < 1e-9);
+        assert!((r.thickness - (0.2 - 1.5 * tan) * half).abs() < 1e-9);
         // 0,6°: no.
         let (s, tol) = sources_for(tilted(0.6));
         assert_eq!(
