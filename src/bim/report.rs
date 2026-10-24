@@ -56,6 +56,10 @@ pub enum Notice {
     SemeInMuroNuovo {
         name: String,
     },
+    /// Un seme di progetto nella faccia di un varco, che non è un locale.
+    SemeNelVarco {
+        name: String,
+    },
     LocaleNonChiuso {
         name: String,
     },
@@ -129,6 +133,9 @@ impl Notice {
             }
             Self::SemeInMuroNuovo { name } => {
                 format!("Il locale di progetto {name} cade dentro un muro nuovo.")
+            }
+            Self::SemeNelVarco { name } => {
+                format!("Il locale di progetto {name} cade nel varco: non nomina nessun locale.")
             }
             Self::LocaleNonChiuso { name } => {
                 format!("Il locale {name} non è più chiuso: lasciato com'era.")
@@ -230,6 +237,12 @@ mod tests {
                     name: "Bagno".into(),
                 },
                 "Il locale di progetto Bagno cade dentro un muro nuovo.",
+            ),
+            (
+                Notice::SemeNelVarco {
+                    name: "Disimpegno".into(),
+                },
+                "Il locale di progetto Disimpegno cade nel varco: non nomina nessun locale.",
             ),
             (
                 Notice::LocaleNonChiuso {

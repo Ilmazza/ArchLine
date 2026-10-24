@@ -29,6 +29,10 @@
 //! un arredo aperto (una linea, una polilinea non chiusa) lasciato acceso sul
 //! layer dei muri dentro un locale lo rende «non chiuso». È un messaggio, mai
 //! un numero sbagliato; si spegne quel layer, come in AutoCAD (spec §5.0).
+//! Infine (R47) un locale chiuso solo grazie a una tolleranza larga
+//! (`HPGAPTOL` sopra la tolleranza di base) non è mai esatto: se alla
+//! tolleranza di base non è chiuso, o misura un'altra area, il numero resta
+//! quello alla tolleranza larga con `exact = false`.
 //!
 //! **Locali di progetto** ([`project_rooms`], spec §5.4). Tutto si calcola
 //! sulla geometria di progetto (`project::ProjectGeometry::room_entities`, con
@@ -39,9 +43,10 @@
 //!    [`Notice::SemeInMuroNuovo`] e non nomina nessun locale; un seme senza
 //!    locale chiuso attorno dà [`Notice::LocaleNonChiuso`]; un seme la cui
 //!    faccia sta tutta dentro una zona non nomina niente (quelle facce non sono
-//!    mai locali: un seme di fatto dentro un muro nuovo non ha un avviso suo,
-//!    ma le parti del locale escono «(senza nome)», ognuna con il suo). Gli
-//!    altri si raggruppano per faccia.
+//!    mai locali): un seme di progetto nella faccia di un varco dà
+//!    [`Notice::SemeNelVarco`]; un seme di fatto dentro un muro nuovo non ha un
+//!    avviso suo, ma le parti del locale escono «(senza nome)», ognuna con il
+//!    suo. Gli altri si raggruppano per faccia.
 //! 2. Un gruppo con almeno un seme di progetto prende il nome e il numero del
 //!    primo, senza «da confermare»; più semi di progetto nella stessa faccia
 //!    danno anche un [`Notice::LocaleFuso`] con i loro nomi (scelta oltre il
@@ -82,7 +87,7 @@ use crate::scene::{boundary_polyline_entities, BoundarySource};
 
 use super::report::Notice;
 use super::units::{area_m2, format_m2, DrawingUnit};
-use super::walls::{face_regions, net_area, region_at, Region};
+use super::walls::{face_regions, faces as wall_faces, net_area, region_at, Region};
 use super::zone::{ZoneGeom, ZoneState};
 use super::{APP_LOCALE, LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
 
@@ -296,7 +301,80 @@ pub struct Computed {
 /// contiene il punto o se la regione contiene un gruppo di muri staccato (il
 /// locale vero è aperto: vedi la documentazione del modulo). `faces` vengono da
 /// `walls::faces(sources, tol)`, con la stessa `tol` in unità del disegno.
+///
+/// Un locale chiuso solo grazie a una tolleranza larga (`HPGAPTOL` sopra
+/// `unit.tolerance()`) non è esatto (R47): si rifà la misura sulle facce alla
+/// tolleranza di base e, se lì il locale non è chiuso o l'area cambia più di
+/// [`GAP_SLACK`] tolleranze di base per il perimetro, il risultato resta
+/// quello alla tolleranza larga ma con `exact = false` (il chiamante dà
+/// [`Notice::ContornoApprossimato`]). Le facce alla tolleranza di base si
+/// calcolano qui; chi misura molti locali le passa una volta sola con
+/// [`compute_at_with_base`].
 pub fn compute_at(
+    faces: &[Vec<[f64; 2]>],
+    sources: &FxHashMap<Handle, BoundarySource>,
+    seed: [f64; 2],
+    unit: DrawingUnit,
+    tol: f64,
+) -> Option<(Region, f64, bool, usize)> {
+    let base_faces = gap_tolerance(unit, tol).then(|| wall_faces(sources, unit.tolerance()));
+    compute_checked(faces, base_faces.as_deref(), sources, seed, unit, tol)
+}
+
+/// [`compute_at`] con le facce alla tolleranza di base già pronte:
+/// `base_faces = walls::faces(sources, unit.tolerance())`. Con `tol` uguale
+/// alla tolleranza di base non si usano.
+pub fn compute_at_with_base(
+    faces: &[Vec<[f64; 2]>],
+    base_faces: &[Vec<[f64; 2]>],
+    sources: &FxHashMap<Handle, BoundarySource>,
+    seed: [f64; 2],
+    unit: DrawingUnit,
+    tol: f64,
+) -> Option<(Region, f64, bool, usize)> {
+    compute_checked(faces, Some(base_faces), sources, seed, unit, tol)
+}
+
+/// Quante tolleranze di base, per unità di perimetro, può cambiare l'area tra
+/// la misura alla tolleranza larga e quella alla tolleranza di base (lo
+/// spostamento ammesso di un lato, come la saldatura delle facce).
+pub const GAP_SLACK: f64 = 4.0;
+
+/// `tol` supera la tolleranza di base oltre l'arrotondamento?
+fn gap_tolerance(unit: DrawingUnit, tol: f64) -> bool {
+    tol > unit.tolerance() * (1.0 + 1.0e-9)
+}
+
+/// R47: con la tolleranza larga il locale vale esatto solo se alla
+/// tolleranza di base (`base_faces`) è chiuso e misura lo stesso. Senza
+/// `base_faces` con una tolleranza larga, non esatto.
+fn compute_checked(
+    faces: &[Vec<[f64; 2]>],
+    base_faces: Option<&[Vec<[f64; 2]>]>,
+    sources: &FxHashMap<Handle, BoundarySource>,
+    seed: [f64; 2],
+    unit: DrawingUnit,
+    tol: f64,
+) -> Option<(Region, f64, bool, usize)> {
+    let (region, area, exact, islands) = measure(faces, sources, seed, unit, tol)?;
+    let exact = exact
+        && (!gap_tolerance(unit, tol)
+            || base_faces.is_some_and(|base_faces| {
+                let base = unit.tolerance();
+                let perimeter: f64 = std::iter::once(&region.outer)
+                    .chain(&region.holes)
+                    .flat_map(|ring| ring_lines(ring))
+                    .map(|line| length(&line))
+                    .sum();
+                let slack = area_m2(GAP_SLACK * base * perimeter, unit);
+                measure(base_faces, sources, seed, unit, base)
+                    .is_some_and(|(_, base_area, _, _)| (base_area - area).abs() <= slack)
+            }));
+    Some((region, area, exact, islands))
+}
+
+/// La misura alla tolleranza `tol`, senza il controllo di R47.
+fn measure(
     faces: &[Vec<[f64; 2]>],
     sources: &FxHashMap<Handle, BoundarySource>,
     seed: [f64; 2],
@@ -418,6 +496,11 @@ pub fn project_rooms(
     let tolerance = Tolerance::new(tol);
     let zones: Vec<ZoneShape> = zones.iter().filter_map(ZoneShape::new).collect();
     let mut notices = Vec::new();
+    // R47: le facce alla tolleranza di base, una volta sola.
+    let base_faces = gap_tolerance(unit, tol).then(|| wall_faces(pg_sources, unit.tolerance()));
+    let compute_at = |seed: [f64; 2]| {
+        compute_checked(pg_faces, base_faces.as_deref(), pg_sources, seed, unit, tol)
+    };
 
     // 1. I semi, raggruppati per faccia.
     let mut groups: Vec<Group> = Vec::new();
@@ -436,7 +519,7 @@ pub fn project_rooms(
             });
             continue;
         }
-        let Some(found) = compute_at(pg_faces, pg_sources, room.seed, unit, tol) else {
+        let Some(found) = compute_at(room.seed) else {
             notices.push(Notice::LocaleNonChiuso {
                 name: room.name.clone(),
             });
@@ -444,12 +527,18 @@ pub fn project_rooms(
         };
         // La faccia sta tutta in una zona? Decide il suo punto interno, come
         // per le facce senza seme: il seme può stare sul bordo della zona.
+        // Un seme di progetto nella faccia di un varco lo dice (R48).
         if !zones.is_empty() {
             let probe = interior_point(&found.0, tol).unwrap_or(room.seed);
-            if zones
+            if let Some(zone) = zones
                 .iter()
-                .any(|zone| zone.covers(&found.0.outer, probe, tolerance))
+                .find(|zone| zone.covers(&found.0.outer, probe, tolerance))
             {
+                if of_project && zone.state == ZoneState::Demolito && zone.varco {
+                    notices.push(Notice::SemeNelVarco {
+                        name: room.name.clone(),
+                    });
+                }
                 continue;
             }
         }
@@ -520,7 +609,7 @@ pub fn project_rooms(
         {
             continue;
         }
-        match compute_at(pg_faces, pg_sources, inner, unit, tol) {
+        match compute_at(inner) {
             Some((region, area_m2, exact, islands)) if region.outer == face.outer => {
                 unnamed.push(Computed {
                     name: UNNAMED.to_string(),
@@ -1336,25 +1425,106 @@ mod tests {
             );
         }
 
-        // Con HPGAPTOL 5 mm il vuoto si chiude e il locale misura giusto.
+        // Con HPGAPTOL 5 mm il vuoto si chiude e il locale misura giusto, ma
+        // si chiude solo grazie alla tolleranza: non è esatto (R47).
         let (faces, sources) = survey(open_corner(0.002, true), hpgaptol);
         let (_, area, exact, islands) =
             compute_at(&faces, &sources, [2.0, 1.5], M, hpgaptol).expect("chiuso con HPGAPTOL");
         assert!((area - 12.0).abs() < 1e-3, "{area}");
-        assert!(exact);
+        assert!(!exact, "chiuso solo dalla tolleranza");
         assert_eq!(islands, 0);
 
-        // Limite di upstream, misurato: la saldatura entro HPGAPTOL fonde i
-        // due estremi in uno, e `refined_boundary_ring` (il percorso esatto)
-        // porta l'angolo sulla curva del lato uscente (antiorario: da sud).
-        // Con il vuoto sulla faccia sud l'angolo può restare a (0,002; 0) e il
-        // triangolo (0; 0)-(0,002; 0)-(0; 3) manca: 0,5 · 0,002 · 3 =
-        // 0,003 m² in meno al più. Il testo resta «12,00 m²».
+        // Con il vuoto sulla faccia sud la saldatura entro HPGAPTOL fonde i
+        // due estremi in uno, e `refined_boundary_ring` (upstream) porta
+        // l'angolo sulla curva del lato uscente (antiorario: da sud): può
+        // restare a (0,002; 0), e il triangolo (0; 0)-(0,002; 0)-(0; 3) manca
+        // (0,003 m² al più). Anche qui: non esatto.
         let (faces, sources) = survey(open_corner(0.002, false), hpgaptol);
-        let (_, area, _, _) =
+        let (_, area, exact, _) =
             compute_at(&faces, &sources, [2.0, 1.5], M, hpgaptol).expect("chiuso con HPGAPTOL");
-        assert!(area <= 12.0 + 1e-9 && area >= 12.0 - 0.003 - 1e-9, "{area}");
+        assert!((area - 12.0).abs() < 1e-2, "{area}");
+        assert!(!exact, "chiuso solo dalla tolleranza");
         assert_eq!(label("A", area, false), "A\\PS = 12,00 m²");
+        // Le facce alla tolleranza di base date una volta sola: lo stesso.
+        let base_faces = crate::bim::walls::faces(&sources, M.tolerance());
+        assert_eq!(
+            compute_at_with_base(&faces, &base_faces, &sources, [2.0, 1.5], M, hpgaptol),
+            compute_at(&faces, &sources, [2.0, 1.5], M, hpgaptol)
+        );
+
+        // Senza vuoti, alla stessa tolleranza larga: esatto, al nanometro
+        // quadro.
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let (faces, sources) = survey(case_a(form, M), hpgaptol);
+            let (_, area, exact, islands) =
+                compute_at(&faces, &sources, [2.0, 1.5], M, hpgaptol).expect("A");
+            assert_m2(area, 12.0, form);
+            assert!(exact, "{form:?}");
+            assert_eq!(islands, 0);
+            let mut e = case_a(form, M);
+            e.push(pilastro(M));
+            let (faces, sources) = survey(e, hpgaptol);
+            let (_, area, exact, islands) =
+                compute_at(&faces, &sources, [2.0, 2.5], M, hpgaptol).expect("A con pilastro");
+            assert_m2(area, 11.91, form);
+            assert!(exact, "{form:?}");
+            assert_eq!(islands, 1);
+        }
+    }
+
+    // R47 anche nei locali di progetto: il contorno chiuso solo dalla
+    // tolleranza esce come approssimato.
+    #[test]
+    fn project_room_closed_by_gap_tolerance_is_approximate() {
+        let hpgaptol = 0.005;
+        let scene = scene_with(open_corner(0.002, false), 6);
+        let walls = wall_set(&scene.document, hpgaptol);
+        let survey_faces = faces(&walls.sources, hpgaptol);
+        let fatto_a = fatto("A", [2.0, 1.5]);
+        let (region, ..) =
+            compute_at(&survey_faces, &walls.sources, fatto_a.seed, M, hpgaptol).expect("A");
+        let pg = project_geometry(&scene.document, &walls, &[], LAYER_MURI, hpgaptol);
+        let (pg_sources, _) = sources_of(&pg.room_entities, hpgaptol);
+        let pg_faces = faces(&pg_sources, hpgaptol);
+        let (rooms, notices) = project_rooms(
+            &pg_faces,
+            &pg_sources,
+            &[fatto_a],
+            &[region],
+            &[],
+            &[],
+            M,
+            hpgaptol,
+        );
+        assert_eq!(names(&rooms), ["A"]);
+        assert!(!rooms[0].exact);
+        assert!((rooms[0].area_m2 - 12.0).abs() < 1e-2);
+        assert_eq!(notices, [Notice::ContornoApprossimato { name: "A".into() }]);
+    }
+
+    // R48
+    #[test]
+    fn project_seed_in_the_varco_is_reported() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let zones = vec![axis_zone([4.05, 1.0], [4.05, 1.9], true)];
+            let (rooms, notices) = rooms_of(
+                case_a(form, M),
+                &zones,
+                &fatto_ab(),
+                &[progetto("Disimpegno", [4.05, 1.45])],
+            );
+            assert_eq!(names(&rooms), ["A", "B"], "{form:?}");
+            assert!(
+                notices.contains(&Notice::SemeNelVarco {
+                    name: "Disimpegno".into()
+                }),
+                "{form:?}: {notices:?}"
+            );
+            assert_eq!(notices.len(), 2, "{form:?}: {notices:?}");
+            assert!(notices
+                .iter()
+                .any(|notice| matches!(notice, Notice::Varco { .. })));
+        }
     }
 
     #[test]
