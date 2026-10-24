@@ -60,6 +60,14 @@ pub enum Notice {
     SemeNelVarco {
         name: String,
     },
+    /// Un seme in una faccia tutta dentro una zona demolita.
+    SemeInDemolizione {
+        name: String,
+    },
+    /// Un locale che si chiude solo con la tolleranza `HPGAPTOL`.
+    ChiusoPerTolleranza {
+        name: String,
+    },
     LocaleNonChiuso {
         name: String,
     },
@@ -137,6 +145,12 @@ impl Notice {
             Self::SemeNelVarco { name } => {
                 format!("Il locale di progetto {name} cade nel varco: non nomina nessun locale.")
             }
+            Self::SemeInDemolizione { name } => {
+                format!("Il locale {name} cade in una zona demolita: non nomina nessun locale.")
+            }
+            Self::ChiusoPerTolleranza { name } => format!(
+                "Locale {name}: chiuso solo dalla tolleranza HPGAPTOL, superficie da verificare."
+            ),
             Self::LocaleNonChiuso { name } => {
                 format!("Il locale {name} non è più chiuso: lasciato com'era.")
             }
@@ -243,6 +257,18 @@ mod tests {
                     name: "Disimpegno".into(),
                 },
                 "Il locale di progetto Disimpegno cade nel varco: non nomina nessun locale.",
+            ),
+            (
+                Notice::SemeInDemolizione {
+                    name: "Ripostiglio".into(),
+                },
+                "Il locale Ripostiglio cade in una zona demolita: non nomina nessun locale.",
+            ),
+            (
+                Notice::ChiusoPerTolleranza {
+                    name: "Bagno".into(),
+                },
+                "Locale Bagno: chiuso solo dalla tolleranza HPGAPTOL, superficie da verificare.",
             ),
             (
                 Notice::LocaleNonChiuso {

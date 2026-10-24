@@ -15,38 +15,54 @@
 //! handle `NULL`: chi le inserisce chiama prima `zone::ensure_layers`, che crea
 //! i layer e l'APPID.
 //!
-//! **Calcolo** ([`compute_at`]). Il locale attorno al seme è la faccia più
-//! piccola che lo contiene, meno le isole (`walls::region_at`,
+//! **Calcolo** ([`measure_at`], [`compute_at`]). Il locale attorno al seme è
+//! la faccia più piccola che lo contiene, meno le isole (`walls::region_at`,
 //! `walls::net_area`: archi veri dove si può, mai un'area sbagliata dichiarata
-//! esatta). In più vale la **regola del gruppo staccato**: se dentro la regione
-//! trovata c'è un gruppo di segmenti dei muri, collegati tra loro, che non
-//! tocca (entro `tol`) né il contorno né i buchi della regione, il locale vero
-//! è aperto e le sue linee galleggiano dentro una faccia più grande. Succede con
-//! un vano senza soglia o con un vuoto d'angolo di 2 mm: senza la regola il
-//! punto cadrebbe nel contorno esterno dell'edificio e darebbe la sua area.
-//! Allora il risultato è `None`, «non chiuso». I monconi attaccati al contorno
-//! (linee che sporgono oltre un angolo) non contano. Il costo, dichiarato: anche
-//! un arredo aperto (una linea, una polilinea non chiusa) lasciato acceso sul
-//! layer dei muri dentro un locale lo rende «non chiuso». È un messaggio, mai
-//! un numero sbagliato; si spegne quel layer, come in AutoCAD (spec §5.0).
+//! esatta). In più vale la **regola dei muri dentro** (R50): i segmenti dei
+//! muri strettamente dentro la regione (punto medio nella regione, a più di
+//! `tol` dal contorno e da ogni buco: la regione da tutte e due le parti),
+//! uniti quando si toccano, non devono formare un gruppo lungo più di
+//! [`OPEN_WALLS_M`] (0,50 m). Se lo formano, il locale vero è aperto e le sue
+//! linee stanno dentro una faccia più grande: un vuoto d'angolo di 2 mm lascia
+//! i lati del locale nel contorno esterno dell'edificio, anche quando toccano un
+//! locale vicino chiuso (spallette e linea di soglia di un vano). Allora il
+//! risultato è `None`, «non chiuso». I gruppi più corti (sporgenze oltre un
+//! angolo, monconi, battute) non contano. Prima della regola si tolgono dagli
+//! anelli le punte: un moncone attaccato al contorno entra nell'anello della
+//! faccia come andata e ritorno, ma ha la regione da tutte e due le parti, e la
+//! regola lo deve vedere; l'area non cambia e il contorno disegnato non lo
+//! segue. Il costo, dichiarato: un arredo aperto
+//! (una linea, una polilinea non chiusa) lasciato acceso sul layer dei muri, o
+//! una parete a una linea sola che entra nel locale per più di 0,50 m, lo
+//! rende «non chiuso». È un messaggio, mai un numero sbagliato; si spegne quel
+//! layer, come in AutoCAD (spec §5.0). Un vano porta senza soglia non rende il
+//! locale «non chiuso» da sé: se di là c'è un altro locale chiuso, i due escono
+//! come una faccia sola, e il contorno lo mostra; la linea di soglia li separa
+//! (spec §5.2).
+//!
 //! Infine (R47) un locale chiuso solo grazie a una tolleranza larga
 //! (`HPGAPTOL` sopra la tolleranza di base) non è mai esatto: se alla
 //! tolleranza di base non è chiuso, o misura un'altra area, il numero resta
-//! quello alla tolleranza larga con `exact = false`.
+//! quello alla tolleranza larga con [`Measured::by_tolerance`] ed
+//! `exact = false`; l'avviso è [`Notice::ChiusoPerTolleranza`]
+//! ([`quality_notices`]).
 //!
 //! **Locali di progetto** ([`project_rooms`], spec §5.4). Tutto si calcola
 //! sulla geometria di progetto (`project::ProjectGeometry::room_entities`, con
 //! le soglie dei varchi):
 //!
 //! 1. Per ogni seme, prima quelli di fatto e poi quelli di progetto, nel loro
-//!    ordine: un seme di progetto dentro una zona `nuovo` dà
-//!    [`Notice::SemeInMuroNuovo`] e non nomina nessun locale; un seme senza
-//!    locale chiuso attorno dà [`Notice::LocaleNonChiuso`]; un seme la cui
-//!    faccia sta tutta dentro una zona non nomina niente (quelle facce non sono
-//!    mai locali): un seme di progetto nella faccia di un varco dà
-//!    [`Notice::SemeNelVarco`]; un seme di fatto dentro un muro nuovo non ha un
-//!    avviso suo, ma le parti del locale escono «(senza nome)», ognuna con il
-//!    suo. Gli altri si raggruppano per faccia.
+//!    ordine e senza doppioni (stesso nome, seme entro `tol`: il contorno e il
+//!    testo dello stesso locale contano una volta): un seme di progetto dentro
+//!    una zona `nuovo` dà [`Notice::SemeInMuroNuovo`] e non nomina nessun
+//!    locale; un seme senza locale chiuso attorno dà
+//!    [`Notice::LocaleNonChiuso`]; un seme la cui faccia sta tutta dentro una
+//!    zona non nomina niente (quelle facce non sono mai locali): nella faccia di
+//!    un varco un seme di progetto dà [`Notice::SemeNelVarco`], in una zona
+//!    demolita (anche un varco, per un seme di fatto) [`Notice::SemeInDemolizione`];
+//!    un seme di fatto dentro un muro nuovo non ha un avviso suo, ma le parti
+//!    del locale escono «(senza nome)», ognuna con il suo. Gli altri si
+//!    raggruppano per faccia.
 //! 2. Un gruppo con almeno un seme di progetto prende il nome e il numero del
 //!    primo, senza «da confermare»; più semi di progetto nella stessa faccia
 //!    danno anche un [`Notice::LocaleFuso`] con i loro nomi (scelta oltre il
@@ -55,14 +71,15 @@
 //!    non vuoti uniti allo stesso modo; con più di un seme è «da confermare» e
 //!    dà un [`Notice::LocaleFuso`]. L'etichetta sta sul primo seme del gruppo
 //!    che dà il nome.
-//! 3. Ogni faccia che non è un locale né un buco di un locale: se sta tutta
-//!    dentro una zona non è un locale, e dentro un varco dà [`Notice::Varco`]
-//!    con la sua area, che non appartiene a nessun locale. Altrimenti, se il
-//!    suo punto interno cade dentro il contorno esterno di una regione di
-//!    fatto, è un locale «(senza nome)» con [`Notice::LocaleSenzaNome`]
-//!    (un'isola di un locale senza nome è dell'isola, non un locale); se
-//!    contiene un gruppo di muri staccato, [`Notice::LocaleNonChiuso`] con il
-//!    nome «(senza nome)». Il punto
+//! 3. Ogni faccia che non è un locale né sta dentro un'isola di un locale (il
+//!    buco stesso o ciò che contiene: un pilastro a doppio contorno, un
+//!    cavedio, una vasca a due linee): se sta tutta dentro una zona non è un
+//!    locale, e dentro un varco dà [`Notice::Varco`] con la sua area, che non
+//!    appartiene a nessun locale. Altrimenti, se il suo punto interno cade
+//!    dentro il contorno esterno di una regione di fatto, è un locale «(senza
+//!    nome)» con [`Notice::LocaleSenzaNome`] (ciò che sta dentro un'isola di un
+//!    locale senza nome è dell'isola, non un locale); se nella faccia restano
+//!    muri (R50), [`Notice::LocaleNonChiuso`] con il nome «(senza nome)». Il punto
 //!    interno si prende sulla faccia come regione, cioè meno i suoi figli
 //!    diretti (`walls::face_regions`, la regola di `region_at`): il
 //!    baricentro del triangolo più grande di `kernel::geom2d::triangulate`, o
@@ -70,8 +87,9 @@
 //!    dagli anelli); se `triangulate` non ne dà, quelli di
 //!    `triangulate_rings`. Sull'anello nudo del contorno esterno dell'edificio
 //!    il punto cadrebbe dentro un locale.
-//! 4. Per ogni locale: isole → [`Notice::Isole`], area non esatta →
-//!    [`Notice::ContornoApprossimato`].
+//! 4. Per ogni locale ([`quality_notices`]): isole → [`Notice::Isole`];
+//!    chiuso solo dalla tolleranza → [`Notice::ChiusoPerTolleranza`];
+//!    altrimenti area non esatta → [`Notice::ContornoApprossimato`].
 
 use codec::entities::{AttachmentPoint, EntityCommon, LwPolyline, LwVertex, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
@@ -80,7 +98,7 @@ use kernel::geom2d::{
     contains, distance_to, segment_crossing, signed_area, triangulate, triangulate_rings, Curve,
     Line, SegmentCrossing, Tolerance,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::command::WorkingPlane;
 use crate::scene::{boundary_polyline_entities, BoundarySource};
@@ -297,19 +315,10 @@ pub struct Computed {
 }
 
 /// Il locale attorno a `seed`: la regione, l'area netta in m², se l'area è
-/// esatta e quante isole sono state sottratte. `None` se nessuna faccia
-/// contiene il punto o se la regione contiene un gruppo di muri staccato (il
-/// locale vero è aperto: vedi la documentazione del modulo). `faces` vengono da
-/// `walls::faces(sources, tol)`, con la stessa `tol` in unità del disegno.
-///
-/// Un locale chiuso solo grazie a una tolleranza larga (`HPGAPTOL` sopra
-/// `unit.tolerance()`) non è esatto (R47): si rifà la misura sulle facce alla
-/// tolleranza di base e, se lì il locale non è chiuso o l'area cambia più di
-/// [`GAP_SLACK`] tolleranze di base per il perimetro, il risultato resta
-/// quello alla tolleranza larga ma con `exact = false` (il chiamante dà
-/// [`Notice::ContornoApprossimato`]). Le facce alla tolleranza di base si
-/// calcolano qui; chi misura molti locali le passa una volta sola con
-/// [`compute_at_with_base`].
+/// esatta e quante isole sono state sottratte. È [`measure_at`] senza le facce
+/// alla tolleranza di base (calcolate qui se servono) e senza
+/// [`Measured::by_tolerance`]; chi deve dare gli avvisi giusti (o misura molti
+/// locali con `HPGAPTOL`) usa [`measure_at`].
 pub fn compute_at(
     faces: &[Vec<[f64; 2]>],
     sources: &FxHashMap<Handle, BoundarySource>,
@@ -317,22 +326,72 @@ pub fn compute_at(
     unit: DrawingUnit,
     tol: f64,
 ) -> Option<(Region, f64, bool, usize)> {
-    let base_faces = gap_tolerance(unit, tol).then(|| wall_faces(sources, unit.tolerance()));
-    compute_checked(faces, base_faces.as_deref(), sources, seed, unit, tol)
+    measure_at(faces, None, sources, seed, unit, tol)
+        .map(|m| (m.region, m.area_m2, m.exact, m.islands))
 }
 
-/// [`compute_at`] con le facce alla tolleranza di base già pronte:
-/// `base_faces = walls::faces(sources, unit.tolerance())`. Con `tol` uguale
-/// alla tolleranza di base non si usano.
-pub fn compute_at_with_base(
+/// Una misura attorno a un seme ([`measure_at`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Measured {
+    pub region: Region,
+    pub area_m2: f64,
+    /// Area dalle curve vere dei muri (`walls::net_area`), e locale chiuso
+    /// anche alla tolleranza di base.
+    pub exact: bool,
+    pub islands: usize,
+    /// Chiuso solo dalla tolleranza larga (R47): alla tolleranza di base il
+    /// locale non è chiuso o misura un'altra area. Allora `exact` è `false` e
+    /// l'avviso è [`Notice::ChiusoPerTolleranza`] (vedi [`quality_notices`]).
+    pub by_tolerance: bool,
+}
+
+/// Il locale attorno a `seed`. `None` se nessuna faccia contiene il punto o se
+/// nella regione restano muri staccati (R50, documentazione del modulo).
+/// `faces` vengono da `walls::faces(sources, tol)`, con la stessa `tol` in
+/// unità del disegno.
+///
+/// Con una tolleranza larga (`HPGAPTOL` sopra `unit.tolerance()`) la misura si
+/// rifà sulle facce alla tolleranza di base: se lì il locale non è chiuso o
+/// l'area cambia più di [`GAP_SLACK`] tolleranze di base per il perimetro, il
+/// numero resta quello alla tolleranza larga, con `by_tolerance = true` ed
+/// `exact = false`. `base_faces` sono `walls::faces(sources,
+/// unit.tolerance())`, se il chiamante le ha già (si calcolano una volta per
+/// molti locali); con `None` si calcolano qui quando servono.
+pub fn measure_at(
     faces: &[Vec<[f64; 2]>],
-    base_faces: &[Vec<[f64; 2]>],
+    base_faces: Option<&[Vec<[f64; 2]>]>,
     sources: &FxHashMap<Handle, BoundarySource>,
     seed: [f64; 2],
     unit: DrawingUnit,
     tol: f64,
-) -> Option<(Region, f64, bool, usize)> {
-    compute_checked(faces, Some(base_faces), sources, seed, unit, tol)
+) -> Option<Measured> {
+    let (region, area, exact, islands) = measure(faces, sources, seed, unit, tol)?;
+    let by_tolerance = gap_tolerance(unit, tol) && {
+        let base = unit.tolerance();
+        let computed;
+        let base_faces = match base_faces {
+            Some(base_faces) => base_faces,
+            None => {
+                computed = wall_faces(sources, base);
+                &computed
+            }
+        };
+        let perimeter: f64 = std::iter::once(&region.outer)
+            .chain(&region.holes)
+            .flat_map(|ring| ring_lines(ring))
+            .map(|line| length(&line))
+            .sum();
+        let slack = area_m2(GAP_SLACK * base * perimeter, unit);
+        !measure(base_faces, sources, seed, unit, base)
+            .is_some_and(|(_, base_area, _, _)| (base_area - area).abs() <= slack)
+    };
+    Some(Measured {
+        region,
+        area_m2: area,
+        exact: exact && !by_tolerance,
+        islands,
+        by_tolerance,
+    })
 }
 
 /// Quante tolleranze di base, per unità di perimetro, può cambiare l'area tra
@@ -340,37 +399,13 @@ pub fn compute_at_with_base(
 /// spostamento ammesso di un lato, come la saldatura delle facce).
 pub const GAP_SLACK: f64 = 4.0;
 
+/// Oltre questa lunghezza, in metri, un gruppo di muri dentro una regione la
+/// rende «non chiusa» (R50); sotto sono monconi, sporgenze, battute.
+pub const OPEN_WALLS_M: f64 = 0.5;
+
 /// `tol` supera la tolleranza di base oltre l'arrotondamento?
 fn gap_tolerance(unit: DrawingUnit, tol: f64) -> bool {
     tol > unit.tolerance() * (1.0 + 1.0e-9)
-}
-
-/// R47: con la tolleranza larga il locale vale esatto solo se alla
-/// tolleranza di base (`base_faces`) è chiuso e misura lo stesso. Senza
-/// `base_faces` con una tolleranza larga, non esatto.
-fn compute_checked(
-    faces: &[Vec<[f64; 2]>],
-    base_faces: Option<&[Vec<[f64; 2]>]>,
-    sources: &FxHashMap<Handle, BoundarySource>,
-    seed: [f64; 2],
-    unit: DrawingUnit,
-    tol: f64,
-) -> Option<(Region, f64, bool, usize)> {
-    let (region, area, exact, islands) = measure(faces, sources, seed, unit, tol)?;
-    let exact = exact
-        && (!gap_tolerance(unit, tol)
-            || base_faces.is_some_and(|base_faces| {
-                let base = unit.tolerance();
-                let perimeter: f64 = std::iter::once(&region.outer)
-                    .chain(&region.holes)
-                    .flat_map(|ring| ring_lines(ring))
-                    .map(|line| length(&line))
-                    .sum();
-                let slack = area_m2(GAP_SLACK * base * perimeter, unit);
-                measure(base_faces, sources, seed, unit, base)
-                    .is_some_and(|(_, base_area, _, _)| (base_area - area).abs() <= slack)
-            }));
-    Some((region, area, exact, islands))
 }
 
 /// La misura alla tolleranza `tol`, senza il controllo di R47.
@@ -381,13 +416,36 @@ fn measure(
     unit: DrawingUnit,
     tol: f64,
 ) -> Option<(Region, f64, bool, usize)> {
-    let region = region_at(faces, seed, tol)?;
-    if has_floating_group(&region, sources, tol) {
+    let region = without_spurs(region_at(faces, seed, tol)?, tol);
+    if has_walls_inside(&region, sources, unit.metres(OPEN_WALLS_M), tol) {
         return None;
     }
     let (area, exact) = net_area(&region, sources, tol);
     let islands = region.holes.len();
     Some((region, area_m2(area, unit), exact, islands))
+}
+
+/// Gli avvisi di qualità di un locale misurato: isole → [`Notice::Isole`];
+/// chiuso solo dalla tolleranza → [`Notice::ChiusoPerTolleranza`];
+/// altrimenti area non esatta → [`Notice::ContornoApprossimato`].
+pub fn quality_notices(name: &str, exact: bool, by_tolerance: bool, islands: usize) -> Vec<Notice> {
+    let mut notices = Vec::new();
+    if islands > 0 {
+        notices.push(Notice::Isole {
+            name: name.to_string(),
+            count: islands,
+        });
+    }
+    if by_tolerance {
+        notices.push(Notice::ChiusoPerTolleranza {
+            name: name.to_string(),
+        });
+    } else if !exact {
+        notices.push(Notice::ContornoApprossimato {
+            name: name.to_string(),
+        });
+    }
+    notices
 }
 
 /// Il contorno e il testo del locale, entrambi con il record della `phase`
@@ -498,16 +556,15 @@ pub fn project_rooms(
     let mut notices = Vec::new();
     // R47: le facce alla tolleranza di base, una volta sola.
     let base_faces = gap_tolerance(unit, tol).then(|| wall_faces(pg_sources, unit.tolerance()));
-    let compute_at = |seed: [f64; 2]| {
-        compute_checked(pg_faces, base_faces.as_deref(), pg_sources, seed, unit, tol)
-    };
+    let measure_here =
+        |seed: [f64; 2]| measure_at(pg_faces, base_faces.as_deref(), pg_sources, seed, unit, tol);
 
-    // 1. I semi, raggruppati per faccia.
+    // 1. I semi, senza doppioni, raggruppati per faccia.
     let mut groups: Vec<Group> = Vec::new();
-    let seeds = fatto
-        .iter()
+    let seeds = distinct(fatto, tol)
+        .into_iter()
         .map(|room| (room, false))
-        .chain(progetto.iter().map(|room| (room, true)));
+        .chain(distinct(progetto, tol).into_iter().map(|room| (room, true)));
     for (room, of_project) in seeds {
         if of_project
             && zones
@@ -519,7 +576,7 @@ pub fn project_rooms(
             });
             continue;
         }
-        let Some(found) = compute_at(room.seed) else {
+        let Some(found) = measure_here(room.seed) else {
             notices.push(Notice::LocaleNonChiuso {
                 name: room.name.clone(),
             });
@@ -527,24 +584,28 @@ pub fn project_rooms(
         };
         // La faccia sta tutta in una zona? Decide il suo punto interno, come
         // per le facce senza seme: il seme può stare sul bordo della zona.
-        // Un seme di progetto nella faccia di un varco lo dice (R48).
         if !zones.is_empty() {
-            let probe = interior_point(&found.0, tol).unwrap_or(room.seed);
+            let probe = interior_point(&found.region, tol).unwrap_or(room.seed);
             if let Some(zone) = zones
                 .iter()
-                .find(|zone| zone.covers(&found.0.outer, probe, tolerance))
+                .find(|zone| zone.covers(&found.region.outer, probe, tolerance))
             {
-                if of_project && zone.state == ZoneState::Demolito && zone.varco {
-                    notices.push(Notice::SemeNelVarco {
-                        name: room.name.clone(),
-                    });
+                let name = room.name.clone();
+                match zone.state {
+                    ZoneState::Demolito if of_project && zone.varco => {
+                        notices.push(Notice::SemeNelVarco { name })
+                    }
+                    ZoneState::Demolito => notices.push(Notice::SemeInDemolizione { name }),
+                    // Un seme di fatto in un muro nuovo: le parti del locale
+                    // escono «(senza nome)», ognuna con il suo avviso.
+                    ZoneState::Nuovo => {}
                 }
                 continue;
             }
         }
         match groups
             .iter_mut()
-            .find(|group| group.found.0.outer == found.0.outer)
+            .find(|group| group.found.region.outer == found.region.outer)
         {
             Some(group) => group.add(room, of_project),
             None => {
@@ -570,12 +631,16 @@ pub fn project_rooms(
         .filter(|region| region.outer.len() >= 3)
         .map(|region| (bounds(&region.outer), ring_curves(&region.outer)))
         .collect();
-    let mut unnamed: Vec<Computed> = Vec::new();
-    for face in face_regions(pg_faces, tol) {
-        if rooms
-            .iter()
-            .any(|room| room.region.outer == face.outer || room.region.holes.contains(&face.outer))
-        {
+    let room_holes: Vec<Vec<Curve>> = rooms
+        .iter()
+        .flat_map(|room| room.region.holes.iter().map(|hole| ring_curves(hole)))
+        .collect();
+    let mut unnamed: Vec<(Computed, bool)> = Vec::new();
+    for face in face_regions(pg_faces, tol)
+        .into_iter()
+        .map(|face| without_spurs(face, tol))
+    {
+        if rooms.iter().any(|room| room.region.outer == face.outer) {
             continue;
         }
         let face_box = bounds(&face.outer);
@@ -591,6 +656,14 @@ pub fn project_rooms(
         let Some(inner) = interior_point(&face, tol) else {
             continue;
         };
+        // Dentro un'isola di un locale (il buco stesso, o ciò che contiene:
+        // un pilastro a doppio contorno, un cavedio, una vasca).
+        if room_holes
+            .iter()
+            .any(|hole| contains(hole, inner, tolerance))
+        {
+            continue;
+        }
         if let Some(zone) = zones
             .iter()
             .find(|zone| zone.covers(&face.outer, inner, tolerance))
@@ -609,45 +682,71 @@ pub fn project_rooms(
         {
             continue;
         }
-        match compute_at(inner) {
-            Some((region, area_m2, exact, islands)) if region.outer == face.outer => {
-                unnamed.push(Computed {
+        match measure_here(inner) {
+            Some(found) if found.region.outer == face.outer => unnamed.push((
+                Computed {
                     name: UNNAMED.to_string(),
                     number: String::new(),
-                    area_m2,
-                    region,
+                    area_m2: found.area_m2,
+                    region: found.region,
                     confirm: false,
-                    exact,
-                    islands,
+                    exact: found.exact,
+                    islands: found.islands,
                     seed: inner,
-                })
-            }
-            // Una faccia chiusa con dentro un gruppo di muri staccato.
+                },
+                found.by_tolerance,
+            )),
+            // Una faccia chiusa con dentro dei muri (R50).
             _ => notices.push(Notice::LocaleNonChiuso {
                 name: UNNAMED.to_string(),
             }),
         }
     }
-    let unnamed_holes: Vec<Vec<[f64; 2]>> = unnamed
+    let unnamed_holes: Vec<Vec<Curve>> = unnamed
         .iter()
-        .flat_map(|room| room.region.holes.iter().cloned())
+        .flat_map(|(room, _)| room.region.holes.iter().map(|hole| ring_curves(hole)))
         .collect();
-    for room in unnamed {
-        if unnamed_holes.contains(&room.region.outer) {
+    for (room, by_tolerance) in unnamed {
+        if unnamed_holes
+            .iter()
+            .any(|hole| contains(hole, room.seed, tolerance))
+        {
             continue;
         }
         notices.push(Notice::LocaleSenzaNome {
             area_m2: room.area_m2,
         });
-        push_quality(&mut notices, &room.name, room.exact, room.islands);
+        notices.extend(quality_notices(
+            &room.name,
+            room.exact,
+            by_tolerance,
+            room.islands,
+        ));
         rooms.push(room);
     }
     (rooms, notices)
 }
 
+/// I locali senza doppioni: lo stesso nome con il seme entro `tol` vale una
+/// volta (il primo). Così il contorno e il testo dello stesso locale di fatto,
+/// passati tutti e due, non danno «A + A».
+fn distinct(rooms: &[Room], tol: f64) -> Vec<&Room> {
+    let mut kept: Vec<&Room> = Vec::new();
+    for room in rooms {
+        let twin = kept.iter().any(|seen| {
+            seen.name == room.name
+                && (seen.seed[0] - room.seed[0]).hypot(seen.seed[1] - room.seed[1]) <= tol
+        });
+        if !twin {
+            kept.push(room);
+        }
+    }
+    kept
+}
+
 /// I semi che cadono nella stessa faccia di progetto.
 struct Group<'a> {
-    found: (Region, f64, bool, usize),
+    found: Measured,
     fatto: Vec<&'a Room>,
     progetto: Vec<&'a Room>,
 }
@@ -663,7 +762,13 @@ impl<'a> Group<'a> {
 
     /// Il locale col suo nome meccanico, e i suoi avvisi.
     fn into_room(self, notices: &mut Vec<Notice>) -> Computed {
-        let (region, area_m2, exact, islands) = self.found;
+        let Measured {
+            region,
+            area_m2,
+            exact,
+            islands,
+            by_tolerance,
+        } = self.found;
         let names = |rooms: &[&Room]| -> Vec<String> {
             rooms.iter().map(|room| room.name.clone()).collect()
         };
@@ -699,7 +804,7 @@ impl<'a> Group<'a> {
                 )
             }
         };
-        push_quality(notices, &name, exact, islands);
+        notices.extend(quality_notices(&name, exact, by_tolerance, islands));
         Computed {
             name,
             number,
@@ -710,20 +815,6 @@ impl<'a> Group<'a> {
             islands,
             seed,
         }
-    }
-}
-
-fn push_quality(notices: &mut Vec<Notice>, name: &str, exact: bool, islands: usize) {
-    if islands > 0 {
-        notices.push(Notice::Isole {
-            name: name.to_string(),
-            count: islands,
-        });
-    }
-    if !exact {
-        notices.push(Notice::ContornoApprossimato {
-            name: name.to_string(),
-        });
     }
 }
 
@@ -829,85 +920,163 @@ fn centres_by_area((points, triangles): (Vec<[f64; 2]>, Vec<[usize; 3]>)) -> Vec
     candidates.into_iter().map(|(centre, _)| centre).collect()
 }
 
-/// Regola del gruppo staccato (documentazione del modulo). I lati degli anelli
-/// della regione sono un solo gruppo; i segmenti dei muri che toccano il
-/// riquadro della regione vi si uniscono quando si toccano entro `tol`
-/// ([`touch`]). Un gruppo che non arriva agli anelli non li attraversa, quindi
-/// sta tutto da una parte: decide il punto medio di un suo segmento. I
-/// segmenti lunghi `tol` o meno si saltano, come fa la ricerca delle facce.
-fn has_floating_group(
+/// La regione senza le punte dei suoi anelli: un moncone attaccato al
+/// contorno entra nell'anello della faccia come andata e ritorno sullo stesso
+/// tratto (`… P → Q → P …`). Si tolgono finché ce ne sono, con i vertici
+/// doppi che lasciano; un anello che resterebbe con meno di tre vertici resta
+/// com'era. L'area non cambia; il moncone resta un muro dentro la regione
+/// (con la regione da tutte e due le parti), che R50 vede.
+fn without_spurs(region: Region, tol: f64) -> Region {
+    let clean = |ring: Vec<[f64; 2]>| {
+        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) <= tol;
+        let mut cleaned = ring.clone();
+        loop {
+            let before = cleaned.len();
+            let mut kept: Vec<[f64; 2]> = Vec::with_capacity(cleaned.len());
+            for &p in &cleaned {
+                if kept.last().map_or(true, |&q| !near(p, q)) {
+                    kept.push(p);
+                }
+            }
+            while kept.len() > 1 && near(kept[0], kept[kept.len() - 1]) {
+                kept.pop();
+            }
+            cleaned = kept;
+            let count = cleaned.len();
+            if count < 3 {
+                break;
+            }
+            if let Some(tip) = (0..count)
+                .find(|&i| near(cleaned[(i + count - 1) % count], cleaned[(i + 1) % count]))
+            {
+                cleaned.remove(tip);
+                continue;
+            }
+            if cleaned.len() == before {
+                break;
+            }
+        }
+        if cleaned.len() >= 3 {
+            cleaned
+        } else {
+            ring
+        }
+    };
+    Region {
+        outer: clean(region.outer),
+        holes: region.holes.into_iter().map(clean).collect(),
+    }
+}
+
+/// R50 (documentazione del modulo): nella regione restano muri? I segmenti
+/// dei muri che toccano il riquadro della regione si spezzano dove incontrano
+/// i suoi anelli; restano i pezzi strettamente dentro, col punto medio nella
+/// regione e a più di `tol` dal contorno e da ogni buco (la regione da tutte e
+/// due le parti). Si uniscono quando si toccano entro `tol` ([`touch`]), e un
+/// gruppo lungo in tutto più di `limit` (unità del disegno) rende la regione
+/// «non chiusa». I pezzi lunghi `tol` o meno si saltano, come fa la ricerca
+/// delle facce.
+fn has_walls_inside(
     region: &Region,
     sources: &FxHashMap<Handle, BoundarySource>,
+    limit: f64,
     tol: f64,
 ) -> bool {
-    let mut lines: Vec<Line> = std::iter::once(&region.outer)
+    let tolerance = Tolerance::new(tol);
+    let ring_lines_all: Vec<Line> = std::iter::once(&region.outer)
         .chain(&region.holes)
         .flat_map(|ring| ring_lines(ring))
         .collect();
-    let border = lines.len();
-    if border == 0 {
+    if ring_lines_all.is_empty() {
         return false;
     }
-    let reach = bounds(&region.outer);
-    lines.extend(
-        sources
-            .values()
-            .flat_map(|source| source.segments.iter().copied())
-            .filter(|segment| {
-                length(segment) > tol
-                    && boxes_overlap(&bounds(&[segment.start, segment.end]), &reach, tol)
-            }),
-    );
-    if lines.len() == border {
-        return false;
-    }
-
-    let boxes: Vec<Bounds> = lines
+    let ring_boxes: Vec<Bounds> = ring_lines_all
         .iter()
         .map(|line| bounds(&[line.start, line.end]))
         .collect();
-    let mut groups = UnionFind::new(lines.len());
-    for index in 1..border {
-        groups.union(0, index);
+    let edges: Vec<Curve> = ring_lines_all.iter().copied().map(Curve::Line).collect();
+    let outer = ring_curves(&region.outer);
+    let holes: Vec<Vec<Curve>> = region.holes.iter().map(|hole| ring_curves(hole)).collect();
+    let strictly_inside = |p: [f64; 2]| {
+        edges.iter().all(|edge| distance_to(edge, p) > tol)
+            && contains(&outer, p, tolerance)
+            && !holes.iter().any(|hole| contains(hole, p, tolerance))
+    };
+
+    // I pezzi strettamente dentro.
+    let reach = bounds(&region.outer);
+    let mut pieces: Vec<Line> = Vec::new();
+    for segment in sources
+        .values()
+        .flat_map(|source| source.segments.iter().copied())
+    {
+        let segment_box = bounds(&[segment.start, segment.end]);
+        if !(length(&segment) > tol) || !boxes_overlap(&segment_box, &reach, tol) {
+            continue;
+        }
+        let mut cuts = vec![0.0, 1.0];
+        for (edge, edge_box) in ring_lines_all.iter().zip(&ring_boxes) {
+            if !boxes_overlap(&segment_box, edge_box, tol) {
+                continue;
+            }
+            match segment_crossing(segment, *edge, tolerance) {
+                SegmentCrossing::None => {}
+                SegmentCrossing::Point { a, .. } => cuts.push(a.clamp(0.0, 1.0)),
+                SegmentCrossing::Overlap { a, .. } => {
+                    cuts.extend(a.iter().map(|t| t.clamp(0.0, 1.0)))
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        let at = |t: f64| {
+            [
+                segment.start[0] + t * (segment.end[0] - segment.start[0]),
+                segment.start[1] + t * (segment.end[1] - segment.start[1]),
+            ]
+        };
+        for pair in cuts.windows(2) {
+            let piece = Line {
+                start: at(pair[0]),
+                end: at(pair[1]),
+            };
+            if length(&piece) > tol && strictly_inside(at((pair[0] + pair[1]) / 2.0)) {
+                pieces.push(piece);
+            }
+        }
     }
-    let mut order: Vec<usize> = (0..lines.len()).collect();
+    if pieces.is_empty() {
+        return false;
+    }
+
+    // I gruppi, per contatto, e la loro lunghezza.
+    let boxes: Vec<Bounds> = pieces
+        .iter()
+        .map(|line| bounds(&[line.start, line.end]))
+        .collect();
+    let mut groups = UnionFind::new(pieces.len());
+    let mut order: Vec<usize> = (0..pieces.len()).collect();
     order.sort_by(|&a, &b| boxes[a].0[0].total_cmp(&boxes[b].0[0]));
     let mut active: Vec<usize> = Vec::new();
     for index in order {
         let front = boxes[index].0[0];
         active.retain(|&other| boxes[other].1[0] + tol >= front);
         for &other in &active {
-            if (index < border && other < border)
-                || !boxes_overlap(&boxes[index], &boxes[other], tol)
+            if !boxes_overlap(&boxes[index], &boxes[other], tol)
                 || groups.find(index) == groups.find(other)
             {
                 continue;
             }
-            if touch(lines[index], lines[other], tol) {
+            if touch(pieces[index], pieces[other], tol) {
                 groups.union(index, other);
             }
         }
         active.push(index);
     }
-
-    let tolerance = Tolerance::new(tol);
-    let outer = ring_curves(&region.outer);
-    let holes: Vec<Vec<Curve>> = region.holes.iter().map(|hole| ring_curves(hole)).collect();
-    let border_group = groups.find(0);
-    let mut seen = FxHashSet::default();
-    (border..lines.len()).any(|index| {
-        let group = groups.find(index);
-        if group == border_group || !seen.insert(group) {
-            return false;
-        }
-        let line = lines[index];
-        let middle = [
-            (line.start[0] + line.end[0]) / 2.0,
-            (line.start[1] + line.end[1]) / 2.0,
-        ];
-        contains(&outer, middle, tolerance)
-            && !holes.iter().any(|hole| contains(hole, middle, tolerance))
-    })
+    let mut lengths: FxHashMap<usize, f64> = FxHashMap::default();
+    for (index, piece) in pieces.iter().enumerate() {
+        *lengths.entry(groups.find(index)).or_insert(0.0) += length(piece);
+    }
+    lengths.values().any(|&total| total > limit)
 }
 
 /// Due segmenti si toccano entro `tol`: si incrociano (o si sovrappongono)
@@ -1414,8 +1583,8 @@ mod tests {
         for on_west in [true, false] {
             let (faces, sources) = survey(open_corner(0.002, on_west), tol);
             assert_eq!(compute_at(&faces, &sources, [2.0, 1.5], M, tol), None);
-            // Premessa: senza la regola del gruppo staccato il punto cadrebbe
-            // nel contorno esterno, meno B: 30,96 − 11,70 = 19,26 m².
+            // Premessa: senza la regola dei muri dentro (R50) il punto
+            // cadrebbe nel contorno esterno, meno B: 30,96 − 11,70 = 19,26 m².
             let outer = region_at(&faces, [2.0, 1.5], tol).expect("contorno esterno");
             assert_eq!(outer.holes.len(), 1);
             assert_m2(
@@ -1445,11 +1614,18 @@ mod tests {
         assert!((area - 12.0).abs() < 1e-2, "{area}");
         assert!(!exact, "chiuso solo dalla tolleranza");
         assert_eq!(label("A", area, false), "A\\PS = 12,00 m²");
-        // Le facce alla tolleranza di base date una volta sola: lo stesso.
+        // `measure_at` dice perché: chiuso solo dalla tolleranza (R51), con
+        // le facce alla tolleranza di base calcolate da sé o date.
         let base_faces = crate::bim::walls::faces(&sources, M.tolerance());
+        let measured = measure_at(&faces, None, &sources, [2.0, 1.5], M, hpgaptol).unwrap();
+        assert!(measured.by_tolerance && !measured.exact);
         assert_eq!(
-            compute_at_with_base(&faces, &base_faces, &sources, [2.0, 1.5], M, hpgaptol),
-            compute_at(&faces, &sources, [2.0, 1.5], M, hpgaptol)
+            measure_at(&faces, Some(&base_faces), &sources, [2.0, 1.5], M, hpgaptol),
+            Some(measured.clone())
+        );
+        assert_eq!(
+            quality_notices("A", measured.exact, measured.by_tolerance, measured.islands),
+            [Notice::ChiusoPerTolleranza { name: "A".into() }]
         );
 
         // Senza vuoti, alla stessa tolleranza larga: esatto, al nanometro
@@ -1469,11 +1645,13 @@ mod tests {
             assert_m2(area, 11.91, form);
             assert!(exact, "{form:?}");
             assert_eq!(islands, 1);
+            let measured = measure_at(&faces, None, &sources, [2.0, 2.5], M, hpgaptol).unwrap();
+            assert!(!measured.by_tolerance, "{form:?}");
         }
     }
 
-    // R47 anche nei locali di progetto: il contorno chiuso solo dalla
-    // tolleranza esce come approssimato.
+    // R47 e R51 anche nei locali di progetto: il contorno chiuso solo dalla
+    // tolleranza ha il suo avviso.
     #[test]
     fn project_room_closed_by_gap_tolerance_is_approximate() {
         let hpgaptol = 0.005;
@@ -1499,7 +1677,7 @@ mod tests {
         assert_eq!(names(&rooms), ["A"]);
         assert!(!rooms[0].exact);
         assert!((rooms[0].area_m2 - 12.0).abs() < 1e-2);
-        assert_eq!(notices, [Notice::ContornoApprossimato { name: "A".into() }]);
+        assert_eq!(notices, [Notice::ChiusoPerTolleranza { name: "A".into() }]);
     }
 
     // R48
@@ -1528,9 +1706,9 @@ mod tests {
     }
 
     #[test]
-    fn floating_wall_lines_make_the_room_open() {
-        // Senza il lato (0; 0)-(4; 0) i tre lati di A galleggiano nel
-        // contorno esterno (Task 14, `aggiorna_reports_open_room`).
+    fn walls_inside_make_the_room_open() {
+        // Senza il lato (0; 0)-(4; 0) i tre lati di A restano nel contorno
+        // esterno (Task 14, `aggiorna_reports_open_room`).
         let mut e = case_a(Form::Continua, M);
         e.retain(|entity| !is_line(entity, [0.0, 0.0], [4.0, 0.0]));
         let (faces, sources) = survey(e, TOL);
@@ -1538,18 +1716,36 @@ mod tests {
         let (_, area, _, _) = compute_at(&faces, &sources, [6.0, 1.5], M, TOL).expect("B");
         assert_m2(area, 11.70, "B resta");
 
-        // Un moncone attaccato al contorno (la faccia del tramezzo che
-        // sporge dentro A) non conta.
+        // Una sporgenza di 5 cm oltre l'angolo (la faccia del tramezzo che
+        // entra in A), una battuta da 5 cm staccata e una da 0,50 m giuste:
+        // sotto la soglia, il locale resta chiuso ed esatto.
+        for stub in [
+            wall_line([4.0, 1.5], [3.95, 1.5]),
+            wall_line([2.0, 1.0], [2.05, 1.0]),
+            wall_line([4.0, 2.0], [3.5, 2.0]),
+        ] {
+            let mut e = case_a(Form::Continua, M);
+            e.push(stub);
+            let (faces, sources) = survey(e, TOL);
+            let (_, area, exact, islands) =
+                compute_at(&faces, &sources, [2.0, 2.5], M, TOL).expect("moncone");
+            assert_m2(area, 12.0, "moncone");
+            assert!(exact);
+            assert_eq!(islands, 0);
+        }
+        // Un tratto doppio di 5 cm sul contorno di A e una sporgenza di 5 cm
+        // oltre l'angolo (4; 0), nel muro sud: non stanno dentro A.
         let mut e = case_a(Form::Continua, M);
-        e.push(wall_line([4.0, 1.5], [3.0, 1.5]));
+        e.push(wall_line([0.0, 3.0], [0.0, 2.95]));
+        e.push(wall_line([4.0, 0.0], [4.0, -0.05]));
         let (faces, sources) = survey(e, TOL);
-        let (_, area, _, islands) =
-            compute_at(&faces, &sources, [2.0, 2.5], M, TOL).expect("moncone");
-        assert_m2(area, 12.0, "moncone");
-        assert_eq!(islands, 0);
+        let (_, area, exact, _) = compute_at(&faces, &sources, [2.0, 1.5], M, TOL).expect("A");
+        assert_m2(area, 12.0, "sporgenze");
+        assert!(exact);
 
-        // Il costo della regola: una linea o una polilinea aperta staccate
-        // dentro A (un arredo lasciato acceso sul layer dei muri) danno «non
+        // Il costo della regola: una linea o una polilinea aperta dentro A
+        // (un arredo lasciato acceso sul layer dei muri), anche attaccate al
+        // contorno (una parete a una linea che entra per 1 m), danno «non
         // chiuso», mai un numero sbagliato.
         for stray in [
             wall_line([1.0, 1.0], [3.0, 1.0]),
@@ -1557,6 +1753,7 @@ mod tests {
                 &[([1.0, 1.0], 0.0), ([2.0, 1.0], 0.0), ([2.0, 2.0], 0.0)],
                 false,
             ),
+            wall_line([4.0, 1.5], [3.0, 1.5]),
         ] {
             let mut e = case_a(Form::Continua, M);
             e.push(stray);
@@ -1579,6 +1776,315 @@ mod tests {
             compute_at(&faces, &sources, [3.0, 2.5], M, TOL).expect("isola");
         assert_m2(area, 11.0, "isola");
         assert_eq!(islands, 1);
+    }
+
+    #[test]
+    fn spurs_are_removed_from_the_rings() {
+        let square = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]];
+        let plain = Region {
+            outer: square.clone(),
+            holes: vec![vec![[1.0, 1.0], [1.3, 1.0], [1.3, 1.3], [1.0, 1.3]]],
+        };
+        assert_eq!(
+            without_spurs(plain.clone(), TOL),
+            plain,
+            "senza punte: uguale"
+        );
+        // Una punta semplice e un albero (P → Q → R → Q → S → Q → P) sul lato
+        // est, e una punta sul buco.
+        let spiky = Region {
+            outer: vec![
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 1.5],
+                [3.95, 1.5],
+                [4.0, 1.5],
+                [4.0, 2.0],
+                [3.5, 2.0],
+                [3.2, 2.0],
+                [3.5, 2.0],
+                [3.5, 2.4],
+                [3.5, 2.0],
+                [4.0, 2.0],
+                [4.0, 3.0],
+                [0.0, 3.0],
+            ],
+            holes: vec![vec![
+                [1.0, 1.0],
+                [1.3, 1.0],
+                [1.4, 1.0],
+                [1.3, 1.0],
+                [1.3, 1.3],
+                [1.0, 1.3],
+            ]],
+        };
+        let cleaned = without_spurs(spiky, TOL);
+        assert_eq!(
+            cleaned.outer,
+            vec![
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 1.5],
+                [4.0, 2.0],
+                [4.0, 3.0],
+                [0.0, 3.0]
+            ]
+        );
+        assert_eq!(cleaned.holes, plain.holes);
+        assert_m2(signed_area(&cleaned.outer).abs(), 12.0, "stessa area");
+
+        // Sul disegno: il contorno di A con un moncone attaccato non lo segue.
+        let mut e = case_a(Form::Continua, M);
+        e.push(wall_line([4.0, 1.5], [3.95, 1.5]));
+        let (faces, sources) = survey(e, TOL);
+        let raw = region_at(&faces, [2.0, 2.5], TOL).unwrap();
+        assert!(raw.outer.contains(&[3.95, 1.5]), "premessa: la punta c'è");
+        let c = computed(&faces, &sources, "A", [2.0, 2.5]);
+        assert!(!c.region.outer.contains(&[3.95, 1.5]));
+        let EntityType::LwPolyline(outline) =
+            &room_entities(&c, Phase::Fatto, &sources, 0.25, TOL)[0]
+        else {
+            panic!();
+        };
+        assert!(outline
+            .vertices
+            .iter()
+            .all(|v| (v.location.x - 3.95).abs() > 1e-6));
+    }
+
+    /// Il caso A con un vano porta nel tramezzo tra y = 1,00 e y = 1,90:
+    /// spallette a y = 1,00 e y = 1,90, linee di soglia su x = 4,00 (per A) e
+    /// x = 4,10 (per B), e il vano fra le due soglie (0,09 m²). Con
+    /// `corner_gap`, l'angolo (0; 0) di A aperto sulla faccia ovest.
+    fn doorway(corner_gap: Option<f64>) -> Vec<EntityType> {
+        let mut e = match corner_gap {
+            Some(gap) => open_corner(gap, true),
+            None => case_a(Form::Continua, M),
+        };
+        e.retain(|entity| {
+            !is_line(entity, [4.0, 0.0], [4.0, 3.0]) && !is_line(entity, [4.1, 0.0], [4.1, 3.0])
+        });
+        assert_eq!(e.len(), 10, "tolti i due lati del tramezzo");
+        for x in [4.0, 4.1] {
+            e.push(wall_line([x, 0.0], [x, 1.0]));
+            e.push(wall_line([x, 1.9], [x, 3.0]));
+            e.push(wall_line([x, 1.0], [x, 1.9]));
+        }
+        e.push(wall_line([4.0, 1.0], [4.1, 1.0]));
+        e.push(wall_line([4.0, 1.9], [4.1, 1.9]));
+        e
+    }
+
+    // R50: il caso trovato in revisione.
+    #[test]
+    fn corner_gap_next_to_a_closed_room_is_open() {
+        // Senza vuoti: A 12,00, B 11,70, il vano 0,09, tutti esatti.
+        let (faces, sources) = survey(doorway(None), TOL);
+        for (p, want) in [
+            ([2.0, 1.5], 12.0),
+            ([6.0, 1.5], 11.70),
+            ([4.05, 1.45], 0.09),
+        ] {
+            let (_, area, exact, _) = compute_at(&faces, &sources, p, M, TOL).expect("chiuso");
+            assert_m2(area, want, p);
+            assert!(exact, "{p:?}");
+        }
+
+        // Con il vuoto di 2 mm in A i suoi lati toccano il vano chiuso (alle
+        // spallette), ma restano dentro il contorno esterno: non chiuso.
+        let (faces, sources) = survey(doorway(Some(0.002)), TOL);
+        assert_eq!(compute_at(&faces, &sources, [2.0, 1.5], M, TOL), None);
+        // Premessa: la regione sarebbe il contorno esterno meno B e il vano,
+        // 30,96 − 11,70 − 0,09 = 19,17 m².
+        let outer = region_at(&faces, [2.0, 1.5], TOL).expect("contorno esterno");
+        assert_eq!(outer.holes.len(), 2);
+        assert_m2(
+            area_m2(net_area(&outer, &sources, TOL).0, M),
+            19.17,
+            "premessa",
+        );
+        let (_, area, exact, _) = compute_at(&faces, &sources, [6.0, 1.5], M, TOL).expect("B");
+        assert_m2(area, 11.70, "B");
+        assert!(exact);
+
+        // Con HPGAPTOL 5 mm: chiuso, 12,00, ma solo dalla tolleranza (R47).
+        let hpgaptol = 0.005;
+        let (faces, sources) = survey(doorway(Some(0.002)), hpgaptol);
+        let measured = measure_at(&faces, None, &sources, [2.0, 1.5], M, hpgaptol).expect("chiuso");
+        assert!(
+            (measured.area_m2 - 12.0).abs() < 1e-3,
+            "{}",
+            measured.area_m2
+        );
+        assert!(!measured.exact);
+        assert!(measured.by_tolerance);
+    }
+
+    // R50 nello stato di progetto: il varco al posto del vano.
+    #[test]
+    fn corner_gap_next_to_a_varco_is_open_in_the_project() {
+        let zones = vec![axis_zone([4.05, 1.0], [4.05, 1.9], true)];
+        let (rooms, notices) = rooms_of(
+            open_corner(0.002, true),
+            &zones,
+            &[fatto("B", [6.0, 1.5])],
+            &[progetto("A", [2.0, 1.5])],
+        );
+        assert_eq!(names(&rooms), ["B"]);
+        assert_m2(rooms[0].area_m2, 11.70, "B");
+        assert!(
+            notices.contains(&Notice::LocaleNonChiuso { name: "A".into() }),
+            "{notices:?}"
+        );
+        assert!(notices
+            .iter()
+            .any(|notice| matches!(notice, Notice::Varco { .. })));
+        assert_eq!(notices.len(), 2, "{notices:?}");
+    }
+
+    // R51 (b): ciò che sta dentro un'isola non è un locale.
+    #[test]
+    fn faces_inside_an_island_are_not_rooms() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            // Il pilastro a doppio contorno (0,30 e 0,20 di lato) e una vasca
+            // a due linee staccata dai muri in B (1,70 × 0,70 e, dentro,
+            // 1,60 × 0,60).
+            let mut e = case_a(form, M);
+            e.push(pilastro(M));
+            e.push(wall_polyline(
+                &[
+                    ([1.05, 1.05], 0.0),
+                    ([1.25, 1.05], 0.0),
+                    ([1.25, 1.25], 0.0),
+                    ([1.05, 1.25], 0.0),
+                ],
+                true,
+            ));
+            e.push(wall_polyline(
+                &[
+                    ([6.0, 0.5], 0.0),
+                    ([7.7, 0.5], 0.0),
+                    ([7.7, 1.2], 0.0),
+                    ([6.0, 1.2], 0.0),
+                ],
+                true,
+            ));
+            e.push(wall_polyline(
+                &[
+                    ([6.05, 0.55], 0.0),
+                    ([7.65, 0.55], 0.0),
+                    ([7.65, 1.15], 0.0),
+                    ([6.05, 1.15], 0.0),
+                ],
+                true,
+            ));
+            let (rooms, notices) = rooms_of(
+                e,
+                &[],
+                &[fatto("A", [2.0, 2.5]), fatto("B", [5.0, 1.5])],
+                &[],
+            );
+            assert_eq!(names(&rooms), ["A", "B"], "{form:?}: {notices:?}");
+            assert_m2(named(&rooms, "A").area_m2, 11.91, form);
+            assert_m2(named(&rooms, "B").area_m2, 11.70 - 1.19, form);
+            assert_eq!(
+                notices,
+                [
+                    Notice::Isole {
+                        name: "A".into(),
+                        count: 1
+                    },
+                    Notice::Isole {
+                        name: "B".into(),
+                        count: 1
+                    }
+                ],
+                "{form:?}"
+            );
+        }
+    }
+
+    // R51 (c)
+    #[test]
+    fn seed_in_a_demolished_zone_is_reported() {
+        // Un ripostiglio 1 × 1 dentro B, e una zona demolita senza asse sul
+        // suo contorno: i bordi restano, la faccia sta tutta nella zona.
+        let mut e = case_a(Form::Continua, M);
+        e.push(wall_polyline(
+            &[
+                ([5.0, 1.0], 0.0),
+                ([6.0, 1.0], 0.0),
+                ([6.0, 2.0], 0.0),
+                ([5.0, 2.0], 0.0),
+            ],
+            true,
+        ));
+        let zone = zone_geom(
+            Zone {
+                state: ZoneState::Demolito,
+                origin: ZoneOrigin::Rettangolo,
+                axis: None,
+                thickness: None,
+                height: None,
+                varco: false,
+            },
+            vec![[5.0, 1.0], [6.0, 1.0], [6.0, 2.0], [5.0, 2.0]],
+        );
+        let (rooms, notices) = rooms_of(
+            e,
+            &[zone],
+            &[fatto("B", [7.0, 2.5]), fatto("Ripostiglio", [5.5, 1.5])],
+            &[progetto("Dispensa", [5.5, 1.6])],
+        );
+        assert_eq!(names(&rooms), ["B"], "{notices:?}");
+        for name in ["Ripostiglio", "Dispensa"] {
+            assert!(
+                notices.contains(&Notice::SemeInDemolizione { name: name.into() }),
+                "{name}: {notices:?}"
+            );
+        }
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, Notice::LocaleSenzaNome { .. })),
+            "{notices:?}"
+        );
+    }
+
+    // R51 (d)
+    #[test]
+    fn the_same_seed_twice_counts_once() {
+        // Il contorno e il testo dello stesso locale di fatto (stesso nome,
+        // stesso seme), passati tutti e due: niente «A + A».
+        let twice = [
+            fatto("A", [2.0, 1.5]),
+            fatto("A", [2.0, 1.5]),
+            fatto("B", [6.0, 1.5]),
+            fatto("B", [6.0 + 0.5 * TOL, 1.5]),
+        ];
+        let (rooms, notices) = rooms_of(case_a(Form::Continua, M), &[], &twice, &[]);
+        assert_eq!(names(&rooms), ["A", "B"]);
+        assert!(rooms.iter().all(|room| !room.confirm));
+        assert!(notices.is_empty(), "{notices:?}");
+        let (rooms, notices) =
+            rooms_of(case_a(Form::Continua, M), &total_demolition(), &twice, &[]);
+        assert_eq!(names(&rooms), ["A + B"]);
+        let [Notice::LocaleFuso { names: fused, .. }] = &notices[..] else {
+            panic!("{notices:?}");
+        };
+        assert_eq!(fused, &["A", "B"]);
+        // Due semi di progetto uguali: un nome solo, nessuna fusione.
+        let (rooms, notices) = rooms_of(
+            case_a(Form::Continua, M),
+            &total_demolition(),
+            &fatto_ab(),
+            &[
+                progetto("Soggiorno", [3.0, 1.0]),
+                progetto("Soggiorno", [3.0, 1.0]),
+            ],
+        );
+        assert_eq!(names(&rooms), ["Soggiorno"]);
+        assert!(notices.is_empty(), "{notices:?}");
     }
 
     // -----------------------------------------------------------------------
