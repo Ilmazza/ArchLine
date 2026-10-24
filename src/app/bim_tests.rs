@@ -1,11 +1,14 @@
-//! Comandi BIM dall'app (spec §3 e §5.1): `AL_DEMOLISCI`, `AL_NUOVO`, la
-//! scelta dell'unità `AL_UNITA` e `AL_STATO`, guidati come da uno script o dalla
-//! riga di comando. Coprono ciò che i test di `bim::commands` non vedono: l'unità letta
-//! dal disegno, i layer creati in un passo di annullamento a sé, l'istantanea
-//! della geometria e il rilievo che resta intatto.
+//! Comandi BIM dall'app (spec §3, §4.2, §5.1 e §5.2): `AL_DEMOLISCI`,
+//! `AL_NUOVO`, la scelta dell'unità `AL_UNITA`, `AL_STATO`, `AL_LOCALE` e
+//! `AL_AGGIORNA`, guidati come da uno script o dalla riga di comando. Coprono
+//! ciò che i test di `bim::commands` non vedono: l'unità letta dal disegno, i
+//! layer creati in un passo di annullamento a sé, l'istantanea della geometria
+//! e il rilievo che resta intatto.
 //!
 //! Negli script lo spessore si scrive col punto («0.12»): la virgola farebbe
-//! leggere al runner le coordinate (0;12).
+//! leggere al runner le coordinate (0;12). Il numero di un locale vuoto è
+//! l'Invio con cui il runner chiude la riga: `AL_LOCALE 2,1.5 A` dà il punto,
+//! il nome e il numero vuoto.
 //!
 //! `AL_ESTRAI` scrive in cartelle nuove sotto la cartella temporanea, tolte a
 //! fine test: mai file o impostazioni dell'utente.
@@ -15,6 +18,7 @@ use crate::bim::extract::{file_name, Elaborato};
 use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
 use crate::bim::record;
 use crate::bim::report::Notice;
+use crate::bim::rooms::{rooms_in, Phase, Room, RoomPart};
 use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{missing_layers, read_zone, zones_in, Zone, ZoneState};
 use crate::bim::{
@@ -23,7 +27,7 @@ use crate::bim::{
 };
 use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_NOTE};
-use codec::entities::Line;
+use codec::entities::{Line, LwPolyline, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{CadDocument, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
@@ -319,6 +323,9 @@ fn paper_space_is_refused() {
         ("AL_DEMOLISCI 4.05,0 4.05,3 N", 6),
         ("AL_NUOVO 2,0 2,3 0.12", 6),
         ("AL_DEMOLISCI", 0),
+        ("AL_LOCALE 2,1.5 A", 6),
+        ("AL_LOCALE", 0),
+        ("AL_AGGIORNA", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -1849,4 +1856,459 @@ fn dialog_refuses_a_missing_or_invalid_layer_for_the_project() {
     assert_eq!(dwg_count(tmp.path()), 2);
     assert_eq!(record::read(doc(&app)).new_walls_layer, None);
     assert_eq!(undo_steps(&app), steps);
+}
+
+// ------------------------------------------------------- AL_LOCALE e AL_AGGIORNA
+
+/// Le entità sul layer `layer`, con il loro handle, in ordine di handle.
+fn on_layer(app: &OpenCADStudio, layer: &str) -> Vec<(Handle, EntityType)> {
+    let mut entities: Vec<(Handle, EntityType)> = doc(app)
+        .entities()
+        .filter(|entity| entity.common().layer == layer)
+        .map(|entity| (entity.common().handle, entity.clone()))
+        .collect();
+    entities.sort_by_key(|(handle, _)| handle.value());
+    entities
+}
+
+/// Il contorno e il testo dell'unico locale di fatto (`AL-LOCALI`).
+fn room_parts(app: &OpenCADStudio) -> ((Handle, EntityType), (Handle, EntityType)) {
+    let parts = on_layer(app, LAYER_LOCALI);
+    assert_eq!(parts.len(), 2, "contorno e testo: {parts:?}");
+    let find = |is: fn(&EntityType) -> bool| {
+        parts
+            .iter()
+            .find(|(_, entity)| is(entity))
+            .cloned()
+            .expect("parte del locale")
+    };
+    (
+        find(|e| matches!(e, EntityType::LwPolyline(_))),
+        find(|e| matches!(e, EntityType::MText(_))),
+    )
+}
+
+fn polyline(entity: &EntityType) -> &LwPolyline {
+    let EntityType::LwPolyline(polyline) = entity else {
+        panic!("non è una LWPOLYLINE: {entity:?}")
+    };
+    polyline
+}
+
+fn mtext(entity: &EntityType) -> &MText {
+    let EntityType::MText(text) = entity else {
+        panic!("non è un MTEXT: {entity:?}")
+    };
+    text
+}
+
+/// L'area racchiusa dai vertici (lati dritti).
+fn polyline_area(polyline: &LwPolyline) -> f64 {
+    let v = &polyline.vertices;
+    let twice: f64 = (0..v.len())
+        .map(|k| {
+            let (a, b) = (v[k].location, v[(k + 1) % v.len()].location);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    twice.abs() / 2.0
+}
+
+fn near(p: Vector3, q: [f64; 2]) -> bool {
+    (p.x - q[0]).abs() < 1e-9 && (p.y - q[1]).abs() < 1e-9
+}
+
+/// L'handle della `LINE` del rilievo da `a` a `b`.
+fn survey_line(app: &OpenCADStudio, a: [f64; 2], b: [f64; 2]) -> Handle {
+    doc(app)
+        .entities()
+        .find(|e| matches!(e, EntityType::Line(l) if near(l.start, a) && near(l.end, b)))
+        .map(|e| e.common().handle)
+        .expect("linea del rilievo")
+}
+
+/// Il tramezzo del caso A (linee): la faccia di A passa da x = 4,00 a 3,90,
+/// fuori dai comandi (come una modifica a mano del rilievo).
+fn move_tramezzo_face(app: &mut OpenCADStudio) {
+    let face = survey_line(app, [4.0, 0.0], [4.0, 3.0]);
+    let i = app.active_tab;
+    let Some(EntityType::Line(line)) = app.tabs[i].scene.document.get_entity_mut(face) else {
+        panic!("faccia del tramezzo")
+    };
+    line.start.x = 3.9;
+    line.end.x = 3.9;
+}
+
+#[test]
+fn locale_fatto_writes_outline_and_label() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let before = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+
+    let history = history(&app);
+    assert!(
+        comes_after(
+            &history,
+            "AL_LOCALE (Fatto)  Punto interno del locale o [Fase]:",
+            "Superficie netta 12,00 m². Nome del locale:"
+        ),
+        "storia: {history}"
+    );
+    assert!(
+        comes_after(&history, "Superficie netta 12,00 m²", "Numero <nessuno>:"),
+        "storia: {history}"
+    );
+    assert_eq!(active_command(&app), None);
+    let ((_, outline), (_, text)) = room_parts(&app);
+    let outline = polyline(&outline);
+    assert!(outline.is_closed);
+    assert_eq!(outline.vertices.len(), 4);
+    assert!((polyline_area(outline) - 12.0).abs() < 1e-9);
+    let text = mtext(&text);
+    assert_eq!(text.value, "A\\PS = 12,00 m²");
+    assert_eq!(text.height, doc(&app).header.text_height);
+    assert!(near(text.insertion_point, [2.0, 1.5]));
+    let room = Room {
+        phase: Phase::Fatto,
+        name: "A".into(),
+        number: String::new(),
+        seed: [2.0, 1.5],
+    };
+    let rooms = rooms_in(doc(&app));
+    let parts: Vec<RoomPart> = rooms.iter().map(|(_, _, part)| *part).collect();
+    assert_eq!(parts, [RoomPart::Contorno, RoomPart::Testo]);
+    assert!(rooms.iter().all(|(_, r, _)| *r == room), "{rooms:?}");
+    assert!(doc(&app).app_ids.contains(APP_LOCALE));
+    assert!(on_layer(&app, LAYER_LOCALI_PROGETTO).is_empty());
+    assert_eq!(rilievo_snapshot(&app), before, "il rilievo non si tocca");
+
+    // Il locale è un passo di annullamento; i layer, la prima volta, un altro.
+    assert_eq!(undo_steps(&app), steps + 2);
+    undo(&mut app);
+    assert!(on_layer(&app, LAYER_LOCALI).is_empty());
+    assert!(!missing_layers(doc(&app)), "i layer restano");
+    undo(&mut app);
+    assert!(missing_layers(doc(&app)));
+    assert_eq!(rilievo_snapshot(&app), before);
+}
+
+#[test]
+fn locale_progetto_stores_only_the_seed() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let before = rilievo_snapshot(&app);
+
+    run(&mut app, "AL_LOCALE F 3,1 Soggiorno");
+
+    let history = history(&app);
+    assert!(
+        comes_after(
+            &history,
+            "AL_LOCALE (Progetto)  Punto interno del locale o [Fase]:",
+            "Superficie netta 12,00 m². Nome del locale:"
+        ),
+        "storia: {history}"
+    );
+    assert!(
+        on_layer(&app, LAYER_LOCALI).is_empty(),
+        "né contorno né testo"
+    );
+    let seeds = on_layer(&app, LAYER_LOCALI_PROGETTO);
+    assert_eq!(seeds.len(), 1, "storia: {history}");
+    assert_eq!(mtext(&seeds[0].1).value, "Soggiorno");
+    let room = Room {
+        phase: Phase::Progetto,
+        name: "Soggiorno".into(),
+        number: String::new(),
+        seed: [3.0, 1.0],
+    };
+    assert_eq!(
+        rooms_in(doc(&app)),
+        vec![(seeds[0].0, room, RoomPart::Seme)]
+    );
+    assert_eq!(rilievo_snapshot(&app), before);
+}
+
+#[test]
+fn aggiorna_follows_the_survey() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let ((outline_handle, outline), (text_handle, _)) = room_parts(&app);
+    move_tramezzo_face(&mut app);
+    let survey = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let log = history(&app);
+    assert!(
+        log.contains("AL_AGGIORNA: 1 locali aggiornati."),
+        "storia: {log}"
+    );
+    let ((new_outline_handle, new_outline), (new_text_handle, text)) = room_parts(&app);
+    assert_eq!(
+        (new_outline_handle, new_text_handle),
+        (outline_handle, text_handle),
+        "stessi handle"
+    );
+    assert_eq!(mtext(&text).value, "A\\PS = 11,70 m²");
+    let new_outline = polyline(&new_outline);
+    assert!((polyline_area(new_outline) - 11.7).abs() < 1e-9);
+    assert!(new_outline
+        .vertices
+        .iter()
+        .any(|v| (v.location.x - 3.9).abs() < 1e-9));
+    assert!(!new_outline
+        .vertices
+        .iter()
+        .any(|v| (v.location.x - 4.0).abs() < 1e-9));
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+    assert_eq!(undo_steps(&app), steps + 1, "un solo passo");
+
+    // Niente da cambiare: nessun passo.
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+    assert!(
+        history(&app).contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    // Un annullamento riporta contorno e testo insieme.
+    undo(&mut app);
+    let ((_, old_outline), (_, old_text)) = room_parts(&app);
+    assert_eq!(old_outline, outline);
+    assert_eq!(mtext(&old_text).value, "A\\PS = 12,00 m²");
+}
+
+#[test]
+fn aggiorna_reports_open_room() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let (outline, text) = room_parts(&app);
+    let south = survey_line(&app, [0.0, 0.0], [4.0, 0.0]);
+    let i = app.active_tab;
+    app.tabs[i].scene.erase_entities(&[south]);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    assert!(
+        history.contains("Il locale A non è più chiuso: lasciato com'era."),
+        "storia: {history}"
+    );
+    assert!(
+        history.contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {history}"
+    );
+    assert_eq!(
+        room_parts(&app),
+        (outline, text),
+        "polilinea e testo invariati"
+    );
+    assert_eq!(undo_steps(&app), steps, "nessun passo");
+}
+
+/// Review Focus 3, lato app: un vuoto di 2 mm all'angolo (0;0) di A, sulla
+/// faccia ovest. Senza `HPGAPTOL` il locale non è chiuso; con 5 mm misura
+/// 12,00, con l'avviso che lo chiude solo la tolleranza.
+#[test]
+fn gap_closed_by_hpgaptol() {
+    let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+    let west = entities
+        .iter_mut()
+        .find_map(|e| match e {
+            EntityType::Line(l) if near(l.start, [0.0, 3.0]) && near(l.end, [0.0, 0.0]) => Some(l),
+            _ => None,
+        })
+        .expect("faccia ovest di A");
+    west.end = Vector3::new(0.0, 0.002, 0.0);
+    let mut app = fresh_app();
+    load(&mut app, entities, 6);
+    let before = rilievo_snapshot(&app);
+
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    assert!(
+        history(&app).contains(
+            "Nessun locale chiuso attorno al punto (chiudi i vani con una linea di soglia o usa HPGAPTOL)."
+        ),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(on_layer(&app, LAYER_LOCALI).is_empty());
+    assert_eq!(active_command(&app), None, "l'Invio finale chiude");
+
+    dispatch_line(&mut app, "HPGAPTOL 0.005");
+    forget_history(&mut app);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+
+    let log = history(&app);
+    let tolerance = Notice::ChiusoPerTolleranza { name: "A".into() }.text();
+    assert!(
+        comes_after(&log, "Superficie netta 12,00 m²", &tolerance),
+        "manca «{tolerance}»; storia: {log}"
+    );
+    let ((_, outline), (_, text)) = room_parts(&app);
+    assert_eq!(mtext(&text).value, "A\\PS = 12,00 m²");
+    let outline = polyline(&outline);
+    assert!(outline.vertices.iter().all(|v| v.bulge == 0.0));
+    assert!((polyline_area(outline) - 12.0).abs() < 1e-3);
+
+    // AL_AGGIORNA lo ritrova uguale e lo ridice.
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+    let log = history(&app);
+    assert!(
+        log.contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {log}"
+    );
+    assert!(log.contains(&tolerance), "storia: {log}");
+    assert_eq!(rilievo_snapshot(&app), before);
+    dispatch_line(&mut app, "HPGAPTOL 0");
+}
+
+/// R54: il tramezzo (una polilinea chiusa per muro) si ferma 2 mm prima del
+/// muro nord dopo che A e B sono stati scritti. La regione di A contiene il
+/// seme di B: `AL_AGGIORNA` lo dice, una volta sola.
+#[test]
+fn aggiorna_reports_fused_rooms() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::ChiusaPerMuro, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    let labels: Vec<String> = on_layer(&app, LAYER_LOCALI)
+        .iter()
+        .filter(|(_, e)| matches!(e, EntityType::MText(_)))
+        .map(|(_, e)| mtext(e).value.clone())
+        .collect();
+    assert_eq!(labels, ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]);
+    let tramezzo = doc(&app)
+        .entities()
+        .find(|e| {
+            matches!(e, EntityType::LwPolyline(p) if e.common().layer == LAYER_MURI
+                && p.vertices.iter().any(|v| near(Vector3::new(v.location.x, v.location.y, 0.0), [4.1, 3.0])))
+        })
+        .map(|e| e.common().handle)
+        .expect("tramezzo");
+    let i = app.active_tab;
+    if let Some(EntityType::LwPolyline(p)) = app.tabs[i].scene.document.get_entity_mut(tramezzo) {
+        for v in &mut p.vertices {
+            if (v.location.y - 3.0).abs() < 1e-9 {
+                v.location.y = 2.998;
+            }
+        }
+    }
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    let fused = "Locali A + B fusi in uno (23,70 m²): nome da confermare.";
+    assert_eq!(history.matches(fused).count(), 1, "storia: {history}");
+    // L'avviso è l'unica differenza: i due locali seguono la regione trovata.
+    assert!(
+        history.contains("AL_AGGIORNA: 2 locali aggiornati."),
+        "storia: {history}"
+    );
+}
+
+/// In un disegno in centimetri senza unità (INSUNITS = 0) e senza `TEXTSIZE`:
+/// lo script risponde all'unità, la superficie esce in m² e il testo è alto
+/// 0,25 m, detto in riga di comando.
+#[test]
+fn locale_asks_the_unit_and_falls_back_on_the_text_height() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Centimetri), 0);
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.text_height = 0.0;
+
+    run(&mut app, "AL_LOCALE CM 200,150 A");
+
+    let history = history(&app);
+    assert!(
+        history.contains(
+            "AL_LOCALE: TEXTSIZE del disegno non è positiva: i testi dei locali sono alti 0,25 m."
+        ),
+        "storia: {history}"
+    );
+    let (_, (_, text)) = room_parts(&app);
+    let text = mtext(&text);
+    assert_eq!(text.value, "A\\PS = 12,00 m²");
+    assert!((text.height - 25.0).abs() < 1e-9, "{}", text.height);
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Centimetri));
+    assert_eq!(doc(&app).header.insertion_units, 0);
+}
+
+#[test]
+fn aggiorna_skips_rooms_on_locked_layers() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let parts = room_parts(&app);
+    move_tramezzo_face(&mut app);
+    let i = app.active_tab;
+    app.tabs[i]
+        .scene
+        .document
+        .layers
+        .get_mut(LAYER_LOCALI)
+        .expect("layer dei locali")
+        .lock();
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    assert!(
+        history.contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {history}"
+    );
+    assert!(
+        history.contains("Locali su layer bloccati ignorati: 1."),
+        "storia: {history}"
+    );
+    assert_eq!(room_parts(&app), parts);
+    assert_eq!(undo_steps(&app), steps);
+}
+
+/// Un locale senza contorno (cancellato a mano): il testo si aggiorna e la
+/// riga di comando dice che il contorno manca.
+#[test]
+fn aggiorna_updates_a_lone_text_and_says_so() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let ((outline, _), (text, _)) = room_parts(&app);
+    let i = app.active_tab;
+    app.tabs[i].scene.erase_entities(&[outline]);
+    move_tramezzo_face(&mut app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    assert!(
+        history.contains("Locale A: c'è il testo ma non il contorno."),
+        "storia: {history}"
+    );
+    assert!(
+        history.contains("AL_AGGIORNA: 1 locali aggiornati."),
+        "storia: {history}"
+    );
+    assert_eq!(mtext(&entity_of(&app, text)).value, "A\\PS = 11,70 m²");
+    assert_eq!(
+        on_layer(&app, LAYER_LOCALI).len(),
+        1,
+        "nessun contorno nuovo"
+    );
 }

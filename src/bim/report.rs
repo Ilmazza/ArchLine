@@ -71,6 +71,14 @@ pub enum Notice {
     LocaleNonChiuso {
         name: String,
     },
+    /// Un locale di fatto di cui nel disegno c'è il testo ma non il contorno.
+    ContornoMancante {
+        name: String,
+    },
+    /// Un locale di fatto di cui nel disegno c'è il contorno ma non il testo.
+    TestoMancante {
+        name: String,
+    },
     Isole {
         name: String,
         count: usize,
@@ -153,6 +161,12 @@ impl Notice {
             ),
             Self::LocaleNonChiuso { name } => {
                 format!("Il locale {name} non è più chiuso: lasciato com'era.")
+            }
+            Self::ContornoMancante { name } => {
+                format!("Locale {name}: c'è il testo ma non il contorno.")
+            }
+            Self::TestoMancante { name } => {
+                format!("Locale {name}: c'è il contorno ma non il testo.")
             }
             Self::Isole { name, count } => format!("Locale {name}: {count} isole sottratte."),
             Self::Varco { area_m2 } => format!("Varco {} escluso dai locali.", format_m2(*area_m2)),
@@ -275,6 +289,18 @@ mod tests {
                     name: "Bagno".into(),
                 },
                 "Il locale Bagno non è più chiuso: lasciato com'era.",
+            ),
+            (
+                Notice::ContornoMancante {
+                    name: "Bagno".into(),
+                },
+                "Locale Bagno: c'è il testo ma non il contorno.",
+            ),
+            (
+                Notice::TestoMancante {
+                    name: "Bagno".into(),
+                },
+                "Locale Bagno: c'è il contorno ma non il testo.",
             ),
             (
                 Notice::Isole {

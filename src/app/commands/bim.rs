@@ -1,19 +1,24 @@
-//! Famiglia dei comandi BIM di ArchLine (spec §3, §5.1 e §5.5): `AL_DEMOLISCI`,
-//! `AL_NUOVO`, `AL_STATO`, `AL_ESTRAI` e l'interno `AL_UNITA`.
+//! Famiglia dei comandi BIM di ArchLine (spec §3, §4.2, §5.1, §5.2 e §5.5):
+//! `AL_DEMOLISCI`, `AL_NUOVO`, `AL_STATO`, `AL_LOCALE`, `AL_AGGIORNA`,
+//! `AL_ESTRAI` e l'interno `AL_UNITA`.
 //!
 //! Qui sta solo il lato app: l'unità del disegno (chiesta quando `INSUNITS`
 //! vale 0, mai scritta in `INSUNITS`), i layer `AL-*` creati la prima volta in
 //! un passo di annullamento a sé, l'istantanea della geometria, l'avvio di
-//! [`ZoneCommand`], il cambio di stato delle zone esistenti (`AL_STATO`) e
+//! [`ZoneCommand`] e di [`RoomCommand`], il cambio di stato delle zone
+//! esistenti (`AL_STATO`), il ricalcolo dei locali di fatto (`AL_AGGIORNA`) e
 //! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
 //! sta in `crate::bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
-use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
+use crate::bim::commands::{
+    refresh_rooms, room_snapshot, room_text_height, RoomCommand, RoomEdit, ZoneCommand,
+    ZoneSnapshot, DEFAULT_ROOM_TEXT_M,
+};
 use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::record;
 use crate::bim::report::Notice;
-use crate::bim::units::{self, DrawingUnit, UnitLookup};
+use crate::bim::units::{self, format_decimal, DrawingUnit, UnitLookup};
 use crate::bim::walls;
 use crate::bim::zone::{self, Zone, ZoneGeom, ZoneState};
 use crate::bim::APP_ZONA;
@@ -73,6 +78,8 @@ impl OpenCADStudio {
                     self.bim_apply_stato(i, keyword, &args)
                 }
             }),
+            "AL_LOCALE" => Some(self.bim_start_room(i)),
+            "AL_AGGIORNA" => Some(self.bim_update_rooms(i)),
             "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
             _ => None,
         }
@@ -123,15 +130,7 @@ impl OpenCADStudio {
         };
         // Un rilancio lasciato a metà (AL_UNITA annullato) non vale più.
         self.bim_pending = None;
-        if zone::missing_layers(&self.tabs[i].scene.document) {
-            // Passo a sé: un annullamento dopo il primo comando toglie la zona,
-            // non i layer; e nessun layer nasce fuori da un passo.
-            self.push_undo_snapshot(i, "AL_LAYER");
-            zone::ensure_layers(&mut self.tabs[i].scene.document);
-            self.tabs[i].dirty = true;
-            self.finish_pending_history(i);
-            self.refresh_layer_panel();
-        }
+        self.bim_ensure_layers(i);
         let (snap, off_plane) = zone_snapshot(&self.tabs[i].scene.document, unit);
         if off_plane > 0 {
             self.command_line
@@ -141,6 +140,104 @@ impl OpenCADStudio {
         self.command_line.push_info(&command.prompt());
         self.tabs[i].active_cmd = Some(Box::new(command));
         self.finish_dispatch(cmd)
+    }
+
+    /// I layer `AL-*` e gli APPID `ARCHLINE_*`, se ne manca uno, in un passo di
+    /// annullamento a sé: un annullamento dopo il primo comando toglie ciò che
+    /// il comando ha creato, non i layer; e nessun layer nasce fuori da un
+    /// passo. Va chiamato prima di consegnare entità con l'XDATA dei nostri
+    /// APPID.
+    fn bim_ensure_layers(&mut self, i: usize) {
+        if zone::missing_layers(&self.tabs[i].scene.document) {
+            self.push_undo_snapshot(i, "AL_LAYER");
+            zone::ensure_layers(&mut self.tabs[i].scene.document);
+            self.tabs[i].dirty = true;
+            self.finish_pending_history(i);
+            self.refresh_layer_panel();
+        }
+    }
+
+    /// `AL_LOCALE` (spec §5.2): unità, layer (la prima volta), istantanea dei
+    /// muri di fatto e di progetto alla tolleranza dei locali, poi
+    /// [`RoomCommand`]. Senza `TEXTSIZE` i testi hanno un'altezza di ripiego, e
+    /// lo si dice.
+    fn bim_start_room(&mut self, i: usize) -> Task<Message> {
+        const CMD: &str = "AL_LOCALE";
+        if !self.bim_in_model_space(i, CMD) {
+            return Task::none();
+        }
+        let Some(unit) = self.bim_unit_or_ask(i, CMD) else {
+            return self.finish_dispatch(CMD);
+        };
+        self.bim_pending = None;
+        // Il contorno e il testo portano l'XDATA `ARCHLINE_LOCALE`.
+        self.bim_ensure_layers(i);
+        let doc = &self.tabs[i].scene.document;
+        let (snap, off_plane) = room_snapshot(doc, unit, room_tolerance(unit));
+        let (_, fallback_height) = room_text_height(doc, unit);
+        if off_plane > 0 {
+            self.command_line
+                .push_info(&Notice::FuoriPiano { count: off_plane }.text());
+        }
+        if fallback_height {
+            self.command_line.push_info(&format!(
+                "AL_LOCALE: TEXTSIZE del disegno non è positiva: i testi dei locali sono alti {} m.",
+                format_decimal(DEFAULT_ROOM_TEXT_M)
+            ));
+        }
+        let command = RoomCommand::new(snap);
+        self.command_line.push_info(&command.prompt());
+        self.command_line.set_step_options(command.options());
+        self.tabs[i].active_cmd = Some(Box::new(command));
+        self.finish_dispatch(CMD)
+    }
+
+    /// `AL_AGGIORNA` (spec §4.2): ogni locale di fatto si rimisura sul rilievo
+    /// attuale ([`refresh_rooms`]); contorno e testo cambiano sul posto, con lo
+    /// stesso handle, in un solo passo di annullamento e solo se qualcosa
+    /// cambia. Un locale su un layer bloccato non si tocca e si conta. In
+    /// fondo il riepilogo e gli avvisi, una riga ciascuno.
+    fn bim_update_rooms(&mut self, i: usize) -> Task<Message> {
+        const CMD: &str = "AL_AGGIORNA";
+        if !self.bim_in_model_space(i, CMD) {
+            return Task::none();
+        }
+        let Some(unit) = self.bim_unit_or_ask(i, CMD) else {
+            return self.finish_dispatch(CMD);
+        };
+        self.bim_pending = None;
+        let refresh = refresh_rooms(&self.tabs[i].scene.document, unit, room_tolerance(unit));
+        let scene = &self.tabs[i].scene;
+        let (locked, free): (Vec<_>, Vec<_>) = refresh.changed.into_iter().partition(|edits| {
+            edits
+                .iter()
+                .any(|(handle, _)| scene.is_layer_locked(*handle))
+        });
+        let updated = free.len();
+        let edits: HashMap<Handle, RoomEdit> = free.into_iter().flatten().collect();
+        if !edits.is_empty() {
+            let mut handles: Vec<Handle> = edits.keys().copied().collect();
+            handles.sort_by_key(|handle| handle.value());
+            self.apply_property_op(i, CMD, &handles, |app, handle| {
+                if let (Some(edit), Some(entity)) = (
+                    edits.get(&handle),
+                    app.tabs[i].scene.document.get_entity_mut(handle),
+                ) {
+                    edit.apply_to(entity);
+                }
+            });
+            self.finish_pending_history(i);
+        }
+        self.command_line
+            .push_info(&format!("{CMD}: {updated} locali aggiornati."));
+        if !locked.is_empty() {
+            self.command_line.push_info(&format!(
+                "Locali su layer bloccati ignorati: {}.",
+                locked.len()
+            ));
+        }
+        self.bim_push_notices(&refresh.notices);
+        Task::none()
     }
 
     /// `AL_UNITA MM|CM|M`: l'unità va nel record del disegno (`INSUNITS` resta
@@ -571,7 +668,7 @@ impl OpenCADStudio {
         result
     }
 
-    /// Una riga per avviso dell'estrazione.
+    /// Una riga per avviso (dell'estrazione, di `AL_AGGIORNA`).
     fn bim_push_notices(&mut self, notices: &[Notice]) {
         for notice in notices {
             self.command_line.push_info(&notice.text());
@@ -894,6 +991,12 @@ fn zone_snapshot(doc: &CadDocument, unit: DrawingUnit) -> (ZoneSnapshot, usize) 
         last_thickness,
     };
     (snap, set.off_plane)
+}
+
+/// La tolleranza dei locali (spec §3): quella dell'unità, o `HPGAPTOL` se è
+/// più larga.
+fn room_tolerance(unit: DrawingUnit) -> f64 {
+    unit.tolerance().max(super::hatchvars::gap_tolerance())
 }
 
 /// Lo spessore della zona nuova più recente (handle più alto) che ne ha uno.
