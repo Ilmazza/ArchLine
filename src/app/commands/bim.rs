@@ -312,7 +312,16 @@ impl OpenCADStudio {
             return self.finish_dispatch("AL_ESTRAI");
         }
         self.bim_pending = None;
-        let layer = initial_new_walls_layer(&self.tabs[i].scene.document);
+        // Nessuno sceglie: vale il layer ricordato o proposto, che non si
+        // ricorda (estrarre da script non cambia il disegno); senza nessuno dei
+        // due, il layer 0, e lo si dice.
+        let layer = proposed_new_walls_layer(&self.tabs[i].scene.document).unwrap_or_else(|| {
+            self.command_line.push_info(
+                "AL_ESTRAI: nessun layer dei muri nuovi ricordato e nessun muro nel disegno: \
+                 i muri nuovi vanno sul layer 0.",
+            );
+            "0".to_string()
+        });
         let result = self.bim_run_extract(i, &dir, ALL_ELABORATI.to_vec(), layer, false);
         if let Err(WriteError::Exists(paths)) = result {
             self.command_line.push_error(&exists_text(&paths));
@@ -358,7 +367,7 @@ impl OpenCADStudio {
             fatto: true,
             comparativa: true,
             progetto: true,
-            layer: initial_new_walls_layer(doc),
+            layer: proposed_new_walls_layer(doc).unwrap_or_default(),
             layers,
             confirm_overwrite: false,
         };
@@ -411,9 +420,11 @@ impl OpenCADStudio {
     }
 
     /// OK della finestra. Se i file esistono e non c'è ancora la conferma, la
-    /// finestra lo dice e resta aperta: niente è stato scritto. Altrimenti
-    /// estrae (sovrascrivendo solo dopo la conferma), si chiude e il rapporto
-    /// va in riga di comando.
+    /// finestra lo dice e resta aperta: niente è stato scritto. Lo stesso, con
+    /// un errore in riga di comando, se manca il layer dei muri nuovi per lo
+    /// stato di progetto. Altrimenti estrae (sovrascrivendo solo dopo la
+    /// conferma), ricorda il layer dei muri nuovi se ha scritto lo stato di
+    /// progetto, si chiude e il rapporto va in riga di comando.
     fn bim_extract_ok(&mut self) -> Task<Message> {
         let Some(dialog) = self.bim_extract.as_ref() else {
             return Task::none();
@@ -423,7 +434,7 @@ impl OpenCADStudio {
         };
         let tab_id = dialog.tab_id;
         let elaborati = dialog.elaborati();
-        let layer = dialog.layer.clone();
+        let layer = dialog.layer.trim().to_string();
         let overwrite = dialog.confirm_overwrite;
         let Some(i) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             self.bim_close_extract();
@@ -431,7 +442,20 @@ impl OpenCADStudio {
                 .push_error("AL_ESTRAI: il disegno non è più aperto. Niente è stato scritto.");
             return Task::none();
         };
-        match self.bim_run_extract(i, &dir, elaborati, layer, overwrite) {
+        if let Some(error) = new_walls_layer_error(&self.tabs[i].scene.document, &elaborati, &layer)
+        {
+            // La finestra resta aperta: si corregge il nome e si riprova.
+            self.command_line.push_error(&error);
+            return Task::none();
+        }
+        let progetto = elaborati.contains(&Elaborato::StatoDiProgetto);
+        match self.bim_run_extract(i, &dir, elaborati, layer.clone(), overwrite) {
+            Ok(_) => {
+                if progetto {
+                    self.bim_remember_new_walls_layer(i, &layer);
+                }
+                self.bim_close_extract();
+            }
             Err(WriteError::Exists(_)) if !overwrite => {
                 if let Some(dialog) = self.bim_extract.as_mut() {
                     dialog.confirm_overwrite = true;
@@ -457,14 +481,19 @@ impl OpenCADStudio {
     }
 
     /// Estrae `elaborati` dal disegno `i` e li scrive in `dir` con il nome del
-    /// disegno; con `overwrite` falso un file esistente ferma tutto prima di
-    /// scrivere (`Exists`). Dice tutto in riga di comando tranne `Exists`, che
-    /// il chiamante tratta a modo suo (rifiuto o conferma):
-    /// - riuscita: il layer dei muri nuovi nel record, se è cambiato, «scritti
-    ///   n file» e una riga per avviso;
+    /// disegno; i muri nuovi dello stato di progetto vanno su `layer` (senza
+    /// spazi attorno; vuoto o non valido, se c'è il progetto, è un errore:
+    /// [`new_walls_layer_error`]). Con `overwrite` falso un
+    /// file esistente ferma tutto prima di scrivere (`Exists`). Dice tutto in
+    /// riga di comando tranne `Exists`, che il chiamante tratta a modo suo
+    /// (rifiuto o conferma):
+    /// - riuscita: «scritti n file», il layer dei muri nuovi da creare se il
+    ///   disegno non lo ha, e una riga per avviso;
     /// - errore prima del primo file: la frase, «Niente è stato scritto.»;
     /// - errore dopo (`Partial`): la frase con i file già scritti, poi gli
     ///   avvisi, che valgono per quei file rimasti sul disco.
+    ///
+    /// Il layer non si ricorda qui: lo fa la finestra, dove lo si sceglie.
     fn bim_run_extract(
         &mut self,
         i: usize,
@@ -477,6 +506,12 @@ impl OpenCADStudio {
             self.command_line.push_error(&format!("AL_ESTRAI: {error}"));
             return Err(WriteError::Io(error));
         }
+        let layer = layer.trim().to_string();
+        if let Some(error) = new_walls_layer_error(&self.tabs[i].scene.document, &elaborati, &layer)
+        {
+            self.command_line.push_error(&error);
+            return Err(WriteError::Io(error));
+        }
         let unit = match units::resolve(&self.tabs[i].scene.document) {
             UnitLookup::Known(unit) => unit,
             // Chi chiama ha già chiesto l'unità: qui non si inventa.
@@ -486,7 +521,7 @@ impl OpenCADStudio {
                 return Err(WriteError::Io(error.into()));
             }
         };
-        let layer = layer.trim().to_string();
+        let progetto = elaborati.contains(&Elaborato::StatoDiProgetto);
         let opts = ExtractOptions {
             elaborati,
             new_walls_layer: layer.clone(),
@@ -496,15 +531,21 @@ impl OpenCADStudio {
         let extracted = extract::extract(&self.tabs[i].scene.document, &opts);
         let tab = &self.tabs[i];
         let base = base_name(tab.current_path.as_deref(), &tab.tab_title);
+        let new_layer = progetto && !tab.scene.document.layers.contains(&layer);
         let result = extract::write(&extracted, dir, &base, overwrite);
         match &result {
             Ok(written) => {
-                self.bim_remember_new_walls_layer(i, &layer);
                 self.command_line.push_info(&format!(
                     "AL_ESTRAI: scritti {} file in {}.",
                     written.len(),
                     dir.display()
                 ));
+                if new_layer {
+                    self.command_line.push_info(&format!(
+                        "AL_ESTRAI: il layer {layer} dei muri nuovi non c'è nel disegno: \
+                         creato nello stato di progetto con colore e tipo di linea predefiniti."
+                    ));
+                }
                 self.bim_push_notices(&extracted.notices);
             }
             Err(WriteError::Exists(_)) => {}
@@ -598,11 +639,48 @@ fn unquote(text: &str) -> &str {
         .trim()
 }
 
-/// Il layer dei muri nuovi da proporre: quello ricordato nel record; senza
-/// record, per ora nessuno (la proposta dal layer più frequente dei muri
-/// arriva con lo stato di progetto).
-fn initial_new_walls_layer(doc: &CadDocument) -> String {
-    record::read(doc).new_walls_layer.unwrap_or_default()
+/// Il layer dei muri nuovi da proporre (spec §5.5): quello ricordato nel
+/// record, altrimenti il più frequente tra i muri del disegno
+/// ([`extract::propose_new_walls_layer`]); `None` se non c'è né l'uno né
+/// l'altro.
+fn proposed_new_walls_layer(doc: &CadDocument) -> Option<String> {
+    record::read(doc)
+        .new_walls_layer
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| extract::propose_new_walls_layer(doc))
+}
+
+/// Perché `layer` (già senza spazi attorno) non va bene per i muri nuovi dello
+/// stato di progetto, se lo si chiede: vuoto, oppure un nome che AutoCAD non
+/// accetta per un layer nuovo (uno di `<>/\":;?*|=` o l'apice inverso, un
+/// carattere di controllo, più di 255 caratteri). Un layer che il disegno ha
+/// già va sempre bene.
+fn new_walls_layer_error(
+    doc: &CadDocument,
+    elaborati: &[Elaborato],
+    layer: &str,
+) -> Option<String> {
+    if !elaborati.contains(&Elaborato::StatoDiProgetto) || doc.layers.contains(layer) {
+        return None;
+    }
+    if layer.is_empty() {
+        return Some(
+            "AL_ESTRAI: indica il layer dei muri nuovi per lo stato di progetto. \
+             Niente è stato scritto."
+                .into(),
+        );
+    }
+    let invalid = layer.chars().count() > 255
+        || layer
+            .chars()
+            .any(|c| "<>/\\\":;?*|=`".contains(c) || c.is_control());
+    invalid.then(|| {
+        format!(
+            "AL_ESTRAI: «{layer}» non è un nome di layer valido (niente <>/\\\":;?*|=` \
+             né caratteri di controllo, al massimo 255 caratteri). Niente è stato scritto."
+        )
+    })
 }
 
 /// Il nome di base dei file estratti: il file del disegno senza estensione
@@ -823,13 +901,59 @@ fn last_new_thickness(zones: &[ZoneGeom]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_name, commits_to_model_space, exists_text, file_names, folder_error, parse_positive,
-        partial_failure_text, safe_file_stem, unquote, StatoChange,
+        base_name, commits_to_model_space, exists_text, file_names, folder_error,
+        new_walls_layer_error, parse_positive, partial_failure_text, safe_file_stem, unquote,
+        StatoChange,
     };
+    use crate::bim::extract::Elaborato;
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
-    use codec::Handle;
+    use codec::tables::Layer;
+    use codec::{CadDocument, Handle};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn new_walls_layer_must_be_a_valid_name_for_the_project() {
+        let mut doc = CadDocument::new();
+        let mut old = Layer::new("VECCHIO;LAYER");
+        old.handle = doc.allocate_handle();
+        doc.layers.add(old).unwrap();
+        let progetto = [Elaborato::StatoDiFatto, Elaborato::StatoDiProgetto];
+        for good in [
+            "MURI NUOVI",
+            "0",
+            "Muri-nuovi_2",
+            "VECCHIO;LAYER",
+            "vecchio;layer",
+        ] {
+            assert_eq!(
+                new_walls_layer_error(&doc, &progetto, good),
+                None,
+                "{good:?}"
+            );
+        }
+        assert_eq!(
+            new_walls_layer_error(&doc, &progetto, &"x".repeat(255)),
+            None
+        );
+        let empty = new_walls_layer_error(&doc, &progetto, "").unwrap();
+        assert!(empty.starts_with("AL_ESTRAI: indica il layer"), "{empty}");
+        for bad in [
+            "A<B", "A>B", "A/B", "A\\B", "A\"B", "A:B", "A;B", "A?B", "A*B", "A|B", "A=B", "A`B",
+            "A\tB",
+        ] {
+            let error = new_walls_layer_error(&doc, &progetto, bad).unwrap();
+            assert!(error.contains("non è un nome di layer valido"), "{bad:?}");
+            assert!(error.ends_with("Niente è stato scritto."), "{error}");
+        }
+        assert!(new_walls_layer_error(&doc, &progetto, &"x".repeat(256)).is_some());
+        // Senza stato di progetto il layer non serve.
+        assert_eq!(
+            new_walls_layer_error(&doc, &[Elaborato::StatoDiFatto], ""),
+            None
+        );
+        assert_eq!(new_walls_layer_error(&doc, &[], "A/B"), None);
+    }
 
     #[test]
     fn base_names_are_valid_file_names() {

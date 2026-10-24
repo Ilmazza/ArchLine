@@ -1,6 +1,7 @@
 //! Estrazione degli elaborati in DWG 2D ordinari (spec §5.5): lo stato di
-//! fatto (il rilievo senza zone) e demolizioni e costruzioni (il rilievo con le
-//! campiture gialle e rosse). Lo stato di progetto arriva con il Task 12.
+//! fatto (il rilievo senza zone), demolizioni e costruzioni (il rilievo con le
+//! campiture gialle e rosse) e lo stato di progetto (la geometria di
+//! [`project_geometry`], spec §5.4, con i muri nuovi sul layer scelto).
 //!
 //! Il file estratto si apre senza ArchLine: solo spazio modello, nessun XDATA
 //! e nessun APPID `ARCHLINE_*`, nessun record `ARCHLINE_PROGETTO` (il
@@ -21,13 +22,15 @@
 //! `Portability`), gli handle che la copia non restituisce e, per layout, lo
 //! spazio carta.
 //!
-//! Il disegno di lavoro non si tocca: si lavora su una sua copia.
+//! Il disegno di lavoro non si tocca: si lavora su una sua copia, e le entità
+//! nuove dello stato di progetto (pezzi dei muri tagliati, chiusure, muri
+//! nuovi) entrano solo in quella copia, prima della copia nel documento nuovo.
 
 use std::path::{Path, PathBuf};
 
 use codec::entities::{Insert, MLine};
 use codec::objects::{MLineStyle, ObjectType};
-use codec::tables::{BlockRecord, DimStyle, TextStyle};
+use codec::tables::{BlockRecord, DimStyle, Layer, TextStyle};
 use codec::xdata::ExtendedData;
 use codec::{CadDocument, DxfVersion, EntityType, Handle, Vector3};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -36,9 +39,15 @@ use crate::app::{copy_to_clipboard_kernel, paste_entities_kernel, ClipboardDeps,
 use crate::modules::insert::wblock::extract_entities_into;
 use crate::scene::view::dispatch::set_entity_xdata;
 
+use super::project::project_geometry;
 use super::report::Notice;
 use super::units::DrawingUnit;
+use super::walls::{is_wall_entity, wall_set};
+use super::zone::zones_in;
 use super::{APP_ZONA, LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
+
+/// Il layer dei muri nuovi quando il nome dato è vuoto.
+const DEFAULT_LAYER: &str = "0";
 
 /// Prefisso degli APPID di ArchLine (`ARCHLINE_ZONA`, `ARCHLINE_LOCALE`).
 const APP_PREFIX: &str = "ARCHLINE_";
@@ -68,7 +77,9 @@ impl Elaborato {
 /// Cosa estrarre e con quali impostazioni.
 pub struct ExtractOptions {
     pub elaborati: Vec<Elaborato>,
-    /// Layer dei muri nuovi dello stato di progetto.
+    /// Layer dei muri nuovi dello stato di progetto, senza badare agli spazi
+    /// attorno né alle maiuscole; vuoto vale «0». Può non esistere nel disegno:
+    /// si crea nel DWG di progetto.
     pub new_walls_layer: String,
     pub unit: DrawingUnit,
     /// Tolleranza geometrica, in unità del disegno.
@@ -87,12 +98,17 @@ pub struct Extracted {
 /// - **fatto**: lo spazio modello senza le zone (ogni entità con un record
 ///   `ARCHLINE_ZONA`, leggibile o no) e senza i layer `AL-LOCALI-PROGETTO`;
 /// - **comparativa**: lo spazio modello senza i layer `AL-LOCALI` e
-///   `AL-LOCALI-PROGETTO`, cioè con le zone.
+///   `AL-LOCALI-PROGETTO`, cioè con le zone;
+/// - **progetto**: la pianta di [`project_geometry`] — i muri non toccati, i
+///   pezzi di quelli tagliati, le chiusure e i muri nuovi (questi sul layer dei
+///   muri nuovi, creato se manca: [`ensure_new_walls_layer`]) — più le entità
+///   non muro dello spazio modello tranne le zone, i layer `AL-LOCALI*` e le
+///   entità escluse (dentro una zona demolita); prima i suoi avvisi, poi
+///   [`Notice::FuoriPiano`] per i muri fuori piano, che non si tagliano.
 ///
-/// In fondo, se è uscito almeno un documento, un avviso per ogni layout con
-/// entità: lo spazio carta non si estrae.
-///
-/// `StatoDiProgetto` per ora si salta, senza documento né avviso (Task 12).
+/// I tre documenti passano dalla stessa copia ([`copy_out`]). In fondo, se è
+/// uscito almeno un documento, un avviso per ogni layout con entità: lo
+/// spazio carta non si estrae.
 pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
     let mut ex = Extracted {
         docs: Vec::new(),
@@ -103,18 +119,51 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
         }
-        let handles = match elaborato {
-            Elaborato::StatoDiFatto => model_space_handles(src, |_, entity| {
-                !carries_zone_record(entity, zone_app)
-                    && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
-            }),
-            Elaborato::DemolizioniCostruzioni => model_space_handles(src, |_, entity| {
-                !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
-            }),
-            Elaborato::StatoDiProgetto => continue,
-        };
         let mut work = src.clone();
-        let (out, notices) = copy_out(src, &mut work, &handles);
+        let (out, notices) = match elaborato {
+            Elaborato::StatoDiFatto => {
+                let handles = model_space_handles(src, |_, entity| {
+                    !carries_zone_record(entity, zone_app)
+                        && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
+                });
+                copy_out(src, &mut work, &handles, None)
+            }
+            Elaborato::DemolizioniCostruzioni => {
+                let handles = model_space_handles(src, |_, entity| {
+                    !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
+                });
+                copy_out(src, &mut work, &handles, None)
+            }
+            Elaborato::StatoDiProgetto => {
+                let layer = new_walls_layer_name(src, &opts.new_walls_layer);
+                let walls = wall_set(src, opts.tol);
+                let pg = project_geometry(src, &walls, &zones_in(src), &layer, opts.tol);
+                let wall_handles: FxHashSet<Handle> =
+                    walls.entities.iter().map(|(handle, _)| *handle).collect();
+                let kept: FxHashSet<Handle> = pg.kept_originals.iter().copied().collect();
+                let excluded: FxHashSet<Handle> = pg.excluded.iter().copied().collect();
+                let mut handles = model_space_handles(src, |handle, entity| {
+                    if wall_handles.contains(&handle) {
+                        kept.contains(&handle)
+                    } else {
+                        !carries_zone_record(entity, zone_app)
+                            && !on_rooms_layer(entity)
+                            && !excluded.contains(&handle)
+                    }
+                });
+                handles.extend(add_drawn(&mut work, &pg.drawn));
+                push_unique(&mut ex.notices, pg.notices);
+                if walls.off_plane > 0 {
+                    push_unique(
+                        &mut ex.notices,
+                        vec![Notice::FuoriPiano {
+                            count: walls.off_plane,
+                        }],
+                    );
+                }
+                copy_out(src, &mut work, &handles, Some(&layer))
+            }
+        };
         ex.docs.push((elaborato, out));
         push_unique(&mut ex.notices, notices);
     }
@@ -208,14 +257,96 @@ fn on_layers(entity: &EntityType, layers: &[&str]) -> bool {
     layers.iter().any(|name| layer.eq_ignore_ascii_case(name))
 }
 
+/// L'entità sta su un layer `AL-LOCALI*` (locali di fatto e di progetto)?
+fn on_rooms_layer(entity: &EntityType) -> bool {
+    entity
+        .common()
+        .layer
+        .get(..LAYER_LOCALI.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(LAYER_LOCALI))
+}
+
+/// Il layer dei muri nuovi: il nome senza spazi attorno («0» se vuoto), scritto
+/// come nella tabella dei layer di `src` se c'è.
+fn new_walls_layer_name(src: &CadDocument, name: &str) -> String {
+    let name = match name.trim() {
+        "" => DEFAULT_LAYER,
+        name => name,
+    };
+    src.layers
+        .get(name)
+        .map_or_else(|| name.to_string(), |layer| layer.name.clone())
+}
+
+/// Le entità disegnate dalla geometria di progetto (pezzi, chiusure, muri
+/// nuovi) entrano in `work`, mai in `src`, come entità nuove dello spazio
+/// modello: handle nuovi, layer risolto per nome in `work` (nessuno se manca:
+/// lo crea [`ensure_new_walls_layer`] nel documento d'uscita) e nessun XDATA,
+/// nemmeno di altre applicazioni (quello dei pezzi era dell'entità intera).
+/// Restituisce i loro handle, nell'ordine.
+fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> Vec<Handle> {
+    let model = work
+        .block_records
+        .iter()
+        .find(|record| record.is_model_space())
+        .map(|record| record.handle);
+    drawn
+        .iter()
+        .cloned()
+        .filter_map(|mut entity| {
+            let layer_handle = work
+                .layers
+                .get(&entity.common().layer)
+                .map(|layer| layer.handle)
+                .filter(|handle| !handle.is_null());
+            let common = entity.common_mut();
+            common.handle = Handle::NULL;
+            common.layer_handle = layer_handle;
+            common.extended_data = ExtendedData::new();
+            if let Some(model) = model {
+                common.owner_handle = model;
+            }
+            work.add_entity(entity).ok()
+        })
+        .collect()
+}
+
+/// Il layer dei muri nuovi in `out`. La copia lo porta quando un'entità
+/// copiata lo usa; altrimenti (nessun muro nuovo, o un layer che in `src` non
+/// c'è) lo si crea qui, con un handle nuovo e con colore, tipo di linea e
+/// spessore di linea del layer omonimo di `src`, se c'è, o con i valori
+/// predefiniti. Senza, il DWG metterebbe i muri nuovi sul layer «0». Il tipo di
+/// linea, se manca, lo porta poi [`copy_layer_linetypes`].
+fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) {
+    if out.layers.contains(name) {
+        return;
+    }
+    let mut layer = match src.layers.get(name) {
+        Some(from) => {
+            let mut layer = Layer::new(from.name.clone());
+            layer.color = from.color;
+            layer.color_name = from.color_name.clone();
+            layer.book_name = from.book_name.clone();
+            layer.line_type = from.line_type.clone();
+            layer.line_weight = from.line_weight;
+            layer
+        }
+        None => Layer::new(name),
+    };
+    layer.handle = out.allocate_handle();
+    let _ = out.layers.add(layer);
+}
+
 /// Passi 3-6 per gli handle scelti in `work` (copia di `src`): fuori ciò che
 /// la copia non porta intero, via i nostri record, copia in un documento nuovo
-/// con versione, unità e impostazioni di `src`, tipi di linea dei layer, avvisi
-/// per ciò che non si copia (nell'ordine degli handle).
+/// con versione, unità e impostazioni di `src`, il layer dei muri nuovi se
+/// dato, tipi di linea dei layer, avvisi per ciò che non si copia (nell'ordine
+/// degli handle).
 fn copy_out(
     src: &CadDocument,
     work: &mut CadDocument,
     handles: &[Handle],
+    new_walls_layer: Option<&str>,
 ) -> (CadDocument, Vec<Notice>) {
     let left_out: FxHashSet<Handle> = {
         let mut portable = Portability::new(work);
@@ -241,6 +372,9 @@ fn copy_out(
     // nessuno copiabile): il documento resta vuoto e gli avvisi sotto
     // elencano gli handle non copiati.
     let _ = extract_entities_into(work, &handles_in, &mut out);
+    if let Some(name) = new_walls_layer {
+        ensure_new_walls_layer(src, &mut out, name);
+    }
     out.header.insertion_units = src.header.insertion_units;
     copy_drawing_settings(src, &mut out);
     copy_mline_styles(src, &mut out);
@@ -855,6 +989,37 @@ fn copy_layer_plot_styles(src: &CadDocument, out: &mut CadDocument) {
     }
 }
 
+/// Il layer da proporre per i muri nuovi (spec §5.5): il più frequente tra le
+/// entità muro dello spazio modello ([`is_wall_entity`]), senza distinguere le
+/// maiuscole come tutti i nomi dei layer, scritto come nella tabella dei layer
+/// (o come la prima entità, se la tabella non lo ha). A parità vince l'ordine
+/// alfabetico. `None` senza entità muro.
+pub fn propose_new_walls_layer(doc: &CadDocument) -> Option<String> {
+    // Nome in maiuscolo → (nome da mostrare, entità).
+    let mut counts: FxHashMap<String, (String, usize)> = FxHashMap::default();
+    for handle in model_space_handles(doc, |_, entity| is_wall_entity(doc, entity)) {
+        let Some(entity) = doc.get_entity(handle) else {
+            continue;
+        };
+        let layer = &entity.common().layer;
+        if layer.trim().is_empty() {
+            continue;
+        }
+        let entry = counts.entry(layer.to_uppercase()).or_insert_with(|| {
+            let name = doc
+                .layers
+                .get(layer)
+                .map_or_else(|| layer.clone(), |found| found.name.clone());
+            (name, 0)
+        });
+        entry.1 += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|(a_key, (_, a)), (b_key, (_, b))| a.cmp(b).then_with(|| b_key.cmp(a_key)))
+        .map(|(_, (name, _))| name)
+}
+
 /// `"{base}_{suffisso}.dwg"`.
 pub fn file_name(base: &str, e: Elaborato) -> String {
     format!("{base}_{}.dwg", e.suffix())
@@ -949,51 +1114,67 @@ mod tests {
         }
     }
 
-    /// Caso A in metri (linee continue, INSUNITS 6), una zona demolita sul
-    /// tramezzo (asse (4,05; 0)-(4,05; 3)) e una zona nuova da 0,12 sull'asse
-    /// (2; 0,5)-(2; 2,5), più il record `ARCHLINE_PROGETTO`.
-    fn doc_with_zones() -> CadDocument {
+    /// Il caso A in metri (INSUNITS 6) nella forma data, con i layer `AL-*`.
+    fn case_a_doc(form: Form) -> CadDocument {
         let mut doc = CadDocument::new();
         doc.header.insertion_units = 6;
         let mut muri = Layer::new(LAYER_MURI);
         muri.handle = doc.allocate_handle();
         doc.layers.add(muri).unwrap();
-        for entity in case_a(Form::Continua, M) {
+        for entity in case_a(form, M) {
             doc.add_entity(entity).unwrap();
         }
         ensure_layers(&mut doc);
+        doc
+    }
 
+    /// Una zona demolita «muro tra due punti» sull'asse `p1`-`p2`, sulle facce
+    /// dei muri di `doc`.
+    fn add_demolition(doc: &mut CadDocument, p1: [f64; 2], p2: [f64; 2]) -> Handle {
         let tol = M.tolerance();
-        let walls = wall_set(&doc, tol);
-        let tramezzo = rect_from_axis(
-            &walls.sources,
-            [4.05, 0.0],
-            [4.05, 3.0],
-            M.metres(MAX_WALL_THICKNESS_M),
-            tol,
-        )
-        .unwrap();
+        let walls = wall_set(doc, tol);
+        let rect = rect_from_axis(&walls.sources, p1, p2, M.metres(MAX_WALL_THICKNESS_M), tol)
+            .expect("muro sull'asse");
         let demolita = Zone {
             state: ZoneState::Demolito,
             origin: ZoneOrigin::MuroDuePunti,
-            axis: Some(tramezzo.axis),
-            thickness: Some(tramezzo.thickness),
+            axis: Some(rect.axis),
+            thickness: Some(rect.thickness),
             height: None,
             varco: false,
         };
-        doc.add_entity(zone_hatch(&demolita, &[tramezzo.ring()]))
-            .unwrap();
+        doc.add_entity(zone_hatch(&demolita, &[rect.ring()]))
+            .unwrap()
+    }
 
-        let muro = rect_from_axis_thickness([2.0, 0.5], [2.0, 2.5], 0.12).unwrap();
+    /// Una zona nuova «linea + spessore».
+    fn add_new_wall(doc: &mut CadDocument, p1: [f64; 2], p2: [f64; 2], thickness: f64) -> Handle {
+        let rect = rect_from_axis_thickness(p1, p2, thickness).unwrap();
         let nuova = Zone {
             state: ZoneState::Nuovo,
             origin: ZoneOrigin::LineaSpessore,
-            axis: Some(muro.axis),
-            thickness: Some(0.12),
+            axis: Some(rect.axis),
+            thickness: Some(thickness),
             height: None,
             varco: false,
         };
-        doc.add_entity(zone_hatch(&nuova, &[muro.ring()])).unwrap();
+        doc.add_entity(zone_hatch(&nuova, &[rect.ring()])).unwrap()
+    }
+
+    /// Il caso A in metri nella forma data, con il tramezzo demolito per
+    /// intero (asse (4,05; 0)-(4,05; 3)).
+    fn doc_with_demolition(form: Form) -> CadDocument {
+        let mut doc = case_a_doc(form);
+        add_demolition(&mut doc, [4.05, 0.0], [4.05, 3.0]);
+        doc
+    }
+
+    /// Caso A in metri (linee continue, INSUNITS 6), una zona demolita sul
+    /// tramezzo (asse (4,05; 0)-(4,05; 3)) e una zona nuova da 0,12 sull'asse
+    /// (2; 0,5)-(2; 2,5), più il record `ARCHLINE_PROGETTO`.
+    fn doc_with_zones() -> CadDocument {
+        let mut doc = doc_with_demolition(Form::Continua);
+        add_new_wall(&mut doc, [2.0, 0.5], [2.0, 2.5], 0.12);
 
         record::write(
             &mut doc,
@@ -1094,6 +1275,14 @@ mod tests {
 
     fn both() -> [Elaborato; 2] {
         [Elaborato::StatoDiFatto, Elaborato::DemolizioniCostruzioni]
+    }
+
+    fn all_three() -> [Elaborato; 3] {
+        [
+            Elaborato::StatoDiFatto,
+            Elaborato::DemolizioniCostruzioni,
+            Elaborato::StatoDiProgetto,
+        ]
     }
 
     #[test]
@@ -1202,12 +1391,18 @@ mod tests {
                     .collect::<Vec<_>>(),
                 doc.objects.len(),
                 record::read(doc),
+                doc.layers
+                    .iter()
+                    .map(|l| l.name.clone())
+                    .collect::<Vec<_>>(),
             )
         };
         let before = snapshot(&src);
-        let ex = extract(&src, &opts(&both()));
-        assert_eq!(ex.docs.len(), 2);
+        let next_handle = src.next_handle();
+        let ex = extract(&src, &opts(&all_three()));
+        assert_eq!(ex.docs.len(), 3);
         assert!(snapshot(&src) == before, "il disegno di lavoro è cambiato");
+        assert_eq!(src.next_handle(), next_handle, "handle presi da src");
         // Le zone di src hanno ancora il loro record.
         assert_eq!(crate::bim::zone::zones_in(&src).len(), 2);
     }
@@ -1395,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn progetto_is_skipped_for_now_and_duplicates_once() {
+    fn each_elaborato_once_in_the_order_asked() {
         let src = doc_with_zones();
         let ex = extract(
             &src,
@@ -1404,14 +1599,19 @@ mod tests {
                 Elaborato::StatoDiProgetto,
                 Elaborato::StatoDiFatto,
                 Elaborato::DemolizioniCostruzioni,
+                Elaborato::StatoDiProgetto,
             ]),
         );
         let kinds: Vec<_> = ex.docs.iter().map(|(e, _)| *e).collect();
         assert_eq!(
             kinds,
-            vec![Elaborato::DemolizioniCostruzioni, Elaborato::StatoDiFatto]
+            vec![
+                Elaborato::DemolizioniCostruzioni,
+                Elaborato::StatoDiProgetto,
+                Elaborato::StatoDiFatto
+            ]
         );
-        assert!(ex.notices.is_empty());
+        assert!(ex.notices.is_empty(), "{:?}", ex.notices);
         assert!(extract(&src, &opts(&[])).docs.is_empty());
     }
 
@@ -1762,10 +1962,10 @@ mod tests {
         );
         // Nello spazio modello estratto la linea della carta non c'è.
         assert_eq!(model_space_count(&ex.docs[0].1), 12);
-        // Solo il progetto (per ora saltato): nessun documento, nessun avviso.
-        assert!(extract(&src, &opts(&[Elaborato::StatoDiProgetto]))
-            .notices
-            .is_empty());
+        // Anche il solo progetto elenca il layout.
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiProgetto]));
+        assert_eq!(ex.docs.len(), 1);
+        assert_eq!(ex.notices, vec![non_copiata(paper, "Layout Layout1")]);
     }
 
     /// R27: variabili di testata, layer «0» e stile di testo «Standard».
@@ -2308,5 +2508,519 @@ mod tests {
             let loaded = crate::io::load_file(&path).unwrap();
             check(&loaded, "dopo il DWG");
         }
+    }
+
+    // ---- Stato di progetto (Task 12) ----
+
+    fn near(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() <= 1e-6 && (a[1] - b[1]).abs() <= 1e-6
+    }
+
+    fn xy(v: Vector3) -> [f64; 2] {
+        [v.x, v.y]
+    }
+
+    /// Le `LINE` dello spazio modello di `doc`, con il layer.
+    fn model_lines(doc: &CadDocument) -> Vec<(String, [f64; 2], [f64; 2])> {
+        let model = doc
+            .block_records
+            .iter()
+            .find(|r| r.is_model_space())
+            .unwrap();
+        model
+            .entity_handles
+            .iter()
+            .filter_map(|&h| match doc.get_entity(h) {
+                Some(EntityType::Line(l)) => Some((l.common.layer.clone(), xy(l.start), xy(l.end))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// I tratti dritti dello spazio modello: le `LINE` e i lati delle
+    /// `LWPOLYLINE` (chiusura compresa).
+    fn model_segments(doc: &CadDocument) -> Vec<([f64; 2], [f64; 2])> {
+        let mut segments: Vec<_> = model_lines(doc)
+            .into_iter()
+            .map(|(_, a, b)| (a, b))
+            .collect();
+        for entity in doc.entities() {
+            let EntityType::LwPolyline(p) = entity else {
+                continue;
+            };
+            let points: Vec<[f64; 2]> = p
+                .vertices
+                .iter()
+                .map(|v| [v.location.x, v.location.y])
+                .collect();
+            let count = if p.is_closed {
+                points.len()
+            } else {
+                points.len().saturating_sub(1)
+            };
+            for k in 0..count {
+                segments.push((points[k], points[(k + 1) % points.len()]));
+            }
+        }
+        segments
+    }
+
+    /// C'è una `LINE` da `a` a `b`, in qualunque verso, entro 1e-6?
+    fn has_line(doc: &CadDocument, a: [f64; 2], b: [f64; 2]) -> bool {
+        model_lines(doc)
+            .iter()
+            .any(|(_, p, q)| (near(*p, a) && near(*q, b)) || (near(*p, b) && near(*q, a)))
+    }
+
+    /// Un tratto dritto su `x` (entro 1e-6) con una parte in `y0 < y < y1`?
+    fn stretch_on_x(doc: &CadDocument, x: f64, (y0, y1): (f64, f64)) -> bool {
+        model_segments(doc).iter().any(|(a, b)| {
+            let on_x = (a[0] - x).abs() <= 1e-6 && (b[0] - x).abs() <= 1e-6;
+            let (lo, hi) = (a[1].min(b[1]), a[1].max(b[1]));
+            on_x && lo.max(y0) < hi.min(y1) - 1e-6
+        })
+    }
+
+    fn sorted_texts(notices: &[Notice]) -> Vec<String> {
+        let mut texts: Vec<String> = notices.iter().map(Notice::text).collect();
+        texts.sort();
+        texts
+    }
+
+    /// Nessuna campitura sui layer `AL-*`: le zone non entrano nel progetto.
+    #[track_caller]
+    fn assert_no_zone_hatches(out: &CadDocument) {
+        assert!(
+            !hatches(out)
+                .iter()
+                .any(|h| h.common.layer.to_ascii_uppercase().starts_with("AL-")),
+            "campitura sui layer AL-* nel progetto"
+        );
+    }
+
+    /// Caso A a linee continue, tramezzo demolito per intero: le facce del
+    /// tramezzo spariscono, le due facce esterne si chiudono con una `LINE`
+    /// ciascuna, il resto del rilievo resta com'è; il DWG si rilegge uguale.
+    #[test]
+    fn progetto_closes_outer_faces_and_has_no_tramezzo() {
+        let src = doc_with_demolition(Form::Continua);
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiProgetto]));
+        assert_eq!(ex.docs.len(), 1);
+        let (e, out) = &ex.docs[0];
+        assert_eq!(*e, Elaborato::StatoDiProgetto);
+        assert!(ex.notices.is_empty(), "{:?}", ex.notices);
+
+        #[track_caller]
+        fn check(out: &CadDocument, src: &CadDocument, what: &str) {
+            assert!(
+                has_line(out, [4.0, 0.0], [4.1, 0.0]),
+                "{what}: chiusura sud"
+            );
+            assert!(
+                has_line(out, [4.0, 3.0], [4.1, 3.0]),
+                "{what}: chiusura nord"
+            );
+            for x in [4.0, 4.1] {
+                assert!(
+                    !stretch_on_x(out, x, (0.0, 3.0)),
+                    "{what}: faccia del tramezzo x = {x} rimasta"
+                );
+            }
+            assert_no_zone_hatches(out);
+            assert!(hatches(out).is_empty(), "{what}");
+            assert_no_archline_data(out);
+            // Le linee del rilievo fuori dalla zona sono le stesse, al micron.
+            let out_lines = model_lines(out);
+            let tramezzo_face = |a: &[f64; 2], b: &[f64; 2]| {
+                [4.0, 4.1]
+                    .iter()
+                    .any(|x| (a[0] - x).abs() <= 1e-6 && (b[0] - x).abs() <= 1e-6)
+            };
+            let kept: Vec<_> = model_lines(src)
+                .into_iter()
+                .filter(|(_, a, b)| !tramezzo_face(a, b))
+                .collect();
+            assert_eq!(kept.len(), 10, "{what}");
+            for (layer, a, b) in &kept {
+                assert!(
+                    out_lines
+                        .iter()
+                        .any(|(l, p, q)| l == layer && near(*p, *a) && near(*q, *b)),
+                    "{what}: manca la LINE {a:?}-{b:?}"
+                );
+            }
+            // 10 linee del rilievo e 2 chiusure, tutte sul layer dei muri.
+            assert_eq!(out_lines.len(), 12, "{what}");
+            assert!(out_lines.iter().all(|(l, _, _)| l == LAYER_MURI), "{what}");
+            assert_eq!(model_space_count(out), 12, "{what}");
+        }
+        check(out, &src, "in memoria");
+
+        let tmp = TempDir::new("progetto");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        assert_eq!(written, vec![tmp.0.join("casa_stato-di-progetto.dwg")]);
+        let loaded = crate::io::load_file(&written[0]).unwrap();
+        assert_eq!(loaded.entities().count(), out.entities().count());
+        assert_eq!(loaded.header.insertion_units, 6);
+        check(&loaded, &src, "dopo il DWG");
+    }
+
+    /// Una polilinea chiusa per muro: le teste del tramezzo coincidono con i
+    /// muri sud e nord, quindi niente chiusure e due giunzioni negli avvisi. I
+    /// pezzi della polilinea tagliata non portano XDATA (nemmeno di altre
+    /// applicazioni); i muri non toccati tengono quello degli altri.
+    #[test]
+    fn progetto_closed_walls_lists_junctions_and_pieces_lose_xdata() {
+        let mut src = doc_with_demolition(Form::ChiusaPerMuro);
+        for name in ["ALTRA_APP", "ARCHLINE_FUTURA"] {
+            let mut app = codec::tables::AppId::new(name);
+            app.handle = src.allocate_handle();
+            src.app_ids.add(app).unwrap();
+        }
+        let first_vertex = |doc: &CadDocument, at: [f64; 2]| {
+            doc.entities()
+                .find_map(|e| match e {
+                    EntityType::LwPolyline(p) if near(xy_of(p.vertices[0].location), at) => {
+                        Some(p.common.handle)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        fn xy_of(v: Vector2) -> [f64; 2] {
+            [v.x, v.y]
+        }
+        let tramezzo = first_vertex(&src, [4.0, 0.0]);
+        let sud = first_vertex(&src, [-0.3, -0.3]);
+        let mut other = ExtendedDataRecord::new("ALTRA_APP");
+        other.add_value(XDataValue::Integer16(7));
+        for handle in [tramezzo, sud] {
+            let common = src.get_entity_mut(handle).unwrap().common_mut();
+            common.extended_data.add_record(other.clone());
+        }
+        let mut future = ExtendedDataRecord::new("ARCHLINE_FUTURA");
+        future.add_value(XDataValue::Integer16(1));
+        src.get_entity_mut(tramezzo)
+            .unwrap()
+            .common_mut()
+            .extended_data
+            .add_record(future);
+        let entities_before = src.entities().count();
+
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiProgetto]));
+        let (_, out) = &ex.docs[0];
+        assert_eq!(
+            sorted_texts(&ex.notices),
+            sorted_texts(&[
+                Notice::GiunzioneDaVerificare { at: [4.05, 0.0] },
+                Notice::GiunzioneDaVerificare { at: [4.05, 3.0] },
+            ])
+        );
+        assert!(ex.notices.iter().all(|n| matches!(
+            n,
+            Notice::GiunzioneDaVerificare { at } if near(*at, [4.05, 0.0]) || near(*at, [4.05, 3.0])
+        )));
+        for x in [4.0, 4.1] {
+            assert!(!stretch_on_x(out, x, (0.0, 3.0)), "faccia x = {x} rimasta");
+        }
+        assert!(model_lines(out).is_empty(), "nessuna chiusura: giunzioni");
+        assert_no_zone_hatches(out);
+        assert_no_archline_data(out);
+
+        let polylines: Vec<&LwPolyline> = out
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::LwPolyline(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        // Sud, nord, ovest, est intere; del tramezzo restano le due teste.
+        let (pieces, whole): (Vec<&LwPolyline>, Vec<&LwPolyline>) =
+            polylines.into_iter().partition(|p| !p.is_closed);
+        assert_eq!(whole.len(), 4);
+        assert_eq!(pieces.len(), 2, "le teste del tramezzo");
+        for piece in &pieces {
+            assert_eq!(piece.common.layer, LAYER_MURI);
+            assert!(piece
+                .vertices
+                .iter()
+                .all(|v| (4.0 - 1e-6..=4.1 + 1e-6).contains(&v.location.x)));
+            let xdata = &piece.common.extended_data;
+            assert!(xdata.records().is_empty(), "XDATA sul pezzo: {xdata:?}");
+            assert!(xdata.raw_dwg_eed.is_empty());
+        }
+        let with_other: Vec<_> = whole
+            .iter()
+            .filter(|p| p.common.extended_data.get_record("ALTRA_APP").is_some())
+            .collect();
+        assert_eq!(with_other.len(), 1, "il muro sud tiene l'XDATA di altri");
+        assert!(out.app_ids.contains("ALTRA_APP"));
+
+        // Il disegno di partenza non riceve né pezzi né chiusure.
+        assert_eq!(src.entities().count(), entities_before);
+        assert!(src
+            .get_entity(tramezzo)
+            .unwrap()
+            .common()
+            .extended_data
+            .get_record("ARCHLINE_FUTURA")
+            .is_some());
+
+        let tmp = TempDir::new("giunzioni");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        let loaded = crate::io::load_file(&written[0]).unwrap();
+        assert_no_archline_data(&loaded);
+        assert_eq!(model_space_count(&loaded), model_space_count(out));
+    }
+
+    /// I muri nuovi sul layer scelto: se manca nel disegno lo si crea con i
+    /// valori predefiniti (e un handle suo), e il DWG lo tiene (senza, le linee
+    /// finirebbero sul layer 0). Il nome si legge senza spazi attorno.
+    #[test]
+    fn new_walls_go_on_the_chosen_layer_created_with_defaults() {
+        let mut src = doc_with_demolition(Form::Continua);
+        add_new_wall(&mut src, [2.0, 0.5], [2.0, 2.5], 0.12);
+        assert!(src.layers.get("MURI-NUOVI").is_none());
+        let mut o = opts(&[Elaborato::StatoDiProgetto]);
+        o.new_walls_layer = "  MURI-NUOVI ".into();
+        let ex = extract(&src, &o);
+        assert!(ex.notices.is_empty(), "{:?}", ex.notices);
+        let (_, out) = &ex.docs[0];
+
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            let new: Vec<_> = model_lines(out)
+                .into_iter()
+                .filter(|(l, _, _)| l.eq_ignore_ascii_case("MURI-NUOVI"))
+                .collect();
+            assert_eq!(new.len(), 4, "{what}: lati del muro nuovo");
+            for (a, b) in [
+                ([1.94, 0.5], [1.94, 2.5]),
+                ([2.06, 0.5], [2.06, 2.5]),
+                ([1.94, 0.5], [2.06, 0.5]),
+                ([1.94, 2.5], [2.06, 2.5]),
+            ] {
+                assert!(
+                    new.iter()
+                        .any(|(_, p, q)| (near(*p, a) && near(*q, b))
+                            || (near(*p, b) && near(*q, a))),
+                    "{what}: manca il lato {a:?}-{b:?}"
+                );
+            }
+            let layer = out.layers.get("MURI-NUOVI").expect("layer dei muri nuovi");
+            assert!(!layer.handle.is_null(), "{what}");
+            assert_eq!(
+                out.layers
+                    .iter()
+                    .filter(|l| l.handle == layer.handle)
+                    .count(),
+                1,
+                "{what}: handle doppio"
+            );
+            assert!(!out.objects.contains_key(&layer.handle), "{what}");
+            let defaults = Layer::new("MURI-NUOVI");
+            assert_eq!(layer.color, defaults.color, "{what}");
+            assert!(layer.line_type.eq_ignore_ascii_case(&defaults.line_type));
+            assert_eq!(layer.line_weight, defaults.line_weight, "{what}");
+        }
+        check(out, "in memoria");
+        let tmp = TempDir::new("layer-nuovo");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        check(&crate::io::load_file(&written[0]).unwrap(), "dopo il DWG");
+
+        // Un nome vuoto vale il layer 0.
+        let mut o = opts(&[Elaborato::StatoDiProgetto]);
+        o.new_walls_layer = "   ".into();
+        let ex = extract(&src, &o);
+        let on_zero = model_lines(&ex.docs[0].1)
+            .into_iter()
+            .filter(|(l, _, _)| l == "0")
+            .count();
+        assert_eq!(on_zero, 4);
+        assert!(ex.docs[0].1.layers.get("").is_none());
+    }
+
+    /// Il layer dei muri nuovi omonimo di un layer del disegno ne prende
+    /// colore, tipo di linea (copiato) e spessore, anche quando nessuna entità
+    /// del progetto lo usa.
+    #[test]
+    fn new_walls_layer_takes_the_source_layer_settings() {
+        let mut src = doc_with_demolition(Form::Continua);
+        let mut dashed = LineType::new("DASHED");
+        dashed.description = "__ __ __".into();
+        dashed.handle = src.allocate_handle();
+        src.line_types.add(dashed).unwrap();
+        let mut nuovi = Layer::new("NUOVI");
+        nuovi.handle = src.allocate_handle();
+        nuovi.color = Color::from_index(3);
+        nuovi.line_type = "DASHED".into();
+        nuovi.line_weight = codec::LineWeight::Value(35);
+        src.layers.add(nuovi).unwrap();
+        let mut o = opts(&[Elaborato::StatoDiProgetto]);
+        o.new_walls_layer = "nuovi".into();
+
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            let layer = out.layers.get("NUOVI").expect("layer dei muri nuovi");
+            assert!(!layer.handle.is_null(), "{what}");
+            assert_eq!(layer.color, Color::from_index(3), "{what}");
+            assert_eq!(layer.line_type, "DASHED", "{what}");
+            assert_eq!(layer.line_weight, codec::LineWeight::Value(35), "{what}");
+            let lt = out.line_types.get("DASHED").expect("tipo di linea DASHED");
+            assert_eq!(lt.description, "__ __ __", "{what}");
+            assert!(!lt.handle.is_null(), "{what}");
+        }
+
+        // Nessun muro nuovo: il layer si crea dai valori di src.
+        let ex = extract(&src, &o);
+        let (_, out) = &ex.docs[0];
+        assert!(model_lines(out).iter().all(|(l, _, _)| l == LAYER_MURI));
+        check(out, "senza muri nuovi");
+        let tmp = TempDir::new("layer-src");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        check(&crate::io::load_file(&written[0]).unwrap(), "dopo il DWG");
+
+        // Con un muro nuovo le sue linee lo usano: arriva con la copia.
+        add_new_wall(&mut src, [2.0, 0.5], [2.0, 2.5], 0.12);
+        let ex = extract(&src, &o);
+        let (_, out) = &ex.docs[0];
+        let on_new = model_lines(out)
+            .into_iter()
+            .filter(|(l, _, _)| l.eq_ignore_ascii_case("NUOVI"))
+            .count();
+        assert_eq!(on_new, 4);
+        check(out, "con muri nuovi");
+    }
+
+    /// Le entità che non sono muri restano, tranne zone, locali ed elementi
+    /// dentro le zone demolite (elencati); i muri fuori piano non si tagliano e
+    /// lo dice un avviso.
+    #[test]
+    fn progetto_keeps_other_entities_and_lists_what_it_leaves_out() {
+        let mut src = doc_with_zones();
+        // Un testo dentro la zona demolita: escluso.
+        let mut dentro = codec::entities::Text::with_value("via", Vector3::new(4.05, 1.5, 0.0));
+        dentro.common.layer = "TESTI".into();
+        let dentro = src.add_entity(EntityType::Text(dentro)).unwrap();
+        // Un testo nel locale A: resta.
+        let mut fuori = codec::entities::Text::with_value("A", Vector3::new(1.0, 1.0, 0.0));
+        fuori.common.layer = "TESTI".into();
+        src.add_entity(EntityType::Text(fuori)).unwrap();
+        // Un locale (contorno e testo): non entra nel progetto.
+        let mut contorno = LwPolyline::from_points(vec![
+            Vector2::new(0.5, 0.5),
+            Vector2::new(3.5, 0.5),
+            Vector2::new(3.5, 2.5),
+        ]);
+        contorno.common.layer = LAYER_LOCALI.into();
+        src.add_entity(EntityType::LwPolyline(contorno)).unwrap();
+        let mut seme = MText::with_value("Soggiorno", Vector3::new(2.0, 1.5, 0.0));
+        seme.common.layer = LAYER_LOCALI_PROGETTO.into();
+        src.add_entity(EntityType::MText(Box::new(seme))).unwrap();
+        // Un muro fuori dal piano XY, lontano dalle zone.
+        let alto = codec::entities::Line::from_points(
+            Vector3::new(10.0, 0.0, 1.0),
+            Vector3::new(12.0, 0.0, 1.0),
+        );
+        let mut alto = EntityType::Line(alto);
+        alto.common_mut().layer = LAYER_MURI.into();
+        src.add_entity(alto).unwrap();
+
+        let ex = extract(&src, &opts(&[Elaborato::StatoDiProgetto]));
+        let (_, out) = &ex.docs[0];
+        assert!(
+            ex.notices.contains(&Notice::Esclusa {
+                handle: dentro,
+                kind: "TEXT".into()
+            }),
+            "{:?}",
+            ex.notices
+        );
+        assert!(
+            ex.notices.contains(&Notice::FuoriPiano { count: 1 }),
+            "{:?}",
+            ex.notices
+        );
+        assert_eq!(ex.notices.len(), 2, "{:?}", ex.notices);
+        let texts: Vec<&str> = out
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Text(t) => Some(t.value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["A"]);
+        assert!(!out.entities().any(|e| e
+            .common()
+            .layer
+            .to_ascii_uppercase()
+            .starts_with(LAYER_LOCALI)));
+        assert!(!out.entities().any(|e| matches!(e, EntityType::MText(_))));
+        assert!(out.entities().any(|e| matches!(
+            e,
+            EntityType::Line(l) if (l.start.z - 1.0).abs() < 1e-9
+        )));
+        assert_no_zone_hatches(out);
+        assert_no_archline_data(out);
+        // Rilievo: 10 linee + 2 chiusure + 4 lati del muro nuovo + quella fuori
+        // piano; più il testo del locale A.
+        assert_eq!(model_lines(out).len(), 17);
+        assert_eq!(model_space_count(out), 18);
+    }
+
+    #[test]
+    fn proposal_is_most_frequent_wall_layer() {
+        let line_on = |layer: &str, y: f64| {
+            let mut line = codec::entities::Line::from_points(
+                Vector3::new(20.0, y, 0.0),
+                Vector3::new(25.0, y, 0.0),
+            );
+            line.common.layer = layer.into();
+            EntityType::Line(line)
+        };
+        let mut doc = CadDocument::new();
+        assert_eq!(propose_new_walls_layer(&doc), None, "disegno vuoto");
+        // Ciò che non è muro non conta: testi, layer spenti o congelati, AL-*.
+        for k in 0..20 {
+            let mut text =
+                codec::entities::Text::with_value("x", Vector3::new(0.0, f64::from(k), 0.0));
+            text.common.layer = "TESTI".into();
+            doc.add_entity(EntityType::Text(text)).unwrap();
+        }
+        for (name, freeze) in [("SPENTO", false), ("CONGELATO", true)] {
+            let mut layer = Layer::new(name);
+            layer.handle = doc.allocate_handle();
+            if freeze {
+                layer.freeze();
+            } else {
+                layer.turn_off();
+            }
+            doc.layers.add(layer).unwrap();
+        }
+        for k in 0..20 {
+            for layer in ["SPENTO", "CONGELATO", "AL-NUOVE"] {
+                doc.add_entity(line_on(layer, f64::from(k))).unwrap();
+            }
+        }
+        assert_eq!(propose_new_walls_layer(&doc), None, "nessun muro");
+
+        for entity in case_a(Form::Continua, M) {
+            doc.add_entity(entity).unwrap();
+        }
+        for y in [10.0, 11.0] {
+            doc.add_entity(line_on("TRAMEZZI", y)).unwrap();
+        }
+        assert_eq!(propose_new_walls_layer(&doc), Some("MURI".into()));
+
+        // A parità vince l'ordine alfabetico; il nome è quello della tabella.
+        let mut doc = CadDocument::new();
+        let mut layer = Layer::new("Bordi");
+        layer.handle = doc.allocate_handle();
+        doc.layers.add(layer).unwrap();
+        for (layer, y) in [("bordi", 0.0), ("BORDI", 1.0), ("Zeta", 2.0), ("zeta", 3.0)] {
+            doc.add_entity(line_on(layer, y)).unwrap();
+        }
+        doc.add_entity(line_on("ALFA", 4.0)).unwrap();
+        assert_eq!(propose_new_walls_layer(&doc), Some("Bordi".into()));
     }
 }

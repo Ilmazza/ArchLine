@@ -14,6 +14,7 @@ use super::{Message, ModalKind, OpenCADStudio};
 use crate::bim::extract::{file_name, Elaborato};
 use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
 use crate::bim::record;
+use crate::bim::report::Notice;
 use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{missing_layers, read_zone, zones_in, Zone, ZoneState};
 use crate::bim::{
@@ -1044,13 +1045,17 @@ impl Drop for TempDir {
     }
 }
 
-/// I DWG dello stato di fatto e di demolizioni e costruzioni per il disegno
-/// `base` (lo stato di progetto arriva con la sua geometria).
+/// I tre DWG estratti per il disegno `base`, nell'ordine in cui si scrivono:
+/// stato di fatto, demolizioni e costruzioni, stato di progetto.
 fn extracted_paths(dir: &Path, base: &str) -> Vec<PathBuf> {
-    [Elaborato::StatoDiFatto, Elaborato::DemolizioniCostruzioni]
-        .into_iter()
-        .map(|elaborato| dir.join(file_name(base, elaborato)))
-        .collect()
+    [
+        Elaborato::StatoDiFatto,
+        Elaborato::DemolizioniCostruzioni,
+        Elaborato::StatoDiProgetto,
+    ]
+    .into_iter()
+    .map(|elaborato| dir.join(file_name(base, elaborato)))
+    .collect()
 }
 
 /// Il nome del tab attivo: il nome di base dei file di un disegno mai salvato.
@@ -1121,15 +1126,16 @@ fn scripted_extract_writes_three_files() {
         assert!(path.is_file(), "{}: storia: {history}", path.display());
         crate::io::load_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
-    let written = dwg_count(tmp.path());
-    assert!(written >= 2, "storia: {history}");
+    assert_eq!(dwg_count(tmp.path()), 3, "storia: {history}");
     assert!(
         history.contains(&format!(
-            "AL_ESTRAI: scritti {written} file in {}.",
+            "AL_ESTRAI: scritti 3 file in {}.",
             tmp.path().display()
         )),
         "storia: {history}"
     );
+    // Il layer proposto (il più frequente dei muri) non si ricorda da script.
+    assert_eq!(record::read(doc(&app)).new_walls_layer, None);
     assert!(!history.contains("esistono già"), "un giro solo: {history}");
     // Da script nessuna finestra e nessun comando che resta aperto.
     assert_eq!(app.active_modal, None);
@@ -1185,7 +1191,10 @@ fn dialog_flow_overwrite_needs_second_ok() {
         let dialog = app.bim_extract.as_ref().expect("finestra aperta");
         assert_eq!(dialog.dir, None, "disegno mai salvato: nessuna cartella");
         assert!(dialog.fatto && dialog.comparativa && dialog.progetto);
-        assert_eq!(dialog.layer, "", "nessun layer ricordato nel record");
+        assert_eq!(
+            dialog.layer, LAYER_MURI,
+            "nessun layer nel record: il più frequente dei muri"
+        );
         assert!(
             dialog.layers.iter().any(|layer| layer == LAYER_MURI),
             "{:?}",
@@ -1609,4 +1618,223 @@ fn extract_refuses_inches() {
     );
     assert_eq!(app.active_modal, None, "nessuna finestra");
     assert_eq!(dwg_count(tmp.path()), 0);
+}
+
+// ------------------------------------------------- AL_ESTRAI, stato di progetto
+
+/// Il record con il layer dei muri nuovi `layer`, scritto senza passare dai
+/// comandi (come in un disegno riaperto).
+fn remember_layer(app: &mut OpenCADStudio, layer: &str) {
+    let i = app.active_tab;
+    let doc = &mut app.tabs[i].scene.document;
+    let mut rec = record::read(doc);
+    rec.new_walls_layer = Some(layer.to_string());
+    record::write(doc, &rec);
+}
+
+/// Le `LINE` del DWG `path` sul layer `layer` (senza badare alle maiuscole).
+fn lines_on_layer(path: &Path, layer: &str) -> usize {
+    crate::io::load_file(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .entities()
+        .filter(|e| {
+            matches!(e, EntityType::Line(_)) && e.common().layer.eq_ignore_ascii_case(layer)
+        })
+        .count()
+}
+
+/// Una polilinea chiusa per muro, tramezzo demolito: `AL_ESTRAI` scrive anche
+/// lo stato di progetto e la riga di comando elenca le due giunzioni da
+/// verificare. Il rilievo, il record e la storia degli annullamenti non cambiano.
+#[test]
+fn scripted_extract_writes_the_project_and_lists_the_junctions() {
+    let tmp = TempDir::new("progetto");
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::ChiusaPerMuro, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_DEMOLISCI 4.05,0 4.05,3 N");
+    assert_eq!(zones_in(doc(&app)).len(), 1, "storia: {}", history(&app));
+    let before = rilievo_snapshot(&app);
+    assert_eq!(before.len(), 5, "cinque polilinee chiuse");
+    let steps = undo_steps(&app);
+    let rec = record::read(doc(&app));
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let history = history(&app);
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    for path in &paths {
+        assert!(path.is_file(), "{}: storia: {history}", path.display());
+    }
+    for at in [[4.05, 0.0], [4.05, 3.0]] {
+        let junction = Notice::GiunzioneDaVerificare { at }.text();
+        assert!(
+            comes_after(&history, "AL_ESTRAI: scritti 3 file", &junction),
+            "manca «{junction}»; storia: {history}"
+        );
+    }
+    let progetto = crate::io::load_file(&paths[2]).unwrap();
+    assert!(
+        !progetto
+            .entities()
+            .any(|e| matches!(e, EntityType::Hatch(_))),
+        "zone nel progetto"
+    );
+    // Sud, nord, ovest, est intere e le due teste rimaste del tramezzo.
+    let polylines = progetto
+        .entities()
+        .filter(|e| matches!(e, EntityType::LwPolyline(_)))
+        .count();
+    assert_eq!(polylines, 6);
+    assert_eq!(rilievo_snapshot(&app), before, "il rilievo non si tocca");
+    assert_eq!(undo_steps(&app), steps);
+    assert_eq!(record::read(doc(&app)), rec);
+    assert_eq!(zones_in(doc(&app)).len(), 1);
+}
+
+/// La finestra propone il layer del record; senza record, il più frequente dei
+/// muri; senza muri, nessuno.
+#[test]
+fn dialog_proposes_the_record_layer_then_the_walls_layer() {
+    let (mut app, _, _) = app_with_two_zones();
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(app.bim_extract.as_ref().unwrap().layer, LAYER_MURI);
+    bim(&mut app, BimMsg::Cancel);
+
+    remember_layer(&mut app, "TRAMEZZI");
+    dispatch_line(&mut app, "AL_ESTRAI");
+    assert_eq!(app.bim_extract.as_ref().unwrap().layer, "TRAMEZZI");
+    bim(&mut app, BimMsg::Cancel);
+
+    let mut empty = fresh_app();
+    load(&mut empty, Vec::new(), 6);
+    dispatch_line(&mut empty, "AL_ESTRAI");
+    assert_eq!(empty.bim_extract.as_ref().unwrap().layer, "");
+}
+
+/// Da script, senza layer nel record e senza muri, i muri nuovi vanno sul
+/// layer 0 e la riga di comando lo dice; nulla si ricorda nel disegno.
+#[test]
+fn script_without_walls_uses_layer_zero_and_says_so() {
+    let tmp = TempDir::new("layer-zero");
+    let mut app = fresh_app();
+    load(&mut app, Vec::new(), 6);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let history = history(&app);
+    assert!(
+        history.contains("i muri nuovi vanno sul layer 0"),
+        "storia: {history}"
+    );
+    assert_eq!(dwg_count(tmp.path()), 3, "storia: {history}");
+    assert_eq!(record::read(doc(&app)).new_walls_layer, None);
+    assert_eq!(undo_steps(&app), steps);
+}
+
+/// Da script vale il layer ricordato nel record, anche se nel disegno non c'è:
+/// le linee del muro nuovo stanno lì nel DWG di progetto.
+#[test]
+fn script_uses_the_remembered_layer() {
+    let tmp = TempDir::new("layer-record");
+    let (mut app, _, _) = app_with_two_zones();
+    remember_layer(&mut app, "MURI-NUOVI");
+    let steps = undo_steps(&app);
+
+    run(&mut app, &format!("AL_ESTRAI {}", tmp.path().display()));
+
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    assert!(paths[2].is_file(), "storia: {}", history(&app));
+    // Il muro nuovo da 0,12 nel locale B: lati lunghi e teste sulle facce del
+    // locale (le teste coincidono con i muri esistenti: giunzioni).
+    assert_eq!(lines_on_layer(&paths[2], "MURI-NUOVI"), 2);
+    assert_eq!(undo_steps(&app), steps);
+    assert_eq!(
+        record::read(doc(&app)).new_walls_layer.as_deref(),
+        Some("MURI-NUOVI")
+    );
+}
+
+/// Un layer scritto a mano che nel disegno non c'è si accetta: lo si crea nel
+/// DWG di progetto, la riga di comando lo dice e il record lo ricorda.
+#[test]
+fn dialog_accepts_a_new_layer_for_the_new_walls() {
+    let tmp = TempDir::new("layer-scritto");
+    let (mut app, _, _) = app_with_two_zones();
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    bim(&mut app, BimMsg::Layer("  MURI-NUOVI ".to_string()));
+    forget_history(&mut app);
+    bim(&mut app, BimMsg::Ok);
+
+    assert!(app.bim_extract.is_none(), "storia: {}", history(&app));
+    let history = history(&app);
+    assert!(
+        history.contains("il layer MURI-NUOVI dei muri nuovi non c'è nel disegno"),
+        "storia: {history}"
+    );
+    let paths = extracted_paths(tmp.path(), &tab_title(&app));
+    assert_eq!(lines_on_layer(&paths[2], "MURI-NUOVI"), 2);
+    assert!(crate::io::load_file(&paths[2])
+        .unwrap()
+        .layers
+        .get("MURI-NUOVI")
+        .is_some());
+    assert_eq!(
+        record::read(doc(&app)).new_walls_layer.as_deref(),
+        Some("MURI-NUOVI")
+    );
+    assert!(
+        doc(&app).layers.get("MURI-NUOVI").is_none(),
+        "non nel disegno"
+    );
+}
+
+/// Con lo stato di progetto spuntato serve un layer valido per i muri nuovi:
+/// vuoto, o con un carattere che AutoCAD non accetta, niente si scrive e la
+/// finestra resta aperta. Senza progetto il layer non serve e non si ricorda.
+#[test]
+fn dialog_refuses_a_missing_or_invalid_layer_for_the_project() {
+    let tmp = TempDir::new("layer-vuoto");
+    let (mut app, _, _) = app_with_two_zones();
+    let steps = undo_steps(&app);
+    dispatch_line(&mut app, "AL_ESTRAI");
+    pick_folder(&mut app, tmp.path());
+    for (typed, error) in [
+        ("   ", "AL_ESTRAI: indica il layer dei muri nuovi"),
+        (
+            "MURI/NUOVI",
+            "AL_ESTRAI: «MURI/NUOVI» non è un nome di layer valido",
+        ),
+    ] {
+        bim(&mut app, BimMsg::Layer(typed.to_string()));
+        forget_history(&mut app);
+        bim(&mut app, BimMsg::Ok);
+
+        assert_eq!(
+            app.active_modal,
+            Some(ModalKind::BimExtract),
+            "resta aperta"
+        );
+        assert!(
+            history(&app).contains(error),
+            "{typed:?}: storia: {}",
+            history(&app)
+        );
+        assert!(
+            history(&app).contains("Niente è stato scritto."),
+            "storia: {}",
+            history(&app)
+        );
+        assert_eq!(dwg_count(tmp.path()), 0);
+    }
+
+    bim(&mut app, BimMsg::Toggle(Elaborato::StatoDiProgetto));
+    bim(&mut app, BimMsg::Ok);
+    assert!(app.bim_extract.is_none(), "storia: {}", history(&app));
+    assert_eq!(dwg_count(tmp.path()), 2);
+    assert_eq!(record::read(doc(&app)).new_walls_layer, None);
+    assert_eq!(undo_steps(&app), steps);
 }
