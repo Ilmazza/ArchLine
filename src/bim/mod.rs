@@ -9,6 +9,7 @@ pub mod extract;
 pub mod project;
 pub mod record;
 pub mod report;
+pub mod rooms;
 pub mod units;
 pub mod walls;
 pub mod zone;

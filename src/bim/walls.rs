@@ -181,6 +181,41 @@ pub fn region_at(faces: &[Vec<[f64; 2]>], p: [f64; 2], tol: f64) -> Option<Regio
     })
 }
 
+/// Ogni faccia come locale, nell'ordine di `faces`: il suo anello con i figli
+/// diretti come buchi, le facce dentro di essa senza nessuna faccia in mezzo.
+/// È la regola di [`region_at`] per un punto della faccia fuori dai buchi
+/// (lo stesso [`face_inside`]); serve a chi deve trovare un punto interno di
+/// una faccia senza seme (`rooms::project_rooms`), che sull'anello nudo del
+/// contorno esterno cadrebbe dentro un locale.
+pub fn face_regions(faces: &[Vec<[f64; 2]>], tol: f64) -> Vec<Region> {
+    let boxes: Vec<_> = faces.iter().map(|face| bounds(face)).collect();
+    let curves: Vec<Vec<Curve>> = faces.iter().map(|face| face_curves(face)).collect();
+    let areas: Vec<f64> = faces.iter().map(|face| signed_area(face).abs()).collect();
+    let inside = |outer: usize, inner: usize| {
+        inner != outer
+            && areas[inner] < areas[outer]
+            && box_within(&boxes[inner], &boxes[outer], tol)
+            && face_inside(&curves[outer], &faces[inner], tol)
+    };
+    (0..faces.len())
+        .map(|outer| {
+            let within: Vec<usize> = (0..faces.len())
+                .filter(|&index| inside(outer, index))
+                .collect();
+            let holes = within
+                .iter()
+                .copied()
+                .filter(|&hole| !within.iter().any(|&between| inside(between, hole)))
+                .map(|hole| faces[hole].clone())
+                .collect();
+            Region {
+                outer: faces[outer].clone(),
+                holes,
+            }
+        })
+        .collect()
+}
+
 fn face_curves(face: &[[f64; 2]]) -> Vec<Curve> {
     face.iter()
         .zip(face.iter().cycle().skip(1))
@@ -1067,6 +1102,63 @@ mod tests {
         assert!(r.holes.is_empty());
         assert_eq!(region_at(&faces, [20.0, 20.0], tol), None);
         assert_eq!(region_at(&[], [0.0, 0.0], tol), None);
+    }
+
+    #[test]
+    fn face_regions_follow_region_at() {
+        // Tre quadrati annidati e la «L» con il triangolo nella rientranza.
+        let nested = vec![square(4.0, 6.0), square(0.0, 10.0), square(2.0, 8.0)];
+        let tol = 1e-6;
+        let regions = face_regions(&nested, tol);
+        assert_eq!(regions.len(), 3);
+        for (index, p) in [[5.0, 5.0], [1.0, 1.0], [3.0, 3.0]].into_iter().enumerate() {
+            assert_eq!(
+                Some(regions[index].clone()),
+                region_at(&nested, p, tol),
+                "{p:?}"
+            );
+        }
+        let l_room = vec![
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [4.0, 2.0],
+            [2.0, 2.0],
+            [2.0, 4.0],
+            [0.0, 4.0],
+        ];
+        let triangle = vec![[2.0, 2.0], [4.0, 2.0], [2.0, 4.0]];
+        let notch = vec![l_room.clone(), triangle.clone()];
+        let regions = face_regions(&notch, tol);
+        assert_eq!(
+            regions[0],
+            Region {
+                outer: l_room,
+                holes: Vec::new()
+            }
+        );
+        assert_eq!(
+            regions[1],
+            Region {
+                outer: triangle,
+                holes: Vec::new()
+            }
+        );
+        assert!(face_regions(&[], tol).is_empty());
+
+        // Sul caso A (linee continue): il contorno esterno ha per buchi i
+        // due locali; il pilastro è un buco di A, non del contorno.
+        let mut e = case_a(Form::Continua, M);
+        e.push(pilastro(M));
+        let scene = scene_with(e, 6);
+        let walls = wall_set(&scene.document, tol);
+        let faces = faces(&walls.sources, tol);
+        let regions = face_regions(&faces, tol);
+        for p in [[2.0, 2.5], [6.0, 1.5], [1.1, 1.1], [-0.15, 1.5]] {
+            let want = region_at(&faces, p, tol).unwrap();
+            assert!(regions.contains(&want), "{p:?}");
+        }
+        let outer = region_at(&faces, [-0.15, 1.5], tol).unwrap();
+        assert_eq!(outer.holes.len(), 2);
     }
 
     #[test]
