@@ -531,7 +531,15 @@ impl OpenCADStudio {
         let extracted = extract::extract(&self.tabs[i].scene.document, &opts);
         let tab = &self.tabs[i];
         let base = base_name(tab.current_path.as_deref(), &tab.tab_title);
-        let new_layer = progetto && !tab.scene.document.layers.contains(&layer);
+        // Un layer dei muri nuovi che il disegno non ha: con che cosa nasce nel
+        // progetto (quelli del layer più frequente dei muri, o i predefiniti).
+        let doc = &tab.scene.document;
+        let new_layer = (progetto && !doc.layers.contains(&layer)).then(|| {
+            match extract::new_walls_layer_template(doc, &layer) {
+                Some(walls) => format!("colore, tipo di linea e spessore del layer {}", walls.name),
+                None => "colore e tipo di linea predefiniti".to_string(),
+            }
+        });
         let result = extract::write(&extracted, dir, &base, overwrite);
         match &result {
             Ok(written) => {
@@ -540,10 +548,10 @@ impl OpenCADStudio {
                     written.len(),
                     dir.display()
                 ));
-                if new_layer {
+                if let Some(settings) = new_layer {
                     self.command_line.push_info(&format!(
                         "AL_ESTRAI: il layer {layer} dei muri nuovi non c'è nel disegno: \
-                         creato nello stato di progetto con colore e tipo di linea predefiniti."
+                         creato nello stato di progetto con {settings}."
                     ));
                 }
                 self.bim_push_notices(&extracted.notices);

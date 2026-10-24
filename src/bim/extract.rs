@@ -311,19 +311,32 @@ fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> Vec<Handle> {
         .collect()
 }
 
+/// Il layer di `src` da cui il layer dei muri nuovi `name` prende colore, tipo
+/// di linea e spessore quando il documento d'uscita non lo ha: l'omonimo, se
+/// `src` lo ha; altrimenti (spec §5.5, «con colore e tipo di linea dei muri
+/// esistenti»; R46) il layer più frequente dei muri,
+/// [`propose_new_walls_layer`]. `None` senza né l'uno né l'altro: valori
+/// predefiniti.
+pub fn new_walls_layer_template<'a>(src: &'a CadDocument, name: &str) -> Option<&'a Layer> {
+    src.layers
+        .get(name)
+        .or_else(|| propose_new_walls_layer(src).and_then(|walls| src.layers.get(&walls)))
+}
+
 /// Il layer dei muri nuovi in `out`. La copia lo porta quando un'entità
 /// copiata lo usa; altrimenti (nessun muro nuovo, o un layer che in `src` non
 /// c'è) lo si crea qui, con un handle nuovo e con colore, tipo di linea e
-/// spessore di linea del layer omonimo di `src`, se c'è, o con i valori
-/// predefiniti. Senza, il DWG metterebbe i muri nuovi sul layer «0». Il tipo di
-/// linea, se manca, lo porta poi [`copy_layer_linetypes`].
+/// spessore di linea di [`new_walls_layer_template`] (l'omonimo di `src` o il
+/// layer più frequente dei muri), o con i valori predefiniti se non c'è.
+/// Senza, il DWG metterebbe i muri nuovi sul layer «0». Il tipo di linea, se
+/// manca, lo porta poi [`copy_layer_linetypes`].
 fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) {
     if out.layers.contains(name) {
         return;
     }
-    let mut layer = match src.layers.get(name) {
+    let mut layer = match new_walls_layer_template(src, name) {
         Some(from) => {
-            let mut layer = Layer::new(from.name.clone());
+            let mut layer = Layer::new(name);
             layer.color = from.color;
             layer.color_name = from.color_name.clone();
             layer.book_name = from.book_name.clone();
@@ -2773,13 +2786,17 @@ mod tests {
         assert_eq!(model_space_count(&loaded), model_space_count(out));
     }
 
-    /// I muri nuovi sul layer scelto: se manca nel disegno lo si crea con i
-    /// valori predefiniti (e un handle suo), e il DWG lo tiene (senza, le linee
+    /// I muri nuovi sul layer scelto: se manca nel disegno, e il disegno non ha
+    /// muri da cui prendere colore e tipo di linea, lo si crea con i valori
+    /// predefiniti (e un handle suo), e il DWG lo tiene (senza, le linee
     /// finirebbero sul layer 0). Il nome si legge senza spazi attorno.
     #[test]
     fn new_walls_go_on_the_chosen_layer_created_with_defaults() {
-        let mut src = doc_with_demolition(Form::Continua);
+        let mut src = CadDocument::new();
+        src.header.insertion_units = 6;
+        ensure_layers(&mut src);
         add_new_wall(&mut src, [2.0, 0.5], [2.0, 2.5], 0.12);
+        assert_eq!(propose_new_walls_layer(&src), None, "nessun muro");
         assert!(src.layers.get("MURI-NUOVI").is_none());
         let mut o = opts(&[Elaborato::StatoDiProgetto]);
         o.new_walls_layer = "  MURI-NUOVI ".into();
@@ -2838,6 +2855,71 @@ mod tests {
             .count();
         assert_eq!(on_zero, 4);
         assert!(ex.docs[0].1.layers.get("").is_none());
+    }
+
+    /// R46 (spec §5.5, «con colore e tipo di linea dei muri esistenti»): un
+    /// layer dei muri nuovi che il disegno non ha prende colore, tipo di linea
+    /// (copiato) e spessore del layer più frequente dei muri, anche dopo il DWG.
+    #[test]
+    fn new_walls_layer_missing_from_the_drawing_takes_the_walls_layer() {
+        let mut src = doc_with_demolition(Form::Continua);
+        let mut dashed = LineType::new("DASHED");
+        dashed.description = "__ __ __".into();
+        dashed.handle = src.allocate_handle();
+        src.line_types.add(dashed).unwrap();
+        let muri = src.layers.get_mut(LAYER_MURI).unwrap();
+        muri.color = Color::from_index(3);
+        muri.line_type = "DASHED".into();
+        muri.line_weight = codec::LineWeight::Value(35);
+        // Un layer di muri meno frequente, d'altro colore: non conta.
+        let mut tramezzi = Layer::new("TRAMEZZI");
+        tramezzi.handle = src.allocate_handle();
+        tramezzi.color = Color::from_index(5);
+        src.layers.add(tramezzi).unwrap();
+        for y in [10.0, 11.0] {
+            let mut line = codec::entities::Line::from_points(
+                Vector3::new(20.0, y, 0.0),
+                Vector3::new(25.0, y, 0.0),
+            );
+            line.common.layer = "TRAMEZZI".into();
+            src.add_entity(EntityType::Line(line)).unwrap();
+        }
+        add_new_wall(&mut src, [2.0, 0.5], [2.0, 2.5], 0.12);
+        assert!(src.layers.get("MURI_NUOVI").is_none());
+        let mut o = opts(&[Elaborato::StatoDiProgetto]);
+        o.new_walls_layer = "MURI_NUOVI".into();
+
+        #[track_caller]
+        fn check(out: &CadDocument, what: &str) {
+            let layer = out.layers.get("MURI_NUOVI").expect("layer dei muri nuovi");
+            assert!(!layer.handle.is_null(), "{what}");
+            assert_eq!(layer.color, Color::from_index(3), "{what}");
+            assert_eq!(layer.line_type, "DASHED", "{what}");
+            assert_eq!(layer.line_weight, codec::LineWeight::Value(35), "{what}");
+            let lt = out.line_types.get("DASHED").expect("tipo di linea DASHED");
+            assert_eq!(lt.description, "__ __ __", "{what}");
+            assert!(!lt.handle.is_null(), "{what}");
+            let on_new = model_lines(out)
+                .into_iter()
+                .filter(|(l, _, _)| l.eq_ignore_ascii_case("MURI_NUOVI"))
+                .count();
+            assert_eq!(on_new, 4, "{what}: lati del muro nuovo");
+        }
+        let ex = extract(&src, &o);
+        let (_, out) = &ex.docs[0];
+        check(out, "in memoria");
+        let tmp = TempDir::new("layer-dei-muri");
+        let written = write(&ex, &tmp.0, "casa", false).unwrap();
+        check(&crate::io::load_file(&written[0]).unwrap(), "dopo il DWG");
+        assert_eq!(
+            new_walls_layer_template(&src, "MURI_NUOVI").map(|l| l.name.as_str()),
+            Some(LAYER_MURI)
+        );
+        assert_eq!(
+            new_walls_layer_template(&src, "tramezzi").map(|l| l.name.as_str()),
+            Some("TRAMEZZI"),
+            "l'omonimo prima del più frequente"
+        );
     }
 
     /// Il layer dei muri nuovi omonimo di un layer del disegno ne prende

@@ -1758,11 +1758,22 @@ fn script_uses_the_remembered_layer() {
 }
 
 /// Un layer scritto a mano che nel disegno non c'è si accetta: lo si crea nel
-/// DWG di progetto, la riga di comando lo dice e il record lo ricorda.
+/// DWG di progetto con colore e tipo di linea del layer dei muri (R46), la riga
+/// di comando lo dice e il record lo ricorda.
 #[test]
 fn dialog_accepts_a_new_layer_for_the_new_walls() {
     let tmp = TempDir::new("layer-scritto");
     let (mut app, _, _) = app_with_two_zones();
+    {
+        let i = app.active_tab;
+        let muri = app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get_mut(LAYER_MURI)
+            .expect("layer dei muri nella tabella");
+        muri.color = Color::from_index(3);
+    }
     dispatch_line(&mut app, "AL_ESTRAI");
     pick_folder(&mut app, tmp.path());
     bim(&mut app, BimMsg::Layer("  MURI-NUOVI ".to_string()));
@@ -1772,16 +1783,17 @@ fn dialog_accepts_a_new_layer_for_the_new_walls() {
     assert!(app.bim_extract.is_none(), "storia: {}", history(&app));
     let history = history(&app);
     assert!(
-        history.contains("il layer MURI-NUOVI dei muri nuovi non c'è nel disegno"),
+        history.contains(
+            "il layer MURI-NUOVI dei muri nuovi non c'è nel disegno: creato nello stato di \
+             progetto con colore, tipo di linea e spessore del layer MURI."
+        ),
         "storia: {history}"
     );
     let paths = extracted_paths(tmp.path(), &tab_title(&app));
     assert_eq!(lines_on_layer(&paths[2], "MURI-NUOVI"), 2);
-    assert!(crate::io::load_file(&paths[2])
-        .unwrap()
-        .layers
-        .get("MURI-NUOVI")
-        .is_some());
+    let progetto = crate::io::load_file(&paths[2]).unwrap();
+    let layer = progetto.layers.get("MURI-NUOVI").expect("layer nel DWG");
+    assert_eq!(layer.color, Color::from_index(3));
     assert_eq!(
         record::read(doc(&app)).new_walls_layer.as_deref(),
         Some("MURI-NUOVI")
