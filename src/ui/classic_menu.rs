@@ -212,6 +212,20 @@ fn build() -> Vec<MenuDef> {
                     ],
                 ),
                 Sep,
+                // ArchLine BIM (spec 2026-10-23-bim-stato-piante §6): the submenu
+                // also becomes the bar of the same name (`toolbar_registry`).
+                sub(
+                    "Ristrutturazione",
+                    vec![
+                        cmd("Demolisci", "AL_DEMOLISCI"),
+                        cmd("Nuovo", "AL_NUOVO"),
+                        cmd("Stato", "AL_STATO"),
+                        cmd("Locale", "AL_LOCALE"),
+                        cmd("Aggiorna locali", "AL_AGGIORNA"),
+                        cmd("Estrai elaborati", "AL_ESTRAI"),
+                    ],
+                ),
+                Sep,
                 cmd("UCS", "UCS"),
                 cmd("Drafting Settings", "DSETTINGS"),
                 Sep,
@@ -864,7 +878,17 @@ mod tests {
     /// Commands that have no icon anywhere in the app (no ribbon tool, no
     /// quick-access glyph). Adding a menu row without an icon fails the test
     /// below until the row gets one or is listed here on purpose.
-    const NO_ICON: &[&str] = &[];
+    ///
+    /// ArchLine BIM: the six Ristrutturazione commands have no SVG yet, on
+    /// purpose (first round); their bar shows two-letter glyphs. Kept sorted.
+    const NO_ICON: &[&str] = &[
+        "AL_AGGIORNA",
+        "AL_DEMOLISCI",
+        "AL_ESTRAI",
+        "AL_LOCALE",
+        "AL_NUOVO",
+        "AL_STATO",
+    ];
 
     #[test]
     fn command_rows_without_an_icon_are_the_known_ones() {

@@ -690,7 +690,7 @@ mod tests {
             vec![
                 vec!["Standard", "Dimension", "Inquiry"],
                 vec!["Layers", "Styles"],
-                vec!["Insert", "Reference"],
+                vec!["Insert", "Reference", "Ristrutturazione"],
             ]
         );
         assert_eq!(titles(Edge::Left), vec![vec!["Draw"]]);
@@ -701,7 +701,40 @@ mod tests {
         );
         // Every other bar is hidden.
         let shown = ToolbarId::all().iter().filter(|id| l.is_visible(**id)).count();
-        assert_eq!(shown, 3 + 2 + 2 + 1 + 2 + 4);
+        assert_eq!(shown, 3 + 2 + 3 + 1 + 2 + 4);
+    }
+
+    #[test]
+    fn ristrutturazione_bar_has_the_six_commands() {
+        // ArchLine BIM: Tools > Ristrutturazione is a submenu with six commands,
+        // so the registry makes the bar of the same name, one button each.
+        let id = bar_named("Ristrutturazione");
+        assert_eq!(id.key(), "menu:Ristrutturazione");
+        assert_eq!(
+            bar_commands(id),
+            ["AL_DEMOLISCI", "AL_NUOVO", "AL_STATO", "AL_LOCALE", "AL_AGGIORNA", "AL_ESTRAI"]
+        );
+        // One plain button per command, no dropdown variants.
+        for i in items_for(id) {
+            if let ClassicItem::Button(b) = i {
+                assert!(b.variants.is_empty(), "{} has variants", b.main.id);
+            }
+        }
+        // Without an icon of their own the buttons fall back on a two-letter
+        // glyph; no two of them may share it.
+        let mut glyphs = Vec::new();
+        for i in items_for(id) {
+            if let ClassicItem::Button(b) = i {
+                match b.main.icon {
+                    IconKind::Glyph(g) => glyphs.push(g),
+                    IconKind::Svg(_) => {}
+                }
+            }
+        }
+        let mut unique = glyphs.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), glyphs.len(), "two buttons share a glyph: {glyphs:?}");
     }
 
     #[test]

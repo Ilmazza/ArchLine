@@ -258,7 +258,7 @@ impl ToolbarLayout {
             &lanes(&[
                 &["Standard", "Dimension", "Inquiry"],
                 &["Layers", "Styles"],
-                &["Insert", "Reference"],
+                &["Insert", "Reference", "Ristrutturazione"],
             ]),
         );
         l.write_lanes(Edge::Left, &lanes(&[&["Draw"]]));
