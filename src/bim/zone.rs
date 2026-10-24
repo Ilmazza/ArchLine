@@ -14,6 +14,7 @@ use codec::entities::{BoundaryEdge, BoundaryPath, EntityCommon, Hatch, PolylineE
 use codec::tables::{AppId, Layer};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{CadDocument, Color, EntityType, Handle, Vector2, Vector3};
+use kernel::geom2d::signed_area;
 
 use super::{
     ACI_GIALLO, ACI_ROSSO, APP_LOCALE, APP_ZONA, LAYER_DEMOLIZIONI, LAYER_LOCALI,
@@ -291,18 +292,27 @@ fn open_ring(mut ring: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
 
 /// La zona descritta da `entity`, se è una `HATCH` con un record
 /// `ARCHLINE_ZONA` leggibile e almeno un contorno.
+///
+/// Gli anelli si ordinano per area assoluta decrescente (a pari area resta
+/// l'ordine dei percorsi): il più grande è il contorno esterno, gli altri i
+/// buchi. Progetto, locali e convalide si fidano di `rings[0]`, e l'ordine dei
+/// percorsi di un HATCH scritto da un altro programma non è garantito (fix
+/// finale, punto 6).
 pub fn read_zone(handle: Handle, entity: &EntityType) -> Option<ZoneGeom> {
     let EntityType::Hatch(hatch) = entity else {
         return None;
     };
     let zone = decode(hatch.common.extended_data.get_record(APP_ZONA)?)?;
-    let rings: Vec<_> = crate::scene::hatch_boundary_rings(hatch)
+    let mut sized: Vec<(f64, Vec<[f64; 2]>)> = crate::scene::hatch_boundary_rings(hatch)
         .into_iter()
         .map(open_ring)
+        .map(|ring| (signed_area(&ring).abs(), ring))
         .collect();
-    if rings.is_empty() {
+    if sized.is_empty() {
         return None;
     }
+    sized.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let rings = sized.into_iter().map(|(_, ring)| ring).collect();
     Some(ZoneGeom {
         handle,
         zone,
@@ -587,6 +597,31 @@ mod tests {
         assert_eq!(zg.rings.len(), 2);
         assert_eq!(zg.rings[0].len(), 4);
         assert_eq!(zg.rings[1].len(), 4);
+    }
+
+    /// Fix finale, punto 6: una zona con buco il cui HATCH ha i percorsi in
+    /// ordine invertito (buco per primo, come può scriverli AutoCAD o un altro
+    /// programma). Progetto, locali e convalide si fidano di `rings[0]`: la
+    /// rilettura ordina gli anelli per area decrescente, l'esterno è il primo.
+    #[test]
+    fn read_zone_puts_the_outer_ring_first() {
+        let outer = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]];
+        let hole = vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]];
+        let small = vec![[3.0, 2.0], [3.5, 2.0], [3.5, 2.5], [3.0, 2.5]];
+        let z = plain(ZoneState::Nuovo, ZoneOrigin::PuntoInterno);
+        let EntityType::Hatch(mut h) = zone_hatch(&z, &[outer.clone(), hole.clone(), small])
+        else {
+            panic!()
+        };
+        h.paths.reverse();
+        let zg = read_zone(codec::Handle::new(1), &EntityType::Hatch(h)).unwrap();
+        assert_eq!(zg.rings.len(), 3);
+        assert_eq!(zg.rings[0], outer, "l'esterno è il primo");
+        assert_eq!(zg.rings[1], hole, "poi i buchi, dal più grande");
+        // Nell'ordine giusto non cambia nulla.
+        let entity = zone_hatch(&z, &[outer.clone(), hole.clone()]);
+        let zg = read_zone(codec::Handle::new(1), &entity).unwrap();
+        assert_eq!(zg.rings, vec![outer, hole]);
     }
 
     #[test]
