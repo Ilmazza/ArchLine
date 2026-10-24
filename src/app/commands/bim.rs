@@ -204,6 +204,8 @@ impl OpenCADStudio {
             return Task::none();
         }
         if !has_fatto_rooms(&self.tabs[i].scene.document) {
+            // Un rilancio lasciato a metà (AL_UNITA annullato) non vale più.
+            self.bim_pending = None;
             self.command_line
                 .push_info("AL_AGGIORNA: nessun locale di fatto nel disegno.");
             return Task::none();

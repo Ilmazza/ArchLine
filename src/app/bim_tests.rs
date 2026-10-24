@@ -2315,9 +2315,9 @@ fn aggiorna_updates_a_lone_text_and_says_so() {
         history.contains("Locale A: c'è il testo ma non il contorno."),
         "storia: {history}"
     );
-    // Senza contorno l'area di prima non si sa.
+    // R60: l'area di prima viene dall'etichetta, anche senza contorno.
     assert!(
-        history.contains("Locale A: aggiornato a 11,70 m²."),
+        history.contains("Locale A: 12,00 → 11,70 m²."),
         "storia: {history}"
     );
     assert!(
@@ -2340,6 +2340,8 @@ fn aggiorna_without_rooms_says_so() {
     let mut app = fresh_app();
     load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 0);
     let steps = undo_steps(&app);
+    // Un rilancio lasciato a metà non vale più, come per le altre uscite.
+    app.bim_pending = Some("AL_DEMOLISCI".into());
 
     run(&mut app, "AL_AGGIORNA");
 
@@ -2350,6 +2352,7 @@ fn aggiorna_without_rooms_says_so() {
     );
     assert!(!log.contains("Unità del disegno"), "storia: {log}");
     assert_eq!(active_command(&app), None);
+    assert_eq!(app.bim_pending, None);
     assert_eq!(record::read(doc(&app)).unit, None);
     assert_eq!(undo_steps(&app), steps);
 
@@ -2474,4 +2477,112 @@ fn aggiorna_keeps_true_arcs() {
     assert_eq!(mtext(&new_text).value, "Abside\\PS = 3,37 m²");
     assert!(has_arc(&new_outline), "l'arco resta");
     assert_eq!(undo_steps(&app), steps + 1);
+}
+
+/// R60: con il pilastro l'etichetta dice l'area netta (11,91). Spento il layer
+/// del pilastro, la riga dice da quanto a quanto: 11,91 → 12,00, non 12,00 →
+/// 12,00 (il contorno, solo l'anello esterno, è lordo).
+#[test]
+fn aggiorna_reports_the_net_area_with_a_pillar() {
+    let mut entities = case_a(Form::Continua, DrawingUnit::Metri);
+    entities.push(crate::bim::fixtures::pilastro(DrawingUnit::Metri));
+    let mut app = fresh_app();
+    load(&mut app, entities, 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let ((_, outline), (_, text)) = room_parts(&app);
+    assert_eq!(mtext(&text).value, "A\\PS = 11,91 m²");
+    let i = app.active_tab;
+    app.tabs[i]
+        .scene
+        .document
+        .layers
+        .get_mut(crate::bim::fixtures::LAYER_PILASTRI)
+        .expect("layer del pilastro")
+        .turn_off();
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let history = history(&app);
+    assert!(
+        comes_after(
+            &history,
+            "Locale A: 11,91 → 12,00 m².",
+            "AL_AGGIORNA: 1 locali aggiornati."
+        ),
+        "storia: {history}"
+    );
+    let ((_, new_outline), (_, new_text)) = room_parts(&app);
+    assert_eq!(mtext(&new_text).value, "A\\PS = 12,00 m²");
+    assert_eq!(new_outline, outline, "l'anello esterno è lo stesso");
+}
+
+/// R55 e R59 con un locale scritto «da confermare»: B nasce dentro la regione
+/// unita da un vuoto (il seme di A ci sta dentro); finché il vuoto c'è,
+/// `AL_AGGIORNA` lascia com'erano A e B; chiuso il vuoto, B torna 11,70 e
+/// perde la nota, A resta com'era.
+#[test]
+fn aggiorna_drops_the_note_when_the_gap_closes() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::ChiusaPerMuro, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let tramezzo = doc(&app)
+        .entities()
+        .find(|e| {
+            matches!(e, EntityType::LwPolyline(p) if e.common().layer == LAYER_MURI
+                && p.vertices.iter().any(|v| near(Vector3::new(v.location.x, v.location.y, 0.0), [4.1, 3.0])))
+        })
+        .map(|e| e.common().handle)
+        .expect("tramezzo");
+    let set_top = |app: &mut OpenCADStudio, from: f64, to: f64| {
+        let i = app.active_tab;
+        if let Some(EntityType::LwPolyline(p)) = app.tabs[i].scene.document.get_entity_mut(tramezzo)
+        {
+            for v in &mut p.vertices {
+                if (v.location.y - from).abs() < 1e-9 {
+                    v.location.y = to;
+                }
+            }
+        }
+    };
+    set_top(&mut app, 3.0, 2.998);
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    let label_of = |app: &OpenCADStudio, name: &str| {
+        on_layer(app, LAYER_LOCALI)
+            .iter()
+            .filter_map(|(_, e)| match e {
+                EntityType::MText(t) if t.value.starts_with(name) => Some(t.value.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(label_of(&app, "B"), ["B (da confermare)\\PS = 23,70 m²"]);
+    let rooms_before = on_layer(&app, LAYER_LOCALI);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let fused = history(&app);
+    assert!(
+        fused.contains("Locali A + B lasciati com'erano."),
+        "storia: {fused}"
+    );
+    assert_eq!(on_layer(&app, LAYER_LOCALI), rooms_before, "niente cambia");
+
+    // Il vuoto si chiude.
+    set_top(&mut app, 2.998, 3.0);
+    forget_history(&mut app);
+    run(&mut app, "AL_AGGIORNA");
+
+    let closed = history(&app);
+    assert!(
+        comes_after(
+            &closed,
+            "Locale B: 23,70 → 11,70 m².",
+            "AL_AGGIORNA: 1 locali aggiornati."
+        ),
+        "storia: {closed}"
+    );
+    assert_eq!(label_of(&app, "B"), ["B\\PS = 11,70 m²"]);
+    assert_eq!(label_of(&app, "A"), ["A\\PS = 12,00 m²"]);
 }

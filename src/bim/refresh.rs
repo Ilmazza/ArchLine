@@ -10,7 +10,7 @@ use super::rooms::{
     label, measure_at, quality_notices, region_holds, room_entities, rooms_in, Computed, Measured,
     Phase, Room, RoomPart,
 };
-use super::units::{area_m2, DrawingUnit};
+use super::units::DrawingUnit;
 use super::walls::{faces as wall_faces, wall_set};
 
 /// Una modifica di `AL_AGGIORNA` a un'entità di un locale di fatto, che resta
@@ -45,20 +45,33 @@ impl RoomEdit {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoomChange {
     pub name: String,
-    /// L'area del contorno di prima, in m²; `None` senza un contorno chiuso.
+    /// L'area che diceva l'etichetta di prima, in m² (R60: netta, come la
+    /// nuova; il contorno è solo l'anello esterno, lordo delle isole). `None`
+    /// senza testo o se il testo non la dice.
     pub old_area_m2: Option<f64>,
     pub new_area_m2: f64,
+    /// L'etichetta cambia (altrimenti cambia solo il contorno).
+    pub label_changed: bool,
     /// Le modifiche alle sue entità, ognuna col suo handle.
     pub edits: Vec<(Handle, RoomEdit)>,
 }
 
 impl RoomChange {
-    /// La riga che dice quale locale cambia, da quanto a quanto (R58).
+    /// La riga che dice quale locale cambia e da quanto a quanto (R58, R60):
+    /// [`Notice::LocaleAggiornato`], o [`Notice::ContornoAggiornato`] quando
+    /// l'etichetta resta la stessa.
     pub fn notice(&self) -> Notice {
-        Notice::LocaleAggiornato {
-            name: self.name.clone(),
-            old_m2: self.old_area_m2,
-            new_m2: self.new_area_m2,
+        if self.label_changed {
+            Notice::LocaleAggiornato {
+                name: self.name.clone(),
+                old_m2: self.old_area_m2,
+                new_m2: self.new_area_m2,
+            }
+        } else {
+            Notice::ContornoAggiornato {
+                name: self.name.clone(),
+                area_m2: self.new_area_m2,
+            }
         }
     }
 }
@@ -129,8 +142,8 @@ fn fatto_parts(doc: &CadDocument, tol: f64) -> Vec<FattoParts<'_>> {
 /// (`rooms::measure_at`). Se il locale c'è, il contorno prende i vertici
 /// nuovi e il testo l'etichetta nuova, solo dove cambiano: il contorno si
 /// confronta alla tolleranza di base, e uno uguale partendo da un altro
-/// vertice non cambia. Ogni locale cambiato porta nome, area di prima (dal
-/// contorno di prima) e area nuova ([`RoomChange::notice`], R58). Se non è più chiuso,
+/// vertice non cambia. Ogni locale cambiato porta nome, area di prima (letta
+/// dall'etichetta di prima, R60) e area nuova ([`RoomChange::notice`], R58). Se non è più chiuso,
 /// [`Notice::LocaleNonChiuso`] e niente cambia. Un locale senza contorno o
 /// senza testo lo dice ([`Notice::ContornoMancante`],
 /// [`Notice::TestoMancante`]) e aggiorna la parte che ha. Se la regione di un
@@ -262,19 +275,21 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
                 }
             }
         }
+        let mut label_changed = false;
         if let Some((handle, old)) = parts.text {
             let value = label(name, measured.area_m2, false);
             if old.value != value {
+                label_changed = true;
                 edits.push((handle, RoomEdit::Testo { value }));
             }
         }
         if !edits.is_empty() {
             out.changed.push(RoomChange {
                 name: name.clone(),
-                old_area_m2: parts
-                    .outline
-                    .and_then(|(_, old)| outline_area_m2(old, unit)),
+                // R60: «prima» è ciò che il disegno diceva, cioè l'etichetta.
+                old_area_m2: parts.text.and_then(|(_, old)| label_area_m2(&old.value)),
                 new_area_m2: measured.area_m2,
+                label_changed,
                 edits,
             });
         }
@@ -282,15 +297,26 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
     out
 }
 
-/// L'area chiusa da un contorno, archi compresi (come il comando AREA), in
-/// m²; `None` se il contorno non è chiuso o non si misura.
-fn outline_area_m2(outline: &LwPolyline, unit: DrawingUnit) -> Option<f64> {
-    if !outline.is_closed || outline.vertices.len() < 3 {
+/// L'area che dice un'etichetta di locale, in m²: il numero dopo l'ultimo `=`
+/// e prima di ` m²` in fondo, con la virgola decimale, come la scrive
+/// `rooms::label` (`A (da confermare)\PS = 23,70 m²`). Si legge dalla fine,
+/// così il nome (con le sue barre e graffe, o un `=`) e la nota «da
+/// confermare» non contano. `None` se il testo non finisce così.
+fn label_area_m2(value: &str) -> Option<f64> {
+    let (_, number) = value
+        .trim_end()
+        .strip_suffix("m²")?
+        .trim_end()
+        .rsplit_once('=')?;
+    let number = number.trim();
+    let digits = number.chars().filter(char::is_ascii_digit).count();
+    let well_formed = digits > 0
+        && number.matches(',').count() <= 1
+        && number.chars().all(|c| c.is_ascii_digit() || c == ',');
+    if !well_formed {
         return None;
     }
-    let (area, _) =
-        crate::modules::draw::inquiry::area::measure(&EntityType::LwPolyline(outline.clone()))?;
-    area.is_finite().then(|| area_m2(area.abs(), unit))
+    number.replace(',', ".").parse::<f64>().ok()
 }
 
 /// Il disegno ha locali di fatto (un contorno o un testo) nello spazio
@@ -326,7 +352,7 @@ mod tests {
     //! Il ricalcolo di `AL_AGGIORNA` ([`refresh_rooms`]) sui casi di prova,
     //! senza l'app.
     use super::*;
-    use crate::bim::fixtures::{case_a, Form};
+    use crate::bim::fixtures::{case_a, pilastro, Form, LAYER_PILASTRI};
     use crate::bim::room_command::test_support::*;
     use crate::bim::room_command::{room_snapshot, RoomCommand};
     use crate::command::CadCommand;
@@ -368,9 +394,9 @@ mod tests {
         let [change] = &refresh.changed[..] else {
             panic!("{:?}", refresh.changed)
         };
-        // R58: quale locale, da quanto a quanto (il prima dal contorno di prima).
+        // R58: quale locale, da quanto a quanto (il prima dall'etichetta).
         assert_eq!(change.name, "A");
-        assert!((change.old_area_m2.expect("contorno") - 12.0).abs() < 1e-9);
+        assert!((change.old_area_m2.expect("etichetta") - 12.0).abs() < 1e-9);
         assert!((change.new_area_m2 - 11.7).abs() < 1e-9);
         assert_eq!(change.notice().text(), "Locale A: 12,00 → 11,70 m².");
         let edits = &change.edits;
@@ -452,9 +478,9 @@ mod tests {
                 }
             )]
         );
-        // Senza contorno l'area di prima non si sa.
-        assert_eq!(change.old_area_m2, None);
-        assert_eq!(change.notice().text(), "Locale A: aggiornato a 12,00 m².");
+        // R60: l'area di prima è quella che l'etichetta diceva.
+        assert_eq!(change.old_area_m2, Some(99.0));
+        assert_eq!(change.notice().text(), "Locale A: 99,00 → 12,00 m².");
     }
 
     /// R59: il contorno si confronta alla tolleranza di base anche con
@@ -578,5 +604,125 @@ mod tests {
         let mut arc = polyline(&ring, true);
         arc.vertices[1].bulge = 0.2;
         assert!(!same_outline(&a, &arc, TOL));
+    }
+
+    /// La faccia est di A (la `LINE` del caso a linee, o il lato ovest del
+    /// tramezzo a polilinea) portata a `x`.
+    fn move_east_face_of_a(doc: &mut CadDocument, x: f64) {
+        let handles: Vec<Handle> = doc
+            .entities()
+            .filter(|e| {
+                is_tramezzo(e)
+                    || matches!(e, EntityType::Line(l)
+                        if near(l.start, [4.0, 0.0]) && near(l.end, [4.0, 3.0]))
+            })
+            .map(|e| e.common().handle)
+            .collect();
+        assert_eq!(handles.len(), 1, "una faccia est di A");
+        match doc.get_entity_mut(handles[0]) {
+            Some(EntityType::Line(line)) => {
+                line.start.x = x;
+                line.end.x = x;
+            }
+            Some(EntityType::LwPolyline(polyline)) => {
+                for vertex in &mut polyline.vertices {
+                    if (vertex.location.x - 4.0).abs() < 1e-9 {
+                        vertex.location.x = x;
+                    }
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// La riga dell'unico locale cambiato, e le sue modifiche.
+    #[track_caller]
+    fn only_change(doc: &CadDocument) -> (String, Vec<(Handle, RoomEdit)>) {
+        let refresh = refresh_rooms(doc, M, TOL);
+        let [change] = &refresh.changed[..] else {
+            panic!("{:?}", refresh.changed)
+        };
+        (change.notice().text(), change.edits.clone())
+    }
+
+    /// R60: con un'isola l'etichetta dice l'area netta, mentre il contorno è
+    /// solo l'anello esterno (lordo). La riga di `AL_AGGIORNA` legge «prima»
+    /// dall'etichetta, mai dal contorno.
+    #[test]
+    fn refresh_line_reads_the_old_area_from_the_label() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let with_pillar = || {
+                let mut entities = case_a(form, M);
+                entities.push(pilastro(M));
+                let mut scene = scene_of(entities);
+                let (_, text) = write_room(&mut scene, "A", [2.0, 1.5]);
+                let Some(EntityType::MText(label)) = scene.document.get_entity(text) else {
+                    panic!("testo")
+                };
+                assert_eq!(label.value, "A\\PS = 11,91 m²", "{form:?}");
+                (scene, text)
+            };
+
+            // Il tramezzo da x = 4,00 a 3,90: 11,91 → 11,61.
+            let (mut scene, _) = with_pillar();
+            move_east_face_of_a(&mut scene.document, 3.9);
+            let (line, _) = only_change(&scene.document);
+            assert_eq!(line, "Locale A: 11,91 → 11,61 m².", "{form:?}");
+
+            // Il layer del pilastro spento: l'isola sparisce, 11,91 → 12,00.
+            let (mut scene, _) = with_pillar();
+            scene
+                .document
+                .layers
+                .get_mut(LAYER_PILASTRI)
+                .expect("layer del pilastro")
+                .turn_off();
+            let (line, edits) = only_change(&scene.document);
+            assert_eq!(line, "Locale A: 11,91 → 12,00 m².", "{form:?}");
+            assert!(
+                matches!(&edits[..], [(_, RoomEdit::Testo { .. })]),
+                "il contorno esterno è lo stesso: {edits:?}"
+            );
+
+            // Un'etichetta che non dice l'area: solo quella nuova.
+            let (mut scene, text) = with_pillar();
+            if let Some(EntityType::MText(label)) = scene.document.get_entity_mut(text) {
+                label.value = "A".into();
+            }
+            move_east_face_of_a(&mut scene.document, 3.9);
+            let (line, _) = only_change(&scene.document);
+            assert_eq!(line, "Locale A: aggiornato a 11,61 m².", "{form:?}");
+
+            // 1 mm: il contorno cambia, l'etichetta no (11,907 → «11,91»).
+            let (mut scene, _) = with_pillar();
+            move_east_face_of_a(&mut scene.document, 3.999);
+            let (line, edits) = only_change(&scene.document);
+            assert_eq!(
+                line, "Locale A: contorno aggiornato (11,91 m²).",
+                "{form:?}"
+            );
+            assert!(
+                matches!(&edits[..], [(_, RoomEdit::Contorno { .. })]),
+                "solo il contorno: {edits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_area_reads_what_label_wrote() {
+        for (value, want) in [
+            ("A\\PS = 11,91 m²", Some(11.91)),
+            ("A (da confermare)\\PS = 23,70 m²", Some(23.7)),
+            ("WC\\\\Doccia \\{2\\}\\PS = 3,05 m²", Some(3.05)),
+            ("Sala = grande\\PS = 1234,50 m²", Some(1234.5)),
+            ("A\\PS = 12 m²", Some(12.0)),
+            ("A", None),
+            ("A\\PS = dodici m²", None),
+            ("A\\PS = 12,00", None),
+            ("", None),
+        ] {
+            assert_eq!(label_area_m2(value), want, "{value:?}");
+        }
+        assert_eq!(label_area_m2(&label("A", 11.905, true)), Some(11.91));
     }
 }

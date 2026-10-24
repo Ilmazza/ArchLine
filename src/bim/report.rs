@@ -75,12 +75,18 @@ pub enum Notice {
     LocaleNonChiuso {
         name: String,
     },
-    /// Un locale di fatto riscritto da `AL_AGGIORNA`: l'area di prima (dal
-    /// contorno di prima, se c'era) e quella nuova, in m².
+    /// Un locale di fatto riscritto da `AL_AGGIORNA`: l'area di prima (quella
+    /// che diceva l'etichetta, se si legge) e quella nuova, in m².
     LocaleAggiornato {
         name: String,
         old_m2: Option<f64>,
         new_m2: f64,
+    },
+    /// Un locale di fatto di cui `AL_AGGIORNA` cambia solo il contorno:
+    /// l'etichetta (e la sua area, in m²) resta quella.
+    ContornoAggiornato {
+        name: String,
+        area_m2: f64,
     },
     /// Un locale di fatto di cui nel disegno c'è il testo ma non il contorno.
     ContornoMancante {
@@ -190,6 +196,10 @@ impl Notice {
                 old_m2: None,
                 new_m2,
             } => format!("Locale {name}: aggiornato a {}.", format_m2(*new_m2)),
+            Self::ContornoAggiornato { name, area_m2 } => format!(
+                "Locale {name}: contorno aggiornato ({}).",
+                format_m2(*area_m2)
+            ),
             Self::ContornoMancante { name } => {
                 format!("Locale {name}: c'è il testo ma non il contorno.")
             }
@@ -340,6 +350,13 @@ mod tests {
                     new_m2: 11.7,
                 },
                 "Locale Bagno: aggiornato a 11,70 m².",
+            ),
+            (
+                Notice::ContornoAggiornato {
+                    name: "Bagno".into(),
+                    area_m2: 11.91,
+                },
+                "Locale Bagno: contorno aggiornato (11,91 m²).",
             ),
             (
                 Notice::ContornoMancante {
