@@ -69,10 +69,14 @@ Dal confronto con lo screenshot di AutoCAD 2025 dell'utente (barre che esistono 
 |---|---|
 | Alto, riga 1 | Standard, Dimension, Inquiry |
 | Alto, riga 2 | Layers, Styles |
-| Alto, riga 3 | Insert, Reference |
+| Alto, riga 3 | Insert, Reference, Ristrutturazione |
 | Sinistra | Draw |
 | Destra | Modify, Draw Order |
 | Basso | Visual Styles, Preset Views, Modeling, Solid Editing |
+
+**Ristrutturazione** non è una barra di AutoCAD ma una barra propria di ArchLine (modulo BIM: nasce dal sottomenu
+Tools > Ristrutturazione, spec `2026-10-23-bim-stato-piante-design.md` §6). Chi ha già una disposizione salvata non la
+vede finché non riseleziona AutoCAD Classic.
 
 Le altre barre restano nascoste. È una scelta dell'implementatore se qualche barra non entra nella
 larghezza: la riga si divide con le regole già esistenti di `ToolbarLayout`.

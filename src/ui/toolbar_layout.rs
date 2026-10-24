@@ -236,9 +236,10 @@ impl ToolbarLayout {
     }
 
     /// ArchLine: the AutoCAD Classic arrangement, as in AutoCAD 2025's default
-    /// workspace (spec `2026-10-20-workspace-design.md` §4). Every bar not named
-    /// here is hidden. The lanes are written directly: `move_to` one bar at a
-    /// time would shift the others.
+    /// workspace, except that the third top row also carries ArchLine's own
+    /// `Ristrutturazione` bar (spec `2026-10-20-workspace-design.md` §4). Every
+    /// bar not named here is hidden. The lanes are written directly: `move_to`
+    /// one bar at a time would shift the others.
     pub fn autocad_classic() -> Self {
         let lanes = |rows: &[&[&str]]| -> Vec<Vec<ToolbarId>> {
             rows.iter()
