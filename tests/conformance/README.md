@@ -91,7 +91,10 @@ due locali, A di 4,00 x 3,00 m e B di 3,90 x 3,00 m, con un tramezzo da 0,10 m i
 `MURI`. `ArchLine --serve` apre il disegno ed esegue `AL_DEMOLISCI 4.05,0 4.05,3 N` (demolisce il tramezzo),
 `AL_NUOVO 2,0.5 2,2.5 0.12` (muro nuovo da 0,12 m) e `AL_ESTRAI <cartella>`, che scrive
 `casoA_stato-di-fatto.dwg`, `casoA_demolizioni-costruzioni.dwg` e `casoA_stato-di-progetto.dwg`. Ogni DWG si
-riconverte con `ArchLine --export x.dwg x.dxf` (ezdxf non legge DWG) e si legge con ezdxf.
+riconverte con `ArchLine --export x.dwg x.dxf` (ezdxf non legge DWG) e si legge con ezdxf. Poi un secondo giro,
+in `asse-oltre\` e con gli stessi controlli (righe con il prefisso "asse oltre le facce,"), con l'asse dato a occhio
+che sfora di 0,10 m nei muri d'ambito: `AL_DEMOLISCI 4.05,-0.1 4.05,3.1 N`. La zona deve fermarsi dove finiscono
+le facce del tramezzo (y da 0 a 3), quindi lo stato di progetto e' lo stesso del primo giro.
 
 **Cosa controlla** (una riga per controllo):
 
@@ -119,7 +122,7 @@ cartella temporanea di sistema; se il suo percorso ha spazi (un utente "Mario Ro
 tentativi. `--keep DIR` usa una cartella a scelta (senza spazi, nuova o vuota: `AL_ESTRAI` non sovrascrive) e la lascia com'e'. Se un controllo fallisce la
 cartella temporanea resta, con i DXF riconvertiti e `serve.stderr.txt`.
 
-**Limiti.** Un solo caso sintetico. Lo "spazio modello" e' controllato solo nel senso che i layout non hanno
+**Limiti.** Un solo disegno sintetico (due assi). Lo "spazio modello" e' controllato solo nel senso che i layout non hanno
 entita': il caso non ha contenuto nello spazio carta, quindi quel controllo non distingue un'estrazione che
 copiasse anche i layout. I DWG si verificano in modo indiretto (riletti da ArchLine stesso). Aree, nomi e testi dei
 locali non si controllano qui: stanno nei test Rust (`cargo test --locked --lib bim::`, `app::bim_tests`).

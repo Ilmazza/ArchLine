@@ -132,6 +132,17 @@ class ReportTests(unittest.TestCase):
         self.assertEqual((rep.total, rep.failed), (3, 1))
         self.assertIn("3 controlli, 2 OK, 1 FALLITI", rep.summary())
 
+    def test_prefixed_checks_land_in_the_same_report(self):
+        out = io.StringIO()
+        rep = be.Report(out)
+        rep.check(True, "open")
+        past = be.Prefixed(rep, be.PAST_PREFIX)
+        self.assertFalse(past.check(False, "open", "male"))
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].endswith(" open"))
+        self.assertTrue(lines[1].startswith("FALLITO") and lines[1].endswith("asse oltre le facce, open: male"))
+        self.assertEqual((rep.total, rep.failed), (2, 1))
+
 
 @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
 class DrawingTests(unittest.TestCase):

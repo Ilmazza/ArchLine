@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Banco di conformita, estrazione BIM: lancia `ArchLine --serve`, esegue sul caso A (due locali affiancati,
 tramezzo da 0,10 m) AL_DEMOLISCI, AL_NUOVO e AL_ESTRAI, poi legge i tre DWG estratti con ezdxf (via
-`ArchLine --export x.dwg x.dxf`, perche' ezdxf non legge DWG) e controlla il contenuto.
+`ArchLine --export x.dwg x.dxf`, perche' ezdxf non legge DWG) e controlla il contenuto. Due giri, con gli stessi
+controlli: l'asse del tramezzo dato esatto (4.05,0 4.05,3) e dato a occhio, oltre le facce (4.05,-0.1 4.05,3.1;
+righe con il prefisso "asse oltre le facce,"): la zona deve fermarsi dove finiscono le facce.
 
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
@@ -42,6 +44,11 @@ ROOM_A = [(0.0, 0.0), (4.00, 0.0), (4.00, 3.00), (0.0, 3.00)]
 ROOM_B = [(4.10, 0.0), (8.00, 0.0), (8.00, 3.00), (4.10, 3.00)]
 
 SUFFIX = {"fatto": "stato-di-fatto", "comparativa": "demolizioni-costruzioni", "progetto": "stato-di-progetto"}
+
+# I due assi del tramezzo per AL_DEMOLISCI: esatto, e a occhio (sfora di 0,10 m nei muri d'ambito).
+AXIS_EXACT = "4.05,0 4.05,3"
+AXIS_PAST = "4.05,-0.1 4.05,3.1"
+PAST_PREFIX = "asse oltre le facce, "
 
 READY_TIMEOUT = 180  # s: avvio a freddo dell'app
 REQUEST_TIMEOUT = 300  # s: una singola richiesta
@@ -154,6 +161,17 @@ class Report:
         line = f"Riepilogo: {self.total} controlli, {self.total - self.failed} OK, {self.failed} FALLITI"
         print(line, file=self.out)
         return line
+
+
+class Prefixed:
+    """Lo stesso `Report`, con un prefisso davanti al nome di ogni controllo (per il secondo giro)."""
+
+    def __init__(self, rep, prefix):
+        self.rep = rep
+        self.prefix = prefix
+
+    def check(self, ok, name, detail=""):
+        return self.rep.check(ok, self.prefix + name, detail)
 
 
 # ---------------------------------------------------------------- disegno di prova
@@ -345,14 +363,14 @@ def read_dxf(path):
 # ---------------------------------------------------------------- il banco
 
 
-def checks_session(rep, session, src, out_dir):
-    """Esegue i comandi via --serve e ne controlla le risposte."""
+def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT):
+    """Esegue i comandi via --serve (AL_DEMOLISCI sull'asse `axis`) e ne controlla le risposte."""
     rep.check(bool(session.ready.get("ok")), "sessione", f"app pronta (versione {session.ready.get('version', '?')})")
     resp = session.request({"op": "open", "path": str(src)})
     by_type = resp.get("by_type", {})
     rep.check(bool(resp.get("ok")) and by_type.get("Line") == 12 and resp.get("total") == 12,
               "open", f"disegno aperto, entita': {resp.get('total')} {by_type}" if resp.get("ok") else str(resp))
-    for cmd in ("AL_DEMOLISCI 4.05,0 4.05,3 N", "AL_NUOVO 2,0.5 2,2.5 0.12", f"AL_ESTRAI {out_dir}"):
+    for cmd in (f"AL_DEMOLISCI {axis} N", "AL_NUOVO 2,0.5 2,2.5 0.12", f"AL_ESTRAI {out_dir}"):
         resp = session.request({"op": "run", "cmd": cmd})
         ok = bool(resp.get("ok")) and resp.get("status") == "completed" and not resp.get("unconsumed")
         detail = (f"completato, entita' {resp.get('entities')} ({resp.get('added'):+d})" if resp.get("ok")
@@ -446,21 +464,15 @@ def check_progetto(rep, doc):
                       f"layer {hit[0].dxf.layer}" + ("" if hit[0].dxf.layer == LAYER_MURI else f", atteso {LAYER_MURI}"))
 
 
-def run_bim_extract(exe, work, rep):
-    """Tutto il giro in `work` (percorso senza spazi). Ritorna l'oggetto Report."""
+def run_case(rep, exe, env, work, src, src_doc, before, axis):
+    """Un giro: sessione --serve con AL_DEMOLISCI sull'asse `axis`, estratti in `work/out`, DXF riconvertiti in
+    `work`, controlli su `rep`."""
     work = Path(work)
     out_dir = work / "out"
-    out_dir.mkdir(exist_ok=True)
-    env = isolated_env(work / "config")
-    src = build_case_a(work / f"{BASE}.dxf")
-    src_doc, err = read_dxf(src)
-    if src_doc is None:
-        raise BenchError(f"la sorgente non e' leggibile da ezdxf ({err}): difetto del banco, non dell'app")
-    before = sha256_of(src)
-
+    out_dir.mkdir(parents=True, exist_ok=True)
     session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
     try:
-        checks_session(rep, session, src, out_dir)
+        checks_session(rep, session, src, out_dir, axis)
     except BaseException:
         session.kill()
         raise
@@ -472,6 +484,20 @@ def run_bim_extract(exe, work, rep):
               "DXF di partenza identico byte per byte (SHA-256)" if after == before
               else f"il DXF di partenza e' cambiato (SHA-256 {before[:12]} -> {after[:12]})")
     checks_files(rep, exe, env, work, out_dir, src_doc)
+
+
+def run_bim_extract(exe, work, rep):
+    """Tutto il banco in `work` (percorso senza spazi): il giro con l'asse esatto in `work`, quello con l'asse
+    oltre le facce in `work/asse-oltre` (stessi controlli, nomi col prefisso). Ritorna l'oggetto Report."""
+    work = Path(work)
+    env = isolated_env(work / "config")
+    src = build_case_a(work / f"{BASE}.dxf")
+    src_doc, err = read_dxf(src)
+    if src_doc is None:
+        raise BenchError(f"la sorgente non e' leggibile da ezdxf ({err}): difetto del banco, non dell'app")
+    before = sha256_of(src)
+    run_case(rep, exe, env, work, src, src_doc, before, AXIS_EXACT)
+    run_case(Prefixed(rep, PAST_PREFIX), exe, env, work / "asse-oltre", src, src_doc, before, AXIS_PAST)
     return rep
 
 

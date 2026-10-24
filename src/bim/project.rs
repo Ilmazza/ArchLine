@@ -1788,6 +1788,49 @@ mod tests {
         assert!(no_wall_inside(&pg, [4.0, 4.1], (0.0, 3.0)));
     }
 
+    /// Fix finale, punto 1: l'asse cliccato a occhio sfora nei muri d'ambito
+    /// (da y = −0,10 a y = 3,10). La zona si ferma sulle facce del tramezzo e
+    /// la pianta di progetto è quella dell'asse esatto: nessun pezzo tolto
+    /// dalle facce y = 0 e y = 3 dei muri d'ambito, nessun `TaglioNonChiuso`,
+    /// nessuna chiusura ridisegnata sulla faccia demolita (R39).
+    #[test]
+    fn axis_past_the_faces_gives_the_plan_of_the_exact_axis() {
+        let not_cut = |notices: &[Notice]| {
+            !notices
+                .iter()
+                .any(|n| matches!(n, Notice::TaglioNonChiuso { .. }))
+        };
+
+        // Linee continue: le due chiusure, nient'altro.
+        let entities = case_a(Form::Continua, DrawingUnit::Metri);
+        let zone = axis_zone_on(entities.clone(), [4.05, -0.10], [4.05, 3.10]).expect("muro");
+        let pg = project(entities, vec![zone]);
+        assert!(not_cut(&pg.notices), "{:?}", pg.notices);
+        assert!(pg.notices.is_empty(), "{:?}", pg.notices);
+        assert!(has_line(&pg, [4.0, 0.0], [4.1, 0.0]), "{:?}", pg.drawn);
+        assert!(has_line(&pg, [4.0, 3.0], [4.1, 3.0]), "{:?}", pg.drawn);
+        assert_eq!(pg.drawn.len(), 2, "{:?}", pg.drawn);
+        assert_eq!(pg.kept_originals.len(), 10);
+        assert!(no_wall_inside(&pg, [4.0, 4.1], (0.0, 3.0)));
+
+        // Una polilinea per muro: le due giunzioni, sud e nord intere.
+        let entities = case_a(Form::ChiusaPerMuro, DrawingUnit::Metri);
+        let scene = scene_with(entities.clone(), 6);
+        let zone = axis_zone_on(entities, [4.05, -0.10], [4.05, 3.10]).expect("muro");
+        let pg = project_on(&scene, vec![zone]);
+        assert!(not_cut(&pg.notices), "{:?}", pg.notices);
+        assert_notices(
+            &pg.notices,
+            &[giunzione([4.05, 0.0]), giunzione([4.05, 3.0])],
+        );
+        let walls = handles_of(&scene, "LWPOLYLINE");
+        assert!(pg.kept_originals.contains(&walls[0]), "sud");
+        assert!(pg.kept_originals.contains(&walls[1]), "nord");
+        assert!(!has_line(&pg, [4.0, 0.0], [4.1, 0.0]), "{:?}", pg.drawn);
+        assert!(!has_line(&pg, [4.0, 3.0], [4.1, 3.0]), "{:?}", pg.drawn);
+        assert!(no_wall_inside(&pg, [4.0, 4.1], (0.0, 3.0)));
+    }
+
     #[test]
     fn varco_keeps_jambs_and_soglie_only_for_rooms() {
         let pg = project(

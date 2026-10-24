@@ -546,7 +546,8 @@ pub enum AxisMiss {
     /// I due punti coincidono (entro la tolleranza): non c'è un asse.
     Degenerate,
     /// Nessuna faccia valida ai lati dell'asse, oppure due facce valide una
-    /// per una ma più distanti tra loro dello spessore massimo.
+    /// per una ma che non fanno un muro: più distanti tra loro dello spessore
+    /// massimo, o che lungo l'asse non si affiancano per più della tolleranza.
     NoFaces,
     /// Una faccia sola: l'altra manca entro il limite di spessore (anche
     /// l'asse caduto sull'unica faccia vicina).
@@ -594,10 +595,25 @@ pub(super) const FACE_PARALLEL_DEGREES: f64 = 0.5;
 /// all'asse si toglie intera, dell'altra resta il tratto fuori dalla zona e la
 /// geometria di progetto lo segnala (`Notice::FacciaNonTolta`).
 ///
+/// Il rettangolo non va oltre le facce (fix finale, punto 1): l'asse dato a
+/// occhio che sfora nei muri ortogonali porterebbe la zona dentro la loro
+/// massa (buchi nelle facce dei muri d'ambito, `TaglioNonChiuso`, facce
+/// demolite richiuse da R39). Dopo l'eventuale allineamento alle facce,
+/// l'intervallo dell'asse, nel verso del rettangolo, si accorcia
+/// all'intersezione delle coperture delle due facce; la copertura di una
+/// faccia va dal primo all'ultimo estremo dei candidati sulla sua stessa
+/// retta (entro `tol`: per facce parallele all'asse è lo stesso `s`), così un
+/// vano porta in mezzo non accorcia la zona. Un estremo che sfora di non più
+/// di `tol` non si tocca: con l'asse dentro le facce il risultato è quello di
+/// prima, bit per bit. [`rect_from_axis_thickness`] (muro nuovo, senza
+/// facce) non si accorcia.
+///
 /// Errori: [`AxisMiss::Degenerate`] se `p1 ≈ p2`; [`AxisMiss::OneFace`] se
 /// resta una faccia sola (anche l'unica faccia su cui cade l'asse, senza
 /// nient'altro entro il limite); [`AxisMiss::NoFaces`] se non ce n'è nessuna,
-/// o se le due scelte distano più del limite tra loro.
+/// se le due scelte distano più del limite tra loro o se lungo l'asse si
+/// affiancano per non più di `tol` (ognuna c'è, ma insieme non fanno un muro:
+/// come per lo spessore oltre il limite, il comando chiede lo spessore).
 pub fn rect_from_axis(
     sources: &FxHashMap<Handle, BoundarySource>,
     p1: [f64; 2],
@@ -642,8 +658,66 @@ pub fn rect_from_axis(
     if left.s - right.s > max_thickness {
         return Err(AxisMiss::NoFaces);
     }
-    Ok(along_faces(p1, p2, d, length, tol, right, left)
-        .unwrap_or_else(|| wall_rect(p1, p2, n, right.s, left.s)))
+    let rect = along_faces(p1, p2, d, length, tol, right, left)
+        .unwrap_or_else(|| wall_rect(p1, p2, n, right.s, left.s));
+    trim_to_faces(rect, &valid, right, left, tol).ok_or(AxisMiss::NoFaces)
+}
+
+/// Il rettangolo accorciato, nel suo verso (`c0 → c1`), al tratto in cui le
+/// facce `right` e `left` lo accompagnano entrambe (vedi [`rect_from_axis`]).
+/// La copertura di una faccia è l'intervallo dal primo all'ultimo estremo dei
+/// candidati in `faces` che stanno sulla sua retta (entrambi gli estremi
+/// entro `tol`). Un capo si sposta solo se sfora la copertura di più di
+/// `tol`, altrimenti resta identico. `None` se il tratto comune non è più
+/// lungo di `tol`.
+fn trim_to_faces(
+    rect: WallRect,
+    faces: &[FaceCandidate],
+    right: &FaceCandidate,
+    left: &FaceCandidate,
+    tol: f64,
+) -> Option<WallRect> {
+    let [c0, c1, c2, c3] = rect.corners;
+    let length = (c1[0] - c0[0]).hypot(c1[1] - c0[1]);
+    if !(length > 0.0) {
+        return None;
+    }
+    let a = [(c1[0] - c0[0]) / length, (c1[1] - c0[1]) / length];
+    let along = |p: [f64; 2]| (p[0] - c0[0]) * a[0] + (p[1] - c0[1]) * a[1];
+    // Distanza di `p` dalla retta della faccia (verso unitario).
+    let off_line = |p: [f64; 2], face: &FaceCandidate| {
+        ((p[0] - face.point[0]) * face.dir[1] - (p[1] - face.point[1]) * face.dir[0]).abs()
+    };
+    let cover = |face: &FaceCandidate| {
+        faces
+            .iter()
+            .filter(|other| other.ends.iter().all(|&p| off_line(p, face) <= tol))
+            .flat_map(|other| other.ends)
+            .map(along)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+                (lo.min(t), hi.max(t))
+            })
+    };
+    let (right_from, right_to) = cover(right);
+    let (left_from, left_to) = cover(left);
+    let from = right_from.max(left_from).max(0.0);
+    let to = right_to.min(left_to).min(length);
+    if !(to - from > tol) {
+        return None;
+    }
+    let shift = |p: [f64; 2], t: f64| [p[0] + a[0] * t, p[1] + a[1] * t];
+    let (mut start, mut end) = ([c0, c3, rect.axis.0], [c1, c2, rect.axis.1]);
+    if from > tol {
+        start = start.map(|p| shift(p, from));
+    }
+    if to < length - tol {
+        end = end.map(|p| shift(p, to - length));
+    }
+    Some(WallRect {
+        corners: [start[0], end[0], end[1], start[1]],
+        axis: (start[2], end[2]),
+        thickness: rect.thickness,
+    })
 }
 
 /// Il rettangolo orientato sulle due facce scelte (vedi [`rect_from_axis`]),
@@ -733,6 +807,8 @@ struct FaceCandidate {
     dir: [f64; 2],
     /// Il punto del segmento a metà del tratto in cui copre l'asse.
     point: [f64; 2],
+    /// Gli estremi del segmento intero (per la copertura della faccia).
+    ends: [[f64; 2]; 2],
 }
 
 /// Ogni segmento dritto che accompagna l'asse: parallelo entro
@@ -784,6 +860,7 @@ fn face_candidates(
                 s: dot(from_p1(point), n),
                 dir: [sign * v[0] / extent, sign * v[1] / extent],
                 point,
+                ends: [segment.start, segment.end],
             })
         })
         .collect()
@@ -1692,16 +1769,19 @@ mod tests {
         assert_pt(r.axis.0, [x / 2.0, 4.0]);
 
         // Una faccia che copre solo da y = 5 a y = 10 (lo stesso filo): vale la
-        // metà del tratto coperto (da 5 a 6), y = 5,5.
+        // metà del tratto coperto (da 5 a 6), y = 5,5. Dal fix finale (punto
+        // 1) il rettangolo si ferma anche dove comincia la faccia, y = 5: da
+        // y = 4 a 5 la faccia destra non c'è (prima i lati corti stavano a
+        // y = 4 e y = 6).
         let (a, b) = (skewed(5.0), skewed(10.0));
         let short = line([a[0], a[1], 0.0], [b[0], b[1], 0.0]);
         let (s, tol) = sources_for(vec![wall, short]);
         let x = 0.2 + 5.5 * tan;
         let r = rect_from_axis(&s, [0.1, 4.0], [0.1, 6.0], 1.5, tol).unwrap();
-        assert_corners(&r, [[x, 4.0], [x, 6.0], [0.0, 6.0], [0.0, 4.0]]);
+        assert_corners(&r, [[x, 5.0], [x, 6.0], [0.0, 6.0], [0.0, 5.0]]);
         // Lo stesso con l'asse nel verso opposto.
         let r = rect_from_axis(&s, [0.1, 6.0], [0.1, 4.0], 1.5, tol).unwrap();
-        assert_corners(&r, [[0.0, 6.0], [0.0, 4.0], [x, 4.0], [x, 6.0]]);
+        assert_corners(&r, [[0.0, 6.0], [0.0, 5.0], [x, 5.0], [x, 6.0]]);
     }
 
     /// R41: si seguono le facce solo se lo spessore è costante, cioè se ai due
@@ -1886,6 +1966,123 @@ mod tests {
         assert!(wall(segment(1.0, 2.0)).is_ok());
         // Uno che finisce prima dell'inizio dell'asse: no.
         assert_eq!(wall(segment(-5.0, 0.0)), Err(AxisMiss::OneFace));
+    }
+
+    /// Fix finale, punto 1: l'asse cliccato a occhio sfora nei muri d'ambito
+    /// (da y = −0,10 a y = 3,10): la zona si ferma dove finiscono le facce del
+    /// tramezzo, y ∈ [0; 3], nelle due forme e nei due versi.
+    #[test]
+    fn axis_past_the_faces_stops_where_they_end() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let (s, tol) = sources_for(case_a(form, M));
+            let r = rect_from_axis(&s, [4.05, -0.10], [4.05, 3.10], 1.5, tol).unwrap();
+            assert!((r.thickness - 0.10).abs() < 1e-9, "{form:?}");
+            assert_corners(&r, [[4.1, 0.0], [4.1, 3.0], [4.0, 3.0], [4.0, 0.0]]);
+            assert_pt(r.axis.0, [4.05, 0.0]);
+            assert_pt(r.axis.1, [4.05, 3.0]);
+            assert!((signed_area(&r.ring()) - 0.30).abs() < 1e-9, "{form:?}");
+
+            let r = rect_from_axis(&s, [4.05, 3.10], [4.05, -0.10], 1.5, tol).unwrap();
+            assert_corners(&r, [[4.0, 3.0], [4.0, 0.0], [4.1, 0.0], [4.1, 3.0]]);
+            assert_pt(r.axis.0, [4.05, 3.0]);
+            assert_pt(r.axis.1, [4.05, 0.0]);
+
+            // Sfora da una parte sola: si accorcia solo quell'estremo.
+            let r = rect_from_axis(&s, [4.05, 1.0], [4.05, 3.10], 1.5, tol).unwrap();
+            assert_corners(&r, [[4.1, 1.0], [4.1, 3.0], [4.0, 3.0], [4.0, 1.0]]);
+            assert_eq!(r.corners[0][1], 1.0, "{form:?}: l'estremo dentro non si tocca");
+        }
+    }
+
+    /// Asse più corto delle facce: il rettangolo è quello di sempre, con gli
+    /// estremi esattamente dove li ha dati l'asse.
+    #[test]
+    fn axis_inside_the_faces_is_unchanged() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let (s, tol) = sources_for(case_a(form, M));
+            let r = rect_from_axis(&s, [4.05, 0.5], [4.05, 2.5], 1.5, tol).unwrap();
+            assert_corners(&r, [[4.1, 0.5], [4.1, 2.5], [4.0, 2.5], [4.0, 0.5]]);
+            let ys: Vec<f64> = r.corners.iter().map(|c| c[1]).collect();
+            assert_eq!(ys, vec![0.5, 2.5, 2.5, 0.5], "{form:?}");
+            assert_eq!((r.axis.0[1], r.axis.1[1]), (0.5, 2.5), "{form:?}");
+            // Asse esattamente sulle estremità delle facce: lo stesso.
+            let r = rect_from_axis(&s, [4.05, 0.0], [4.05, 3.0], 1.5, tol).unwrap();
+            let ys: Vec<f64> = r.corners.iter().map(|c| c[1]).collect();
+            assert_eq!(ys, vec![0.0, 3.0, 3.0, 0.0], "{form:?}");
+        }
+    }
+
+    /// Una faccia interrotta da un vano porta (due tratti sulla stessa retta,
+    /// con un buco da y = 1,00 a y = 1,90): la copertura è l'unione dei
+    /// tratti, la zona non si accorcia al buco.
+    #[test]
+    fn face_broken_by_a_doorway_does_not_shorten_the_zone() {
+        let (s, tol) = sources_for(vec![
+            line([0.0, 0.0, 0.0], [0.0, 3.0, 0.0]),
+            line([0.2, 0.0, 0.0], [0.2, 1.0, 0.0]),
+            line([0.2, 1.9, 0.0], [0.2, 3.0, 0.0]),
+        ]);
+        for (p1, p2) in [
+            ([0.1, -0.1], [0.1, 3.1]),
+            ([0.1, 3.1], [0.1, -0.1]),
+        ] {
+            let r = rect_from_axis(&s, p1, p2, 1.5, tol).unwrap();
+            let mut ys: Vec<f64> = r.corners.iter().map(|c| c[1]).collect();
+            ys.sort_by(f64::total_cmp);
+            assert_pt([ys[0], ys[3]], [0.0, 3.0]);
+            assert!((r.thickness - 0.2).abs() < 1e-9);
+        }
+        // Dentro, col vano a metà dell'asse: invariato.
+        let r = rect_from_axis(&s, [0.1, 0.5], [0.1, 2.5], 1.5, tol).unwrap();
+        assert_corners(&r, [[0.2, 0.5], [0.2, 2.5], [0.0, 2.5], [0.0, 0.5]]);
+        // L'asse che comincia nel vano: il tratto prima (y da 0 a 1) non
+        // accompagna l'asse e non è un candidato, quindi la zona comincia
+        // alla spalletta (y = 1,90), dove c'è muro da tutte e due le parti.
+        let r = rect_from_axis(&s, [0.1, 1.5], [0.1, 2.5], 1.5, tol).unwrap();
+        assert_corners(&r, [[0.2, 1.9], [0.2, 2.5], [0.0, 2.5], [0.0, 1.9]]);
+    }
+
+    /// Due facce valide una per una ma che non si affiancano lungo l'asse
+    /// (una da y = 0 a 1, l'altra da 2 a 3): non sono un muro, `NoFaces` come
+    /// per due facce più distanti dello spessore massimo.
+    #[test]
+    fn faces_that_do_not_overlap_along_the_axis_are_no_wall() {
+        let (s, tol) = sources_for(vec![
+            line([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            line([0.2, 2.0, 0.0], [0.2, 3.0, 0.0]),
+        ]);
+        assert_eq!(
+            rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol),
+            Err(AxisMiss::NoFaces)
+        );
+        // Si toccano solo in un punto: lo stesso.
+        let (s, tol) = sources_for(vec![
+            line([0.0, 0.0, 0.0], [0.0, 1.5, 0.0]),
+            line([0.2, 1.5, 0.0], [0.2, 3.0, 0.0]),
+        ]);
+        assert_eq!(
+            rect_from_axis(&s, [0.1, 0.0], [0.1, 3.0], 1.5, tol),
+            Err(AxisMiss::NoFaces)
+        );
+    }
+
+    /// Facce parallele tra loro ma fuori squadra (R40): l'accorciamento si fa
+    /// nel verso delle facce, dopo l'allineamento. Le facce partono da
+    /// (0; 0) e (0,2; 0): lungo le facce l'inizio comune è quello della
+    /// destra, (0,2; 0); l'asse va da y = −1 (fuori) a y = 3 (dentro).
+    #[test]
+    fn skewed_faces_are_trimmed_along_their_own_direction() {
+        let (sin, cos) = 0.3_f64.to_radians().sin_cos();
+        let face = |x: f64| line([x, 0.0, 0.0], [x + 10.0 * sin, 10.0 * cos, 0.0]);
+        let (s, tol) = sources_for(vec![face(0.0), face(0.2)]);
+        let r = rect_from_axis(&s, [0.1, -1.0], [0.1, 3.0], 1.5, tol).unwrap();
+        let along = |p: [f64; 2]| p[0] * sin + p[1] * cos;
+        let c = r.corners;
+        assert_pt(c[0], [0.2, 0.0]);
+        assert!((along(c[3]) - along([0.2, 0.0])).abs() < 1e-9, "{c:?}");
+        assert!((along(c[1]) - along([0.1, 3.0])).abs() < 1e-9, "{c:?}");
+        assert!((along(c[2]) - along([0.1, 3.0])).abs() < 1e-9, "{c:?}");
+        assert!((r.thickness - 0.2 * cos).abs() < 1e-9);
     }
 
     #[test]
