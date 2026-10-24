@@ -50,6 +50,10 @@ pub enum Notice {
         names: Vec<String>,
         area_m2: f64,
     },
+    /// Locali di fatto fusi in una regione sola (R55): non si aggiornano.
+    LocaliFusiLasciati {
+        names: Vec<String>,
+    },
     LocaleSenzaNome {
         area_m2: f64,
     },
@@ -144,6 +148,9 @@ impl Notice {
                 names.join(" + "),
                 format_m2(*area_m2)
             ),
+            Self::LocaliFusiLasciati { names } => {
+                format!("Locali {} lasciati com'erano.", names.join(" + "))
+            }
             Self::LocaleSenzaNome { area_m2 } => {
                 format!("Locale senza nome ({}).", format_m2(*area_m2))
             }
@@ -255,6 +262,12 @@ mod tests {
                     area_m2: 11.905,
                 },
                 "Locali Cucina + Pranzo fusi in uno (11,91 m²): nome da confermare.",
+            ),
+            (
+                Notice::LocaliFusiLasciati {
+                    names: vec!["Cucina".into(), "Pranzo".into()],
+                },
+                "Locali Cucina + Pranzo lasciati com'erano.",
             ),
             (
                 Notice::LocaleSenzaNome { area_m2: 4.0 },

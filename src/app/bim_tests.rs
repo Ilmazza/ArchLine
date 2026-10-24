@@ -2176,9 +2176,10 @@ fn gap_closed_by_hpgaptol() {
     dispatch_line(&mut app, "HPGAPTOL 0");
 }
 
-/// R54: il tramezzo (una polilinea chiusa per muro) si ferma 2 mm prima del
-/// muro nord dopo che A e B sono stati scritti. La regione di A contiene il
-/// seme di B: `AL_AGGIORNA` lo dice, una volta sola.
+/// R54 e R55: il tramezzo (una polilinea chiusa per muro) si ferma 2 mm prima
+/// del muro nord dopo che A e B sono stati scritti. La regione di A contiene il
+/// seme di B: `AL_AGGIORNA` lo dice una volta sola e lascia i due locali
+/// com'erano, senza passi di annullamento.
 #[test]
 fn aggiorna_reports_fused_rooms() {
     let mut app = fresh_app();
@@ -2191,6 +2192,7 @@ fn aggiorna_reports_fused_rooms() {
         .map(|(_, e)| mtext(e).value.clone())
         .collect();
     assert_eq!(labels, ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"]);
+    let rooms_before = on_layer(&app, LAYER_LOCALI);
     let tramezzo = doc(&app)
         .entities()
         .find(|e| {
@@ -2207,6 +2209,7 @@ fn aggiorna_reports_fused_rooms() {
             }
         }
     }
+    let steps = undo_steps(&app);
     forget_history(&mut app);
 
     run(&mut app, "AL_AGGIORNA");
@@ -2214,11 +2217,17 @@ fn aggiorna_reports_fused_rooms() {
     let history = history(&app);
     let fused = "Locali A + B fusi in uno (23,70 m²): nome da confermare.";
     assert_eq!(history.matches(fused).count(), 1, "storia: {history}");
-    // L'avviso è l'unica differenza: i due locali seguono la regione trovata.
     assert!(
-        history.contains("AL_AGGIORNA: 2 locali aggiornati."),
+        comes_after(&history, fused, "Locali A + B lasciati com'erano."),
         "storia: {history}"
     );
+    assert!(
+        history.contains("AL_AGGIORNA: 0 locali aggiornati."),
+        "storia: {history}"
+    );
+    // Contorni e testi di A e B identici: 12,00 e 11,70 restano.
+    assert_eq!(on_layer(&app, LAYER_LOCALI), rooms_before);
+    assert_eq!(undo_steps(&app), steps, "nessun passo");
 }
 
 /// In un disegno in centimetri senza unità (INSUNITS = 0) e senza `TEXTSIZE`:

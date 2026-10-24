@@ -1824,9 +1824,11 @@ fn fatto_parts(doc: &CadDocument, tol: f64) -> Vec<FattoParts<'_>> {
 /// partendo da un altro vertice non cambia); se non è più chiuso,
 /// [`Notice::LocaleNonChiuso`] e niente cambia. Un locale senza contorno o
 /// senza testo lo dice ([`Notice::ContornoMancante`],
-/// [`Notice::TestoMancante`]) e aggiorna la parte che ha. Una regione con il
-/// seme di un altro locale dà [`Notice::LocaleFuso`], una volta per gruppo
-/// (R54); poi gli avvisi di qualità (`rooms::quality_notices`). In testa,
+/// [`Notice::TestoMancante`]) e aggiorna la parte che ha. Se la regione di un
+/// locale contiene il seme di un altro (un vuoto li ha uniti), nessuno dei
+/// due cambia: [`Notice::LocaleFuso`] e [`Notice::LocaliFusiLasciati`], una
+/// volta per gruppo (R54, R55). Per gli altri, gli avvisi di qualità
+/// (`rooms::quality_notices`). In testa,
 /// [`Notice::FuoriPiano`] se ci sono muri fuori dal piano XY. Senza locali di
 /// fatto non c'è niente da dire. Il disegno non si tocca: le modifiche le
 /// applica chi chiama ([`RoomEdit::apply_to`]).
@@ -1859,7 +1861,25 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
             )
         })
         .collect();
-    let mut fused = vec![false; rooms.len()];
+    // R54/R55: i locali la cui regione contiene il seme di un altro fanno un
+    // gruppo (anche a catena), che resta com'è.
+    let mut group: Vec<usize> = (0..rooms.len()).collect();
+    for (index, measured) in found.iter().enumerate() {
+        let Some(measured) = measured else {
+            continue;
+        };
+        for other in 0..rooms.len() {
+            if other != index && region_holds(&measured.region, rooms[other].room.seed, tol) {
+                let (keep, drop) = (group[index], group[other]);
+                for label in &mut group {
+                    if *label == drop {
+                        *label = keep;
+                    }
+                }
+            }
+        }
+    }
+    let mut reported: Vec<usize> = Vec::new();
     for (index, parts) in rooms.iter().enumerate() {
         let name = &parts.room.name;
         if parts.outline.is_none() {
@@ -1870,29 +1890,36 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
             out.notices
                 .push(Notice::TestoMancante { name: name.clone() });
         }
+        let members: Vec<usize> = (0..rooms.len())
+            .filter(|&other| group[other] == group[index])
+            .collect();
+        if members.len() > 1 {
+            // Un vuoto ha unito due locali: l'area unita sostituirebbe dati
+            // giusti. Niente cambia, e lo si dice una volta per gruppo.
+            if !reported.contains(&group[index]) {
+                reported.push(group[index]);
+                let names: Vec<String> = members
+                    .iter()
+                    .map(|&member| rooms[member].room.name.clone())
+                    .collect();
+                if let Some(area_m2) = members
+                    .iter()
+                    .find_map(|&member| found[member].as_ref().map(|m| m.area_m2))
+                {
+                    out.notices.push(Notice::LocaleFuso {
+                        names: names.clone(),
+                        area_m2,
+                    });
+                }
+                out.notices.push(Notice::LocaliFusiLasciati { names });
+            }
+            continue;
+        }
         let Some(measured) = &found[index] else {
             out.notices
                 .push(Notice::LocaleNonChiuso { name: name.clone() });
             continue;
         };
-        if !fused[index] {
-            let others: Vec<usize> = (0..rooms.len())
-                .filter(|&other| {
-                    other != index && region_holds(&measured.region, rooms[other].room.seed, tol)
-                })
-                .collect();
-            if !others.is_empty() {
-                for &other in iter::once(&index).chain(&others) {
-                    fused[other] = true;
-                }
-                out.notices.push(Notice::LocaleFuso {
-                    names: iter::once(name.clone())
-                        .chain(others.iter().map(|&other| rooms[other].room.name.clone()))
-                        .collect(),
-                    area_m2: measured.area_m2,
-                });
-            }
-        }
         out.notices.extend(quality_notices(
             name,
             measured.exact,
@@ -3325,8 +3352,8 @@ mod room_tests {
         );
     }
 
-    /// R54 in `AL_AGGIORNA`: una volta per gruppo; i locali si aggiornano
-    /// comunque sulla regione trovata (l'avviso è l'unica differenza).
+    /// R54 e R55 in `AL_AGGIORNA`: una volta per gruppo, e i locali fusi
+    /// restano com'erano (l'area unita sostituirebbe dati giusti).
     #[test]
     fn refresh_rooms_reports_fused_rooms_once() {
         let mut scene = scene_of(case_a(Form::ChiusaPerMuro, M));
@@ -3346,12 +3373,31 @@ mod room_tests {
             open_tramezzo(polyline);
         }
         let refresh = refresh_rooms(&scene.document, M, TOL);
-        let [Notice::LocaleFuso { names, area_m2 }] = &refresh.notices[..] else {
+        let [Notice::LocaleFuso { names, area_m2 }, Notice::LocaliFusiLasciati { names: left }] =
+            &refresh.notices[..]
+        else {
             panic!("{:?}", refresh.notices)
         };
         assert_eq!(names, &["A", "B"]);
+        assert_eq!(left, &["A", "B"]);
         assert!((area_m2 - 23.7002).abs() < 1e-9, "{area_m2}");
-        assert_eq!(refresh.changed.len(), 2);
+        assert!(refresh.changed.is_empty(), "{:?}", refresh.changed);
+
+        // Un secondo A scritto dopo il vuoto, sullo stesso seme: un gruppo
+        // solo di tre, un avviso solo, niente cambia.
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        let refresh = refresh_rooms(&scene.document, M, TOL);
+        let fused: Vec<&Notice> = refresh
+            .notices
+            .iter()
+            .filter(|n| matches!(n, Notice::LocaleFuso { .. }))
+            .collect();
+        assert_eq!(fused.len(), 1, "{:?}", refresh.notices);
+        let Notice::LocaleFuso { names, .. } = fused[0] else {
+            unreachable!()
+        };
+        assert_eq!(names, &["A", "B", "A"]);
+        assert!(refresh.changed.is_empty(), "{:?}", refresh.changed);
     }
 
     #[test]
