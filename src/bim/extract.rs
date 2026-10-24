@@ -135,6 +135,18 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         notices: Vec::new(),
     };
     let zone_app = src.app_ids.get(APP_ZONA).map(|app| app.handle.value());
+    // I locali si riconoscono dall'XDATA (`rooms_in`), non dal layer (fix
+    // finale, punto 3): una parte spostata a mano su un altro layer si esclude
+    // per handle, oltre all'esclusione per layer. Fatto: via i semi (contorno e
+    // testo di fatto si ricalcolano sul posto, stessi handle); comparativa e
+    // progetto: via tutte le parti (nel progetto i locali si ricreano).
+    let parts = rooms_in(src);
+    let seeds: FxHashSet<Handle> = parts
+        .iter()
+        .filter(|(_, _, part)| *part == RoomPart::Seme)
+        .map(|(handle, _, _)| *handle)
+        .collect();
+    let room_parts: FxHashSet<Handle> = parts.iter().map(|(handle, _, _)| *handle).collect();
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
@@ -144,21 +156,26 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
             Elaborato::StatoDiFatto => {
                 let rooms = refresh_fatto_rooms(&mut work, opts.unit, room_tol(opts));
                 push_unique(&mut ex.notices, rooms);
-                let handles = model_space_handles(src, |_, entity| {
+                let handles = model_space_handles(src, |handle, entity| {
                     !carries_zone_record(entity, zone_app)
                         && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
+                        && !seeds.contains(&handle)
                 });
                 copy_out(src, &mut work, &handles, None)
             }
             Elaborato::DemolizioniCostruzioni => {
-                let handles = model_space_handles(src, |_, entity| {
+                let handles = model_space_handles(src, |handle, entity| {
                     !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
+                        && !room_parts.contains(&handle)
                 });
                 copy_out(src, &mut work, &handles, None)
             }
             Elaborato::StatoDiProgetto => {
                 let layer = new_walls_layer_name(src, &opts.new_walls_layer);
-                let walls = wall_set(src, opts.tol);
+                // Un contorno di locale spostato su un layer non `AL-*` è una
+                // polilinea come le altre: qui non fa da muro (non si taglia,
+                // non si copia, non chiude i locali di progetto).
+                let walls = without_room_parts(wall_set(src, opts.tol), &room_parts);
                 let zones = zones_in(src);
                 let pg = project_geometry(src, &walls, &zones, &layer, opts.tol);
                 let wall_handles: FxHashSet<Handle> =
@@ -171,13 +188,17 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
                     } else {
                         !carries_zone_record(entity, zone_app)
                             && !on_rooms_layer(entity)
+                            && !room_parts.contains(&handle)
                             && !excluded.contains(&handle)
                     }
                 });
-                handles.extend(add_drawn(&mut work, &pg.drawn));
+                let (drawn, mut refused) = add_drawn(&mut work, &pg.drawn);
+                handles.extend(drawn);
                 let (rooms, room_notices) =
                     project_room_entities(src, &walls, &pg.room_entities, &zones, opts);
-                handles.extend(add_drawn(&mut work, &rooms));
+                let (drawn, more) = add_drawn(&mut work, &rooms);
+                handles.extend(drawn);
+                refused.extend(more);
                 push_unique(&mut ex.notices, pg.notices);
                 if walls.off_plane > 0 {
                     push_unique(
@@ -188,9 +209,10 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
                     );
                 }
                 push_unique(&mut ex.notices, room_notices);
-                let (mut out, notices) = copy_out(src, &mut work, &handles, Some(&layer));
+                push_unique(&mut ex.notices, refused);
+                let (mut out, mut notices) = copy_out(src, &mut work, &handles, Some(&layer));
                 if !rooms.is_empty() {
-                    ensure_rooms_layer(src, &mut out);
+                    notices.extend(ensure_rooms_layer(src, &mut out));
                 }
                 (out, notices)
             }
@@ -202,6 +224,22 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         push_unique(&mut ex.notices, layout_notices(src));
     }
     ex
+}
+
+/// I muri senza le parti di locale (`room_parts`, gli handle di `rooms_in`):
+/// un contorno spostato su un layer non `AL-*` passerebbe il filtro dei muri,
+/// che guarda il layer.
+fn without_room_parts(mut walls: WallSet, room_parts: &FxHashSet<Handle>) -> WallSet {
+    if room_parts.is_empty() {
+        return walls;
+    }
+    walls
+        .entities
+        .retain(|(handle, _)| !room_parts.contains(handle));
+    walls
+        .sources
+        .retain(|handle, _| !room_parts.contains(handle));
+    walls
 }
 
 fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
@@ -328,10 +366,11 @@ fn project_room_entities(
 /// entità che lo usano quando `src` lo ha; altrimenti (un disegno con i soli
 /// semi, o il layer tolto) lo si crea qui con un handle nuovo, da quello di
 /// `src` se c'è, o come `zone::ensure_layers` (colore 7). Senza, il DWG
-/// metterebbe i locali sul layer «0».
-fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) {
+/// metterebbe i locali sul layer «0»: se la tabella lo rifiutasse, lo dice
+/// l'avviso restituito ([`add_layer`]).
+fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) -> Option<Notice> {
     if out.layers.contains(LAYER_LOCALI) {
-        return;
+        return None;
     }
     let mut layer = Layer::new(LAYER_LOCALI);
     match src.layers.get(LAYER_LOCALI) {
@@ -346,8 +385,21 @@ fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) {
     }
     let line_type = layer.line_type.clone();
     layer.handle = out.allocate_handle();
-    let _ = out.layers.add(layer);
+    let refused = add_layer(out, layer);
     copy_missing_linetypes(src, out, vec![line_type]);
+    refused
+}
+
+/// Aggiunge `layer` alla tabella di `out`; se la tabella lo rifiuta (oggi solo
+/// un nome già presente, che i chiamanti escludono prima) non si tace: un
+/// [`Notice::NonCopiata`] «Layer <nome>» con l'handle riservato (fix finale,
+/// punto 3).
+fn add_layer(out: &mut CadDocument, layer: Layer) -> Option<Notice> {
+    let (handle, kind) = (layer.handle, format!("Layer {}", layer.name));
+    out.layers
+        .add(layer)
+        .err()
+        .map(|_| Notice::NonCopiata { handle, kind })
 }
 
 /// L'entità porta un record `ARCHLINE_ZONA` (nome senza distinguere le
@@ -452,32 +504,49 @@ fn new_walls_layer_name(src: &CadDocument, name: &str) -> String {
 /// modello: handle nuovi, layer risolto per nome in `work` (nessuno se manca:
 /// lo crea [`ensure_new_walls_layer`] nel documento d'uscita) e nessun XDATA,
 /// nemmeno di altre applicazioni (quello dei pezzi era dell'entità intera).
-/// Restituisce i loro handle, nell'ordine.
-fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> Vec<Handle> {
+/// Restituisce i loro handle, nell'ordine, e un [`Notice::NonCopiata`] (handle
+/// riservato in `work`, tipo dell'entità) per ognuna che `work` rifiuta: non
+/// sparisce in silenzio (fix finale, punto 3).
+fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> (Vec<Handle>, Vec<Notice>) {
+    add_drawn_with(work, drawn, |work, entity| work.add_entity(entity).ok())
+}
+
+/// [`add_drawn`] con l'inserimento `add` dato (nei test, uno che rifiuta).
+/// L'handle si riserva prima, come farebbe `add_entity` con un handle nullo:
+/// così l'avviso di un rifiuto ha l'handle e il tipo.
+fn add_drawn_with(
+    work: &mut CadDocument,
+    drawn: &[EntityType],
+    mut add: impl FnMut(&mut CadDocument, EntityType) -> Option<Handle>,
+) -> (Vec<Handle>, Vec<Notice>) {
     let model = work
         .block_records
         .iter()
         .find(|record| record.is_model_space())
         .map(|record| record.handle);
-    drawn
-        .iter()
-        .cloned()
-        .filter_map(|mut entity| {
-            let layer_handle = work
-                .layers
-                .get(&entity.common().layer)
-                .map(|layer| layer.handle)
-                .filter(|handle| !handle.is_null());
-            let common = entity.common_mut();
-            common.handle = Handle::NULL;
-            common.layer_handle = layer_handle;
-            common.extended_data = ExtendedData::new();
-            if let Some(model) = model {
-                common.owner_handle = model;
-            }
-            work.add_entity(entity).ok()
-        })
-        .collect()
+    let mut handles = Vec::with_capacity(drawn.len());
+    let mut notices = Vec::new();
+    for mut entity in drawn.iter().cloned() {
+        let layer_handle = work
+            .layers
+            .get(&entity.common().layer)
+            .map(|layer| layer.handle)
+            .filter(|handle| !handle.is_null());
+        let handle = work.allocate_handle();
+        entity.as_entity_mut().set_handle(handle);
+        let common = entity.common_mut();
+        common.layer_handle = layer_handle;
+        common.extended_data = ExtendedData::new();
+        if let Some(model) = model {
+            common.owner_handle = model;
+        }
+        let kind = entity.as_entity().entity_type().to_string();
+        match add(work, entity) {
+            Some(added) => handles.push(added),
+            None => notices.push(Notice::NonCopiata { handle, kind }),
+        }
+    }
+    (handles, notices)
 }
 
 /// Il layer di `src` da cui il layer dei muri nuovi `name` prende colore, tipo
@@ -497,11 +566,12 @@ pub fn new_walls_layer_template<'a>(src: &'a CadDocument, name: &str) -> Option<
 /// c'è) lo si crea qui, con un handle nuovo e con colore, tipo di linea e
 /// spessore di linea di [`new_walls_layer_template`] (l'omonimo di `src` o il
 /// layer più frequente dei muri), o con i valori predefiniti se non c'è.
-/// Senza, il DWG metterebbe i muri nuovi sul layer «0». Il tipo di linea, se
-/// manca, lo porta poi [`copy_layer_linetypes`].
-fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) {
+/// Senza, il DWG metterebbe i muri nuovi sul layer «0» ([`add_layer`] dice
+/// se la tabella lo rifiuta). Il tipo di linea, se manca, lo porta poi
+/// [`copy_layer_linetypes`].
+fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) -> Option<Notice> {
     if out.layers.contains(name) {
-        return;
+        return None;
     }
     let mut layer = match new_walls_layer_template(src, name) {
         Some(from) => {
@@ -516,7 +586,7 @@ fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) 
         None => Layer::new(name),
     };
     layer.handle = out.allocate_handle();
-    let _ = out.layers.add(layer);
+    add_layer(out, layer)
 }
 
 /// Passi 3-6 per gli handle scelti in `work` (copia di `src`): fuori ciò che
@@ -554,9 +624,8 @@ fn copy_out(
     // nessuno copiabile): il documento resta vuoto e gli avvisi sotto
     // elencano gli handle non copiati.
     let _ = extract_entities_into(work, &handles_in, &mut out);
-    if let Some(name) = new_walls_layer {
-        ensure_new_walls_layer(src, &mut out, name);
-    }
+    let refused_layer =
+        new_walls_layer.and_then(|name| ensure_new_walls_layer(src, &mut out, name));
     out.header.insertion_units = src.header.insertion_units;
     copy_drawing_settings(src, &mut out);
     copy_mline_styles(src, &mut out);
@@ -591,6 +660,7 @@ fn copy_out(
                 .map_or(UNKNOWN_KIND, |entity| entity.as_entity().entity_type())
                 .to_string(),
         })
+        .chain(refused_layer)
         .collect();
     (out, notices)
 }
@@ -3678,6 +3748,157 @@ mod tests {
         let tmp = TempDir::new("progetto-semi");
         let paths = write(&ex, &tmp.0, "casa", false).unwrap();
         check(&crate::io::load_file(&paths[2]).unwrap(), "dopo il DWG");
+    }
+
+    /// I testi (`MTEXT`) dello spazio modello, su qualunque layer, in ordine.
+    fn all_labels(doc: &CadDocument) -> Vec<String> {
+        let mut labels: Vec<String> = doc
+            .block_records
+            .iter()
+            .filter(|r| r.is_model_space())
+            .flat_map(|r| r.entity_handles.iter())
+            .filter_map(|&h| match doc.get_entity(h) {
+                Some(EntityType::MText(t)) => Some(t.value.clone()),
+                _ => None,
+            })
+            .collect();
+        labels.sort();
+        labels
+    }
+
+    /// Le polilinee dello spazio modello, su qualunque layer.
+    fn all_outlines(doc: &CadDocument) -> usize {
+        doc.block_records
+            .iter()
+            .filter(|r| r.is_model_space())
+            .flat_map(|r| r.entity_handles.iter())
+            .filter(|&&h| matches!(doc.get_entity(h), Some(EntityType::LwPolyline(_))))
+            .count()
+    }
+
+    /// L'entità passa sul layer `layer` (creato se manca), come un cambio di
+    /// layer fatto a mano in AutoCAD: l'XDATA resta.
+    fn move_to_layer(doc: &mut CadDocument, handle: Handle, layer: &str) {
+        if !doc.layers.contains(layer) {
+            let mut new = Layer::new(layer);
+            new.handle = doc.allocate_handle();
+            doc.layers.add(new).unwrap();
+        }
+        let layer_handle = doc.layers.get(layer).map(|l| l.handle);
+        let common = doc.get_entity_mut(handle).expect("entità").common_mut();
+        common.layer = layer.into();
+        common.layer_handle = layer_handle;
+    }
+
+    /// Fix finale, punto 3: i locali si riconoscono dall'XDATA (`rooms_in`),
+    /// non dal layer. Contorno e testo del locale di fatto A spostati a mano
+    /// sul layer LOCALI e il seme di progetto «Soggiorno» spostato su TESTI non
+    /// danno due numeri per lo stesso locale: il fatto ha A e B una volta (A
+    /// ricalcolato sul posto, sul suo layer) e nessun seme; la comparativa
+    /// nessuna parte di locale; il progetto solo il locale ricreato,
+    /// «Soggiorno» da 24,00 m², e nessun resto del contorno di A (non è un
+    /// muro dello stato di progetto).
+    #[test]
+    fn rooms_moved_to_another_layer_are_not_doubled() {
+        let mut src = case_a_doc(Form::Continua);
+        let (outline, text) = write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+        write_room(&mut src, M, 1e-6, "B", [6.0, 1.5]);
+        let seed = write_seed(&mut src, "Soggiorno", [2.0, 1.5]);
+        move_to_layer(&mut src, outline, "LOCALI");
+        move_to_layer(&mut src, text, "LOCALI");
+        move_to_layer(&mut src, seed, "TESTI");
+        add_demolition(&mut src, [4.05, 0.0], [4.05, 3.0]);
+
+        let ex = extract(&src, &opts(&all_three()));
+
+        #[track_caller]
+        fn check(docs: [&CadDocument; 3], what: &str) {
+            let [fatto, comparativa, progetto] = docs;
+            assert_eq!(
+                all_labels(fatto),
+                ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"],
+                "{what}: fatto"
+            );
+            assert_eq!(
+                labels_on(fatto, "LOCALI"),
+                ["A\\PS = 12,00 m²"],
+                "{what}: fatto, sul posto"
+            );
+            assert_eq!(all_outlines(fatto), 2, "{what}: fatto");
+            assert!(all_labels(comparativa).is_empty(), "{what}: comparativa");
+            assert_eq!(all_outlines(comparativa), 0, "{what}: comparativa");
+            assert_eq!(
+                all_labels(progetto),
+                ["Soggiorno\\PS = 24,00 m²"],
+                "{what}: progetto"
+            );
+            assert_eq!(all_outlines(progetto), 1, "{what}: progetto");
+            assert!(model_on(progetto, "LOCALI").is_empty(), "{what}: progetto");
+            assert!(model_on(progetto, "TESTI").is_empty(), "{what}: progetto");
+            for out in docs {
+                assert_no_archline_data(out);
+            }
+        }
+        check(
+            [&ex.docs[0].1, &ex.docs[1].1, &ex.docs[2].1],
+            "in memoria",
+        );
+        let tmp = TempDir::new("locali-spostati");
+        let paths = write(&ex, &tmp.0, "casa", false).unwrap();
+        let loaded: Vec<CadDocument> = paths
+            .iter()
+            .map(|path| crate::io::load_file(path).unwrap())
+            .collect();
+        check([&loaded[0], &loaded[1], &loaded[2]], "dopo il DWG");
+    }
+
+    /// Fix finale, punto 3: un'entità dello stato di progetto che il documento
+    /// di lavoro rifiuta non sparisce in silenzio: `NonCopiata` con l'handle
+    /// che le era stato riservato e il tipo.
+    #[test]
+    fn drawn_entities_that_do_not_enter_are_listed() {
+        let mut work = case_a_doc(Form::Continua);
+        let line = |y: f64| {
+            let mut line = codec::entities::Line::from_points(
+                Vector3::new(0.0, y, 0.0),
+                Vector3::new(1.0, y, 0.0),
+            );
+            line.common.layer = LAYER_MURI.into();
+            EntityType::Line(line)
+        };
+        let drawn = vec![line(10.0), line(11.0), line(12.0)];
+        let mut calls = 0;
+        let (handles, notices) = add_drawn_with(&mut work, &drawn, |work, entity| {
+            calls += 1;
+            (calls != 2).then(|| work.add_entity(entity).ok()).flatten()
+        });
+        assert_eq!(handles.len(), 2, "{handles:?}");
+        let [Notice::NonCopiata { handle, kind }] = notices.as_slice() else {
+            panic!("{notices:?}");
+        };
+        assert_eq!(kind, "LINE");
+        assert!(!handle.is_null());
+        assert!(!handles.contains(handle));
+        assert!(work.get_entity(*handle).is_none());
+        // Con il documento vero nessuna entità è rifiutata.
+        let (handles, notices) = add_drawn(&mut work, &drawn);
+        assert_eq!((handles.len(), notices.len()), (3, 0));
+
+        // Un layer che la tabella rifiuta (già presente) dà il suo avviso.
+        let mut out = CadDocument::new();
+        let mut zero = Layer::new("0");
+        zero.handle = out.allocate_handle();
+        assert_eq!(
+            add_layer(&mut out, zero.clone()),
+            Some(Notice::NonCopiata {
+                handle: zero.handle,
+                kind: "Layer 0".into(),
+            })
+        );
+        let mut fresh = Layer::new("NUOVO");
+        fresh.handle = out.allocate_handle();
+        assert_eq!(add_layer(&mut out, fresh), None);
+        assert!(out.layers.contains("NUOVO"));
     }
 
     /// R55 e R50 nell'estrazione: un locale non più chiuso e due locali fusi da
