@@ -21,7 +21,7 @@ use super::rooms::{
     Computed, Measured, Phase, Room,
 };
 use super::units::{format_m2, DrawingUnit};
-use super::walls::{faces as wall_faces, sources_of, wall_set};
+use super::walls::{faces as wall_faces, sources_of, wall_set_without_rooms};
 use super::zone::{zones_in, ZoneState};
 
 /// L'altezza dei testi dei locali sta in `rooms`, perché la usa anche
@@ -58,7 +58,9 @@ pub struct RoomSnapshot {
 /// facce si saldano a `tol`.
 pub fn room_snapshot(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> (RoomSnapshot, usize) {
     let base = unit.tolerance();
-    let walls = wall_set(doc, base);
+    // R67: le parti dei locali non sono muri, né del rilievo né della
+    // geometria di progetto.
+    let walls = wall_set_without_rooms(doc, base);
     let zones = zones_in(doc);
     // Il layer dei muri nuovi non cambia la geometria dei locali.
     let pg = project_geometry(doc, &walls, &zones, "0", base);
@@ -544,7 +546,7 @@ mod tests {
     //! `AL_LOCALE` ([`RoomCommand`]) sui casi di prova, senza l'app.
     use super::test_support::*;
     use super::*;
-    use crate::bim::fixtures::{case_a, pilastro, Form};
+    use crate::bim::fixtures::{case_a, move_to_layer, pilastro, shift_tramezzo, Form};
     use crate::bim::rooms::decode;
     use crate::bim::rooms::RoomPart;
     use crate::bim::walls::{rect_from_axis, rect_from_axis_thickness, Region};
@@ -583,7 +585,7 @@ mod tests {
     ) -> EntityType {
         let rect = match state {
             ZoneState::Demolito => {
-                let walls = wall_set(&scene.document, TOL);
+                let walls = wall_set_without_rooms(&scene.document, TOL);
                 rect_from_axis(&walls.sources, p1, p2, MAX_WALL_THICKNESS_M, TOL).expect("muro")
             }
             ZoneState::Nuovo => rect_from_axis_thickness(p1, p2, thickness).expect("rettangolo"),
@@ -943,5 +945,44 @@ mod tests {
         assert!(same_ring(&square, &turned, TOL));
         assert!(!same_ring(&square, &rect(0.0, 0.0, 1.0, 2.0), TOL));
         assert!(!same_ring(&square, &square[..3], TOL));
+    }
+
+    /// R67: contorno e testo di A spostati a mano su LOCALI, poi il rilievo
+    /// corretto (A da 12,00 a 12,60 m²). `AL_LOCALE` offre l'area vera nelle
+    /// due fasi: il contorno vecchio non è un muro né del rilievo né della
+    /// geometria di progetto. Prima offriva 12,00.
+    #[test]
+    fn moved_room_outline_does_not_split_the_room() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut scene = scene_of(case_a(form, M));
+            let (outline, text) = write_room(&mut scene, "A", [2.0, 1.5]);
+            for handle in [outline, text] {
+                move_to_layer(&mut scene.document, handle, "LOCALI");
+            }
+            shift_tramezzo(&mut scene.document, M, 0.2);
+
+            let (snap, off_plane) = room_snapshot(&scene.document, M, TOL);
+            assert_eq!(off_plane, 0, "{form:?}");
+            assert!(!snap.fatto.1.contains_key(&outline), "{form:?}: fatto");
+            assert!(
+                !snap.progetto.1.contains_key(&outline),
+                "{form:?}: progetto"
+            );
+            let mut c = RoomCommand::new(snap.clone());
+            need(c.on_point(pt(2.0, 1.5)));
+            assert_eq!(
+                c.prompt(),
+                "Superficie netta 12,60 m². Nome del locale:",
+                "{form:?}: fatto"
+            );
+            let mut c = RoomCommand::new(snap);
+            need_text(c.on_text_input("F"));
+            need(c.on_point(pt(2.0, 1.5)));
+            assert_eq!(
+                c.prompt(),
+                "Superficie netta 12,60 m². Nome del locale:",
+                "{form:?}: progetto"
+            );
+        }
     }
 }

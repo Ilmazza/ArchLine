@@ -50,7 +50,10 @@ use super::rooms::{
     measure_at, project_rooms, room_entities, room_text_height, rooms_in, Phase, Room, RoomPart,
 };
 use super::units::DrawingUnit;
-use super::walls::{faces as wall_faces, is_wall_entity, sources_of, wall_set, Region, WallSet};
+use super::walls::{
+    faces as wall_faces, is_wall_entity, room_part_handles, sources_of, wall_set_without_rooms,
+    Region, WallSet,
+};
 use super::zone::{zones_in, ZoneGeom};
 use super::{APP_ZONA, LAYER_LOCALI, LAYER_LOCALI_PROGETTO};
 
@@ -172,10 +175,10 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
             }
             Elaborato::StatoDiProgetto => {
                 let layer = new_walls_layer_name(src, &opts.new_walls_layer);
-                // Un contorno di locale spostato su un layer non `AL-*` è una
-                // polilinea come le altre: qui non fa da muro (non si taglia,
-                // non si copia, non chiude i locali di progetto).
-                let walls = without_room_parts(wall_set(src, opts.tol), &room_parts);
+                // Le parti dei locali non sono mai muri (R67), anche spostate
+                // su un layer non `AL-*`: non si tagliano, non si copiano, non
+                // chiudono i locali di progetto.
+                let walls = wall_set_without_rooms(src, opts.tol);
                 let zones = zones_in(src);
                 let pg = project_geometry(src, &walls, &zones, &layer, opts.tol);
                 let wall_handles: FxHashSet<Handle> =
@@ -224,22 +227,6 @@ pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
         push_unique(&mut ex.notices, layout_notices(src));
     }
     ex
-}
-
-/// I muri senza le parti di locale (`room_parts`, gli handle di `rooms_in`):
-/// un contorno spostato su un layer non `AL-*` passerebbe il filtro dei muri,
-/// che guarda il layer.
-fn without_room_parts(mut walls: WallSet, room_parts: &FxHashSet<Handle>) -> WallSet {
-    if room_parts.is_empty() {
-        return walls;
-    }
-    walls
-        .entities
-        .retain(|(handle, _)| !room_parts.contains(handle));
-    walls
-        .sources
-        .retain(|handle, _| !room_parts.contains(handle));
-    walls
 }
 
 fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
@@ -1242,14 +1229,17 @@ fn copy_layer_plot_styles(src: &CadDocument, out: &mut CadDocument) {
 }
 
 /// Il layer da proporre per i muri nuovi (spec §5.5): il più frequente tra le
-/// entità muro dello spazio modello ([`is_wall_entity`]), senza distinguere le
-/// maiuscole come tutti i nomi dei layer, scritto come nella tabella dei layer
-/// (o come la prima entità, se la tabella non lo ha). A parità vince l'ordine
-/// alfabetico. `None` senza entità muro.
+/// entità muro dello spazio modello ([`is_wall_entity`], senza le parti dei
+/// locali: R67), senza distinguere le maiuscole come tutti i nomi dei layer,
+/// scritto come nella tabella dei layer (o come la prima entità, se la tabella
+/// non lo ha). A parità vince l'ordine alfabetico. `None` senza entità muro.
 pub fn propose_new_walls_layer(doc: &CadDocument) -> Option<String> {
     // Nome in maiuscolo → (nome da mostrare, entità).
     let mut counts: FxHashMap<String, (String, usize)> = FxHashMap::default();
-    for handle in model_space_handles(doc, |_, entity| is_wall_entity(doc, entity)) {
+    let rooms = room_part_handles(doc);
+    for handle in model_space_handles(doc, |handle, entity| {
+        !rooms.contains(&handle) && is_wall_entity(doc, entity)
+    }) {
         let Some(entity) = doc.get_entity(handle) else {
             continue;
         };
@@ -1346,13 +1336,14 @@ mod tests {
     use codec::xdata::{ExtendedDataRecord, XDataValue};
     use codec::{Color, DxfVersion, EntityType, Handle, Vector2, Vector3};
 
-    use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
+    use crate::bim::fixtures::{case_a, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
     use crate::bim::record::{self, ProjectRecord};
+    use crate::bim::refresh::RoomEdit;
     use crate::bim::rooms::{
         measure_at, room_entities, room_text_height, seed_entity, Computed, Phase, Room,
     };
     use crate::bim::walls::{
-        faces as wall_faces, rect_from_axis, rect_from_axis_thickness, wall_set,
+        faces as wall_faces, rect_from_axis, rect_from_axis_thickness, wall_set_without_rooms,
     };
     use crate::bim::zone::{ensure_layers, zone_hatch, Zone, ZoneOrigin, ZoneState};
     use crate::bim::{
@@ -1405,7 +1396,7 @@ mod tests {
         p2: [f64; 2],
     ) -> Handle {
         let tol = unit.tolerance();
-        let walls = wall_set(doc, tol);
+        let walls = wall_set_without_rooms(doc, tol);
         let at = |p: [f64; 2]| [unit.metres(p[0]), unit.metres(p[1])];
         let rect = rect_from_axis(
             &walls.sources,
@@ -3386,7 +3377,7 @@ mod tests {
         name: &str,
         seed: [f64; 2],
     ) -> (Handle, Handle) {
-        let walls = wall_set(doc, unit.tolerance());
+        let walls = wall_set_without_rooms(doc, unit.tolerance());
         let faces = wall_faces(&walls.sources, tol);
         let found =
             measure_at(&faces, None, &walls.sources, seed, unit, tol).expect("locale chiuso");
@@ -3778,20 +3769,6 @@ mod tests {
             .count()
     }
 
-    /// L'entità passa sul layer `layer` (creato se manca), come un cambio di
-    /// layer fatto a mano in AutoCAD: l'XDATA resta.
-    fn move_to_layer(doc: &mut CadDocument, handle: Handle, layer: &str) {
-        if !doc.layers.contains(layer) {
-            let mut new = Layer::new(layer);
-            new.handle = doc.allocate_handle();
-            doc.layers.add(new).unwrap();
-        }
-        let layer_handle = doc.layers.get(layer).map(|l| l.handle);
-        let common = doc.get_entity_mut(handle).expect("entità").common_mut();
-        common.layer = layer.into();
-        common.layer_handle = layer_handle;
-    }
-
     /// Fix finale, punto 3: i locali si riconoscono dall'XDATA (`rooms_in`),
     /// non dal layer. Contorno e testo del locale di fatto A spostati a mano
     /// sul layer LOCALI e il seme di progetto «Soggiorno» spostato su TESTI non
@@ -3852,6 +3829,75 @@ mod tests {
             .map(|path| crate::io::load_file(path).unwrap())
             .collect();
         check([&loaded[0], &loaded[1], &loaded[2]], "dopo il DWG");
+    }
+
+    /// R67 nell'estrazione: le parti dei locali non sono mai muri. Contorno e
+    /// testo di A spostati a mano su LOCALI, poi il rilievo corretto (A da
+    /// 12,00 a 12,60 m²): il ricalcolo dello stato di fatto dà ad A l'etichetta
+    /// di `AL_AGGIORNA`, la stessa del DWG di progetto senza demolizioni, e la
+    /// riga dell'etichetta da aggiornare lo dice. Prima il contorno vecchio
+    /// faceva da muro e il fatto restava 12,00 accanto al 12,60 del progetto.
+    #[test]
+    fn moved_room_outline_does_not_freeze_the_fatto_area() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut src = case_a_doc(form);
+            let (outline, text) = write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
+            move_to_layer(&mut src, outline, "LOCALI");
+            move_to_layer(&mut src, text, "LOCALI");
+            shift_tramezzo(&mut src, M, 0.2);
+
+            let refresh = refresh_rooms(&src, M, 1e-6);
+            let [change] = &refresh.changed[..] else {
+                panic!("{form:?}: {:?}", refresh.changed)
+            };
+            let Some(RoomEdit::Testo { value }) = change
+                .edits
+                .iter()
+                .map(|(_, edit)| edit)
+                .find(|edit| matches!(edit, RoomEdit::Testo { .. }))
+            else {
+                panic!("{form:?}: {:?}", change.edits)
+            };
+            assert_eq!(value, "A\\PS = 12,60 m²", "{form:?}: AL_AGGIORNA");
+
+            let ex = extract(
+                &src,
+                &opts(&[Elaborato::StatoDiFatto, Elaborato::StatoDiProgetto]),
+            );
+            let (fatto, progetto) = (&ex.docs[0].1, &ex.docs[1].1);
+            assert_eq!(all_labels(fatto), [value.clone()], "{form:?}: fatto");
+            assert_eq!(
+                labels_on(fatto, "LOCALI"),
+                [value.clone()],
+                "{form:?}: sul posto"
+            );
+            assert_eq!(all_labels(progetto), [value.clone()], "{form:?}: progetto");
+            let texts: Vec<String> = ex.notices.iter().map(Notice::text).collect();
+            assert!(
+                texts.contains(
+                    &"Locale A: etichetta nel disegno 12,00 → 12,60 m² nell'estratto.".to_string()
+                ),
+                "{form:?}: {texts:?}"
+            );
+        }
+    }
+
+    /// R67: una parte di locale non è un muro nemmeno per la proposta del
+    /// layer dei muri nuovi. Con i contorni di A e B spostati su LOCALI e il
+    /// layer dei muri spento non resta nessun muro.
+    #[test]
+    fn moved_room_outlines_do_not_propose_their_layer() {
+        let mut src = case_a_doc(Form::Continua);
+        for (name, seed) in [("A", [2.0, 1.5]), ("B", [6.0, 1.5])] {
+            let (outline, _) = write_room(&mut src, M, 1e-6, name, seed);
+            move_to_layer(&mut src, outline, "LOCALI");
+        }
+        assert_eq!(propose_new_walls_layer(&src), Some(LAYER_MURI.into()));
+        src.layers
+            .get_mut(LAYER_MURI)
+            .expect("layer dei muri")
+            .turn_off();
+        assert_eq!(propose_new_walls_layer(&src), None);
     }
 
     /// Fix finale, punto 3: un'entità dello stato di progetto che il documento

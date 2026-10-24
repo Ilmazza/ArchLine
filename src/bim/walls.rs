@@ -4,7 +4,9 @@
 //! Muri = solo `LINE`, `ARC`, `LWPOLYLINE` e `POLYLINE` 2D dello spazio
 //! modello, su layer accesi e non congelati (i bloccati contano), esclusi i
 //! layer `AL-*`: testi, quote, blocchi, campiture e immagini non chiudono
-//! locali. Si lavora sempre sul piano XY del mondo; le entità muro fuori
+//! locali. Le parti dei locali (XDATA `ARCHLINE_LOCALE`) non sono mai muri,
+//! su qualunque layer: i calcoli prendono [`wall_set_without_rooms`] (R67).
+//! Si lavora sempre sul piano XY del mondo; le entità muro fuori
 //! piano si ignorano e si contano, mai in silenzio. `boundary_sources_on_plane`
 //! di upstream (tutti i fili visibili) non si tocca.
 
@@ -15,7 +17,7 @@ use kernel::geom2d::{
     Transform,
 };
 use kernel::tessellation::DEFAULT_ANGLE;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::command::WorkingPlane;
 use crate::entities::hatch::{boundary_area, edge_curve};
@@ -24,6 +26,7 @@ use crate::scene::{
     BoundarySource,
 };
 
+use super::rooms::rooms_in;
 use super::LAYER_PREFIX;
 
 /// Scarto relativo massimo tra l'area esatta (archi veri, da
@@ -85,12 +88,43 @@ pub(crate) fn is_bim_layer(name: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(LAYER_PREFIX))
 }
 
-/// Le entità muro dello spazio modello e la loro geometria sul piano XY.
+/// Le entità muro dello spazio modello e la loro geometria sul piano XY, per
+/// layer e tipo soltanto. Ogni calcolo BIM sul disegno usa
+/// [`wall_set_without_rooms`]: qui una parte di locale spostata a mano su un
+/// layer non `AL-*` passerebbe per un muro.
 pub fn wall_set(doc: &CadDocument, tol: f64) -> WallSet {
+    wall_set_except(doc, tol, &FxHashSet::default())
+}
+
+/// I muri dei calcoli BIM (R67): [`wall_set`] senza le parti dei locali, su
+/// qualunque layer. **Le parti dei locali non sono mai muri**: si escludono
+/// per handle ([`room_part_handles`], cioè per XDATA), come fa l'estrazione.
+/// Il filtro dei muri guarda il layer, e un contorno spostato su un layer non
+/// `AL-*` rimasto vecchio dopo una correzione del rilievo dividerebbe la faccia
+/// del locale: area vecchia dichiarata esatta. La usano `AL_LOCALE`
+/// (`room_snapshot`), `AL_AGGIORNA` e il ricalcolo dello stato di fatto
+/// (`refresh_rooms`), le zone (`zone_snapshot`) e lo stato di progetto.
+pub fn wall_set_without_rooms(doc: &CadDocument, tol: f64) -> WallSet {
+    wall_set_except(doc, tol, &room_part_handles(doc))
+}
+
+/// Gli handle delle parti dei locali dello spazio modello (contorni, testi e
+/// semi: `rooms::rooms_in`), su qualunque layer.
+pub(crate) fn room_part_handles(doc: &CadDocument) -> FxHashSet<Handle> {
+    rooms_in(doc)
+        .into_iter()
+        .map(|(handle, _, _)| handle)
+        .collect()
+}
+
+/// [`wall_set`] senza le entità di `skip`, tolte prima della geometria (non
+/// contano nemmeno tra quelle fuori piano).
+fn wall_set_except(doc: &CadDocument, tol: f64, skip: &FxHashSet<Handle>) -> WallSet {
     let entities: Vec<(Handle, EntityType)> = model_space(doc)
         .map(|(model, handles)| {
             handles
                 .iter()
+                .filter(|handle| !skip.contains(handle))
                 .filter_map(|&handle| {
                     let entity = doc.get_entity(handle)?;
                     is_wall_in(doc, model, entity).then(|| (handle, entity.clone()))
@@ -1010,6 +1044,45 @@ mod tests {
                 .entities
                 .iter()
                 .all(|(_, e)| e.common().layer == LAYER_MURI));
+        }
+    }
+
+    /// R67: le parti dei locali non sono mai muri. Con il locale A sul suo
+    /// layer `AL-LOCALI` le due raccolte coincidono; con contorno e testo
+    /// spostati su LOCALI `wall_set` (solo layer) prende il contorno,
+    /// `wall_set_without_rooms` no, e il resto è identico.
+    #[test]
+    fn room_parts_are_never_walls() {
+        use crate::bim::fixtures::move_to_layer;
+        use crate::bim::room_command::test_support::{scene_of, write_room};
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut scene = scene_of(case_a(form, M));
+            let (outline, text) = write_room(&mut scene, "A", [2.0, 1.5]);
+            let handles = |set: &WallSet| -> Vec<Handle> {
+                set.entities.iter().map(|(handle, _)| *handle).collect()
+            };
+            let tol = M.tolerance();
+            let survey = handles(&wall_set(&scene.document, tol));
+            assert_eq!(
+                handles(&wall_set_without_rooms(&scene.document, tol)),
+                survey,
+                "{form:?}: su AL-LOCALI"
+            );
+            for handle in [outline, text] {
+                move_to_layer(&mut scene.document, handle, "LOCALI");
+            }
+            assert_eq!(
+                room_part_handles(&scene.document),
+                [outline, text].into_iter().collect::<FxHashSet<Handle>>(),
+                "{form:?}"
+            );
+            let by_layer = wall_set(&scene.document, tol);
+            assert!(handles(&by_layer).contains(&outline), "{form:?}");
+            let set = wall_set_without_rooms(&scene.document, tol);
+            assert_eq!(handles(&set), survey, "{form:?}: spostati");
+            assert_eq!(set.sources.len(), survey.len(), "{form:?}");
+            assert!(!set.sources.contains_key(&outline), "{form:?}");
+            assert_eq!(set.off_plane, 0, "{form:?}");
         }
     }
 

@@ -10,7 +10,8 @@ use codec::entities::hatch::BoundaryPathFlags;
 use codec::entities::{
     BoundaryEdge, BoundaryPath, Hatch, Line, LwPolyline, MText, PolylineEdge, Text,
 };
-use codec::{EntityType, Vector2, Vector3};
+use codec::tables::Layer;
+use codec::{CadDocument, EntityType, Handle, Vector2, Vector3};
 
 use super::units::DrawingUnit;
 use super::LAYER_LOCALI;
@@ -151,6 +152,60 @@ pub(crate) fn disturbi(unit: DrawingUnit) -> Vec<EntityType> {
             &[[0.5, 0.5], [3.5, 0.5], [3.5, 2.5], [0.5, 2.5]],
         ),
     ]
+}
+
+/// Il tramezzo del caso A spostato di `dx` metri verso est, con le facce dei
+/// locali che lo seguono, come una correzione del rilievo fatta a mano: ogni
+/// vertice delle entità su `MURI` a x = 4,00 o 4,10 m (le due facce del
+/// tramezzo e i capi delle facce sud e nord di A e B a linee). Con `dx` =
+/// 0,20 il locale A passa da 12,00 a 12,60 m² e B da 11,70 a 11,10 m², nelle
+/// due forme. I locali già scritti (su altri layer) non si toccano.
+pub(crate) fn shift_tramezzo(doc: &mut CadDocument, unit: DrawingUnit, dx: f64) {
+    let faces = [unit.metres(4.00), unit.metres(4.10)];
+    let on_face = |x: f64| {
+        faces
+            .iter()
+            .any(|face| (x - face).abs() < 1e-9 * unit.per_metre())
+    };
+    let dx = unit.metres(dx);
+    let handles: Vec<Handle> = doc
+        .entities()
+        .filter(|entity| entity.common().layer == LAYER_MURI)
+        .map(|entity| entity.common().handle)
+        .collect();
+    for handle in handles {
+        match doc.get_entity_mut(handle) {
+            Some(EntityType::Line(line)) => {
+                for p in [&mut line.start, &mut line.end] {
+                    if on_face(p.x) {
+                        p.x += dx;
+                    }
+                }
+            }
+            Some(EntityType::LwPolyline(polyline)) => {
+                for vertex in &mut polyline.vertices {
+                    if on_face(vertex.location.x) {
+                        vertex.location.x += dx;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// L'entità passa sul layer `layer` (creato se manca), come un cambio di
+/// layer fatto a mano in AutoCAD: l'XDATA resta.
+pub(crate) fn move_to_layer(doc: &mut CadDocument, handle: Handle, layer: &str) {
+    if !doc.layers.contains(layer) {
+        let mut new = Layer::new(layer);
+        new.handle = doc.allocate_handle();
+        doc.layers.add(new).unwrap();
+    }
+    let layer_handle = doc.layers.get(layer).map(|l| l.handle);
+    let common = doc.get_entity_mut(handle).expect("entità").common_mut();
+    common.layer = layer.into();
+    common.layer_handle = layer_handle;
 }
 
 /// Una scena con le entità nello spazio modello e `INSUNITS` = `insunits`. I

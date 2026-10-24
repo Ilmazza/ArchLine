@@ -1007,7 +1007,8 @@ fn commits_to_model_space(scene: &Scene) -> bool {
 /// `HPGAPTOL`, come HATCH; il resto usa la tolleranza dell'unità.
 fn zone_snapshot(doc: &CadDocument, unit: DrawingUnit) -> (ZoneSnapshot, usize) {
     let tol = unit.tolerance();
-    let set = walls::wall_set(doc, tol);
+    // R67: le parti dei locali non sono muri (punto interno, asse, convalida).
+    let set = walls::wall_set_without_rooms(doc, tol);
     let faces = walls::faces(&set.sources, tol.max(super::hatchvars::gap_tolerance()));
     let zones = zone::zones_in(doc);
     let last_thickness = last_new_thickness(&zones);

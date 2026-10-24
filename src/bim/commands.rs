@@ -47,7 +47,8 @@ const PREVIEW_ROSSO: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 /// La geometria che il comando legge, preparata dal lato app all'avvio.
 #[derive(Clone)]
 pub struct ZoneSnapshot {
-    /// La geometria dei muri per handle (`walls::wall_set(..).sources`).
+    /// La geometria dei muri per handle (`walls::wall_set_without_rooms(..)
+    /// .sources`: le parti dei locali non sono muri, R67).
     pub walls: FxHashMap<Handle, BoundarySource>,
     /// Le facce chiuse dai muri (`walls::faces`), per il punto interno.
     pub faces: Vec<Vec<[f64; 2]>>,

@@ -15,7 +15,7 @@
 
 use super::{Message, ModalKind, OpenCADStudio};
 use crate::bim::extract::{file_name, Elaborato};
-use crate::bim::fixtures::{case_a, Form, LAYER_MURI};
+use crate::bim::fixtures::{case_a, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
 use crate::bim::record;
 use crate::bim::report::Notice;
 use crate::bim::rooms::{rooms_in, Phase, Room, RoomPart};
@@ -2216,6 +2216,97 @@ fn aggiorna_reports_open_room() {
         "polilinea e testo invariati"
     );
     assert_eq!(undo_steps(&app), steps, "nessun passo");
+}
+
+/// R67: il caso A con il locale A scritto da `AL_LOCALE`, contorno e testo
+/// spostati a mano sul layer LOCALI, poi il rilievo corretto: il tramezzo
+/// 0,20 m più a est, A da 12,00 a 12,60 m². Il lato est del contorno vecchio
+/// (x = 4,00) ora cade dentro A. Gli handle di contorno e testo.
+fn app_with_a_moved_room_outline() -> (OpenCADStudio, Handle, Handle) {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let ((outline, _), (text, _)) = room_parts(&app);
+    let i = app.active_tab;
+    let document = &mut app.tabs[i].scene.document;
+    for handle in [outline, text] {
+        move_to_layer(document, handle, "LOCALI");
+    }
+    shift_tramezzo(document, DrawingUnit::Metri, 0.2);
+    forget_history(&mut app);
+    (app, outline, text)
+}
+
+/// R67 in `AL_AGGIORNA` dall'app: il contorno spostato non fa da muro, A
+/// passa a 12,60 m² sugli stessi handle (prima restava 12,00 e il comando
+/// diceva «0 locali aggiornati»).
+#[test]
+fn aggiorna_ignores_a_moved_room_outline() {
+    let (mut app, outline, text) = app_with_a_moved_room_outline();
+
+    run(&mut app, "AL_AGGIORNA");
+
+    let log = history(&app);
+    assert!(
+        comes_after(
+            &log,
+            "Locale A: 12,00 → 12,60 m².",
+            "AL_AGGIORNA: 1 locali aggiornati."
+        ),
+        "storia: {log}"
+    );
+    let Some(EntityType::MText(label)) = doc(&app).get_entity(text) else {
+        panic!("testo di A")
+    };
+    assert_eq!(label.value, "A\\PS = 12,60 m²");
+    assert_eq!(label.common.layer, "LOCALI", "resta sul suo layer");
+    let Some(EntityType::LwPolyline(contorno)) = doc(&app).get_entity(outline) else {
+        panic!("contorno di A")
+    };
+    assert!((polyline_area(contorno) - 12.6).abs() < 1e-9);
+}
+
+/// R67 nei comandi delle zone (`zone_snapshot`): il lato est del contorno
+/// vecchio non è un muro. Un muro nuovo lungo x = 4,00 nel locale A non dà
+/// «nuovo su esistente», e il punto interno a x = 4,10 trova il locale A
+/// intero (12,60 m²), non la striscia tra il contorno vecchio e la faccia
+/// nuova (0,60 m²).
+#[test]
+fn zone_commands_ignore_a_moved_room_outline() {
+    let (mut app, _, _) = app_with_a_moved_room_outline();
+
+    run(&mut app, "AL_NUOVO 4,0 4,3 0.12");
+
+    let log = history(&app);
+    assert!(
+        !log.contains(&Notice::NuovoSuEsistente.text()) && !log.contains("Confermi la zona?"),
+        "storia: {log}"
+    );
+    assert_eq!(active_command(&app), None, "storia: {log}");
+    let zones = zones_in(doc(&app));
+    assert_eq!(zones.len(), 1, "storia: {log}");
+    assert_eq!(zones[0].zone.state, ZoneState::Nuovo);
+
+    let (mut app, _, _) = app_with_a_moved_room_outline();
+
+    run(&mut app, "AL_DEMOLISCI I 4.1,1.5 N");
+
+    let log = history(&app);
+    let zones = zones_in(doc(&app));
+    assert_eq!(zones.len(), 1, "storia: {log}");
+    assert_eq!(zones[0].zone.state, ZoneState::Demolito);
+    let outer = &zones[0].rings[0];
+    let twice: f64 = (0..outer.len())
+        .map(|k| {
+            let (a, b) = (outer[k], outer[(k + 1) % outer.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    assert!(
+        (twice.abs() / 2.0 - 12.6).abs() < 1e-9,
+        "area {} invece di 12,60 m²; storia: {log}",
+        twice.abs() / 2.0
+    );
 }
 
 /// Review Focus 3, lato app: un vuoto di 2 mm all'angolo (0;0) di A, sulla

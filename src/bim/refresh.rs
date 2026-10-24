@@ -11,7 +11,7 @@ use super::rooms::{
     Phase, Room, RoomPart,
 };
 use super::units::DrawingUnit;
-use super::walls::{faces as wall_faces, wall_set};
+use super::walls::{faces as wall_faces, wall_set_without_rooms};
 
 /// Una modifica di `AL_AGGIORNA` a un'entità di un locale di fatto, che resta
 /// con il suo handle.
@@ -161,7 +161,9 @@ pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRef
         return out;
     }
     let base = unit.tolerance();
-    let walls = wall_set(doc, base);
+    // R67: le parti dei locali (anche spostate su un layer non `AL-*`) non
+    // sono muri.
+    let walls = wall_set_without_rooms(doc, base);
     let faces = wall_faces(&walls.sources, tol);
     // R47: le facce alla tolleranza di base, una volta per tutti i locali.
     let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
@@ -362,7 +364,9 @@ mod tests {
     //! Il ricalcolo di `AL_AGGIORNA` ([`refresh_rooms`]) sui casi di prova,
     //! senza l'app.
     use super::*;
-    use crate::bim::fixtures::{case_a, pilastro, Form, LAYER_PILASTRI};
+    use crate::bim::fixtures::{
+        case_a, move_to_layer, pilastro, shift_tramezzo, Form, LAYER_PILASTRI,
+    };
     use crate::bim::room_command::test_support::*;
     use crate::bim::room_command::{room_snapshot, RoomCommand};
     use crate::command::CadCommand;
@@ -714,6 +718,63 @@ mod tests {
             assert!(
                 matches!(&edits[..], [(_, RoomEdit::Contorno { .. })]),
                 "solo il contorno: {edits:?}"
+            );
+        }
+    }
+
+    /// R67: le parti dei locali non sono mai muri, su qualunque layer.
+    /// Contorno e testo di A spostati a mano sul layer LOCALI, poi il rilievo
+    /// corretto (A da 12,00 a 12,60 m²): `AL_AGGIORNA` porta A all'area nuova,
+    /// nelle due forme. Prima il contorno vecchio faceva da muro e la faccia
+    /// attorno al seme restava 12,00, «esatta», senza righe né avvisi.
+    #[test]
+    fn moved_room_outline_is_not_a_wall() {
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut scene = scene_of(case_a(form, M));
+            let (outline, text) = write_room(&mut scene, "A", [2.0, 1.5]);
+            for handle in [outline, text] {
+                move_to_layer(&mut scene.document, handle, "LOCALI");
+            }
+            assert_eq!(
+                refresh_rooms(&scene.document, M, TOL),
+                RoomsRefresh::default(),
+                "{form:?}: niente da cambiare"
+            );
+
+            shift_tramezzo(&mut scene.document, M, 0.2);
+            let refresh = refresh_rooms(&scene.document, M, TOL);
+            assert!(
+                refresh.notices.is_empty(),
+                "{form:?}: {:?}",
+                refresh.notices
+            );
+            let [change] = &refresh.changed[..] else {
+                panic!("{form:?}: {:?}", refresh.changed)
+            };
+            assert_eq!(
+                change.notice().text(),
+                "Locale A: 12,00 → 12,60 m².",
+                "{form:?}"
+            );
+            let [(h0, RoomEdit::Contorno { vertices, closed }), (h1, RoomEdit::Testo { value })] =
+                &change.edits[..]
+            else {
+                panic!("{form:?}: contorno e testo: {:?}", change.edits)
+            };
+            assert_eq!((*h0, *h1), (outline, text), "{form:?}: stessi handle");
+            assert!(*closed);
+            assert!((polyline_area(vertices) - 12.6).abs() < 1e-9, "{form:?}");
+            assert_eq!(value, "A\\PS = 12,60 m²", "{form:?}");
+
+            // Applicate, non resta niente (il contorno, sempre su LOCALI, ora
+            // coincide con le facce).
+            for (handle, edit) in &change.edits {
+                edit.apply_to(scene.document.get_entity_mut(*handle).unwrap());
+            }
+            assert_eq!(
+                refresh_rooms(&scene.document, M, TOL),
+                RoomsRefresh::default(),
+                "{form:?}: dopo"
             );
         }
     }
