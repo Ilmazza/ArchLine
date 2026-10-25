@@ -720,21 +720,21 @@ mod tests {
                 assert!(b.variants.is_empty(), "{} has variants", b.main.id);
             }
         }
-        // Without an icon of their own the buttons fall back on a two-letter
-        // glyph; no two of them may share it.
-        let mut glyphs = Vec::new();
+        // Every button has an SVG of its own (no two-letter glyph), drawn in
+        // colour rather than tinted, and no two buttons share a drawing.
+        let mut icons: Vec<&[u8]> = Vec::new();
         for i in items_for(id) {
-            if let ClassicItem::Button(b) = i {
-                match b.main.icon {
-                    IconKind::Glyph(g) => glyphs.push(g),
-                    IconKind::Svg(_) => {}
-                }
+            let ClassicItem::Button(b) = i else { continue };
+            match b.main.icon {
+                IconKind::Svg(bytes) => icons.push(bytes),
+                IconKind::Glyph(g) => panic!("{} has the glyph {g}, not an SVG", b.main.id),
             }
+            assert!(!b.tinted, "{} is coloured art, it must not be tinted", b.main.id);
         }
-        let mut unique = glyphs.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), glyphs.len(), "two buttons share a glyph: {glyphs:?}");
+        assert_eq!(icons.len(), 6, "one icon per command");
+        for (n, a) in icons.iter().enumerate() {
+            assert!(icons[n + 1..].iter().all(|b| a != b), "two buttons share an icon");
+        }
     }
 
     #[test]

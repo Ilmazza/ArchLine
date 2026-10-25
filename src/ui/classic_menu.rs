@@ -877,18 +877,11 @@ mod tests {
 
     /// Commands that have no icon anywhere in the app (no ribbon tool, no
     /// quick-access glyph). Adding a menu row without an icon fails the test
-    /// below until the row gets one or is listed here on purpose.
+    /// below until the row gets one or is listed here on purpose. Kept sorted.
     ///
-    /// ArchLine BIM: the six Ristrutturazione commands have no SVG yet, on
-    /// purpose (first round); their bar shows two-letter glyphs. Kept sorted.
-    const NO_ICON: &[&str] = &[
-        "AL_AGGIORNA",
-        "AL_DEMOLISCI",
-        "AL_ESTRAI",
-        "AL_LOCALE",
-        "AL_NUOVO",
-        "AL_STATO",
-    ];
+    /// Empty: the six Ristrutturazione commands now have their own icons
+    /// (`menu_icons::RIBBON`), so no row is left without one.
+    const NO_ICON: &[&str] = &[];
 
     #[test]
     fn command_rows_without_an_icon_are_the_known_ones() {
