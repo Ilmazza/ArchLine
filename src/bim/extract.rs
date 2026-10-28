@@ -47,7 +47,8 @@ use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
 use super::rooms::{
-    measure_at, project_rooms, room_entities, room_text_height, rooms_in, Phase, Room, RoomPart,
+    measure_at, project_rooms, room_entities, room_text_height, rooms_in, Computed, Phase, Room,
+    RoomPart,
 };
 use super::units::DrawingUnit;
 use super::walls::{
@@ -240,10 +241,16 @@ fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
 /// La tolleranza dei locali: `opts.room_tol`, ma mai sotto `opts.tol` (né
 /// non numerica).
 fn room_tol(opts: &ExtractOptions) -> f64 {
-    if opts.room_tol.is_finite() && opts.room_tol > opts.tol {
-        opts.room_tol
+    rooms_tolerance(opts.tol, opts.room_tol)
+}
+
+/// La tolleranza dei locali `room_tol`, ma mai sotto `tol` (né non numerica):
+/// la regola di [`ExtractOptions::room_tol`].
+pub(crate) fn rooms_tolerance(tol: f64, room_tol: f64) -> f64 {
+    if room_tol.is_finite() && room_tol > tol {
+        room_tol
     } else {
-        opts.tol
+        tol
     }
 }
 
@@ -279,16 +286,10 @@ fn refresh_fatto_rooms(work: &mut Document, unit: DrawingUnit, room_tol: f64) ->
 }
 
 /// I locali di progetto (spec §5.4) come entità da disegnare nello stato di
-/// progetto, con i loro avvisi. Si calcolano con `rooms::project_rooms` sulla
-/// geometria di progetto (`pg_room_entities`, con le soglie dei varchi:
-/// sorgenti a `opts.tol`, facce alla tolleranza dei locali), dai semi del
-/// disegno: un `Room` per locale di fatto (contorno e testo accoppiati per
-/// seme, [`fatto_rooms`]) e i semi di progetto. Le regioni di fatto si
-/// misurano sul rilievo, alla stessa tolleranza. Ogni locale dà contorno e
-/// testo (`rooms::room_entities`) su `AL-LOCALI`, con l'altezza dei testi di
-/// `AL_LOCALE` (`room_text_height`); l'XDATA lo toglie [`add_drawn`]. Senza
-/// semi niente, nemmeno gli avvisi (un varco senza locali non ha nulla da
-/// dire).
+/// progetto, con i loro avvisi: quelli di [`computed_project_rooms`], ognuno
+/// con contorno e testo (`rooms::room_entities`) su `AL-LOCALI`, con
+/// l'altezza dei testi di `AL_LOCALE` (`room_text_height`); l'XDATA lo toglie
+/// [`add_drawn`].
 fn project_room_entities(
     src: &Document,
     walls: &WallSet,
@@ -297,23 +298,58 @@ fn project_room_entities(
     opts: &ExtractOptions,
 ) -> (Vec<EntityType>, Vec<Notice>) {
     let (unit, tol) = (opts.unit, room_tol(opts));
-    let fatto = fatto_rooms(src, tol);
+    let (computed, notices, _, _) =
+        computed_project_rooms(src, walls, pg_room_entities, zones, unit, opts.tol, tol);
+    if computed.is_empty() {
+        return (Vec::new(), notices);
+    }
+    // Le stesse sorgenti su cui `computed_project_rooms` ha misurato.
+    let (pg_sources, _) = sources_of(pg_room_entities, opts.tol);
+    let text_height = room_text_height(src, unit).0;
+    let entities = computed
+        .iter()
+        .flat_map(|room| room_entities(room, Phase::Progetto, &pg_sources, text_height, tol))
+        .collect();
+    (entities, notices)
+}
+
+/// I locali di progetto calcolati (spec §5.4), con i loro avvisi, i locali di
+/// fatto e i semi di progetto da cui vengono. Si calcolano con
+/// `rooms::project_rooms` sulla geometria di progetto (`pg_room_entities`,
+/// con le soglie dei varchi: sorgenti a `tol`, facce alla tolleranza dei
+/// locali `room_tol`), dai semi del disegno: un `Room` per locale di fatto
+/// (contorno e testo accoppiati per seme, [`fatto_rooms`]) e i semi di
+/// progetto, in ordine di disegno. Le regioni di fatto si misurano sul
+/// rilievo (`walls`), alla stessa tolleranza. Senza semi niente, nemmeno gli
+/// avvisi (un varco senza locali non ha nulla da dire). La usano lo stato di
+/// progetto ([`project_room_entities`]) e le quantità dei locali.
+pub(crate) fn computed_project_rooms(
+    src: &Document,
+    walls: &WallSet,
+    pg_room_entities: &[(Handle, EntityType)],
+    zones: &[ZoneGeom],
+    unit: DrawingUnit,
+    tol: f64,
+    room_tol: f64,
+) -> (Vec<Computed>, Vec<Notice>, Vec<Room>, Vec<Room>) {
+    let fatto = fatto_rooms(src, room_tol);
     let progetto: Vec<Room> = rooms_in(src)
         .into_iter()
         .filter(|(_, room, part)| room.phase == Phase::Progetto && *part == RoomPart::Seme)
         .map(|(_, room, _)| room)
         .collect();
     if fatto.is_empty() && progetto.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), fatto, progetto);
     }
     let fatto_regions: Vec<Region> = if fatto.is_empty() {
         Vec::new()
     } else {
-        let faces = wall_faces(&walls.sources, tol);
+        let faces = wall_faces(&walls.sources, room_tol);
         // R47: le facce alla tolleranza di base una volta sola, se servono
         // (come in `refresh_rooms`).
         let base = unit.tolerance();
-        let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
+        let base_faces =
+            (room_tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
         fatto
             .iter()
             .filter_map(|room| {
@@ -323,14 +359,14 @@ fn project_room_entities(
                     &walls.sources,
                     room.seed,
                     unit,
-                    tol,
+                    room_tol,
                 )
                 .map(|found| found.region)
             })
             .collect()
     };
-    let (pg_sources, _) = sources_of(pg_room_entities, opts.tol);
-    let pg_faces = wall_faces(&pg_sources, tol);
+    let (pg_sources, _) = sources_of(pg_room_entities, tol);
+    let pg_faces = wall_faces(&pg_sources, room_tol);
     let (computed, notices) = project_rooms(
         &pg_faces,
         &pg_sources,
@@ -339,14 +375,9 @@ fn project_room_entities(
         &progetto,
         zones,
         unit,
-        tol,
+        room_tol,
     );
-    let text_height = room_text_height(src, unit).0;
-    let entities = computed
-        .iter()
-        .flat_map(|room| room_entities(room, Phase::Progetto, &pg_sources, text_height, tol))
-        .collect();
-    (entities, notices)
+    (computed, notices, fatto, progetto)
 }
 
 /// Il layer dei locali in `out` (stato di progetto). La copia lo porta con le

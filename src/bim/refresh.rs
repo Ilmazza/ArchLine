@@ -4,6 +4,7 @@
 
 use codec::entities::{LwPolyline, LwVertex, MText};
 use codec::{Document, EntityType, Handle};
+use rustc_hash::FxHashMap;
 
 use super::report::Notice;
 use super::rooms::{
@@ -11,7 +12,7 @@ use super::rooms::{
     Phase, Room, RoomPart,
 };
 use super::units::DrawingUnit;
-use super::walls::{faces as wall_faces, wall_set_without_rooms};
+use super::walls::{faces as wall_faces, wall_set_without_rooms, WallSet};
 
 /// Una modifica di `AL_AGGIORNA` a un'entità di un locale di fatto, che resta
 /// con il suo handle.
@@ -137,6 +138,126 @@ fn fatto_parts(doc: &Document, tol: f64) -> Vec<FattoParts<'_>> {
     rooms
 }
 
+/// Un locale di fatto del disegno misurato sui muri attuali
+/// ([`measure_fatto`]).
+pub(crate) struct FattoRoom<'a> {
+    /// Il record della prima parte trovata (contorno o testo): nome, numero,
+    /// seme e altezza.
+    pub room: Room,
+    /// La misura attorno al seme (`rooms::measure_at`); `None` = non chiuso.
+    pub measured: Option<Measured>,
+    /// I nomi degli altri locali del suo gruppo R54/R55 (una regione che
+    /// contiene il seme di un altro, anche a catena), in ordine di disegno;
+    /// vuoto se è solo.
+    pub fused_with: Vec<String>,
+    /// Il gruppo R54/R55: lo stesso numero per i locali fusi insieme.
+    pub group: usize,
+    /// Il contorno nel disegno, se c'è.
+    pub outline: Option<(Handle, &'a LwPolyline)>,
+    /// Il testo nel disegno, se c'è.
+    pub text: Option<(Handle, &'a MText)>,
+}
+
+/// I locali di fatto del disegno misurati ([`measure_fatto`]).
+pub(crate) struct FattoMeasures<'a> {
+    /// Uno per locale, nell'ordine di disegno.
+    pub rooms: Vec<FattoRoom<'a>>,
+    /// I muri della misura (R67: senza le parti dei locali); vuoti se non ci
+    /// sono locali di fatto.
+    pub walls: WallSet,
+    /// Gli avvisi della misura, non dei singoli locali: oggi solo
+    /// [`Notice::FuoriPiano`].
+    pub notices: Vec<Notice>,
+}
+
+/// La misura dei locali di fatto, comune ad `AL_AGGIORNA` ([`refresh_rooms`])
+/// e alle quantità dei locali: contorno e testo accoppiati per seme entro
+/// `tol` (la tolleranza dei locali), i muri senza le parti dei locali (R67),
+/// le facce a `tol` e, se `tol` supera la tolleranza di base, anche a quella
+/// (R47, una volta per tutti i locali), ogni locale misurato attorno al suo
+/// seme (`rooms::measure_at`) e i gruppi dei locali fusi da un vuoto (R54,
+/// R55). Senza locali di fatto non si calcola nulla, nemmeno i muri.
+pub(crate) fn measure_fatto(doc: &Document, unit: DrawingUnit, tol: f64) -> FattoMeasures<'_> {
+    let parts = fatto_parts(doc, tol);
+    if parts.is_empty() {
+        return FattoMeasures {
+            rooms: Vec::new(),
+            walls: WallSet {
+                entities: Vec::new(),
+                sources: FxHashMap::default(),
+                off_plane: 0,
+            },
+            notices: Vec::new(),
+        };
+    }
+    let base = unit.tolerance();
+    // R67: le parti dei locali (anche spostate su un layer non `AL-*`) non
+    // sono muri.
+    let walls = wall_set_without_rooms(doc, base);
+    let faces = wall_faces(&walls.sources, tol);
+    // R47: le facce alla tolleranza di base, una volta per tutti i locali.
+    let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
+    let mut notices = Vec::new();
+    if walls.off_plane > 0 {
+        notices.push(Notice::FuoriPiano {
+            count: walls.off_plane,
+        });
+    }
+    let found: Vec<Option<Measured>> = parts
+        .iter()
+        .map(|parts| {
+            measure_at(
+                &faces,
+                base_faces.as_deref(),
+                &walls.sources,
+                parts.room.seed,
+                unit,
+                tol,
+            )
+        })
+        .collect();
+    // R54/R55: i locali la cui regione contiene il seme di un altro fanno un
+    // gruppo (anche a catena).
+    let mut group: Vec<usize> = (0..parts.len()).collect();
+    for (index, measured) in found.iter().enumerate() {
+        let Some(measured) = measured else {
+            continue;
+        };
+        for other in 0..parts.len() {
+            if other != index && region_holds(&measured.region, parts[other].room.seed, tol) {
+                let (keep, drop) = (group[index], group[other]);
+                for label in &mut group {
+                    if *label == drop {
+                        *label = keep;
+                    }
+                }
+            }
+        }
+    }
+    let names: Vec<String> = parts.iter().map(|parts| parts.room.name.clone()).collect();
+    let rooms = parts
+        .into_iter()
+        .zip(found)
+        .enumerate()
+        .map(|(index, (parts, measured))| FattoRoom {
+            fused_with: (0..names.len())
+                .filter(|&other| other != index && group[other] == group[index])
+                .map(|other| names[other].clone())
+                .collect(),
+            group: group[index],
+            room: parts.room,
+            measured,
+            outline: parts.outline,
+            text: parts.text,
+        })
+        .collect();
+    FattoMeasures {
+        rooms,
+        walls,
+        notices,
+    }
+}
+
 /// `AL_AGGIORNA` (spec §4.2): ogni locale di fatto si rimisura sui muri
 /// attuali attorno al suo seme, alla tolleranza dei locali `tol`
 /// (`rooms::measure_at`). Se il locale c'è, il contorno prende i vertici
@@ -153,58 +274,21 @@ fn fatto_parts(doc: &Document, tol: f64) -> Vec<FattoParts<'_>> {
 /// (`rooms::quality_notices`). In testa,
 /// [`Notice::FuoriPiano`] se ci sono muri fuori dal piano XY. Senza locali di
 /// fatto non c'è niente da dire. Il disegno non si tocca: le modifiche le
-/// applica chi chiama ([`RoomEdit::apply_to`]).
+/// applica chi chiama ([`RoomEdit::apply_to`]). La misura è quella di
+/// [`measure_fatto`].
 pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefresh {
-    let mut out = RoomsRefresh::default();
-    let rooms = fatto_parts(doc, tol);
-    if rooms.is_empty() {
-        return out;
-    }
+    let FattoMeasures {
+        rooms,
+        walls,
+        notices,
+    } = measure_fatto(doc, unit, tol);
+    let mut out = RoomsRefresh {
+        changed: Vec::new(),
+        notices,
+    };
     let base = unit.tolerance();
-    // R67: le parti dei locali (anche spostate su un layer non `AL-*`) non
-    // sono muri.
-    let walls = wall_set_without_rooms(doc, base);
-    let faces = wall_faces(&walls.sources, tol);
-    // R47: le facce alla tolleranza di base, una volta per tutti i locali.
-    let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
-    if walls.off_plane > 0 {
-        out.notices.push(Notice::FuoriPiano {
-            count: walls.off_plane,
-        });
-    }
-    let found: Vec<Option<Measured>> = rooms
-        .iter()
-        .map(|parts| {
-            measure_at(
-                &faces,
-                base_faces.as_deref(),
-                &walls.sources,
-                parts.room.seed,
-                unit,
-                tol,
-            )
-        })
-        .collect();
-    // R54/R55: i locali la cui regione contiene il seme di un altro fanno un
-    // gruppo (anche a catena), che resta com'è.
-    let mut group: Vec<usize> = (0..rooms.len()).collect();
-    for (index, measured) in found.iter().enumerate() {
-        let Some(measured) = measured else {
-            continue;
-        };
-        for other in 0..rooms.len() {
-            if other != index && region_holds(&measured.region, rooms[other].room.seed, tol) {
-                let (keep, drop) = (group[index], group[other]);
-                for label in &mut group {
-                    if *label == drop {
-                        *label = keep;
-                    }
-                }
-            }
-        }
-    }
     let mut reported: Vec<usize> = Vec::new();
-    for (index, parts) in rooms.iter().enumerate() {
+    for parts in &rooms {
         let name = &parts.room.name;
         if parts.outline.is_none() {
             out.notices
@@ -214,21 +298,22 @@ pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefres
             out.notices
                 .push(Notice::TestoMancante { name: name.clone() });
         }
-        let members: Vec<usize> = (0..rooms.len())
-            .filter(|&other| group[other] == group[index])
+        let members: Vec<&FattoRoom> = rooms
+            .iter()
+            .filter(|other| other.group == parts.group)
             .collect();
         if members.len() > 1 {
             // Un vuoto ha unito due locali: l'area unita sostituirebbe dati
             // giusti. Niente cambia, e lo si dice una volta per gruppo.
-            if !reported.contains(&group[index]) {
-                reported.push(group[index]);
+            if !reported.contains(&parts.group) {
+                reported.push(parts.group);
                 let names: Vec<String> = members
                     .iter()
-                    .map(|&member| rooms[member].room.name.clone())
+                    .map(|member| member.room.name.clone())
                     .collect();
                 if let Some(area_m2) = members
                     .iter()
-                    .find_map(|&member| found[member].as_ref().map(|m| m.area_m2))
+                    .find_map(|member| member.measured.as_ref().map(|m| m.area_m2))
                 {
                     out.notices.push(Notice::LocaleFuso {
                         names: names.clone(),
@@ -239,7 +324,7 @@ pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefres
             }
             continue;
         }
-        let Some(measured) = &found[index] else {
+        let Some(measured) = &parts.measured else {
             out.notices
                 .push(Notice::LocaleNonChiuso { name: name.clone() });
             continue;
