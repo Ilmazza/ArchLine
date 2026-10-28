@@ -1042,6 +1042,106 @@ fn stato_without_a_change_does_not_create_layers() {
     assert_eq!(undo_steps(&app), steps);
 }
 
+/// Il caso A in centimetri (`INSUNITS` 5) con il tramezzo demolito,
+/// selezionato: `(app, zona)`.
+fn app_with_a_zone_in_centimetres() -> (OpenCADStudio, Handle) {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Centimetri), 5);
+    run(&mut app, "AL_DEMOLISCI 405,0 405,300 N");
+    let zones = zones_in(doc(&app));
+    assert_eq!(zones.len(), 1, "storia: {}", history(&app));
+    let zone = zones[0].handle;
+    select(&mut app, &[zone]);
+    (app, zone)
+}
+
+/// Spec parte 2, §3: anche `AL_STATO Altezza` ripete l'altezza digitata con
+/// l'unità e in metri, con la regola di `AL_ALTEZZA`. In centimetri «270» è
+/// 2,70 m e non avvisa.
+#[test]
+fn stato_altezza_echo_centimetres_without_warning() {
+    let (mut app, zone) = app_with_a_zone_in_centimetres();
+    forget_history(&mut app);
+
+    run(&mut app, "AL_STATO A 270");
+
+    let log = history(&app);
+    assert_eq!(zone_of(&app, zone).height, Some(270.0), "storia: {log}");
+    assert!(log.contains("altezza 270 cm = 2,70 m"), "storia: {log}");
+    assert!(!log.contains("fuori dall'intervallo"), "storia: {log}");
+    assert!(log.contains("AL_STATO: 1 zone modificate."), "storia: {log}");
+}
+
+/// In centimetri «2.7» è 2,7 cm: l'avviso di intervallo, e il valore scritto
+/// lo stesso (un avviso, non un blocco).
+#[test]
+fn stato_altezza_echo_out_of_range_warns_in_centimetres() {
+    let (mut app, zone) = app_with_a_zone_in_centimetres();
+    forget_history(&mut app);
+
+    run(&mut app, "AL_STATO A 2.7");
+
+    let log = history(&app);
+    assert_eq!(zone_of(&app, zone).height, Some(2.7), "storia: {log}");
+    assert!(log.contains("altezza 2,7 cm = 0,03 m"), "storia: {log}");
+    assert!(
+        log.contains(&Notice::AltezzaFuoriIntervallo { value_m: 0.027 }.text()),
+        "storia: {log}"
+    );
+}
+
+#[test]
+fn stato_altezza_echo_metres() {
+    let (mut app, demolita, _) = app_with_two_zones();
+    select(&mut app, &[demolita]);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_STATO A 3.00");
+
+    let log = history(&app);
+    assert_eq!(zone_of(&app, demolita).height, Some(3.0), "storia: {log}");
+    assert!(log.contains("AL_STATO: altezza 3,00 m"), "storia: {log}");
+    assert!(!log.contains("fuori dall'intervallo"), "storia: {log}");
+}
+
+/// Unità non nota (`INSUNITS` 0, nessun record): l'altezza si scrive com'era
+/// prima, senza fermare `AL_STATO` per chiedere l'unità; una riga dice che
+/// l'eco in metri e il controllo dell'intervallo mancano. Gli altri cambi di
+/// stato non parlano dell'unità.
+#[test]
+fn stato_altezza_echo_unknown_unit_applies_and_notes() {
+    let (mut app, demolita, _) = app_with_two_zones();
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.insertion_units = 0;
+    assert_eq!(record::read(doc(&app)).unit, None);
+    select(&mut app, &[demolita]);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_STATO A 2.70");
+
+    let log = history(&app);
+    assert_eq!(zone_of(&app, demolita).height, Some(2.7), "storia: {log}");
+    assert_eq!(active_command(&app), None, "nessuna domanda dell'unità");
+    assert_eq!(app.bim_pending, None);
+    assert_eq!(undo_steps(&app), steps + 1);
+    assert!(
+        log.contains("AL_STATO: unità del disegno non nota (INSUNITS = 0)"),
+        "storia: {log}"
+    );
+    assert!(!log.contains("altezza 2,70 m"), "storia: {log}");
+    assert!(log.contains("AL_STATO: 1 zone modificate."), "storia: {log}");
+    assert_eq!(record::read(doc(&app)).unit, None);
+    assert_eq!(doc(&app).header.insertion_units, 0);
+
+    forget_history(&mut app);
+    run(&mut app, "AL_STATO N");
+    let log = history(&app);
+    assert_eq!(zone_of(&app, demolita).state, ZoneState::Nuovo, "storia: {log}");
+    assert!(!log.contains("unità"), "storia: {log}");
+    assert_eq!(active_command(&app), None);
+}
+
 // --------------------------------------------------------------- AL_ESTRAI
 
 /// Una cartella nuova sotto la cartella temporanea, tolta a fine test. Il
@@ -3306,6 +3406,29 @@ fn altezza_rejects_bad_values() {
     );
     assert_eq!(record::read(doc(&app)), rec);
     assert_eq!(undo_steps(&app), steps);
+}
+
+/// Come per `AL_UNITA` (`unit_record_that_cannot_be_written_leaves_no_undo_step`):
+/// un disegno senza dizionario radice non tiene il record, e `AL_ALTEZZA L`
+/// lo dice senza lasciare un passo vuoto né segnare il disegno come modificato.
+#[test]
+fn altezza_record_that_cannot_be_written_leaves_no_undo_step() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.named_objects_dict_handle = Handle::NULL;
+    app.tabs[i].dirty = false;
+    let steps = undo_steps(&app);
+
+    dispatch_line(&mut app, "AL_ALTEZZA L 2.70");
+
+    assert_eq!(
+        app.command_line.last_error.as_deref(),
+        Some("AL_ALTEZZA: impossibile salvare l'altezza nel disegno.")
+    );
+    assert_eq!(record::read(doc(&app)).default_height, None);
+    assert_eq!(undo_steps(&app), steps, "nessun passo vuoto");
+    assert!(!app.tabs[i].dirty, "il disegno non è cambiato");
 }
 
 /// Con `INSUNITS` = 0 e nessun record l'altezza non si legge in unità

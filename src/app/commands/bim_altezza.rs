@@ -1,21 +1,21 @@
-//! Comandi BIM della parte 2 (spec `2026-10-28-bim-abachi-quantita-design.md`),
-//! lato app: per ora `AL_ALTEZZA` (§5.1).
+//! Il comando BIM `AL_ALTEZZA` della parte 2 (spec
+//! `2026-10-28-bim-abachi-quantita-design.md`, §5.1), lato app.
 //!
 //! `AL_ALTEZZA` scrive l'altezza a tre livelli (§4.1) dove la chiede Mauro: la
 //! predefinita del livello nel record di progetto (`L`), o l'altezza propria
 //! di zone e locali selezionati (`S`, e `R` per toglierla). Le altezze si
 //! digitano e si salvano in unità del disegno, come lo spessore (§3); la riga
 //! di comando le ripete in metri («altezza 270 cm = 2,70 m») e avvisa, senza
-//! bloccare, fuori da 0,50–10 m. Prima di leggere un numero serve l'unità del
-//! disegno, chiesta come negli altri comandi `AL_*` (`AL_UNITA`). La logica
-//! pura sta in `crate::bim` (`height::range_warning`,
-//! `rooms::room_height_edits`).
+//! bloccare, fuori da 0,50–10 m. La regola dei valori digitati (`parse_positive`,
+//! `height_echo`, `bim_height_range_warning`) sta in `bim.rs`, la stessa per
+//! `AL_STATO Altezza`. Prima di leggere un numero serve l'unità del disegno,
+//! chiesta come negli altri comandi `AL_*` (`AL_UNITA`). La logica pura sta in
+//! `crate::bim` (`height::range_warning`, `rooms::room_height_edits`).
 
 use crate::app::{Message, OpenCADStudio};
-use crate::bim::height::range_warning;
 use crate::bim::record;
 use crate::bim::rooms::{self, room_height_edits, rooms_in, same_room, Room};
-use crate::bim::units::{format_decimal, DrawingUnit};
+use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{self, Zone};
 use crate::bim::{APP_LOCALE, APP_ZONA};
 use crate::command::{CadCommand, KeywordCommand};
@@ -26,7 +26,7 @@ use codec::Handle;
 use iced::Task;
 use std::collections::HashMap;
 
-use super::bim::parse_positive;
+use super::bim::{height_echo, parse_positive};
 
 const CMD: &str = "AL_ALTEZZA";
 
@@ -102,29 +102,27 @@ impl OpenCADStudio {
     /// non resta un passo vuoto.
     fn bim_altezza_livello(&mut self, i: usize, value: f64, unit: DrawingUnit) {
         let echo = height_echo(value, unit);
-        let mut rec = record::read(&self.tabs[i].scene.document);
-        if rec.default_height == Some(value) {
+        if record::read(&self.tabs[i].scene.document).default_height == Some(value) {
             self.command_line.push_info(&format!(
                 "AL_ALTEZZA: {echo} è già la predefinita del livello."
             ));
         } else {
-            self.push_undo_snapshot(i, CMD);
-            rec.default_height = Some(value);
-            let doc = &mut self.tabs[i].scene.document;
-            record::write(doc, &rec);
-            if record::read(doc).default_height != Some(value) {
-                self.drop_unchanged_pending_history(i);
+            let saved = self.bim_save_record(
+                i,
+                CMD,
+                |rec| rec.default_height = Some(value),
+                |rec| rec.default_height == Some(value),
+            );
+            if !saved {
                 self.command_line
                     .push_error("AL_ALTEZZA: impossibile salvare l'altezza nel disegno.");
                 return;
             }
-            self.tabs[i].dirty = true;
-            self.finish_pending_history(i);
             self.command_line.push_info(&format!(
                 "AL_ALTEZZA: {echo} come predefinita del livello."
             ));
         }
-        self.bim_altezza_range_warning(value, unit);
+        self.bim_height_range_warning(value, unit);
     }
 
     /// `AL_ALTEZZA S <valore>` / `R` sulla selezione: zone e locali che
@@ -159,7 +157,7 @@ impl OpenCADStudio {
             plan.zones, plan.rooms
         ));
         if let Some(value) = height {
-            self.bim_altezza_range_warning(value, unit);
+            self.bim_height_range_warning(value, unit);
         }
         if plan.not_ours > 0 {
             self.command_line.push_info(&format!(
@@ -178,14 +176,6 @@ impl OpenCADStudio {
                 "Locali su layer bloccati ignorati: {}.",
                 plan.locked_rooms
             ));
-        }
-    }
-
-    /// L'avviso fuori da 0,50–10 m (spec parte 2, §3): un messaggio, non un
-    /// blocco. `value` è già un numero positivo (`parse_positive`).
-    fn bim_altezza_range_warning(&mut self, value: f64, unit: DrawingUnit) {
-        if let Some(notice) = range_warning(value, unit) {
-            self.command_line.push_info(&notice.text());
         }
     }
 }
@@ -243,20 +233,6 @@ fn value_prompts(unit: DrawingUnit) -> (&'static str, &'static str) {
         DrawingUnit::Millimetri => ("Altezza predefinita del livello (mm):", "Altezza (mm):"),
         DrawingUnit::Centimetri => ("Altezza predefinita del livello (cm):", "Altezza (cm):"),
         DrawingUnit::Metri => ("Altezza predefinita del livello (m):", "Altezza (m):"),
-    }
-}
-
-/// L'altezza digitata con la sua unità e, se non è il metro, in metri con due
-/// decimali: «altezza 270 cm = 2,70 m», «altezza 2,7 cm = 0,03 m», «altezza
-/// 2,70 m». Il valore digitato si ripete senza zeri in coda e con la virgola,
-/// così un errore di scala si vede subito (spec parte 2, §3).
-fn height_echo(value: f64, unit: DrawingUnit) -> String {
-    let metres = format_decimal(value / unit.per_metre());
-    let typed = value.to_string().replace('.', ",");
-    match unit {
-        DrawingUnit::Metri => format!("altezza {metres} m"),
-        DrawingUnit::Centimetri => format!("altezza {typed} cm = {metres} m"),
-        DrawingUnit::Millimetri => format!("altezza {typed} mm = {metres} m"),
     }
 }
 
@@ -354,26 +330,7 @@ fn count_rooms(rooms: &[&Room], tol: f64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{height_echo, AltezzaChange};
-    use crate::bim::units::DrawingUnit;
-
-    #[test]
-    fn echo_repeats_the_unit_and_the_metres() {
-        assert_eq!(
-            height_echo(270.0, DrawingUnit::Centimetri),
-            "altezza 270 cm = 2,70 m"
-        );
-        assert_eq!(
-            height_echo(2.7, DrawingUnit::Centimetri),
-            "altezza 2,7 cm = 0,03 m"
-        );
-        assert_eq!(
-            height_echo(2700.0, DrawingUnit::Millimetri),
-            "altezza 2700 mm = 2,70 m"
-        );
-        assert_eq!(height_echo(2.7, DrawingUnit::Metri), "altezza 2,70 m");
-        assert_eq!(height_echo(3.0, DrawingUnit::Metri), "altezza 3,00 m");
-    }
+    use super::AltezzaChange;
 
     #[test]
     fn altezza_keywords_short_and_long_with_their_values() {

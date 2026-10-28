@@ -8,13 +8,14 @@
 //! [`ZoneCommand`] e di [`RoomCommand`], il cambio di stato delle zone
 //! esistenti (`AL_STATO`), il ricalcolo dei locali di fatto (`AL_AGGIORNA`) e
 //! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
-//! sta in `crate::bim`. I comandi della parte 2 (`AL_ALTEZZA`) stanno in
-//! `bim_abaco.rs` e passano da `dispatch_bim`.
+//! sta in `crate::bim`. I comandi della parte 2 stanno in file propri
+//! (`AL_ALTEZZA` in `bim_altezza.rs`) e passano da `dispatch_bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
 use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
-use crate::bim::record;
+use crate::bim::height::range_warning;
+use crate::bim::record::{self, ProjectRecord};
 use crate::bim::refresh::{has_fatto_rooms, refresh_rooms, RoomEdit};
 use crate::bim::report::Notice;
 use crate::bim::room_command::{
@@ -84,7 +85,7 @@ impl OpenCADStudio {
             "AL_LOCALE" => Some(self.bim_start_room(i)),
             "AL_AGGIORNA" => Some(self.bim_update_rooms(i)),
             "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
-            // Parte 2: in `bim_abaco.rs`.
+            // Parte 2: in `bim_altezza.rs`.
             "AL_ALTEZZA" => Some(self.bim_altezza(i, cmd)),
             _ => None,
         }
@@ -276,25 +277,19 @@ impl OpenCADStudio {
             self.bim_ask_unit(i);
             return self.finish_dispatch("AL_UNITA");
         };
-        self.push_undo_snapshot(i, "AL_UNITA");
-        let doc = &mut self.tabs[i].scene.document;
-        let mut rec = record::read(doc);
-        rec.unit = Some(unit);
-        record::write(doc, &rec);
-        let saved = record::read(doc).unit == Some(unit);
+        let saved = self.bim_save_record(
+            i,
+            "AL_UNITA",
+            |rec| rec.unit = Some(unit),
+            |rec| rec.unit == Some(unit),
+        );
         let pending = self.bim_pending.take();
         if !saved {
-            // Senza dizionario radice il record non si scrive: nessun passo di
-            // annullamento vuoto e il disegno non risulta modificato (come
-            // `bim_remember_new_walls_layer`). Rilanciare chiederebbe di
-            // nuovo, all'infinito.
-            self.drop_unchanged_pending_history(i);
+            // Rilanciare chiederebbe di nuovo, all'infinito.
             self.command_line
                 .push_error("AL_UNITA: impossibile salvare l'unità nel disegno.");
             return Task::none();
         }
-        self.tabs[i].dirty = true;
-        self.finish_pending_history(i);
         match pending {
             Some(cmd) => self.dispatch_command(&cmd),
             None => Task::none(),
@@ -388,6 +383,9 @@ impl OpenCADStudio {
                 self.refresh_layer_panel();
             }
         }
+        if let StatoChange::Altezza(value) = change {
+            self.bim_stato_height_echo(i, value);
+        }
         if plan.varco_on_new {
             self.command_line
                 .push_info("Il varco vale solo per le zone demolite.");
@@ -407,6 +405,28 @@ impl OpenCADStudio {
         self.command_line
             .push_info(&format!("AL_STATO: {modified} zone modificate."));
         Task::none()
+    }
+
+    /// `AL_STATO Altezza <valore>` ripete l'altezza digitata con l'unità e in
+    /// metri, e avvisa fuori da 0,50–10 m, con la regola di `AL_ALTEZZA` (spec
+    /// parte 2, §3). L'unità non si chiede: il cambio è già fatto, e gli altri
+    /// cambi di stato non la vogliono. Se non è nota (o non è supportata) lo
+    /// dice una riga, senza eco né avviso.
+    fn bim_stato_height_echo(&mut self, i: usize, value: f64) {
+        let (what, code) = match units::resolve(&self.tabs[i].scene.document) {
+            UnitLookup::Known(unit) => {
+                self.command_line
+                    .push_info(&format!("AL_STATO: {}.", height_echo(value, unit)));
+                self.bim_height_range_warning(value, unit);
+                return;
+            }
+            UnitLookup::Unspecified => ("non nota", 0),
+            UnitLookup::Unsupported(code) => ("non supportata", code),
+        };
+        self.command_line.push_info(&format!(
+            "AL_STATO: unità del disegno {what} (INSUNITS = {code}): altezza scritta com'è, \
+             senza conversione in metri né controllo dell'intervallo."
+        ));
     }
 
     /// `AL_ESTRAI [cartella]` (spec §5.5). La cartella è il resto della riga,
@@ -711,24 +731,60 @@ impl OpenCADStudio {
     /// Il layer dei muri nuovi va nel record del disegno, in un passo di
     /// annullamento a sé, solo se è cambiato. Vuoto = nessuno.
     fn bim_remember_new_walls_layer(&mut self, i: usize, layer: &str) {
-        let mut rec = record::read(&self.tabs[i].scene.document);
         let chosen = Some(layer.to_string()).filter(|name| !name.is_empty());
-        if rec.new_walls_layer == chosen {
+        if record::read(&self.tabs[i].scene.document).new_walls_layer == chosen {
             return;
         }
-        self.push_undo_snapshot(i, "AL_ESTRAI");
-        rec.new_walls_layer = chosen.clone();
-        let doc = &mut self.tabs[i].scene.document;
-        record::write(doc, &rec);
-        if record::read(doc).new_walls_layer == chosen {
-            self.tabs[i].dirty = true;
-            self.finish_pending_history(i);
-        } else {
-            // Senza dizionario radice il record non si scrive: nessun passo vuoto.
-            self.drop_unchanged_pending_history(i);
+        let value = chosen.clone();
+        let saved = self.bim_save_record(
+            i,
+            "AL_ESTRAI",
+            move |rec| rec.new_walls_layer = value,
+            |rec| rec.new_walls_layer == chosen,
+        );
+        if !saved {
             self.command_line.push_error(
                 "AL_ESTRAI: impossibile ricordare il layer dei muri nuovi nel disegno.",
             );
+        }
+    }
+
+    /// Riscrive il record di progetto (`ARCHLINE_PROGETTO`) in un passo di
+    /// annullamento a sé, `label`: `edit` cambia il record letto, che si scrive
+    /// e si rilegge; `saved` dice se la rilettura ha ciò che si voleva. Se no
+    /// (un disegno senza dizionario radice non può tenere il record) il passo
+    /// si scarta, senza lasciarne uno vuoto, e il disegno non risulta
+    /// modificato. Il messaggio d'errore è di chi chiama. `true` se salvato.
+    /// Usato da `AL_UNITA`, dal layer dei muri nuovi di `AL_ESTRAI` e da
+    /// `AL_ALTEZZA L`.
+    pub(super) fn bim_save_record(
+        &mut self,
+        i: usize,
+        label: &str,
+        edit: impl FnOnce(&mut ProjectRecord),
+        saved: impl FnOnce(&ProjectRecord) -> bool,
+    ) -> bool {
+        self.push_undo_snapshot(i, label);
+        let doc = &mut self.tabs[i].scene.document;
+        let mut rec = record::read(doc);
+        edit(&mut rec);
+        record::write(doc, &rec);
+        if !saved(&record::read(doc)) {
+            self.drop_unchanged_pending_history(i);
+            return false;
+        }
+        self.tabs[i].dirty = true;
+        self.finish_pending_history(i);
+        true
+    }
+
+    /// L'avviso di un'altezza digitata fuori da 0,50–10 m (spec parte 2, §3):
+    /// un messaggio, non un blocco. `value` è in unità del disegno e già un
+    /// numero positivo (`parse_positive`). Per `AL_ALTEZZA` e `AL_STATO
+    /// Altezza`.
+    pub(super) fn bim_height_range_warning(&mut self, value: f64, unit: DrawingUnit) {
+        if let Some(notice) = range_warning(value, unit) {
+            self.command_line.push_info(&notice.text());
         }
     }
 }
@@ -954,6 +1010,21 @@ pub(super) fn parse_positive(text: &str) -> Option<f64> {
     (value > 0.0 && crate::entities::common::typed_value_in_range(value)).then_some(value)
 }
 
+/// Un'altezza digitata (in unità del disegno) con la sua unità e, se non è il
+/// metro, in metri con due decimali: «altezza 270 cm = 2,70 m», «altezza 2,7
+/// cm = 0,03 m», «altezza 2,70 m». Il valore digitato si ripete senza zeri in
+/// coda e con la virgola, così un errore di scala si vede subito (spec parte
+/// 2, §3). Una sola regola per `AL_ALTEZZA` e `AL_STATO Altezza`.
+pub(super) fn height_echo(value: f64, unit: DrawingUnit) -> String {
+    let metres = format_decimal(value / unit.per_metre());
+    let typed = value.to_string().replace('.', ",");
+    match unit {
+        DrawingUnit::Metri => format!("altezza {metres} m"),
+        DrawingUnit::Centimetri => format!("altezza {typed} cm = {metres} m"),
+        DrawingUnit::Millimetri => format!("altezza {typed} mm = {metres} m"),
+    }
+}
+
 /// Ciò che `AL_STATO` farebbe sulla selezione, senza ancora toccare nulla.
 struct StatoPlan {
     /// Oggetti selezionati.
@@ -1046,11 +1117,12 @@ fn last_new_thickness(zones: &[ZoneGeom]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_name, commits_to_model_space, exists_text, file_names, folder_error,
+        base_name, commits_to_model_space, exists_text, file_names, folder_error, height_echo,
         new_walls_layer_error, parse_positive, partial_failure_text, safe_file_stem, unquote,
         StatoChange,
     };
     use crate::bim::extract::Elaborato;
+    use crate::bim::units::DrawingUnit;
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
     use codec::tables::Layer;
@@ -1199,6 +1271,24 @@ mod tests {
         ] {
             assert_eq!(parse_positive(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn echo_repeats_the_unit_and_the_metres() {
+        assert_eq!(
+            height_echo(270.0, DrawingUnit::Centimetri),
+            "altezza 270 cm = 2,70 m"
+        );
+        assert_eq!(
+            height_echo(2.7, DrawingUnit::Centimetri),
+            "altezza 2,7 cm = 0,03 m"
+        );
+        assert_eq!(
+            height_echo(2700.0, DrawingUnit::Millimetri),
+            "altezza 2700 mm = 2,70 m"
+        );
+        assert_eq!(height_echo(2.7, DrawingUnit::Metri), "altezza 2,70 m");
+        assert_eq!(height_echo(3.0, DrawingUnit::Metri), "altezza 3,00 m");
     }
 
     #[test]
