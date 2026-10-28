@@ -73,7 +73,7 @@
 ### Task 3: `AL_ALTEZZA`
 
 **Files:**
-- Create: `src/app/commands/bim_abaco.rs` (solo i metodi di questo comando in questo task). Modify: `src/app/commands/bim.rs` (`inventory::submit!` con i tre nomi nuovi, rami di `dispatch_bim`), `src/app/commands/mod.rs` (`mod bim_abaco;`), `src/bim/rooms.rs` (funzione pura sotto), test in `src/app/bim_tests.rs`.
+- Create: `src/app/commands/bim_altezza.rs` (i metodi di questo comando; `bim_abaco.rs` è riservato ai Task 7 e 8, vedi Ruling G del registro). Modify: `src/app/commands/bim.rs` (`inventory::submit!` con i tre nomi nuovi, rami di `dispatch_bim`), `src/app/commands/mod.rs` (`mod bim_abaco;`), `src/bim/rooms.rs` (funzione pura sotto), test in `src/app/bim_tests.rs`.
 
 **Interfaces:**
 - Produces: `rooms::room_height_edits(doc: &Document, selected: &[Handle], height: Option<f64>, tol: f64) -> Vec<(Handle, Room, RoomPart)>` — per ogni parte di locale selezionata, tutte le parti di locale con stessa fase e seme entro `tol`, col `Room` riscritto (altezza nuova o tolta); senza doppioni. `OpenCADStudio::bim_altezza(&mut self, i: usize, cmd: &str) -> Task<Message>` (chiamato da `dispatch_bim` per `"AL_ALTEZZA"`).
