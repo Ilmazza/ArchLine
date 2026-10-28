@@ -5,11 +5,11 @@
 //! means to change is the block the copy was made from.
 
 use codec::entities::Insert;
-use codec::CadDocument;
+use codec::Document;
 
 /// The name of the block to edit for `insert`: its dynamic definition when it
 /// refers to an evaluated copy, otherwise the block it names.
-pub(crate) fn definition_name(document: &CadDocument, insert: &Insert) -> String {
+pub(crate) fn definition_name(document: &Document, insert: &Insert) -> String {
     if !insert.block_name.starts_with("*U") {
         return insert.block_name.clone();
     }

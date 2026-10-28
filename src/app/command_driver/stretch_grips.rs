@@ -74,7 +74,7 @@ mod tests {
     /// Stretch `handle` with a crossing window around the origin only.
     fn stretch_at_origin(app: &mut OpenCADStudio, handle: Handle) {
         let window = (DVec3::new(-1.0, -1.0, -1.0), DVec3::new(1.0, 1.0, 1.0));
-        let _ = app.handle_stretch_entities(vec![handle], vec![window], DVec3::new(5.0, 3.0, 0.0));
+        let _ = app.handle_stretch_entities(vec![handle], vec![window], Vec::new(), DVec3::new(5.0, 3.0, 0.0));
     }
 
     fn entity(app: &OpenCADStudio, handle: Handle) -> EntityType {
@@ -96,6 +96,7 @@ mod tests {
         let _ = app.handle_stretch_entities(
             vec![inside, outside],
             vec![window],
+            Vec::new(),
             DVec3::new(5.0, 3.0, 0.0),
         );
         let EntityType::Point(p) = entity(&app, inside) else { panic!() };

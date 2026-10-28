@@ -9,7 +9,7 @@
 //! comando che chiama `write`.
 
 use codec::objects::{ObjectType, XRecord, XRecordEntry, XRecordValue};
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 
 use super::units::DrawingUnit;
 use super::RECORD_PROGETTO;
@@ -28,7 +28,7 @@ pub struct ProjectRecord {
 }
 
 /// Il record del disegno; senza record (o illeggibile) i valori sono vuoti.
-pub fn read(doc: &CadDocument) -> ProjectRecord {
+pub fn read(doc: &Document) -> ProjectRecord {
     let mut rec = ProjectRecord::default();
     let Some(ObjectType::XRecord(xrecord)) = record_handle(doc).and_then(|h| doc.objects.get(&h))
     else {
@@ -50,7 +50,7 @@ pub fn read(doc: &CadDocument) -> ProjectRecord {
 
 /// Crea il record o ne sostituisce le voci. Senza dizionario radice non fa
 /// nulla (un disegno aperto dal codec lo ha sempre).
-pub fn write(doc: &mut CadDocument, rec: &ProjectRecord) {
+pub fn write(doc: &mut Document, rec: &ProjectRecord) {
     let root = doc.header.named_objects_dict_handle;
     if !matches!(doc.objects.get(&root), Some(ObjectType::Dictionary(_))) {
         return;
@@ -97,7 +97,7 @@ pub fn write(doc: &mut CadDocument, rec: &ProjectRecord) {
 }
 
 /// Handle dell'XRecord `ARCHLINE_PROGETTO` nel dizionario radice, se esiste ed è un XRecord.
-fn record_handle(doc: &CadDocument) -> Option<Handle> {
+fn record_handle(doc: &Document) -> Option<Handle> {
     let ObjectType::Dictionary(root) = doc.objects.get(&doc.header.named_objects_dict_handle)?
     else {
         return None;
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn record_roundtrip_and_update() {
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         assert_eq!(read(&doc), ProjectRecord::default());
         write(
             &mut doc,

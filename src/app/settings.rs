@@ -108,6 +108,17 @@ impl AutoConstrainSettings {
     }
 }
 
+/// Check Spelling preferences kept with the profile.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpellPrefs {
+    /// BCP-47 tag of the main dictionary; empty: the system language.
+    pub language: String,
+    pub options: crate::ui::window::spell_dialog::SpellOptions,
+    /// Words added to the user's dictionary.
+    pub custom: Vec<String>,
+}
+
 /// TXT2MTXT (Combine Text) settings, the profile values
 /// TXT2MTXTCOMBINEMTEXT, TXT2MTXTTEXTORDER, TXT2MTXTWORDWRAP and
 /// TXT2MTXTLINESPACING.
@@ -123,6 +134,30 @@ pub struct Txt2MtxtSettings {
     pub word_wrap: bool,
     /// Force uniform line spacing (always on while word-wrap is).
     pub uniform_spacing: bool,
+}
+
+/// The Inspection Dimension window's last values, offered the next time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DimInspectSettings {
+    /// 0 round, 1 angular, 2 no frame.
+    pub shape: u8,
+    pub label_on: bool,
+    pub label: String,
+    pub rate_on: bool,
+    pub rate: String,
+}
+
+impl Default for DimInspectSettings {
+    fn default() -> Self {
+        Self {
+            shape: 0,
+            label_on: false,
+            label: String::new(),
+            rate_on: true,
+            rate: "100%".to_string(),
+        }
+    }
 }
 
 impl Default for Txt2MtxtSettings {
@@ -201,7 +236,7 @@ pub fn clamp_right_click_hold_ms(v: i32) -> i32 {
 /// else's to read.
 pub const ZOOM_FACTOR_MIN: i32 = 3;
 pub const ZOOM_FACTOR_SYSVAR_MAX: i32 = 100;
-pub const ZOOM_FACTOR_MAX: i32 = 500;
+pub const ZOOM_FACTOR_MAX: i32 = 200;
 
 /// Hold a ZOOMFACTOR inside the range the application can store, wherever it
 /// arrives from — the slider, the Options field, or a configuration file
@@ -215,11 +250,11 @@ pub fn clamp_zoom_factor(v: i32) -> i32 {
     v.clamp(ZOOM_FACTOR_MIN, ZOOM_FACTOR_MAX)
 }
 
-/// The `Camera::zoom` step one wheel notch means at `factor`. The default 60
-/// is one whole step, which is what makes 60 the setting that leaves the
-/// camera's own `ZOOM_STEP` untouched.
+/// The `Camera::zoom` step one wheel notch means at `factor`. Every 24 is one
+/// camera step, so the default 60 brings the view about a quarter nearer a
+/// notch and the system variable's top, 100, about a third (#1397).
 pub fn zoom_notch_steps(factor: i32) -> f32 {
-    factor as f32 / 60.0
+    factor as f32 / 24.0
 }
 
 /// How much nearer one wheel notch brings the view at `factor`, as a
@@ -232,21 +267,154 @@ pub fn zoom_notch_percent(factor: i32) -> f32 {
     (1.0 - ratio) * 100.0
 }
 
-/// Which mouse gestures pan and orbit the model view.
+/// Which mouse gestures pan and orbit the model view. Besides the own CAD
+/// default, the styles follow the programs they are named after, as FreeCAD
+/// offers them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NavigationStyle {
     /// Middle button pans; Shift + middle button orbits.
     #[default]
     Cad,
-    /// Middle button orbits; Shift + middle button pans.
+    /// Middle button orbits; Shift + middle button, or left + right, pans.
     Blender,
-    /// Middle button pans; middle and left buttons together orbit.
+    /// Middle button pans; middle with the right (or left) button orbits
+    /// about the screen centre; a right click during a middle drag zooms.
     Catia,
+    /// Middle button pans; middle with the left or right button orbits.
+    FreeCad,
+    /// Left button orbits, right button pans, both together tilt.
+    Gesture,
+    /// Alt + left orbits, Alt + middle pans, Alt + right zooms.
+    MayaGesture,
+    /// Middle pans; middle + right or Ctrl + right orbits; Ctrl + left zooms.
+    OpenCascade,
+    /// Left button orbits, middle pans, middle + left zooms.
+    OpenInventor,
+    /// Left button orbits, right pans, middle (or Shift + right) zooms.
+    OpenScad,
+    /// Middle pans; Shift + middle or middle + right orbits; left + right pans.
+    Revit,
+    /// Middle orbits; Shift + middle or middle + right pans; middle + left zooms.
+    SiemensNx,
+    /// Middle orbits; Ctrl + middle pans; Shift + middle zooms.
+    SolidWorks,
+    /// Right button orbits, middle pans.
+    TinkerCad,
+    /// No button needed: Shift pans, Alt orbits, Ctrl + Shift zooms.
+    Touchpad,
+}
+
+/// What a navigation drag does to the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavAction {
+    Pan,
+    Orbit,
+    Zoom,
+    /// Turn about the view axis.
+    Roll,
+}
+
+/// The mouse buttons held down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavButtons {
+    pub left: bool,
+    pub middle: bool,
+    pub right: bool,
 }
 
 impl NavigationStyle {
-    pub const ALL: [NavigationStyle; 3] = [Self::Cad, Self::Blender, Self::Catia];
+    pub const ALL: [NavigationStyle; 14] = [
+        Self::Cad,
+        Self::Blender,
+        Self::Catia,
+        Self::FreeCad,
+        Self::Gesture,
+        Self::MayaGesture,
+        Self::OpenCascade,
+        Self::OpenInventor,
+        Self::OpenScad,
+        Self::Revit,
+        Self::SiemensNx,
+        Self::SolidWorks,
+        Self::TinkerCad,
+        Self::Touchpad,
+    ];
+
+    /// What dragging with `held` and the modifiers does, `None` when the
+    /// buttons do not navigate (a left drag selects, a right click opens the
+    /// menu). `dragging` is true while a navigation drag is under way, for
+    /// the styles where a button keeps one going that would not start it.
+    pub fn action(
+        self,
+        held: NavButtons,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        dragging: bool,
+    ) -> Option<NavAction> {
+        use NavAction::*;
+        let NavButtons {
+            left,
+            middle,
+            right,
+        } = held;
+        match (self, left, middle, right) {
+            (Self::Cad, false, true, false) => Some(if shift { Orbit } else { Pan }),
+            (Self::Blender, false, true, false) => Some(if shift { Pan } else { Orbit }),
+            (Self::Blender, true, false, true) => Some(Pan),
+            (Self::Catia, false, true, false) => Some(Pan),
+            (Self::Catia, _, true, _) => Some(Orbit),
+            (Self::FreeCad, false, true, false) => Some(Pan),
+            (Self::FreeCad, _, true, _) => Some(Orbit),
+            // The middle button may be let go once the right one is down.
+            (Self::FreeCad, false, false, true) if dragging => Some(Orbit),
+            (Self::Gesture, true, false, false) => Some(Orbit),
+            (Self::Gesture, false, false, true) => Some(Pan),
+            (Self::Gesture, true, false, true) => Some(Roll),
+            (Self::MayaGesture, true, false, false) if alt => Some(Orbit),
+            (Self::MayaGesture, false, true, false) if alt => Some(Pan),
+            (Self::MayaGesture, false, false, true) if alt => Some(Zoom),
+            (Self::MayaGesture, true, false, true) if alt => Some(Roll),
+            (Self::OpenCascade, true, false, false) if ctrl => Some(Zoom),
+            (Self::OpenCascade, false, false, true) if ctrl => Some(Orbit),
+            (Self::OpenCascade, false, true, true) => Some(Orbit),
+            (Self::OpenCascade, false, true, false) => Some(Pan),
+            (Self::OpenInventor, true, false, false) if !shift && !ctrl => Some(Orbit),
+            (Self::OpenInventor, false, true, false) => Some(Pan),
+            (Self::OpenInventor, true, true, false) => Some(Zoom),
+            (Self::OpenScad, true, false, false) => Some(Orbit),
+            (Self::OpenScad, false, false, true) => Some(if shift { Zoom } else { Pan }),
+            (Self::OpenScad, false, true, false) => Some(Zoom),
+            (Self::OpenScad, false, true, true) => Some(Orbit),
+            (Self::Revit, false, true, false) => Some(if shift { Orbit } else { Pan }),
+            (Self::Revit, false, true, true) => Some(Orbit),
+            (Self::Revit, true, false, true) => Some(Pan),
+            (Self::SiemensNx, false, true, false) => Some(if shift { Pan } else { Orbit }),
+            (Self::SiemensNx, false, true, true) => Some(Pan),
+            (Self::SiemensNx, true, true, false) => Some(Zoom),
+            (Self::SolidWorks, false, true, false) => Some(if ctrl {
+                Pan
+            } else if shift {
+                Zoom
+            } else {
+                Orbit
+            }),
+            (Self::TinkerCad, false, false, true) => Some(Orbit),
+            (Self::TinkerCad, false, true, false) => Some(Pan),
+            (Self::Touchpad, false, false, false) if ctrl && shift => Some(Zoom),
+            (Self::Touchpad, false, false, false) if shift => Some(Pan),
+            (Self::Touchpad, false, false, false) if alt => Some(Orbit),
+            (Self::Touchpad, true, false, false) if shift => Some(Orbit),
+            _ => None,
+        }
+    }
+
+    /// A middle click (no drag) brings the point under the pointer to the
+    /// centre of the view.
+    pub fn middle_click_recenters(self) -> bool {
+        !matches!(self, Self::Cad | Self::OpenCascade | Self::Touchpad)
+    }
 }
 
 impl std::fmt::Display for NavigationStyle {
@@ -255,6 +423,17 @@ impl std::fmt::Display for NavigationStyle {
             Self::Cad => crate::t!("CAD: Shift + middle button orbits"),
             Self::Blender => crate::t!("Blender: middle button orbits, Shift pans"),
             Self::Catia => crate::t!("CATIA: middle + left button orbits"),
+            Self::FreeCad => crate::t!("FreeCAD CAD: middle + left button orbits"),
+            Self::Gesture => crate::t!("Gesture: left button orbits, right button pans"),
+            Self::MayaGesture => crate::t!("Maya-Gesture: Alt + mouse buttons"),
+            Self::OpenCascade => crate::t!("OpenCascade: Ctrl + right button orbits"),
+            Self::OpenInventor => crate::t!("OpenInventor: left button orbits"),
+            Self::OpenScad => crate::t!("OpenSCAD: left button orbits, right button pans"),
+            Self::Revit => crate::t!("Revit: Shift + middle button orbits"),
+            Self::SiemensNx => crate::t!("Siemens NX: middle button orbits, Shift pans"),
+            Self::SolidWorks => crate::t!("SolidWorks: middle button orbits, Ctrl pans"),
+            Self::TinkerCad => crate::t!("TinkerCAD: right button orbits"),
+            Self::Touchpad => crate::t!("Touchpad: Shift pans, Alt orbits"),
         })
     }
 }
@@ -434,9 +613,144 @@ pub const MAX_SELECTED_GRIPS: usize = 4096;
 /// The "settings" section of the consolidated config ([`crate::app::config`]).
 /// Field defaults mirror the app's in-code defaults so a missing key restores
 /// the value the app boots with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlockEditorPreferences {
+    pub locked: bool,
+    pub action_color: String,
+    pub parameter_color: String,
+    pub grip_color: String,
+    pub grip_size: u8,
+    pub parameter_size: u8,
+    pub parameter_font: String,
+    pub text_horizontal: bool,
+    pub dependency_highlight: bool,
+    pub value_markers: bool,
+    pub dynamic_grip_color: u8,
+    pub grip_tips: bool,
+    pub action_bars: bool,
+    pub constraint_colors: [String; 4],
+}
+
+impl Default for BlockEditorPreferences {
+    fn default() -> Self {
+        Self {
+            locked: false,
+            action_color: "7".into(),
+            parameter_color: "170".into(),
+            grip_color: "141".into(),
+            grip_size: 8,
+            parameter_size: 12,
+            parameter_font: "Simplex.shx".into(),
+            text_horizontal: true,
+            dependency_highlight: true,
+            value_markers: true,
+            dynamic_grip_color: 140,
+            grip_tips: true,
+            action_bars: true,
+            constraint_colors: ["8".into(), "2".into(), "3".into(), "1".into()],
+        }
+    }
+}
+
+pub const BLOCK_DISPLAY_VARIABLES: &[(&str, &str)] = &[
+    ("BACTIONCOLOR", "Action color"),
+    ("BPARAMETERCOLOR", "Parameter color"),
+    ("BGRIPOBJCOLOR", "Grip color"),
+    ("BGRIPOBJSIZE", "Grip size (pixels)"),
+    ("BPARAMETERSIZE", "Parameter text size (pixels)"),
+    ("BPARAMETERFONT", "Parameter font"),
+    ("BPTEXTHORIZONTAL", "Keep parameter text horizontal"),
+    ("BDEPENDENCYHIGHLIGHT", "Highlight dependent geometry"),
+    ("BTMARKDISPLAY", "Show value-set markers"),
+    ("GRIPDYNCOLOR", "Dynamic grip color (index)"),
+    ("GRIPTIPS", "Show grip tips"),
+    ("BACTIONBARMODE", "Display actions in bars"),
+];
+
+impl BlockEditorPreferences {
+    pub(crate) fn display_variable(&self, name: &str) -> Option<String> {
+        Some(match name {
+            "BACTIONCOLOR" => self.action_color.clone(),
+            "BPARAMETERCOLOR" => self.parameter_color.clone(),
+            "BGRIPOBJCOLOR" => self.grip_color.clone(),
+            "BGRIPOBJSIZE" => self.grip_size.to_string(),
+            "BPARAMETERSIZE" => self.parameter_size.to_string(),
+            "BPARAMETERFONT" => self.parameter_font.clone(),
+            "BPTEXTHORIZONTAL" => u8::from(self.text_horizontal).to_string(),
+            "BDEPENDENCYHIGHLIGHT" => u8::from(self.dependency_highlight).to_string(),
+            "BTMARKDISPLAY" => u8::from(self.value_markers).to_string(),
+            "GRIPDYNCOLOR" => self.dynamic_grip_color.to_string(),
+            "GRIPTIPS" => u8::from(self.grip_tips).to_string(),
+            "BACTIONBARMODE" => u8::from(self.action_bars).to_string(),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn set_display_variable(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<(), &'static str> {
+        match name {
+            "BACTIONCOLOR" | "BPARAMETERCOLOR" | "BGRIPOBJCOLOR" => {
+                let value = crate::ui::overlay::authoring::normalize_color(value)
+                    .ok_or("Use BYLAYER, BYBLOCK, an index from 1 to 255, or RGB:r,g,b.")?;
+                match name {
+                    "BACTIONCOLOR" => self.action_color = value,
+                    "BPARAMETERCOLOR" => self.parameter_color = value,
+                    _ => self.grip_color = value,
+                }
+            }
+            "BGRIPOBJSIZE" | "BPARAMETERSIZE" | "GRIPDYNCOLOR" => {
+                let value = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .ok_or("Enter an integer from 1 to 255.")?;
+                if name == "GRIPDYNCOLOR" {
+                    self.dynamic_grip_color = value;
+                } else if name == "BGRIPOBJSIZE" {
+                    self.grip_size = value;
+                } else {
+                    self.parameter_size = value;
+                }
+            }
+            "BPARAMETERFONT" => {
+                let value = value.trim().trim_matches('"');
+                if value.is_empty() || value.chars().any(char::is_control) {
+                    return Err("Enter a font family, font file, or primary,bigfont pair.");
+                }
+                self.parameter_font = value.to_owned();
+            }
+            "BPTEXTHORIZONTAL"
+            | "BDEPENDENCYHIGHLIGHT"
+            | "BTMARKDISPLAY"
+            | "GRIPTIPS"
+            | "BACTIONBARMODE" => {
+                let value = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err("Enter 0 or 1."),
+                };
+                match name {
+                    "BPTEXTHORIZONTAL" => self.text_horizontal = value,
+                    "BDEPENDENCYHIGHLIGHT" => self.dependency_highlight = value,
+                    "BTMARKDISPLAY" => self.value_markers = value,
+                    "GRIPTIPS" => self.grip_tips = value,
+                    _ => self.action_bars = value,
+                }
+            }
+            _ => return Err("Unknown display variable."),
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
+    pub block_editor: BlockEditorPreferences,
     pub spacemouse: crate::input::spacemouse::Preferences,
     pub dyn_input: bool,
     pub dyn_mode: i16,
@@ -457,8 +771,12 @@ pub struct UserSettings {
     pub cursor_size: i32,
     /// PICKBOX: normalized visible-box and click-aperture size.
     pub pick_box: i32,
+    /// APERTURE: object-snap capture radius in screen pixels.
+    pub aperture: f32,
     /// HPASSOC: new hatches follow their boundary objects.
     pub hatch_associative: bool,
+    /// HPGAPTOL: largest boundary gap HATCH/BOUNDARY picks treat as closed.
+    pub hatch_gap_tolerance: f64,
     /// MENUBAR: the classic pull-down menus show above the ribbon.
     pub show_menu_bar: bool,
     /// RIBBONCLOSE hid the ribbon; RIBBON brings it back.
@@ -496,10 +814,16 @@ pub struct UserSettings {
     pub wblock_object_mode: u8,
     /// FIELDDISPLAY: fields show on a gray background.
     pub field_display: bool,
+    /// HYPERLINKOPTIONS: the hyperlink cursor, tooltip and shortcut menu.
+    pub hyperlink_options: bool,
     /// XDWGFADECTL: how much referenced drawings fade (-90..=90; negative is off).
     pub xref_fade: i32,
     /// FILEDIA: file dialogs of commands that have a command-line form.
     pub file_dia: bool,
+    /// OLEHIDE: which OLE objects show (0 all, 1 paper space, 2 model space, 3 none).
+    pub ole_hide: i16,
+    /// OLEQUALITY: the plot quality of new OLE objects (3 automatic).
+    pub ole_quality: i16,
     /// TRIMEXTENDMODE: TRIM and EXTEND start in Quick mode (else Standard).
     pub trim_extend_quick: bool,
     /// Fonts and plot styles kept in a chosen folder (`None`: the default).
@@ -640,6 +964,12 @@ pub struct UserSettings {
     /// TXT2MTXT settings (Text to MText Settings dialog).
     #[serde(default)]
     pub txt2mtxt: Txt2MtxtSettings,
+    /// Check Spelling: main dictionary, options and the user's words.
+    #[serde(default)]
+    pub spell: SpellPrefs,
+    /// Inspection Dimension window values.
+    #[serde(default)]
+    pub dim_inspect: DimInspectSettings,
     /// Keep existing geometry size while solving after a constraint edit.
     #[serde(default = "default_constraint_solve_mode")]
     pub constraint_solve_mode: bool,
@@ -767,6 +1097,9 @@ pub struct UserSettings {
     /// SSMAUTOOPEN, SSLOCATE, SSMPOLLTIME, SSMSHEETSTATUS.
     #[serde(default)]
     pub sheet_set: crate::ui::window::sheet_set::SheetSetSettings,
+    /// QuickCalc: the global variables, the open sections and the angle mode.
+    #[serde(default)]
+    pub quick_calc: crate::ui::window::quick_calc::QuickCalcSettings,
 }
 
 /// A block the Blocks palette lists from outside the current drawing (a
@@ -960,6 +1293,7 @@ pub fn clamp_clipromptlines(v: i32) -> i32 {
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
+            block_editor: BlockEditorPreferences::default(),
             spacemouse: crate::input::spacemouse::Preferences::default(),
             dyn_input: true,
             dyn_mode: 3,
@@ -968,12 +1302,15 @@ impl Default for UserSettings {
             zoom_wheel_reversed: false,
             navigation_style: NavigationStyle::Cad,
             dynamic_ucs: true,
-            touchpad_pan: false,
+            // A Mac's built-in trackpad is the common case there.
+            touchpad_pan: cfg!(target_os = "macos"),
             ui_scale_percent: 100,
             zoom_factor: 60,
             cursor_size: 5,
             pick_box: 3,
+            aperture: crate::snap::DEFAULT_OSNAP_RADIUS_PX,
             hatch_associative: true,
+            hatch_gap_tolerance: 0.0,
             show_menu_bar: false,
             ribbon_closed: false,
             options_tab: crate::ui::window::options::OptionsTab::General,
@@ -995,8 +1332,11 @@ impl Default for UserSettings {
             block_open_in_editor: false,
             wblock_object_mode: 0,
             field_display: true,
+            hyperlink_options: true,
             xref_fade: 50,
             file_dia: true,
+            ole_hide: 0,
+            ole_quality: 3,
             trim_extend_quick: true,
             fonts_folder: None,
             plot_styles_folder: None,
@@ -1028,11 +1368,12 @@ impl Default for UserSettings {
             plugin_repos: Vec::new(),
             literal_spaces: false,
             command_history_height: crate::ui::command_line::HISTORY_HEIGHT_DEFAULT,
-            // Snapper::default(): END|MID|CEN|NODE|QUAD|INT|NEA (575), master
-            // on. Object snap is a drafting aid users expect to be live from
-            // the first click; the suppress bit (16384) is left for the user
-            // to set via the status-bar pill or OSNAP.
-            osmode: 575,
+            // Snapper::default(): END|MID|CEN|NODE|QUAD|INT (63), master on.
+            // Object snap is a drafting aid users expect to be live from the
+            // first click; the suppress bit (16384) is left for the user to
+            // set via the status-bar pill or OSNAP. Nearest is off: on, it is
+            // nearer than any point the object under the cursor offers (#1914).
+            osmode: 63,
             texteditmode: false,
             quick_dimension_snap_priority: 0,
             dimension_continue_mode: 1,
@@ -1043,6 +1384,8 @@ impl Default for UserSettings {
             show_constraint_values: true,
             auto_constrain: AutoConstrainSettings::default(),
             txt2mtxt: Txt2MtxtSettings::default(),
+            spell: SpellPrefs::default(),
+            dim_inspect: DimInspectSettings::default(),
             constraint_solve_mode: true,
             constraint_infer: false,
             constraint_bar_display: 3,
@@ -1082,6 +1425,7 @@ impl Default for UserSettings {
             count_service: true,
             count_invalid_area: 0,
             sheet_set: Default::default(),
+            quick_calc: Default::default(),
         }
     }
 }
@@ -1092,12 +1436,13 @@ mod tests {
 
     /// The Options read-out has to say what a notch really does, or it is
     /// worse than no read-out. These are the percentages of the law in
-    /// `Camera::zoom`, which is where the number comes from: the default a
-    /// tenth of the distance, the top of the system variable's range a
-    /// sixth, and the top of the application's range a little over half.
+    /// `Camera::zoom`, which is where the number comes from: the default
+    /// close to a quarter of the distance, the top of the system variable's
+    /// range about a third, and the top of the application's range a little
+    /// over half.
     #[test]
     fn the_zoom_read_out_says_what_a_notch_does() {
-        for (factor, percent) in [(3, 0.53_f32), (60, 10.0), (100, 16.1), (500, 58.4)] {
+        for (factor, percent) in [(3, 1.31_f32), (60, 23.2), (100, 35.5), (200, 58.4)] {
             let shown = zoom_notch_percent(factor);
             assert!(
                 (shown - percent).abs() < 0.05,
@@ -1109,11 +1454,10 @@ mod tests {
         assert_eq!(zoom_notch_percent(0), zoom_notch_percent(ZOOM_FACTOR_MIN));
     }
 
-    /// The default is one whole step, which is the whole reason the camera's
-    /// base is the per-notch ratio and not something scaled.
+    /// The default stays 60, and 24 is one whole camera step.
     #[test]
     fn the_default_zoom_factor_is_one_step() {
-        assert_eq!(zoom_notch_steps(60), 1.0);
+        assert_eq!(zoom_notch_steps(24), 1.0);
         assert_eq!(UserSettings::default().zoom_factor, 60);
     }
 

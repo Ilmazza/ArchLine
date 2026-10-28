@@ -5,7 +5,7 @@ use codec::objects::{
     BlockParameter, BlockPropertiesTable, BlockPropertiesTableField, BlockPropertiesTableValue,
     DynamicBlockData, ObjectType,
 };
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Column {
@@ -25,12 +25,13 @@ pub(crate) struct TableView {
     pub row_start: usize,
     pub trailer_start: usize,
     pub must_match: bool,
+    pub column_metadata: Vec<Vec<BlockPropertiesTableField>>,
 }
 
 pub(crate) type Grid = (Handle, Vec<Column>, Vec<Vec<String>>);
 
-pub(crate) fn graph_handle(document: &CadDocument, definition: Handle) -> Option<Handle> {
-    let xdict = document.extension_dictionary_handle(definition)?;
+pub(crate) fn graph_handle(document: &Document, definition: Handle) -> Option<Handle> {
+    let xdict = super::block_authoring::definition_dictionary(document, definition)?;
     let ObjectType::Dictionary(dictionary) = document.objects.get(&xdict)? else {
         return None;
     };
@@ -38,7 +39,7 @@ pub(crate) fn graph_handle(document: &CadDocument, definition: Handle) -> Option
 }
 
 pub(crate) fn table(
-    document: &CadDocument,
+    document: &Document,
     definition: Handle,
 ) -> Result<Option<TableView>, &'static str> {
     let graph = graph_handle(document, definition).ok_or("The authoring graph is unavailable.")?;
@@ -116,16 +117,27 @@ fn parse(table_handle: Handle, table: BlockPropertiesTable) -> Result<TableView,
         return Err("The Block Properties Table column count is unsupported.");
     }
     let mut columns = Vec::with_capacity(column_count);
+    let mut column_metadata = Vec::with_capacity(column_count);
     let mut index = column_count_index + 1;
-    for _ in 0..column_count {
-        let column_handle = fields
-            .get(index)
-            .filter(|field| field.code == 340)
-            .and_then(handle)
-            .ok_or("A Block Properties Table property binding is invalid.")?;
-        index += 1;
+    for column in 0..column_count {
+        let leading_handle = fields.get(index).filter(|f| f.code == 340).and_then(handle);
+        if leading_handle.is_some() {
+            index += 1;
+        }
+        if column == 0 && leading_handle.is_none() {
+            return Err("A Block Properties Table property binding is invalid.");
+        }
+        let end = fields
+            .iter()
+            .enumerate()
+            .skip(index)
+            .take_while(|(_, field)| field.code != 92)
+            .find(|(_, field)| field.code == 302)
+            .map(|(i, _)| i + 1)
+            .ok_or("A Block Properties Table property record is incomplete.")?;
+        let metadata = &fields[index..end];
         let mut name = None;
-        for field in fields.iter().skip(index) {
+        for field in metadata {
             if field.code == 301 && name.is_none() {
                 if let BlockPropertiesTableValue::Text(value) = &field.value {
                     name = Some(value.clone());
@@ -135,21 +147,28 @@ fn parse(table_handle: Handle, table: BlockPropertiesTable) -> Result<TableView,
             }
         }
         let name = name.ok_or("A Block Properties Table property name is missing.")?;
-        let end = fields
+        let property_id = metadata
             .iter()
-            .enumerate()
-            .skip(index)
-            .find(|(_, field)| field.code == 340)
-            .map(|(i, _)| i)
-            .ok_or("A Block Properties Table property record is incomplete.")?;
-        let property_id = fields
-            .iter()
-            .enumerate()
-            .skip(index)
-            .take(end - index)
-            .find(|(_, field)| field.code == 90)
-            .and_then(|(_, field)| integer(field))
+            .find(|field| field.code == 90)
+            .and_then(integer)
             .ok_or("A Block Properties Table property type is missing.")?;
+        column_metadata.push(metadata.to_vec());
+        index = end;
+        let column_handle = if let Some(binding) = leading_handle {
+            // Earlier authored tables included a null separator after each column.
+            if fields.get(index).filter(|f| f.code == 340).and_then(handle) == Some(Handle::NULL) {
+                index += 1;
+            }
+            binding
+        } else {
+            let binding = fields
+                .get(index)
+                .filter(|f| f.code == 340)
+                .and_then(handle)
+                .ok_or("A Block Properties Table property binding is invalid.")?;
+            index += 1;
+            binding
+        };
         columns.push(Column {
             handle: column_handle,
             node_id: 0,
@@ -157,7 +176,6 @@ fn parse(table_handle: Handle, table: BlockPropertiesTable) -> Result<TableView,
             display_name: name,
             type_code: property_id,
         });
-        index = end + 1;
     }
     let row_count_index = fields
         .iter()
@@ -230,10 +248,11 @@ fn parse(table_handle: Handle, table: BlockPropertiesTable) -> Result<TableView,
         row_start,
         trailer_start,
         must_match,
+        column_metadata,
     })
 }
 
-pub(crate) fn columns(document: &CadDocument, definition: Handle) -> Vec<Column> {
+pub(crate) fn columns(document: &Document, definition: Handle) -> Vec<Column> {
     let parameters = super::block_actions::all_parameters(document, definition);
     super::block_lookup::properties(document, definition)
         .into_iter()
@@ -264,7 +283,7 @@ pub(crate) fn columns(document: &CadDocument, definition: Handle) -> Vec<Column>
 }
 
 pub(crate) fn grid_table(
-    document: &CadDocument,
+    document: &Document,
     definition: Handle,
 ) -> Result<Option<Grid>, &'static str> {
     let Some(view) = table(document, definition)? else {
@@ -279,7 +298,7 @@ pub(crate) fn grid_table(
 }
 
 pub(crate) fn apply(
-    document: &mut CadDocument,
+    document: &mut Document,
     definition: Handle,
     columns: &[Column],
     rows: &[Vec<f64>],
@@ -355,14 +374,16 @@ pub(crate) fn apply(
         table.parameter.property_count = eval + 1;
     }
     let graph = graph_handle(&working, definition).ok_or("The authoring graph is unavailable.")?;
-    ensure_grip(&mut working, definition, graph, handle)?;
+    if new_table_eval.is_some() || previous.as_ref().is_none_or(|view| view.table.parameter.property_count > 0) {
+        ensure_grip(&mut working, definition, graph, handle)?;
+    }
     let _ = graph;
     *document = working;
     Ok(handle)
 }
 
 fn ensure_grip(
-    document: &mut CadDocument,
+    document: &mut Document,
     definition: Handle,
     graph: Handle,
     table_handle: Handle,
@@ -392,6 +413,7 @@ fn ensure_grip(
                 }
             }
         }
+        repair_grip_graph(document, definition, table_handle)?;
         return Ok(());
     }
     let (graph, slots) = authoring::prepare(document, definition)
@@ -449,7 +471,15 @@ fn ensure_grip(
             )),
         );
     }
-    authoring::append_components(document, graph, slots, &[grip, x, y], &[1, 2]);
+    for (index, handle) in [grip, x, y].into_iter().enumerate() {
+        authoring::append_single(document, graph, authoring::Slots { node: slots.node + index as i32, eval: slots.eval + index as i32, edge: slots.edge }, handle);
+    }
+    let ObjectType::DynamicBlock(object) = document.objects.get_mut(&graph).unwrap() else { unreachable!() };
+    let DynamicBlockData::EvaluationGraph(native) = &mut object.data else { unreachable!() };
+    let parameter_node = native.nodes.iter().find(|node| node.next_id == table_eval).ok_or("The table parameter node is unavailable.")?.id;
+    authoring::graph::link(native, slots.node, parameter_node)?;
+    authoring::graph::link(native, parameter_node, slots.node + 1)?;
+    authoring::graph::link(native, parameter_node, slots.node + 2)?;
     if let Some(ObjectType::DynamicBlock(object)) = document.objects.get_mut(&table_handle) {
         if let DynamicBlockData::PropertiesTable(table) = &mut object.data {
             table.parameter.property_count = slots.eval;
@@ -458,93 +488,152 @@ fn ensure_grip(
     Ok(())
 }
 
+/// Repair the former three-object append layout, preserving all unrelated nodes.
+pub(crate) fn repair_grip_graph(doc: &mut Document, definition: Handle, table: Handle) -> Result<bool, &'static str> {
+    let graph_handle = authoring::graph(doc, definition)?.ok_or("The authoring graph is unavailable.")?;
+    let Some(ObjectType::DynamicBlock(table_object)) = doc.objects.get(&table) else { return Ok(false) };
+    let DynamicBlockData::PropertiesTable(table_data) = &table_object.data else { return Ok(false) };
+    let id = table_data.parameter.property_count;
+    let grip = doc.objects.values().find_map(|object| match object {
+        ObjectType::DynamicBlock(object) if object.owner == graph_handle => match &object.data {
+            DynamicBlockData::PropertiesTableGrip(grip) if grip.element.eval.node_id == id => Some((object.handle, grip.flags_91, grip.flags_92)),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some((grip_handle, x_id, y_id)) = grip else { return Ok(false) };
+    let ObjectType::DynamicBlock(object) = &doc.objects[&graph_handle] else { unreachable!() };
+    let DynamicBlockData::EvaluationGraph(original) = &object.data else { unreachable!() };
+    if original.nodes.iter().all(|node| authoring::graph::valid_lists(original, node.id)) { return Ok(false) }
+    let node_for = |id| original.nodes.iter().find(|node| node.next_id == id).map(|node| node.id);
+    let (Some(g), Some(x), Some(y), Some(p)) = (
+        original.nodes.iter().find(|node| node.expression == grip_handle).map(|node| node.id),
+        node_for(x_id), node_for(y_id), original.nodes.iter().find(|node| node.expression == table).map(|node| node.id),
+    ) else { return Ok(false) };
+    let legacy = [g, x, y];
+    if legacy.iter().collect::<std::collections::BTreeSet<_>>().len() != 3 || legacy.contains(&p) { return Ok(false) }
+    let edges = original.edges.iter().filter(|edge| legacy.contains(&edge.source_node) || legacy.contains(&edge.destination_node)).collect::<Vec<_>>();
+    let actual = edges.iter().map(|edge| (edge.source_node, edge.destination_node)).collect::<std::collections::BTreeSet<_>>();
+    let expected = [(x, g), (g, x), (g, y)].into_iter().collect::<std::collections::BTreeSet<_>>();
+    if edges.len() != 3 || actual != expected || edges.iter().any(|edge| edge.next_id != 0 || edge.outgoing_edges[4] != -1)
+        || original.nodes.iter().filter(|node| !legacy.contains(&node.id)).any(|node| !authoring::graph::valid_lists(original, node.id)) {
+        return Ok(false);
+    }
+    let removed = edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+    let mut graph = original.clone();
+    graph.edges.retain(|edge| !removed.contains(&edge.id));
+    for node in &mut graph.nodes { if legacy.contains(&node.id) { node.node_data = [-1; 4]; } }
+    authoring::graph::link(&mut graph, g, p)?;
+    authoring::graph::link(&mut graph, p, x)?;
+    authoring::graph::link(&mut graph, p, y)?;
+    let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&graph_handle).unwrap() else { unreachable!() };
+    object.data = DynamicBlockData::EvaluationGraph(graph);
+    Ok(true)
+}
+
 fn encode_fields(
     columns: &[Column],
     rows: &[Vec<f64>],
     old: Option<&[BlockPropertiesTableField]>,
     must_match: bool,
 ) -> Result<Vec<BlockPropertiesTableField>, &'static str> {
-    let mut fields = if let Some(fields) = old {
-        fields.to_vec()
+    let previous = old
+        .map(|fields| {
+            parse(
+                Handle::NULL,
+                BlockPropertiesTable {
+                    parameter: Default::default(),
+                    fields: fields.to_vec(),
+                },
+            )
+        })
+        .transpose()?;
+    let mut fields = if let Some(previous) = &previous {
+        let count = previous
+            .table
+            .fields
+            .iter()
+            .position(|field| field.code == 91)
+            .ok_or("The Block Properties Table has no property columns.")?;
+        previous.table.fields[..count].to_vec()
     } else {
         vec![int(90, 2), text(300, "Block Table1"), text(301, "")]
     };
-    if old.is_none() {
-        fields.push(int(91, columns.len() as i64));
-        for column in columns {
-            fields.extend([
-                handle_field(340, column.handle),
-                int(170, 0),
-                int(171, -1),
-                text(300, ""),
-                text(301, &column.connection_name),
-                int(90, column.node_id as i64),
-                int(170, -9999),
-                int(170, -9999),
-                boolean(290, false),
-                boolean(291, true),
-                boolean(292, true),
-                boolean(
-                    293,
-                    column.connection_name.eq_ignore_ascii_case("UpdatedAngle"),
-                ),
-                boolean(294, false),
-                text(302, ""),
-                handle_field(340, Handle::NULL),
-            ]);
-        }
-    } else {
-        let view = parse(
-            Handle::NULL,
-            BlockPropertiesTable {
-                parameter: Default::default(),
-                fields: fields.clone(),
-            },
-        )?;
-        if view.columns.len() != columns.len()
-            || view.columns.iter().zip(columns).any(|(old, new)| {
-                old.handle != new.handle
-                    || old.connection_name != new.connection_name
-                    || (old.type_code != new.type_code
-                        && old.node_id != 0
-                        && old.node_id != new.node_id)
+    fields.push(int(91, columns.len() as i64));
+    for (index, column) in columns.iter().enumerate() {
+        let mut metadata = previous
+            .as_ref()
+            .and_then(|previous| {
+                previous
+                    .columns
+                    .iter()
+                    .position(|old| {
+                        old.handle == column.handle && old.connection_name == column.connection_name
+                    })
+                    .map(|i| previous.column_metadata[i].clone())
             })
-        {
-            return Err(
-                "Changing Block Properties Table columns is not supported for an existing table.",
+            .unwrap_or_else(|| {
+                vec![
+                    int(170, 0),
+                    int(171, -1),
+                    text(300, ""),
+                    text(301, &column.connection_name),
+                    int(90, column.node_id as i64),
+                    int(170, -9999),
+                    int(170, -9999),
+                    boolean(290, false),
+                    boolean(291, true),
+                    boolean(292, true),
+                    boolean(
+                        293,
+                        column.connection_name.eq_ignore_ascii_case("UpdatedAngle"),
+                    ),
+                    boolean(294, false),
+                    text(302, ""),
+                ]
+            });
+        if let Some(field) = metadata.iter_mut().find(|field| field.code == 90) {
+            field.value = BlockPropertiesTableValue::Integer(i64::from(column.node_id));
+        }
+        if let Some(field) = metadata.iter_mut().find(|field| field.code == 293) {
+            field.value = BlockPropertiesTableValue::Boolean(
+                column.connection_name.eq_ignore_ascii_case("UpdatedAngle"),
             );
         }
-        fields.truncate(view.row_start - 1);
-        for column in columns {
-            if let Some(position) = fields.iter().enumerate().skip(4).find_map(|(i, f)|
-                (f.code == 340 && matches!(f.value, BlockPropertiesTableValue::Handle(h) if h == column.handle)).then_some(i)) {
-                let end = fields.iter().enumerate().skip(position + 1).find(|(_, f)| f.code == 340).map(|(i, _)| i).unwrap_or(fields.len());
-                if let Some(field) = fields.iter_mut().take(end).skip(position + 1).find(|f| f.code == 90) {
-                    field.value = BlockPropertiesTableValue::Integer(i64::from(column.node_id));
-                }
-                if let Some(field) = fields.iter_mut().take(end).skip(position + 1).find(|f| f.code == 293) {
-                    field.value = BlockPropertiesTableValue::Boolean(column.connection_name.eq_ignore_ascii_case("UpdatedAngle"));
-                }
-            }
+        // The first binding precedes its metadata; subsequent bindings follow it.
+        if index == 0 {
+            fields.push(handle_field(340, column.handle));
+        }
+        fields.extend(metadata);
+        if index != 0 {
+            fields.push(handle_field(340, column.handle));
         }
     }
     fields.push(int(92, rows.len() as i64));
-    for (row_index, row) in rows.iter().enumerate() {
-        fields.push(int(90, row_index as i64));
+    for (index, row) in rows.iter().enumerate() {
+        fields.push(int(90, index as i64));
         for value in row {
             fields.push(int(170, 40));
             fields.push(real_field(140, *value));
         }
     }
-    fields.push(int(93, rows.len() as i64));
-    fields.extend([
-        boolean(290, must_match),
-        boolean(291, true),
-        boolean(292, false),
-    ]);
+    let mut trailer = previous
+        .as_ref()
+        .map(|previous| previous.table.fields[previous.trailer_start + 1..].to_vec())
+        .unwrap_or_else(|| {
+            vec![
+                boolean(290, must_match),
+                boolean(291, true),
+                boolean(292, false),
+            ]
+        });
+    if let Some(field) = trailer.iter_mut().find(|field| field.code == 290) {
+        field.value = BlockPropertiesTableValue::Boolean(must_match);
+    }
+    fields.push(int(93, trailer.len() as i64));
+    fields.extend(trailer);
     Ok(fields)
 }
-
 fn int(code: i32, value: i64) -> BlockPropertiesTableField {
     BlockPropertiesTableField {
         code,
@@ -577,5 +666,214 @@ fn handle_field(code: i32, value: Handle) -> BlockPropertiesTableField {
     BlockPropertiesTableField {
         code,
         value: BlockPropertiesTableValue::Handle(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::{block_distance_parameter as distance, Scene};
+    use codec::{types::Vector3, DwgReader, DwgWriter, DxfReader, DxfWriter};
+    use std::io::Cursor;
+
+    fn fixture() -> (Document, Handle, Vec<Column>) {
+        let mut scene = Scene::new();
+        scene.define_block_raw("TABLE", Vector3::ZERO, vec![]);
+        let definition = scene.document.block_records.get("TABLE").unwrap().handle;
+        for kind in [distance::Kind::Linear, distance::Kind::Polar] {
+            distance::create(
+                &mut scene.document,
+                definition,
+                kind,
+                Vector3::ZERO,
+                Vector3::new(10., 0., 0.),
+                Vector3::new(5., 2., 0.),
+            )
+            .unwrap();
+        }
+        let available = columns(&scene.document, definition);
+        (scene.document, definition, available)
+    }
+
+    #[test]
+    fn property_table_grip_graph_is_valid_and_repairs_only_the_legacy_layout() {
+        let (mut doc, definition, columns) = fixture();
+        let rows = vec![vec![10.; columns.len()]];
+        let table_handle = apply(&mut doc, definition, &columns, &rows, false).unwrap();
+        let graph_handle = authoring::graph(&doc, definition).unwrap().unwrap();
+        let ObjectType::DynamicBlock(table_object) = &doc.objects[&table_handle] else { panic!() };
+        let DynamicBlockData::PropertiesTable(native) = &table_object.data else { panic!() };
+        let grip_id = native.parameter.property_count;
+        let grip = doc.objects.values().find_map(|object| match object {
+            ObjectType::DynamicBlock(object) => match &object.data {
+                DynamicBlockData::PropertiesTableGrip(grip) if grip.element.eval.node_id == grip_id => Some((object.handle, grip.flags_91, grip.flags_92)),
+                _ => None,
+            },
+            _ => None,
+        }).unwrap();
+        let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&graph_handle).unwrap() else { panic!() };
+        let DynamicBlockData::EvaluationGraph(graph) = &mut object.data else { panic!() };
+        assert!(graph.nodes.iter().all(|node| authoring::graph::valid_lists(graph, node.id)));
+        let p = graph.nodes.iter().find(|node| node.expression == table_handle).unwrap().id;
+        let g = graph.nodes.iter().find(|node| node.expression == grip.0).unwrap().id;
+        let x = graph.nodes.iter().find(|node| node.next_id == grip.1).unwrap().id;
+        let y = graph.nodes.iter().find(|node| node.next_id == grip.2).unwrap().id;
+        let edge_ids = graph.edges.iter().filter(|edge| [g, x, y].contains(&edge.source_node) || [g, x, y].contains(&edge.destination_node)).map(|edge| edge.id).collect::<Vec<_>>();
+        assert_eq!(edge_ids.len(), 3);
+        let [e0, e1, e2] = <[i32;3]>::try_from(edge_ids).unwrap();
+        for node in &mut graph.nodes {
+            if node.id == p { node.node_data = [-1; 4]; }
+            if node.id == g { node.node_data = [e0, e0, e1, e2]; }
+            if node.id == x { node.node_data = [e1, e1, -1, -1]; }
+            if node.id == y { node.node_data = [e2, e2, -1, -1]; }
+        }
+        for edge in &mut graph.edges {
+            if edge.id == e0 { edge.source_node = x; edge.destination_node = g; edge.outgoing_edges = [-1; 5]; }
+            if edge.id == e1 { edge.source_node = g; edge.destination_node = x; edge.outgoing_edges = [-1, -1, -1, e2, -1]; }
+            if edge.id == e2 { edge.source_node = g; edge.destination_node = y; edge.outgoing_edges = [-1, -1, e1, -1, -1]; }
+        }
+        let legacy = doc.clone();
+        for mut saved in [
+            legacy.clone(),
+            DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&legacy).unwrap())).read().unwrap(),
+            DxfReader::from_reader(Cursor::new(DxfWriter::new(&legacy).write_to_vec().unwrap())).unwrap().read().unwrap(),
+        ] {
+            let before = saved.clone();
+            assert!(repair_grip_graph(&mut saved, definition, table_handle).unwrap());
+            assert_eq!(saved.objects[&table_handle], before.objects[&table_handle]);
+            assert_eq!(saved.objects[&grip.0], before.objects[&grip.0]);
+            let ObjectType::DynamicBlock(object) = &saved.objects[&graph_handle] else { panic!() };
+            let DynamicBlockData::EvaluationGraph(graph) = &object.data else { panic!() };
+            assert!(graph.nodes.iter().all(|node| authoring::graph::valid_lists(graph, node.id)));
+            assert!(!repair_grip_graph(&mut saved, definition, table_handle).unwrap());
+            assert_eq!(table(&saved, definition).unwrap().unwrap().rows, rows);
+        }
+        let mut unknown = legacy;
+        let ObjectType::DynamicBlock(object) = unknown.objects.get_mut(&graph_handle).unwrap() else { panic!() };
+        let DynamicBlockData::EvaluationGraph(graph) = &mut object.data else { panic!() };
+        graph.edges.iter_mut().find(|edge| edge.id == e0).unwrap().next_id = 9;
+        let before = unknown.clone();
+        assert!(!repair_grip_graph(&mut unknown, definition, table_handle).unwrap());
+        assert_eq!(unknown, before);
+    }
+
+    #[test]
+    fn native_property_table_columns_and_trailers_roundtrip_independent_of_row_count() {
+        for row_count in [1, 2, 4] {
+            let (mut doc, definition, columns) = fixture();
+            let rows = (0..row_count)
+                .map(|row| {
+                    columns
+                        .iter()
+                        .enumerate()
+                        .map(|(col, _)| (row + col + 1) as f64)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            apply(&mut doc, definition, &columns, &rows, true).unwrap();
+            for saved in [
+                DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+                    .read()
+                    .unwrap(),
+                DxfReader::from_reader(Cursor::new(DxfWriter::new(&doc).write_to_vec().unwrap()))
+                    .unwrap()
+                    .read()
+                    .unwrap(),
+            ] {
+                let view = table(&saved, definition).unwrap().unwrap();
+                assert_eq!(view.rows, rows);
+                assert_eq!(view.columns, columns);
+                assert!(view.must_match);
+                assert_eq!(view.column_metadata.len(), columns.len());
+            }
+        }
+    }
+
+    #[test]
+    fn existing_property_columns_can_be_reordered_added_or_removed_without_losing_metadata() {
+        let (mut doc, definition, columns) = fixture();
+        let handle = apply(
+            &mut doc,
+            definition,
+            &columns[..2],
+            &[vec![10., 20.]],
+            false,
+        )
+        .unwrap();
+        let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&handle).unwrap() else {
+            panic!()
+        };
+        let DynamicBlockData::PropertiesTable(data) = &mut object.data else {
+            panic!()
+        };
+        let label = data
+            .fields
+            .iter_mut()
+            .skip(4)
+            .find(|field| field.code == 300)
+            .unwrap();
+        label.value = BlockPropertiesTableValue::Text("retained column description".into());
+        let reordered = vec![columns[1].clone(), columns[2].clone(), columns[0].clone()];
+        apply(
+            &mut doc,
+            definition,
+            &reordered,
+            &[vec![20., 0.5, 10.]],
+            true,
+        )
+        .unwrap();
+        let view = table(&doc, definition).unwrap().unwrap();
+        assert_eq!(view.columns, reordered);
+        assert!(view.column_metadata[2].iter().any(|field| field.value
+            == BlockPropertiesTableValue::Text("retained column description".into())));
+        apply(
+            &mut doc,
+            definition,
+            &reordered[1..],
+            &[vec![0.5, 10.]],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            table(&doc, definition).unwrap().unwrap().columns,
+            reordered[1..]
+        );
+    }
+
+    #[test]
+    fn earlier_authored_column_separators_are_read_and_migrated_to_native_records() {
+        let (mut doc, definition, columns) = fixture();
+        let handle = apply(
+            &mut doc,
+            definition,
+            &columns,
+            &[vec![10., 20., 0.5]],
+            false,
+        )
+        .unwrap();
+        let view = table(&doc, definition).unwrap().unwrap();
+        let mut fields = view.table.fields[..4].to_vec();
+        for (column, metadata) in columns.iter().zip(&view.column_metadata) {
+            fields.push(handle_field(340, column.handle));
+            fields.extend(metadata.clone());
+            fields.push(handle_field(340, Handle::NULL));
+        }
+        fields.extend_from_slice(&view.table.fields[view.row_start - 1..]);
+        let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&handle).unwrap() else {
+            panic!()
+        };
+        let DynamicBlockData::PropertiesTable(data) = &mut object.data else {
+            panic!()
+        };
+        data.fields = fields;
+        assert_eq!(table(&doc, definition).unwrap().unwrap().columns, columns);
+        apply(&mut doc, definition, &columns, &[vec![12., 24., 1.]], true).unwrap();
+        let saved = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap();
+        assert_eq!(
+            table(&saved, definition).unwrap().unwrap().rows,
+            vec![vec![12., 24., 1.]]
+        );
     }
 }

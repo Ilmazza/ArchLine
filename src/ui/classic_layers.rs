@@ -209,8 +209,8 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "LAYOFF", "LAYFRZ", "LAYLCK", "LAYMCUR", "LAYISO", "LAYON", "LAYTHW", "LAYULK",
-                "LAYMATCH", "LAYUNISO"
+                "LAYOFF", "LAYFRZ", "LAYLCK", "LAYMCUR", "LAYISO", "LAYWALK", "LAYON", "LAYTHW",
+                "LAYULK", "LAYMATCH", "LAYUNISO"
             ]
         );
     }

@@ -102,8 +102,12 @@ pub(crate) const RETRYABLE: &[&str] = &[
     "session_changed",
 ];
 
-pub fn serve(port: u16) {
-    listen(OpenCADStudio::new(), port, Arc::new(AtomicU16::new(0)));
+pub fn serve(port: u16, read_only: bool) {
+    listen(
+        OpenCADStudio::new_headless(read_only),
+        port,
+        Arc::new(AtomicU16::new(0)),
+    );
 }
 
 /// The secret every TCP automation client presents: `OCS_API_TOKEN` when the
@@ -724,12 +728,16 @@ pub(crate) fn plan(method: &str, rest: &[&str], request: &HttpRequest) -> Plan {
             }
         }
         ("POST", ["save"]) => {
-            let mut request_json = json!({"op":"save"});
+            let mut fields = json!({});
             if let Some(path) = body["path"].as_str() {
-                request_json["path"] = json!(path);
+                fields["path"] = json!(path);
             }
-            Plan::Run {
-                request: request_json,
+            if let Some(id) = body["document_id"].as_u64() {
+                fields["document_id"] = json!(id);
+            }
+            Plan::Mutate {
+                op: "save".into(),
+                fields,
                 created: 200,
             }
         }

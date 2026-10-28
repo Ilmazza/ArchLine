@@ -73,7 +73,7 @@ pub(super) struct PendingDelta {
     current_layout: String,
     selected_before: Vec<Handle>,
     dirty_before: bool,
-    structure_before: Option<codec::CadDocument>,
+    structure_before: Option<codec::Document>,
 }
 
 /// How many layer-settings changes LAYERP can step back through (the oldest are dropped).
@@ -228,6 +228,7 @@ impl OpenCADStudio {
             dirty_before,
             dirty_after: true,
             active_layer: None,
+            layiso_state: None,
             structure: (!objects.is_empty()).then_some(StructureSnapshot::Objects(objects)),
             parametric_constraints: Vec::new(),
             reference_designations: Vec::new(),
@@ -307,7 +308,7 @@ impl OpenCADStudio {
                     .get(&session.block_name)
                     .map(|record| (session.block_name.clone(), record.entity_handles.clone()))
             });
-        codec::CadDocument::align_added_entity_structure(
+        codec::Document::align_added_entity_structure(
             &mut pending.structure_before,
             &structure_after,
             &added_handles,
@@ -353,10 +354,37 @@ impl OpenCADStudio {
         let visibility_after = self.tabs[i].scene.visibility_states.clone();
         let visibility_states = (pending.visibility_states_before != visibility_after)
             .then_some((pending.visibility_states_before, visibility_after));
+        let sets_after = &self.tabs[i].scene.parametric_constraints;
+        let mut parametric_constraints: Vec<ParametricConstraintsEntryDelta> = Vec::new();
+        for scope in pending
+            .parametric_constraints_before
+            .iter()
+            .chain(sets_after)
+            .map(|set| set.scope)
+        {
+            if parametric_constraints.iter().any(|entry| entry.scope == scope) {
+                continue;
+            }
+            let find = |sets: &[crate::scene::parametric_constraints::ParametricConstraintSet]| {
+                sets.iter().find(|set| set.scope == scope).cloned().unwrap_or_else(|| {
+                    crate::scene::parametric_constraints::ParametricConstraintSet::new(scope)
+                })
+            };
+            let before = find(&pending.parametric_constraints_before);
+            let after = find(sets_after);
+            if before.constraints != after.constraints {
+                parametric_constraints.push(ParametricConstraintsEntryDelta {
+                    scope,
+                    before,
+                    after,
+                });
+            }
+        }
         if !pending.keep_empty
             && visibility_states.is_none()
             && entities.is_empty()
             && reference_designations.is_empty()
+            && parametric_constraints.is_empty()
             && !structure_changed
             && pending.selected_before == selected_after
             && pending.dirty_before == dirty_after
@@ -375,9 +403,10 @@ impl OpenCADStudio {
             dirty_after,
             active_layer: (pending.active_layer != active_layer_after)
                 .then_some((pending.active_layer, active_layer_after)),
+            layiso_state: None,
             structure: structure_changed
                 .then_some(StructureSnapshot::Full(pending.structure_before)),
-            parametric_constraints: Vec::new(),
+            parametric_constraints,
             reference_designations,
             named_parameters: None,
             label: pending.label,
@@ -396,8 +425,27 @@ impl OpenCADStudio {
 
     pub(super) fn finish_all_pending_history(&mut self) {
         for i in 0..self.tabs.len() {
-            self.finish_pending_history(i);
+            // A plugin's scope spans the commands its running request drives;
+            // the message boundary after the request closes it.
+            let grouping = self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .is_some_and(|command| command.groups_undo());
+            if !self.joins_plugin_scope(i) && !grouping {
+                self.finish_pending_history(i);
+            }
         }
+    }
+
+    /// A plugin request is running and tab `i` has the plugin's open
+    /// `push_undo` scope: edits join it instead of closing it.
+    fn joins_plugin_scope(&self, i: usize) -> bool {
+        self.plugin_request_active
+            && self.tabs[i]
+                .history
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.plugin_owned)
     }
 
     pub(super) fn push_undo_snapshot(&mut self, i: usize, label: impl Into<String>) {
@@ -421,6 +469,8 @@ impl OpenCADStudio {
             structure_before,
             recorder,
             reference_designations_before: Vec::new(),
+            parametric_constraints_before: self.tabs[i].scene.parametric_constraints.clone(),
+            plugin_owned: false,
             keep_empty: false,
         });
     }
@@ -468,6 +518,23 @@ impl OpenCADStudio {
         _touched: usize,
         delta_safe: bool,
     ) -> Option<PendingDelta> {
+        // While a plugin request drives a command inside the plugin's open
+        // `push_undo` scope, JOIN that scope instead of closing it: a re-bond
+        // composed of writes + constraints + replays is ONE plugin-labeled
+        // step. The returned delta never commits: no scene recording was
+        // begun, so `commit_undo_delta` no-ops.
+        if self.joins_plugin_scope(i) {
+            let label = label.into();
+            let structure_before = (!delta_safe || self.tabs[i].active_block_edit.is_some())
+                .then(|| self.tabs[i].scene.document.snapshot_structure());
+            return Some(PendingDelta {
+                label,
+                current_layout: self.tabs[i].scene.current_layout.clone(),
+                selected_before: self.tabs[i].scene.selected.iter().copied().collect(),
+                dirty_before: self.tabs[i].dirty,
+                structure_before,
+            });
+        }
         self.finish_pending_history(i);
         let label = label.into();
         let structure_before = (!delta_safe || self.tabs[i].active_block_edit.is_some())
@@ -563,6 +630,7 @@ impl OpenCADStudio {
             dirty_before: pending.dirty_before,
             dirty_after: self.tabs[i].dirty,
             active_layer: None,
+            layiso_state: None,
             structure: Some(StructureSnapshot::Layers(entries)),
             parametric_constraints: Vec::new(),
             reference_designations: Vec::new(),
@@ -623,6 +691,7 @@ impl OpenCADStudio {
             dirty_before: pending.dirty_before,
             dirty_after: self.tabs[i].dirty,
             active_layer: None,
+            layiso_state: None,
             structure: Some(StructureSnapshot::TextStyles(entries)),
             parametric_constraints: Vec::new(),
             reference_designations: Vec::new(),
@@ -682,6 +751,7 @@ impl OpenCADStudio {
             dirty_before: pending.dirty_before,
             dirty_after: self.tabs[i].dirty,
             active_layer: None,
+            layiso_state: None,
             structure: Some(StructureSnapshot::DimStyles(entries)),
             parametric_constraints: Vec::new(),
             reference_designations: Vec::new(),
@@ -749,6 +819,7 @@ impl OpenCADStudio {
             dirty_before: pending.dirty_before,
             dirty_after: self.tabs[i].dirty,
             active_layer: None,
+            layiso_state: None,
             structure: Some(StructureSnapshot::Objects(entries)),
             parametric_constraints: Vec::new(),
             reference_designations: Vec::new(),
@@ -780,6 +851,7 @@ impl OpenCADStudio {
             dirty_before,
             dirty_after: true,
             active_layer: None,
+            layiso_state: None,
             structure: Some(StructureSnapshot::Styles {
                 before,
                 after,
@@ -959,7 +1031,7 @@ impl OpenCADStudio {
                         (before.is_none() && after.is_some()).then_some(*handle)
                     })
                     .collect();
-                codec::CadDocument::align_added_entity_structure(
+                codec::Document::align_added_entity_structure(
                     before_structure,
                     &after_structure,
                     &added_handles,
@@ -987,6 +1059,7 @@ impl OpenCADStudio {
             dirty_before: pending.dirty_before,
             dirty_after,
             active_layer: None,
+            layiso_state: None,
             structure,
             parametric_constraints,
             reference_designations,
@@ -1013,7 +1086,7 @@ impl OpenCADStudio {
                 let inverse = self.tabs[i]
                     .scene
                     .document
-                    .swap_structure(std::mem::replace(stored, codec::CadDocument::new()));
+                    .swap_structure(std::mem::replace(stored, codec::Document::new()));
                 *stored = inverse;
                 self.tabs[i].scene.invalidate_dependency_index();
                 self.tabs[i].scene.bump_layout_epoch();
@@ -1104,6 +1177,9 @@ impl OpenCADStudio {
                         self.tabs[i].scene.document.objects.remove(&entry.handle);
                     }
                 }
+                // Object images can add or drop a DIMASSOC association without
+                // moving geometry (an undone dimension erase, a redone one).
+                self.tabs[i].scene.invalidate_dependency_index();
                 if layout_touched {
                     self.tabs[i].scene.bump_layout_epoch();
                 }
@@ -1218,6 +1294,9 @@ impl OpenCADStudio {
         };
         if let Some((before, after)) = &d.active_layer {
             self.tabs[i].active_layer = if undo { before } else { after }.clone();
+        }
+        if let Some((before, after)) = &d.layiso_state {
+            self.tabs[i].layiso_state = if undo { before } else { after }.clone();
         }
         self.tabs[i].dirty = dirty;
         changes

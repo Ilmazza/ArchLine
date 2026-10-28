@@ -22,6 +22,10 @@ pub enum Projection {
     Perspective,
 }
 
+/// Pixels Zoom Extents, All and Object add to the limiting axis of the view
+/// (3 on each side), in the view's own pixels.
+pub const EXTENTS_BORDER_PX: f32 = 6.0;
+
 #[derive(Clone)]
 pub struct Camera {
     /// World-space pivot point the camera orbits around. Kept in f64 so a far
@@ -35,6 +39,9 @@ pub struct Camera {
     pub distance: f32,
     /// Vertical field of view in radians (perspective only).
     pub fov_y: f32,
+    /// The camera lens length in millimetres (LENSLENGTH): the perspective
+    /// field of view across the view's diagonal is that of a 42 mm diagonal.
+    pub lens: f32,
     pub projection: Projection,
 
     // --- Legacy yaw/pitch exposed only for ViewCube hit-test compatibility ---
@@ -75,6 +82,7 @@ impl Default for Camera {
             rotation: yaw_pitch_to_quat(yaw, pitch, 0.0),
             distance: 60.36,
             fov_y: 45.0_f32.to_radians(),
+            lens: 50.0,
             projection: Projection::Orthographic,
             yaw,
             pitch,
@@ -98,6 +106,15 @@ impl Camera {
     /// Half-height of the orthographic frustum in world units.
     pub fn ortho_size(&self) -> f32 {
         self.distance * (self.fov_y * 0.5).tan()
+    }
+
+    /// The vertical field of view the lens gives a view of `aspect` (width
+    /// over height): the half-angle across the diagonal has the tangent
+    /// 21 / lens (a 42 mm diagonal), shared out by the view's proportions.
+    pub fn lens_fov_y(&self, aspect: f32) -> f32 {
+        let aspect = aspect.max(0.01);
+        let tan_diagonal = 21.0 / self.lens.max(1.0);
+        2.0 * (tan_diagonal / (1.0 + aspect * aspect).sqrt()).atan()
     }
 
     /// Change projection while keeping the fitted model's screen-space frame.
@@ -200,11 +217,13 @@ impl Camera {
                 }
             }
             Projection::Perspective => {
+                // The perspective view sees what the camera lens sees.
+                self.fov_y = self.lens_fov_y(aspect);
                 // For every corner, radius / ((distance - z) * tan(fov/2))
                 // must be no larger than the old screen extent. The maximum
                 // required distance gives the tightest perspective frame with
                 // at least one corner touching the old envelope.
-                let extent_at_depth = old_extent * tan_half_fov;
+                let extent_at_depth = old_extent * (self.fov_y * 0.5).tan();
                 let mut distance = f32::NEG_INFINITY;
                 for corner in &corners {
                     distance = distance.max(corner.z + radius(corner) / extent_at_depth);
@@ -293,18 +312,15 @@ impl Camera {
     /// point is made eye-relative in f64 (small numbers near the view) before
     /// the rotation-only projection, so it stays exact at large absolute
     /// coordinates — the CPU equivalent of the GPU's relative-to-eye path.
-    /// Returns `None` for points at/behind the eye plane (w ≈ 0).
+    /// Returns `None` for points at/behind the perspective eye plane.
     pub fn project(&self, p: glam::DVec3, bounds: Rectangle) -> Option<glam::Vec2> {
-        let rel = (p - self.eye()).as_vec3();
-        let clip = self.view_proj_rte(bounds) * rel.extend(1.0);
-        if clip.w.abs() < 1e-9 {
-            return None;
-        }
-        let ndc = clip.truncate() / clip.w;
-        Some(glam::vec2(
-            (ndc.x * 0.5 + 0.5) * bounds.width,
-            (0.5 - ndc.y * 0.5) * bounds.height,
-        ))
+        let screen = crate::scene::view::projection::project_screen(
+            self.view_proj_rte(bounds),
+            self.eye(),
+            bounds,
+            p,
+        )?;
+        Some(glam::vec2(screen.x, screen.y))
     }
 
     /// Unproject in f64, with the kernel intersection relative to the plane
@@ -464,6 +480,9 @@ impl Camera {
         if delta_x.abs() < 1e-6 && delta_y.abs() < 1e-6 {
             return;
         }
+        if !(delta_x.is_finite() && delta_y.is_finite()) {
+            return;
+        }
         let old_rot = self.rotation;
         let speed = 0.005_f32;
 
@@ -521,8 +540,12 @@ impl Camera {
     /// target — reachable from a high `ZOOMFACTOR` and from a fast ZOOM
     /// Dynamic drag alike.
     pub fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance * Self::ZOOM_STEP.powf(delta))
+        let distance = (self.distance * Self::ZOOM_STEP.powf(delta))
             .clamp(Self::DISTANCE_MIN, Self::DISTANCE_MAX);
+        // `clamp` passes NaN through; keep the last usable zoom instead.
+        if distance.is_finite() {
+            self.distance = distance;
+        }
     }
 
     /// The `delta` `zoom` needs in order to scale `distance` by `ratio`:
@@ -587,8 +610,11 @@ impl Camera {
         };
         let cam_right = self.rotation * Vec3::X;
         let cam_up = self.rotation * Vec3::Y;
-        self.target -= (cam_right * delta_x * wpp).as_dvec3();
-        self.target += (cam_up * delta_y * wpp).as_dvec3();
+        let step = (cam_up * delta_y * wpp - cam_right * delta_x * wpp).as_dvec3();
+        // A non-finite step would park the view nowhere for good.
+        if step.is_finite() {
+            self.target += step;
+        }
     }
 
     /// The 8 corners of `min..max`, expressed in camera space relative to the
@@ -637,7 +663,48 @@ impl Camera {
         self.fit_to_bounds_f64(min.as_dvec3(), max.as_dvec3(), aspect);
     }
 
+    /// Edge to edge, as Zoom Window frames its box.
     pub fn fit_to_bounds_f64(&mut self, min: DVec3, max: DVec3, aspect: f32) {
+        self.fit_to_bounds_bordered(min, max, aspect, None);
+    }
+
+    /// f32 form of [`Self::fit_to_bounds_bordered`].
+    pub fn fit_to_bounds_bordered_f32(
+        &mut self,
+        min: Vec3,
+        max: Vec3,
+        aspect: f32,
+        pixels: Option<(f32, f32)>,
+    ) {
+        self.fit_to_bounds_bordered(min.as_dvec3(), max.as_dvec3(), aspect, pixels);
+    }
+
+    /// Fit with the border Zoom Extents, All and Object leave: the box grows
+    /// on each axis by [`EXTENTS_BORDER_PX`] over that axis' pixel length, so
+    /// the limiting axis keeps 3 px on each side. `pixels` is the view's size
+    /// in pixels; `None` fits edge to edge.
+    pub fn fit_to_bounds_bordered(
+        &mut self,
+        min: DVec3,
+        max: DVec3,
+        aspect: f32,
+        pixels: Option<(f32, f32)>,
+    ) {
+        if !(min.is_finite() && max.is_finite()) {
+            return;
+        }
+        let grow = |px: f32| {
+            if px.is_finite() && px > 0.0 {
+                1.0 + EXTENTS_BORDER_PX / px
+            } else {
+                1.0
+            }
+        };
+        if self.projection == Projection::Perspective {
+            self.fit_perspective(min, max, aspect);
+            return;
+        }
+        let (grow_x, grow_y) = pixels.map_or((1.0, 1.0), |(w, h)| (grow(w), grow(h)));
         self.target = (min + max) * 0.5;
         let corners = self.bounds_in_view(min, max);
         // Half-height the view needs so the box fits BOTH axes at the given
@@ -647,12 +714,58 @@ impl Camera {
         let a = aspect.max(0.01);
         let half_h = corners
             .iter()
-            .fold(0.0_f32, |m, c| m.max(c.y.abs()).max(c.x.abs() / a))
+            .fold(0.0_f32, |m, c| {
+                m.max(c.y.abs() * grow_y).max(c.x.abs() * grow_x / a)
+            })
             .max(1e-6);
         // `ortho_size` (the half-height) is `distance * tan(fov/2)`, so invert
-        // that to get the distance which just contains `half_h`, plus a small
-        // border margin.
-        self.distance = (half_h / (self.fov_y * 0.5).tan() * 1.1).max(1e-3);
+        // that to get the distance which just contains `half_h`.
+        self.distance = (half_h / (self.fov_y * 0.5).tan()).max(1e-3);
+        self.fit_depth_to_bounds_f64(min, max);
+    }
+
+    /// Perspective Zoom Extents: the eye that frames the box's corners as
+    /// the reference does. On each screen axis the eye sits sideways where
+    /// the two outermost corners subtend equal angles and as far back as
+    /// they need to touch the view's edges; the axis that needs more depth
+    /// sets it, edge to edge with no border. The target is the point of the
+    /// line of sight nearest the box centre.
+    fn fit_perspective(&mut self, min: DVec3, max: DVec3, aspect: f32) {
+        self.fov_y = self.lens_fov_y(aspect);
+        let tan_v = (self.fov_y as f64 * 0.5).tan();
+        let tan_h = tan_v * aspect.max(0.01) as f64;
+        let centre = (min + max) * 0.5;
+        let right = (self.rotation * Vec3::X).as_dvec3();
+        let up = (self.rotation * Vec3::Y).as_dvec3();
+        let back = (self.rotation * Vec3::Z).as_dvec3();
+        let corners: Vec<DVec3> = (0..8)
+            .map(|i| {
+                DVec3::new(
+                    if i & 1 == 0 { min.x } else { max.x },
+                    if i & 2 == 0 { min.y } else { max.y },
+                    if i & 4 == 0 { min.z } else { max.z },
+                ) - centre
+            })
+            .collect();
+        // Sideways position and depth (along `back`) of the eye on one axis.
+        let axis = |dir: DVec3, tan: f64| {
+            let reach = |sign: f64| {
+                corners
+                    .iter()
+                    .map(|c| tan * c.dot(back) + sign * c.dot(dir))
+                    .fold(f64::NEG_INFINITY, f64::max)
+            };
+            let (p, q) = (reach(1.0), reach(-1.0));
+            ((p - q) * 0.5, (p + q) / (2.0 * tan))
+        };
+        let (side_x, depth_x) = axis(right, tan_h);
+        let (side_y, depth_y) = axis(up, tan_v);
+        let depth = depth_x.max(depth_y);
+        if !depth.is_finite() || depth <= 0.0 {
+            return;
+        }
+        self.target = centre + right * side_x + up * side_y;
+        self.distance = (depth as f32).max(1e-3);
         self.fit_depth_to_bounds_f64(min, max);
     }
 
@@ -756,6 +869,20 @@ impl Camera {
     pub fn home_view(&mut self, ucs: glam::Mat4) {
         let dir = ucs.transform_vector3(Vec3::Z);
         self.snap_to_face(dir, ucs);
+    }
+
+    /// Free (arcball) rotation by a screen drag about the view target: the
+    /// model follows the pointer, about an axis in the screen plane, with no
+    /// fixed up direction.
+    pub fn trackball(&mut self, delta_x: f32, delta_y: f32) {
+        let length = delta_x.hypot(delta_y);
+        if !(length > 1e-6) || !length.is_finite() {
+            return;
+        }
+        let axis = Vec3::new(-delta_y, -delta_x, 0.0) / length;
+        self.rotation =
+            (self.rotation * Quat::from_axis_angle(axis, length * 0.005)).normalize();
+        self.sync_yaw_pitch();
     }
 
     /// Roll the camera about its own view axis by `angle` radians. The gaze
@@ -980,6 +1107,24 @@ mod tests {
         }
     }
 
+    /// A point behind a perspective eye has a negative clip W, not a near-zero
+    /// one: dividing by it mirrors the point onto the screen. `project` must
+    /// reject it, whatever its distance.
+    #[test]
+    fn project_rejects_points_behind_the_eye() {
+        let bounds = Rectangle::with_size(iced::Size::new(800., 600.));
+        let camera = Camera {
+            projection: Projection::Perspective,
+            rotation: Quat::IDENTITY,
+            target: DVec3::ZERO,
+            distance: 10.0,
+            ..Camera::default()
+        };
+        assert!(camera.project(DVec3::new(0., 0., 5.), bounds).is_some());
+        assert!(camera.project(DVec3::new(0., 0., 15.), bounds).is_none());
+        assert!(camera.project(DVec3::new(0., 0., 1_000.), bounds).is_none());
+    }
+
     /// A drawing 140 units wide carrying one entity 800 km below its plane must
     /// still zoom to the 140 units — the outlier belongs to the depth range, not
     /// to the zoom. (Sizing both from the 3-D diagonal made the drawing a dot.)
@@ -1039,7 +1184,7 @@ mod tests {
         let old = (max - min).length() * 1.5;
         let ratio = cam.distance / old;
         assert!(
-            (0.75..1.25).contains(&ratio),
+            (0.6..1.25).contains(&ratio),
             "flat framing drifted {ratio}x from the old rule (was {old}, now {})",
             cam.distance
         );

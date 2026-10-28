@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn the_choice_changes_what_a_text_style_is_drawn_with() {
         use crate::entities::text_support::{resolve_text_style, text_local_bounds};
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let mut style = codec::TextStyle::new("ZZ_Quota");
         style.font_file = "zz_resolve_quota.shx".into();
         let _ = doc.text_styles.add(style);

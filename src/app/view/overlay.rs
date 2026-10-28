@@ -264,7 +264,8 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
                     p.line_to(map(x, y));
                 }
             });
-            frame.stroke(&path, Stroke::default().with_color(*col).with_width(*width));
+            let col = readable_on(*col, theme.palette().background.base);
+            frame.stroke(&path, Stroke::default().with_color(col).with_width(*width));
         }
         // Caret — a vertical bar at the caret's glyph boundary, shown when the
         // selection is empty (a plain text cursor).
@@ -328,6 +329,24 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
 /// Split every preview WireModel into finite (x, y) polyline runs, each
 /// carrying its wire's colour (so inline `\C` / the colour dropdown shows) and a
 /// stroke width (bold runs carry a wider pen via `line_weight_px`).
+/// A text colour too close to the editor background (a light grey layer on
+/// the light theme's white) pulled toward the theme's text colour, keeping
+/// some of its own hue.
+fn readable_on(col: Color, background: iced::theme::palette::Pair) -> Color {
+    let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    if (luminance(col) - luminance(background.color)).abs() >= 0.35 {
+        return col;
+    }
+    let text = background.text;
+    let mix = |a: f32, b: f32| a * 0.3 + b * 0.7;
+    Color {
+        r: mix(col.r, text.r),
+        g: mix(col.g, text.g),
+        b: mix(col.b, text.b),
+        a: col.a,
+    }
+}
+
 fn mtext_preview_segments(
     ed: &super::super::mtext_editor::MTextEditorState,
 ) -> Vec<(Vec<(f32, f32)>, Color, f32)> {
@@ -506,7 +525,7 @@ fn mtext_editor_content<'a>(
             .spacing(3)
             .align_y(iced::Alignment::Center),
         font_pl,
-        small_input("2.5", &ed.height, Message::MTextHeight, 64.0),
+        small_input("2.5", ed.span_field("height", &ed.height), Message::MTextHeight, 64.0),
         iced::widget::Space::new().width(6),
         icon_btn(
             include_bytes!("../../../assets/icons/mt_bold.svg"),
@@ -562,11 +581,11 @@ fn mtext_editor_content<'a>(
             .padding(3)
             .style(btn_style),
         lbl("O"),
-        small_input("0", &ed.oblique, Message::MTextOblique, 48.0),
+        small_input("0", ed.span_field("oblique", &ed.oblique), Message::MTextOblique, 48.0),
         lbl("W"),
-        small_input("1", &ed.width, Message::MTextWidth, 48.0),
+        small_input("1", ed.span_field("width", &ed.width), Message::MTextWidth, 48.0),
         lbl("◊"),
-        small_input("0", &ed.char_space, Message::MTextCharSpace, 48.0),
+        small_input("0", ed.span_field("tracking", &ed.char_space), Message::MTextCharSpace, 48.0),
         iced::widget::Space::new().width(6),
         icon_btn(
             include_bytes!("../../../assets/icons/mt_align_left.svg"),
@@ -848,6 +867,9 @@ fn mtext_editor_content<'a>(
         // directions so a taller-than-view text scrolls vertically and a
         // wider-than-view multi-column text scrolls horizontally.
         use iced::widget::scrollable::{Direction, Scrollbar};
+        // Typing into the preview goes through the platform input method, so
+        // Chinese, Japanese and Korean text can be entered (#2231).
+        let cv = crate::ui::ime_zone::ime_zone(cv, Message::CommandAppendChar);
         container(
             iced::widget::scrollable(cv)
                 .direction(Direction::Both {
@@ -946,6 +968,30 @@ pub(super) fn position_canvas_overlay_near_cursor<'a>(
         gap: 12.0,
         offset: Vector::ZERO,
         passive: false,
+    })
+}
+
+/// Native parameter help stays within the viewport and passes input through.
+pub(super) fn grip_tip_overlay<'a>(
+    anchor: iced::Point,
+    bottom_inset: f32,
+    value: String,
+) -> Element<'a, Message> {
+    let panel = container(
+        text(value)
+            .size(12)
+            .shaping(iced::advanced::text::Shaping::Advanced),
+    )
+    .padding(6)
+    .width(Length::Fit.max(420.0))
+    .style(container::bordered_box);
+    Element::new(ClampedPin {
+        content: panel.into(),
+        anchor,
+        bottom_inset: bottom_inset.max(0.0),
+        gap: 12.0,
+        offset: Vector::ZERO,
+        passive: true,
     })
 }
 
@@ -1276,7 +1322,9 @@ pub(super) fn viewport_context_menu_overlay(
                 };
                 let content = row![
                     context_menu_gutter(*icon, enabled),
-                    text(label.clone()).size(12),
+                    text(label.clone())
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::None),
                     iced::widget::Space::new().width(Fill),
                     caret,
                 ]
@@ -1422,7 +1470,11 @@ fn context_menu_panel(
 /// aligned with the others. Disabled rows render without a press handler and
 /// with faded text and icons.
 fn context_menu_row(item: &MenuItem, indent: f32, highlighted: bool) -> Element<'static, Message> {
-    let mut label_text = text(item.label.clone()).size(12);
+    // Rows have a fixed height: a long label must not wrap onto the next
+    // row (#2170).
+    let mut label_text = text(item.label.clone())
+        .size(12)
+        .wrapping(iced::widget::text::Wrapping::None);
     if item.default {
         label_text = label_text.font(iced::Font {
             weight: iced::font::Weight::Bold,
@@ -1515,9 +1567,9 @@ fn context_menu_row_style(
 }
 
 /// One-shot snap override menu (Shift+RMB, #337): a cursor-anchored grid of
-/// snap ICONS only — the names show as hover tooltips. Picking one applies
-/// that snap to just the next point pick; the trailing MTP cell instead
-/// suspends the prompt for two picks and returns their midpoint.
+/// snap ICONS only — the names show as hover tooltips, with the letter that
+/// picks each from the keyboard. Picking one applies that snap to just the
+/// next point pick; MTP and FROM instead suspend the prompt to compute a point.
 pub(super) fn snap_override_overlay(pos: iced::Point) -> Element<'static, Message> {
     const COLS: usize = 4;
 
@@ -1560,14 +1612,18 @@ pub(super) fn snap_override_overlay(pos: iced::Point) -> Element<'static, Messag
             .into()
         };
 
-    // MTP (`_M2P`) goes last, after Parallel: two picks, so not a
-    // `SnapType`, but same icon-only cell with hover tooltip.
+    // Point modifiers follow the snaps, with the same icon-only cells.
     let mut cells: Vec<Element<'static, Message>> =
-        Vec::with_capacity(crate::snap::ALL_SNAP_MODES.len() + 1);
+        Vec::with_capacity(crate::snap::ALL_SNAP_MODES.len() + 2);
     for &(snap_type, _glyph, label) in crate::snap::ALL_SNAP_MODES {
+        // The tooltip teaches the letter that picks the cell from the keyboard.
+        let label = match crate::snap::override_menu_key(snap_type) {
+            Some(key) => format!("{} ({key})", t!(label)),
+            None => t!(label).into_owned(),
+        };
         cells.push(cell_icon(
             crate::ui::icons::osnap(snap_type),
-            label.to_string(),
+            label,
             Message::SnapOverridePick(snap_type),
         ));
     }
@@ -1575,6 +1631,11 @@ pub(super) fn snap_override_overlay(pos: iced::Point) -> Element<'static, Messag
         crate::ui::icons::mtp_icon(),
         t!("Mid Between 2 Points (M2P)").into_owned(),
         Message::SnapOverrideMtp,
+    ));
+    cells.push(cell_icon(
+        crate::ui::icons::from_icon(),
+        format!("{} (F)", t!("From")),
+        Message::SnapOverrideFrom,
     ));
     let mut grid = column![].spacing(2);
     while !cells.is_empty() {
@@ -1764,26 +1825,17 @@ fn qselect_content<'a>(
 
     let derived_error = if candidate_count == 0 {
         Some(crate::t!("No objects are available in this scope.").into_owned())
-    } else if value_enabled
-        && number_property
-        && crate::entities::common::parse_f64(&state.value).is_none()
-    {
-        Some(crate::t!("Enter a valid number.").into_owned())
-    } else if value_enabled
-        && state.property.as_ref().is_some_and(|property| {
-            matches!(property.editor, crate::app::QSelectValueEditor::Choice(_))
-        })
-        && state.value.is_empty()
-    {
-        Some(crate::t!("Choose a value.").into_owned())
-    } else if matches!(
-        state.operator,
-        crate::app::QSelectOp::Gt | crate::app::QSelectOp::Lt
-    ) && !number_property
-    {
-        Some(crate::t!("This operator requires a numeric property.").into_owned())
-    } else {
+    } else if state.type_filter.is_none() && state.property.is_none() {
+        // An empty draft is only an error once Apply is possible; the Add
+        // button already requires a type or property.
         None
+    } else {
+        crate::app::QSelectCondition::validation_error_for(
+            state.type_filter.as_deref(),
+            state.property.as_ref(),
+            state.operator,
+            &state.value,
+        )
     };
     let error = state.error.clone().or(derived_error.clone());
 
@@ -2033,59 +2085,69 @@ mod measurement_tests {
     use super::*;
     #[test]
     fn measurement_overlay_passes_all_clicks_on_text() {
-        let underlay = mouse_area(Space::new().width(Fill).height(Fill))
-            .on_press(Message::ViewportLeftPress)
-            .on_right_press(Message::ViewportRightPress)
-            .on_middle_press(Message::ViewportMiddlePress);
-        let mut ui = iced_test::simulator(stack![
-            underlay,
-            measurement_overlay(
-                iced::Point::new(400.0, 300.0),
-                60.0,
-                "measurement-result".into()
-            )
-        ]);
-        let center = ui
-            .find("measurement-result")
-            .unwrap()
-            .visible_bounds()
-            .unwrap()
-            .center();
-        ui.point_at(center);
-        for button in [
-            iced::mouse::Button::Left,
-            iced::mouse::Button::Right,
-            iced::mouse::Button::Middle,
+        for make_overlay in [
+            measurement_overlay as fn(iced::Point, f32, String) -> Element<'static, Message>,
+            grip_tip_overlay,
         ] {
-            ui.simulate([Event::Mouse(iced::mouse::Event::ButtonPressed(button))]);
-            ui.simulate([Event::Mouse(iced::mouse::Event::ButtonReleased(button))]);
-        }
-        let messages: Vec<_> = ui.into_messages().collect();
-        assert!(messages
-            .iter()
-            .any(|m| matches!(m, Message::ViewportLeftPress)));
-        assert!(messages
-            .iter()
-            .any(|m| matches!(m, Message::ViewportRightPress)));
-        assert!(messages
-            .iter()
-            .any(|m| matches!(m, Message::ViewportMiddlePress)));
-    }
-    #[test]
-    fn measurement_overlay_stays_inside_canvas_above_command_line() {
-        for anchor in [iced::Point::new(5.0, 5.0), iced::Point::new(790.0, 595.0)] {
-            let mut ui = iced_test::simulator::Simulator::with_size(
-                Default::default(),
-                iced::Size::new(800.0, 600.0),
-                measurement_overlay(anchor, 90.0, "measurement-result".into()),
-            );
-            let bounds = ui
+            let underlay = mouse_area(Space::new().width(Fill).height(Fill))
+                .on_press(Message::ViewportLeftPress)
+                .on_right_press(Message::ViewportRightPress)
+                .on_middle_press(Message::ViewportMiddlePress);
+            let mut ui = iced_test::simulator(stack![
+                underlay,
+                make_overlay(
+                    iced::Point::new(400.0, 300.0),
+                    60.0,
+                    "measurement-result".into()
+                )
+            ]);
+            let center = ui
                 .find("measurement-result")
                 .unwrap()
                 .visible_bounds()
-                .unwrap();
-            assert!(bounds.x >= 4.0 && bounds.y >= 4.0);
-            assert!(bounds.x + bounds.width <= 796.0 && bounds.y + bounds.height <= 506.0);
+                .unwrap()
+                .center();
+            ui.point_at(center);
+            for button in [
+                iced::mouse::Button::Left,
+                iced::mouse::Button::Right,
+                iced::mouse::Button::Middle,
+            ] {
+                ui.simulate([Event::Mouse(iced::mouse::Event::ButtonPressed(button))]);
+                ui.simulate([Event::Mouse(iced::mouse::Event::ButtonReleased(button))]);
+            }
+            let messages: Vec<_> = ui.into_messages().collect();
+            assert!(messages
+                .iter()
+                .any(|m| matches!(m, Message::ViewportLeftPress)));
+            assert!(messages
+                .iter()
+                .any(|m| matches!(m, Message::ViewportRightPress)));
+            assert!(messages
+                .iter()
+                .any(|m| matches!(m, Message::ViewportMiddlePress)));
+        }
+    }
+    #[test]
+    fn measurement_overlay_stays_inside_canvas_above_command_line() {
+        for make_overlay in [
+            measurement_overlay as fn(iced::Point, f32, String) -> Element<'static, Message>,
+            grip_tip_overlay,
+        ] {
+            for anchor in [iced::Point::new(5.0, 5.0), iced::Point::new(790.0, 595.0)] {
+                let mut ui = iced_test::simulator::Simulator::with_size(
+                    Default::default(),
+                    iced::Size::new(800.0, 600.0),
+                    make_overlay(anchor, 90.0, "measurement-result".into()),
+                );
+                let bounds = ui
+                    .find("measurement-result")
+                    .unwrap()
+                    .visible_bounds()
+                    .unwrap();
+                assert!(bounds.x >= 4.0 && bounds.y >= 4.0);
+                assert!(bounds.x + bounds.width <= 796.0 && bounds.y + bounds.height <= 506.0);
+            }
         }
     }
 }

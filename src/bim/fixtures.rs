@@ -11,7 +11,7 @@ use codec::entities::{
     BoundaryEdge, BoundaryPath, Hatch, Line, LwPolyline, MText, PolylineEdge, Text,
 };
 use codec::tables::Layer;
-use codec::{CadDocument, EntityType, Handle, Vector2, Vector3};
+use codec::{Document, EntityType, Handle, Vector2, Vector3};
 
 use super::units::DrawingUnit;
 use super::LAYER_LOCALI;
@@ -160,7 +160,7 @@ pub(crate) fn disturbi(unit: DrawingUnit) -> Vec<EntityType> {
 /// tramezzo e i capi delle facce sud e nord di A e B a linee). Con `dx` =
 /// 0,20 il locale A passa da 12,00 a 12,60 m² e B da 11,70 a 11,10 m², nelle
 /// due forme. I locali già scritti (su altri layer) non si toccano.
-pub(crate) fn shift_tramezzo(doc: &mut CadDocument, unit: DrawingUnit, dx: f64) {
+pub(crate) fn shift_tramezzo(doc: &mut Document, unit: DrawingUnit, dx: f64) {
     let faces = [unit.metres(4.00), unit.metres(4.10)];
     let on_face = |x: f64| {
         faces
@@ -196,7 +196,7 @@ pub(crate) fn shift_tramezzo(doc: &mut CadDocument, unit: DrawingUnit, dx: f64) 
 
 /// L'entità passa sul layer `layer` (creato se manca), come un cambio di
 /// layer fatto a mano in AutoCAD: l'XDATA resta.
-pub(crate) fn move_to_layer(doc: &mut CadDocument, handle: Handle, layer: &str) {
+pub(crate) fn move_to_layer(doc: &mut Document, handle: Handle, layer: &str) {
     if !doc.layers.contains(layer) {
         let mut new = Layer::new(layer);
         new.handle = doc.allocate_handle();

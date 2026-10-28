@@ -4,11 +4,22 @@
 
 pub mod entity_labels;
 pub mod external;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod grip_points;
 pub mod host;
 pub mod marketplace;
 pub mod registry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod v4_support;
+#[cfg(target_arch = "wasm32")]
+pub mod v4_support {
+    pub fn publish_panel_action(
+        _panel_id: String,
+        _control_id: String,
+        _action: String,
+        _value: Option<ocs_plugin_api::dialog::DialogValue>,
+    ) {}
+}
 
 pub(crate) use registry::try_dispatch;
 pub use registry::{all_ribbon_modules, plugin_command_names, ribbon_modules_enabled};
@@ -52,6 +63,14 @@ fn errors() -> &'static std::sync::Mutex<Vec<String>> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn drain_errors() -> Vec<String> {
     std::mem::take(&mut *errors().lock().unwrap())
+}
+
+/// Queue one line for the command-line history from plugin paths that cannot
+/// route through [`guard`] directly (e.g. out-of-process event-delivery
+/// failures). Surfaced by [`drain_errors`] on the next update tick.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn push_guard_error(line: String) {
+    errors().lock().unwrap().push(line);
 }
 
 #[cfg(test)]

@@ -24,7 +24,6 @@ pub(in crate::app) fn hatch_command_from_state(
     };
     Some(
         HatchCommand::new(
-            state.outlines.clone(),
             state.boundary_sources.clone(),
             Vec::new(),
             None,
@@ -81,7 +80,11 @@ impl OpenCADStudio {
             glam::DVec3::from_array(storage.x_axis),
             glam::DVec3::from_array(storage.y_axis),
         );
-        let boundary_sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
+        let mut boundary_sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
+        // Regions are found among what is on screen, as HATCH does.
+        self.tabs[i]
+            .scene
+            .retain_sources_on_screen(&mut boundary_sources, plane);
         // HPGAPTOL: a gap up to it still closes the outline.
         let outlines =
             crate::scene::boundary_faces(&boundary_sources, super::hatchvars::gap_tolerance());
@@ -654,7 +657,6 @@ impl OpenCADStudio {
             self.tabs[i].scene.deselect_all();
         }
         let command = HatchCommand::collecting(
-            outlines.clone(),
             boundary_sources.clone(),
             plane,
             kind == AddKind::Objects,

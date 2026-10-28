@@ -9,8 +9,8 @@ use std::io::Read;
 
 use super::model::{
     arc_cubics, bspline_points, dgn_color_table, paths_bounds, scaled_elements, By, DgnCollector,
-    DgnColor, DgnElement, DgnGeom, DgnImport, DgnReference, Path, PathBuilder, Segment, Sheet,
-    SubPath, Text, DGN_DEFAULT_COLORS,
+    DgnColor, DgnDimLook, DgnDimStyle, DgnElement, DgnGeom, DgnImport, DgnReference, Path,
+    PathBuilder, Segment, Sheet, SubPath, Text, DGN_DEFAULT_COLORS,
 };
 
 // ── Compound file ───────────────────────────────────────────────────────────
@@ -317,6 +317,91 @@ fn text_style_table(nm: &[&[u8]]) -> Vec<(u32, String, String)> {
     out
 }
 
+/// The dimension style table (table 5), lengths in master units (`s` per
+/// UOR). One style can have more than one entry. An entry holds its
+/// element id (16), text style id (56), accuracy (72), flags (85: 0x10
+/// text in the line, 0x20 horizontal text; 184: 0x01 a line between the
+/// extension lines, 0x10 trailing zeros shown), text height (112),
+/// extension line offset and extension (152, 160), text gap (360) and
+/// terminator width (408) as text heights, stack offset (288), centre
+/// mark (296), angle decimal places (307, plus one), its master and sub
+/// units (numerator and denominator per metre at 520 and 544) and name
+/// (after 104); the linkage `de 56` holds its scale 54 bytes in.
+fn dim_style_table(nm: &[&[u8]], s: f64) -> Vec<DgnDimStyle> {
+    // Text style id (32) → its font number and kind (40); the text style
+    // table can follow the dimension style table.
+    let mut fonts = HashMap::new();
+    let mut table = 0;
+    for e in nm {
+        match kind(e) {
+            96 => table = u32_at(e, 12).unwrap_or(0),
+            95 if table == 3 => {
+                if let (Some(id), Some(f)) = (u32_at(e, 32), e.get(40..42)) {
+                    fonts.entry(id).or_insert((f[0], f[1]));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for e in nm {
+        match kind(e) {
+            96 => table = u32_at(e, 12).unwrap_or(0),
+            95 if table == 5 => {
+                let (Some(id), Some(name)) = (u32_at(e, 16), marked_string(e, 104)) else {
+                    continue;
+                };
+                let real = |at: usize| f64_at(e, at).filter(|v| v.is_finite()).unwrap_or(0.0);
+                let bit = |at: usize, mask: u8| e.get(at).is_some_and(|b| b & mask != 0);
+                let text_height = real(112) * s;
+                // Metres per unit: denominator over numerator.
+                let metres = |at: usize| {
+                    let n = real(at);
+                    (n > 0.0).then(|| real(at + 8) / n)
+                };
+                let near = |m: Option<f64>, v: f64| m.is_some_and(|m| (m - v).abs() < 1e-9);
+                let scale = (600..e.len().saturating_sub(4))
+                    .find(|&k| e[k + 1] == 0x10 && e[k + 2] == 0xde && e[k + 3] == 0x56)
+                    .and_then(|k| f64_at(e, k + 54))
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(1.0);
+                out.push(DgnDimStyle {
+                    id,
+                    name,
+                    text_style: u32_at(e, 56).unwrap_or(0),
+                    font: u32_at(e, 56).and_then(|t| fonts.get(&t).copied()).unwrap_or((0, 0)),
+                    text_height,
+                    arrow: real(408) * text_height,
+                    ext_offset: real(152) * text_height,
+                    ext_extension: real(160) * text_height,
+                    gap: real(360) * text_height,
+                    stack_offset: real(288) * s,
+                    center: real(296) * s,
+                    accuracy: e.get(72).copied().unwrap_or(0x84),
+                    angle_places: e.get(307).map_or(0, |b| b.saturating_sub(1)),
+                    trailing_zeros: bit(184, 0x10),
+                    inline_text: bit(85, 0x10),
+                    horizontal_text: bit(85, 0x20),
+                    line_inside: bit(184, 0x01),
+                    scale,
+                    two_units: near(metres(520), 0.3048) && near(metres(544), 0.0254),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The shared cell definitions by element id (offset 16), named as their
+/// type-34 header names them.
+fn cell_ids(nm: &[&[u8]]) -> HashMap<u32, String> {
+    nm.iter()
+        .filter(|e| kind(e) == 34 && !is_component(e))
+        .filter_map(|e| Some((u32_at(e, 16)?, marked_string(e, 248)?)))
+        .collect()
+}
+
 /// The font table (table 2): each font's number, kind (2 SHX, 4 TrueType)
 /// and name.
 fn font_table(nm: &[&[u8]]) -> Vec<(u8, u8, String)> {
@@ -381,6 +466,8 @@ struct Styles {
     hidden: std::collections::HashSet<u32>,
     /// True colours, in the order colour words number them (1 first).
     extended: Vec<[u8; 3]>,
+    /// Shared cell definition names by element id.
+    cells: HashMap<u32, String>,
 }
 
 /// The true colours of the file: a zlib-packed UTF-16 record in the
@@ -757,6 +844,7 @@ fn read_run(run: &[&[u8]], styles: &Styles, xf: &Xf) -> Raw {
             },
             geom,
             filled: matches!(kind(e), 6 | 14) && e.windows(4).any(|w| w == [0x07, 0x10, 0x41, 0x00]),
+            construction: false,
         };
         let stroke = Some((color, -1.0));
         let d3 = is_3d(e);
@@ -803,8 +891,11 @@ fn read_run(run: &[&[u8]], styles: &Styles, xf: &Xf) -> Raw {
                 if parts && n > 0 {
                     collect.open(
                         n,
+                        // The origin follows the transformation: 176
+                        // (232 in 3D).
                         element(DgnGeom::CellGroup {
                             name: marked_string(e, 104).unwrap_or_default(),
+                            origin: p3(if d3 { 232 } else { 176 }).map(at3).unwrap_or([0.0; 3]),
                             parts: Vec::new(),
                         }),
                     );
@@ -1027,6 +1118,135 @@ fn read_run(run: &[&[u8]], styles: &Styles, xf: &Xf) -> Raw {
                     color,
                     font: "txt".to_string(),
                 });
+            }
+            // A dimension: its type (133), point count (135), axes (the
+            // columns of a 2×2 matrix by rows from 272; in 3D a quaternion
+            // there, its first two rows) and points from 304, 48 bytes
+            // apart, the first point's +24 holding the dimension line's
+            // offset. It is drawn by the shared cell its linkage names (the
+            // id after `13 27 07 00 00 03 01 00`). A note (53) is a leader
+            // through its points.
+            33 => {
+                let cell = e
+                    .windows(8)
+                    .position(|w| w == [0x13, 0x27, 0x07, 0x00, 0x00, 0x03, 0x01, 0x00])
+                    .and_then(|at| u32_at(e, at + 8))
+                    .and_then(|id| styles.cells.get(&id));
+                let dim = e.get(133).copied().unwrap_or(0);
+                let count = e.get(135).copied().unwrap_or(0) as usize;
+                let points: Option<Vec<[f64; 3]>> =
+                    (0..count).map(|k| p3(304 + 48 * k).map(at3)).collect();
+                let style = u32_at(e, 104).unwrap_or(0);
+                // Only a dimension in the XY plane comes in as a dimension.
+                let axes = if d3 {
+                    quat_axes(e, 272).filter(|(x, y)| x[2].abs() < 1e-9 && y[2].abs() < 1e-9)
+                } else {
+                    (0..4)
+                        .map(|k| f64_at(e, 272 + 8 * k))
+                        .collect::<Option<Vec<f64>>>()
+                        .map(|m| ([m[0], m[2], 0.0], [m[1], m[3], 0.0]))
+                };
+                match (points, axes) {
+                    (Some(points), _) if dim == 53 && points.len() >= 2 => {
+                        collect.push(element(DgnGeom::Leader { points, style }));
+                    }
+                    (Some(points), Some((x, y)))
+                        if matches!(dim, 1 | 5 | 11 | 12) && points.len() >= 2 =>
+                    {
+                        let x = dir3(x);
+                        let y = dir3(y);
+                        // Its own settings: text height (152), font number
+                        // and kind (168), text off the line (180, 0x40),
+                        // extension line offset and extension (192, 200),
+                        // text gap and margin (208, 216), terminator width
+                        // (232).
+                        let real = |at: usize| f64_at(e, at).unwrap_or(0.0);
+                        let byte = |at: usize| e.get(at).copied().unwrap_or(0);
+                        let look = DgnDimLook {
+                            font: (byte(168), byte(169)),
+                            text_height: real(152),
+                            ext_offset: real(192),
+                            ext_extension: real(200),
+                            gap: real(208),
+                            margin: real(216),
+                            arrow: real(232),
+                            text_outside: byte(180) & 0x40 != 0,
+                        };
+                        collect.push(element(DgnGeom::Dimension {
+                            kind: dim,
+                            points,
+                            offset: f64_at(e, 328).unwrap_or(0.0),
+                            axes: [[x[0], x[1]], [y[0], y[1]]],
+                            style,
+                            look,
+                        }));
+                    }
+                    // Otherwise the dimension comes in as its drawing.
+                    _ => {
+                        if let Some(name) = cell {
+                            collect.push(element(DgnGeom::Cell {
+                                name: name.clone(),
+                                m: [1.0, 0.0, 0.0, 1.0],
+                                origin: [0.0; 3],
+                                z_scale: 1.0,
+                            }));
+                        }
+                    }
+                }
+                if let Some(name) = cell {
+                    raw.instances.push(Instance {
+                        name: name.to_ascii_uppercase(),
+                        xf: *xf,
+                    });
+                }
+            }
+            // A mesh: its component count (104), its style (108, 1 face
+            // loops) and its matrices, each a header (101; what it holds at
+            // 116: 1 point numbers, 2 coordinates) and the data after it
+            // (102 integers, 103 doubles: the count at 104, the values from
+            // 120).
+            105 if u32_at(e, 108) == Some(1) => {
+                let n = u32_at(e, 104).unwrap_or(0) as usize;
+                let parts = &run[index + 1..(index + 1 + n).min(run.len())];
+                // A large matrix does not fit one element: its values run on
+                // through every data element up to the next header.
+                let data = |family: u32, data_kind: u8, size: usize| {
+                    let header = parts
+                        .iter()
+                        .position(|&p| kind(p) == 101 && u32_at(p, 116) == Some(family))?;
+                    let mut values = Vec::new();
+                    for &d in parts[header + 1..].iter().take_while(|&&p| kind(p) == data_kind) {
+                        let count = u32_at(d, 104)? as usize;
+                        values.extend(d.get(120..)?.chunks_exact(size).take(count));
+                    }
+                    (!values.is_empty()).then_some(values)
+                };
+                let (Some(numbers), Some(coords)) = (data(1, 102, 4), data(2, 103, 8)) else {
+                    continue;
+                };
+                let coords: Vec<f64> = coords
+                    .iter()
+                    .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                    .collect();
+                let points: Vec<[f64; 3]> =
+                    coords.chunks_exact(3).map(|c| at3([c[0], c[1], c[2]])).collect();
+                let numbers: Vec<i32> = numbers
+                    .iter()
+                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                // A loop ends at a 0; one naming a point the mesh lacks is
+                // left out.
+                let loops: Vec<Vec<i32>> = numbers
+                    .split(|&k| k == 0)
+                    .filter(|l| {
+                        l.len() >= 3
+                            && l.iter().all(|k| (k.unsigned_abs() as usize) <= points.len())
+                    })
+                    .map(|l| l.to_vec())
+                    .collect();
+                if !loops.is_empty() {
+                    collect.push(element(DgnGeom::Mesh { points, loops }));
+                }
             }
             35 => {
                 // Shared cell instance: a 3×3 matrix by rows from 160, the
@@ -1354,6 +1574,7 @@ pub fn model(bytes: &[u8], name: &str, hidden: &[String]) -> Option<Sheet> {
         levels,
         hidden,
         extended: extended_colors(&cfb),
+        cells: cell_ids(&nm),
     };
     // Shared cell definitions: a type-34 element and its components.
     let mut defs: HashMap<String, Vec<&[u8]>> = HashMap::new();
@@ -1575,6 +1796,7 @@ pub fn import(bytes: &[u8], name: &str) -> Option<DgnImport> {
         levels: table.iter().map(|l| (l.0, l.2)).collect(),
         hidden: Default::default(),
         extended: extended_colors(&cfb),
+        cells: cell_ids(&nm),
         colors,
     };
     let levels = table
@@ -1600,7 +1822,7 @@ pub fn import(bytes: &[u8], name: &str) -> Option<DgnImport> {
             // not to the drawing: it is left out.
             if !cell.eq_ignore_ascii_case("POINT_DISPLAY") {
                 let def = read_run(&nm[i + 1..j], &styles, &IDENTITY).elements;
-                cells.push((cell, scaled_elements(&def, s, [0.0, 0.0])));
+                cells.push((cell, scaled_elements(&def, s, [0.0; 3])));
             }
             i = j;
         } else {
@@ -1628,7 +1850,7 @@ pub fn import(bytes: &[u8], name: &str) -> Option<DgnImport> {
         })
         .collect();
     Some(DgnImport {
-        elements: scaled_elements(&raw.elements, s, [-origin[0] * s, -origin[1] * s]),
+        elements: scaled_elements(&raw.elements, s, [-origin[0] * s, -origin[1] * s, 0.0]),
         cells,
         levels,
         level_order,
@@ -1637,6 +1859,16 @@ pub fn import(bytes: &[u8], name: &str) -> Option<DgnImport> {
         v7: false,
         references,
         text_styles: text_style_table(&nm),
+        dim_styles: dim_style_table(&nm, s),
+        fonts: font_table(&nm)
+            .into_iter()
+            .map(|(n, k, name)| {
+                let file = font_file(Some((k, &name)));
+                (n, k, name, file)
+            })
+            .collect(),
+        three_d: false,
+        construction_layers: false,
     })
 }
 
@@ -1868,5 +2100,74 @@ mod cfb_memory_tests {
         assert!(!out.is_empty(), "the first models still load");
         assert!(out.len() < 300, "models past the budget are dropped");
         assert!(model_names(&bytes).is_some());
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+
+    /// An element of `kind` and `len` bytes, a component when `part`.
+    fn element(kind: u8, len: usize, part: bool) -> Vec<u8> {
+        let mut e = vec![0u8; len];
+        e[0] = kind;
+        e[2..4].copy_from_slice(&(if part { 0x4000u16 } else { 0 }).to_le_bytes());
+        e[4..8].copy_from_slice(&(((len - 4) / 2) as u32).to_le_bytes());
+        e
+    }
+
+    fn put(e: &mut [u8], at: usize, v: u32) {
+        e[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// A face-loop mesh: one loop with a hidden edge, one naming a point
+    /// the mesh lacks (left out).
+    #[test]
+    fn face_loop_mesh_reads_its_points_and_loops() {
+        let mut header = element(105, 116, false);
+        put(&mut header, 104, 4);
+        put(&mut header, 108, 1);
+        let matrix = |family: u32| {
+            let mut m = element(101, 132, true);
+            put(&mut m, 116, family);
+            m
+        };
+        let numbers = [1i32, 2, -3, 0, 2, 3, 9, 0];
+        let mut ints = element(102, 120 + 4 * numbers.len(), true);
+        put(&mut ints, 104, numbers.len() as u32);
+        for (k, n) in numbers.iter().enumerate() {
+            put(&mut ints, 120 + 4 * k, *n as u32);
+        }
+        let coords = [0.0f64, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 2.0];
+        let mut doubles = element(103, 120 + 8 * coords.len(), true);
+        put(&mut doubles, 104, coords.len() as u32);
+        for (k, c) in coords.iter().enumerate() {
+            doubles[120 + 8 * k..128 + 8 * k].copy_from_slice(&c.to_le_bytes());
+        }
+        let (m1, m2) = (matrix(1), matrix(2));
+        let run: Vec<&[u8]> = vec![&header, &m1, &ints, &m2, &doubles];
+        let styles = Styles {
+            colors: DGN_DEFAULT_COLORS.to_vec(),
+            levels: HashMap::new(),
+            hidden: Default::default(),
+            extended: Vec::new(),
+            cells: HashMap::new(),
+        };
+        let raw = read_run(&run, &styles, &IDENTITY);
+        let meshes: Vec<_> = raw
+            .elements
+            .iter()
+            .filter_map(|e| match &e.geom {
+                DgnGeom::Mesh { points, loops } => Some((points.clone(), loops.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            meshes,
+            vec![(
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 2.0]],
+                vec![vec![1, 2, -3]]
+            )]
+        );
     }
 }

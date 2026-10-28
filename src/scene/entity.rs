@@ -404,6 +404,12 @@ impl Scene {
                 self.images.insert(handle, model);
             }
             if let Some(mut model) = mesh_seed {
+                // Tessellated before the document assigned the handle, so the
+                // mesh still carries handle 0 as its name — the entity key that
+                // picking and plotting read back through `entity_handle`.
+                for mesh in &mut model.lods {
+                    mesh.name = handle.value().to_string();
+                }
                 if let Some(entity) = self.document.get_entity(handle) {
                     let color = self.render_style(entity).0;
                     let material = crate::scene::model::material_model::resolve_material_with_base(
@@ -1082,9 +1088,12 @@ impl Scene {
             entity = crate::modules::draw::modify::explode::normalize_entity_for_block(entity);
             entity.common_mut().handle = Handle::NULL;
             entity.common_mut().owner_handle = br_handle;
-            self.document
+            let handle = self
+                .document
                 .add_entity(entity)
                 .map_err(|e| e.to_string())?;
+            // An image draws from its cached model, not the entity (#2149).
+            self.reseed_derived_caches(handle);
             if options.mode != crate::ui::window::block_definition::BlockObjectMode::Retain {
                 self.erase_entities(&[old_handle]);
             }
@@ -1377,6 +1386,8 @@ impl Scene {
         let end_handle = Handle::new(next + 2);
 
         let mut block_record = codec::tables::BlockRecord::new(name);
+        block_record.flags.anonymous = name.starts_with('*')
+            && !(block_record.is_model_space() || block_record.is_paper_space());
         block_record.handle = br_handle;
         block_record.block_entity_handle = block_handle;
         block_record.block_end_handle = end_handle;
@@ -1470,6 +1481,187 @@ impl Scene {
         Ok(())
     }
 
+    /// Whether the resident hatch set draws `handle`'s own fill.
+    pub(super) fn hatch_fill_shown(
+        &self,
+        handle: Handle,
+        target_block: Handle,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+    ) -> bool {
+        let Some(entity) = self.document.get_entity(handle) else {
+            return true;
+        };
+        // SOLID already renders through its WCS-aware fill triangles.
+        // Its cached HatchModel is an XY-only plot fallback; sending
+        // that to the screen too adds a flattened, grip-less copy at
+        // z=0 for elevated or angled geometry (#617).
+        if matches!(entity, EntityType::Solid(_)) {
+            return false;
+        }
+        let c = entity.common();
+        if self.display_entity_invisible(c)
+            || self.entity_temporarily_hidden(handle)
+            || self.layer_hidden(&c.layer)
+            || crate::scene::annotative::annotative_offscale_for(
+                &self.document,
+                c,
+                annotation_scale_handle,
+                all_visible,
+            )
+        {
+            return false;
+        }
+        // Per-viewport layer freeze: a content viewport that freezes
+        // this layer hides its fills too, not just its wires.
+        if self.layer_frozen_in(&c.layer, frozen) {
+            return false;
+        }
+        // Reject block-defn-only hatches (entities owned by a
+        // BLOCK record that's neither model nor a paper layout
+        // block) — the scene graph emits only their laid-out copies.
+        self.belongs_to_visible_block(handle, c.owner_handle, target_block)
+    }
+
+    /// Solid backdrop for a hatch's HATCHBACKGROUNDCOLOR, drawn behind `fill`;
+    /// `style` is the fill's resolved (colour, ACI), which ByBlock takes.
+    pub(super) fn hatch_backdrop(
+        &self,
+        dxf: &DxfHatch,
+        fill: &HatchModel,
+        style: ([f32; 4], u8),
+        viewport: Option<Handle>,
+    ) -> Option<HatchModel> {
+        let bg = crate::entities::hatch::background_color(dxf)?;
+        let mut b = fill.clone();
+        b.pattern = model::hatch_model::HatchPattern::Solid;
+        // ByLayer / ByBlock backgrounds resolve through the normal style chain
+        // instead of the raw ACI table (#415).
+        let (bg_color, bg_aci) = match bg {
+            codec::types::Color::ByLayer => {
+                let layer = self.document.layers.get(&dxf.common.layer);
+                let aci = layer
+                    .and_then(|layer| match &layer.color {
+                        codec::types::Color::Index(index) => Some(*index),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                (
+                    crate::scene::view::render::layer_render_style_viewport(
+                        &self.document,
+                        &dxf.common.layer,
+                        viewport,
+                    )
+                    .color,
+                    aci,
+                )
+            }
+            codec::types::Color::ByBlock => style,
+            codec::types::Color::Index(index) => {
+                let color = codec::types::Color::Index(index);
+                (crate::scene::convert::tess_util::aci_to_rgba(&color), index)
+            }
+            other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
+        };
+        b.color = bg_color;
+        b.aci = bg_aci;
+        b.name = "SOLID".into();
+        Some(b)
+    }
+
+    /// `model` synced to its entity's current display style: the fill and
+    /// its optional background (HATCHBACKGROUNDCOLOR) backdrop.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn synced_hatch_model(
+        &self,
+        handle: Handle,
+        model: &HatchModel,
+        annotation_scale_handle: Option<Handle>,
+        viewport: Option<Handle>,
+        hatch_bg: [f32; 4],
+        depth_map: &HashMap<u64, [f32; 2]>,
+        tint_selected: bool,
+    ) -> (Option<HatchModel>, HatchModel) {
+        let contextual = self.document.get_entity(handle).map(|entity| {
+            crate::scene::annotative::entity_for_annotation_context(
+                &self.document,
+                entity,
+                annotation_scale_handle,
+            )
+        });
+        let entity = contextual.as_deref();
+        let mut m = match entity {
+            Some(EntityType::Hatch(dxf))
+                if crate::scene::annotative::active_object_context_for_scale(
+                    &self.document,
+                    handle,
+                    annotation_scale_handle,
+                )
+                .is_some() =>
+            {
+                Self::hatch_model_from_dxf(dxf, model.color).unwrap_or_else(|| model.clone())
+            }
+            _ => model.clone(),
+        };
+        // Optional solid backdrop drawn behind the pattern/gradient when
+        // the hatch carries a HATCHBACKGROUNDCOLOR. Same draw_depth +
+        // emitted first so LessEqual layering keeps it underneath.
+        let mut backdrop: Option<HatchModel> = None;
+        if let Some(e) = entity {
+            let mut style = crate::scene::view::render::render_style_for_viewport(
+                &self.document,
+                e,
+                viewport,
+            );
+            style.0 = crate::scene::view::render::adapt_to_bg(style.0, hatch_bg);
+            m.aci = style.4;
+            m.line_weight_px = style.3;
+            // Gradient RGB comes from its own colour stops, while
+            // transparency remains an entity property shared by both
+            // stops. Solid/pattern fills take the complete style.
+            if matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
+                m.set_alpha(style.0[3]);
+            } else {
+                m.color = style.0;
+            }
+            if let EntityType::Hatch(dxf) = e {
+                backdrop = self.hatch_backdrop(dxf, &m, (style.0, style.4), viewport);
+                match &mut m.pattern {
+                    // Pattern built from the hatch's own stored lines is
+                    // already final (scale 1 / angle 0) — don't re-apply
+                    // pattern_scale/angle. Only the catalog-derived path
+                    // (empty stored lines) needs the override.
+                    model::hatch_model::HatchPattern::Pattern(_)
+                        if dxf.pattern.lines.is_empty() =>
+                    {
+                        m.angle_offset = dxf.pattern_angle as f32;
+                        m.scale = dxf.pattern_scale as f32;
+                    }
+                    model::hatch_model::HatchPattern::Gradient { angle_deg, shift, .. } => {
+                        *angle_deg = dxf.gradient_color.angle.to_degrees() as f32;
+                        *shift = dxf.gradient_color.shift as f32;
+                    }
+                    model::hatch_model::HatchPattern::Pattern(_)
+                    | model::hatch_model::HatchPattern::Solid => {}
+                }
+            }
+        }
+        m.color = self.count_color(handle, m.color, self.current_bg());
+        if let Some(b) = &mut backdrop {
+            b.color = self.count_color(handle, b.color, self.current_bg());
+        }
+        if tint_selected && self.selected.contains(&handle) {
+            m.color = [0.15, 0.55, 1.00, m.color[3]];
+        }
+        let d = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
+        m.draw_depth = d;
+        if let Some(b) = &mut backdrop {
+            b.draw_depth = d;
+        }
+        (backdrop, m)
+    }
+
     pub(super) fn synced_hatch_models(
         &self,
         target_block: Handle,
@@ -1479,14 +1671,6 @@ impl Scene {
         viewport: Option<Handle>,
         tint_selected: bool,
     ) -> Vec<HatchModel> {
-        let layer_hidden = |layer: &str| {
-            self.document
-                .layers
-                .get(layer)
-                .map(|l| l.flags.off || l.flags.frozen)
-                .unwrap_or(false)
-        };
-
         // synced_hatch_models is cached on geometry_epoch and the GPU
         // upload is keyed on geometry_epoch only (see render.rs — hatch
         // buffers are "static"). Don't view-cull here; the per-frame
@@ -1503,162 +1687,38 @@ impl Scene {
             self.bg_color
         };
         let depth_map = self.draw_depth_map();
+        let constraint_display = (self.constraint_shading_active() && self.block_edit_block == Some(target_block))
+            .then(|| (self.block_constraint_report(target_block), self.constraint_palette()));
         let mut models: Vec<HatchModel> = self
             .hatches
             .iter()
             .filter(|(&handle, _)| {
-                let Some(entity) = self.document.get_entity(handle) else {
-                    return true;
-                };
-                // SOLID already renders through its WCS-aware fill triangles.
-                // Its cached HatchModel is an XY-only plot fallback; sending
-                // that to the screen too adds a flattened, grip-less copy at
-                // z=0 for elevated or angled geometry (#617).
-                if matches!(entity, EntityType::Solid(_)) {
-                    return false;
-                }
-                let c = entity.common();
-                if self.display_entity_invisible(c)
-                    || self.entity_temporarily_hidden(handle)
-                    || layer_hidden(&c.layer)
-                    || crate::scene::annotative::annotative_offscale_for(
-                        &self.document,
-                        c,
-                        annotation_scale_handle,
-                        all_visible,
-                    )
-                {
-                    return false;
-                }
-                // Per-viewport layer freeze: a content viewport that freezes
-                // this layer hides its fills too, not just its wires.
-                if self.layer_frozen_in(&c.layer, frozen) {
-                    return false;
-                }
-                // Reject block-defn-only hatches (entities owned by a
-                // BLOCK record that's neither model nor a paper layout
-                // block) — the scene graph emits only their laid-out copies.
-                self.belongs_to_visible_block(handle, c.owner_handle, target_block)
+                self.hatch_fill_shown(
+                    handle,
+                    target_block,
+                    frozen,
+                    annotation_scale_handle,
+                    all_visible,
+                )
             })
             .flat_map(|(&handle, model)| {
-                let contextual = self.document.get_entity(handle).map(|entity| {
-                    crate::scene::annotative::entity_for_annotation_context(
-                        &self.document,
-                        entity,
-                        annotation_scale_handle,
-                    )
-                });
-                let entity = contextual.as_deref();
-                let mut m = match entity {
-                    Some(EntityType::Hatch(dxf))
-                        if crate::scene::annotative::active_object_context_for_scale(
-                            &self.document,
-                            handle,
-                            annotation_scale_handle,
-                        )
-                        .is_some() =>
-                    {
-                        Self::hatch_model_from_dxf(dxf, model.color)
-                            .unwrap_or_else(|| model.clone())
-                    }
-                    _ => model.clone(),
-                };
-                // Optional solid backdrop drawn behind the pattern/gradient when
-                // the hatch carries a HATCHBACKGROUNDCOLOR. Same draw_depth +
-                // emitted first so LessEqual layering keeps it underneath.
-                let mut backdrop: Option<HatchModel> = None;
-                if let Some(e) = entity {
-                    let mut style = crate::scene::view::render::render_style_for_viewport(
-                        &self.document,
-                        e,
-                        viewport,
-                    );
-                    style.0 = crate::scene::view::render::adapt_to_bg(style.0, hatch_bg);
-                    m.aci = style.4;
-                    m.line_weight_px = style.3;
-                    // Gradient RGB comes from its own colour stops, while
-                    // transparency remains an entity property shared by both
-                    // stops. Solid/pattern fills take the complete style.
-                    if matches!(m.pattern, model::hatch_model::HatchPattern::Gradient { .. }) {
-                        m.set_alpha(style.0[3]);
-                    } else {
-                        m.color = style.0;
-                    }
-                    if let EntityType::Hatch(dxf) = e {
-                        if let Some(bg) = crate::entities::hatch::background_color(dxf) {
-                            let mut b = m.clone();
-                            b.pattern = model::hatch_model::HatchPattern::Solid;
-                            // ByLayer / ByBlock backgrounds resolve through the
-                            // normal style chain instead of the raw ACI table
-                            // (#415).
-                            let (bg_color, bg_aci) = match bg {
-                                codec::types::Color::ByLayer => {
-                                    let layer = self.document.layers.get(&dxf.common.layer);
-                                    let aci = layer
-                                        .and_then(|layer| match &layer.color {
-                                            codec::types::Color::Index(index) => Some(*index),
-                                            _ => None,
-                                        })
-                                        .unwrap_or(0);
-                                    (
-                                        crate::scene::view::render::layer_render_style_viewport(
-                                            &self.document,
-                                            &dxf.common.layer,
-                                            viewport,
-                                        )
-                                        .color,
-                                        aci,
-                                    )
-                                }
-                                codec::types::Color::ByBlock => (style.0, style.4),
-                                codec::types::Color::Index(index) => (
-                                    crate::scene::convert::tess_util::aci_to_rgba(
-                                        &codec::types::Color::Index(index),
-                                    ),
-                                    index,
-                                ),
-                                other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
-                            };
-                            b.color = bg_color;
-                            b.aci = bg_aci;
-                            b.name = "SOLID".into();
-                            backdrop = Some(b);
-                        }
-                        match &mut m.pattern {
-                            // Pattern built from the hatch's own stored lines is
-                            // already final (scale 1 / angle 0) — don't re-apply
-                            // pattern_scale/angle. Only the catalog-derived path
-                            // (empty stored lines) needs the override.
-                            model::hatch_model::HatchPattern::Pattern(_)
-                                if dxf.pattern.lines.is_empty() =>
-                            {
-                                m.angle_offset = dxf.pattern_angle as f32;
-                                m.scale = dxf.pattern_scale as f32;
-                            }
-                            model::hatch_model::HatchPattern::Gradient {
-                                angle_deg, shift, ..
-                            } => {
-                                *angle_deg = dxf.gradient_color.angle.to_degrees() as f32;
-                                *shift = dxf.gradient_color.shift as f32;
-                            }
-                            model::hatch_model::HatchPattern::Pattern(_)
-                            | model::hatch_model::HatchPattern::Solid => {}
-                        }
+                let (backdrop, mut model) = self.synced_hatch_model(
+                    handle,
+                    model,
+                    annotation_scale_handle,
+                    viewport,
+                    hatch_bg,
+                    &depth_map,
+                    tint_selected,
+                );
+                if let Some((report, palette)) = &constraint_display {
+                    if let Some(mut color) = self.constraint_display_color(report, handle, palette) {
+                        color[3] = model.color[3];
+                        model.color = color;
+                        if let crate::scene::model::hatch_model::HatchPattern::Gradient { color2, .. } = &mut model.pattern { *color2 = color; }
                     }
                 }
-                m.color = self.count_color(handle, m.color, self.current_bg());
-                if let Some(b) = &mut backdrop {
-                    b.color = self.count_color(handle, b.color, self.current_bg());
-                }
-                if tint_selected && self.selected.contains(&handle) {
-                    m.color = [0.15, 0.55, 1.00, m.color[3]];
-                }
-                let d = depth_map.get(&handle.value()).map_or(0.0, |d| d[0]);
-                m.draw_depth = d;
-                if let Some(b) = &mut backdrop {
-                    b.draw_depth = d;
-                }
-                backdrop.into_iter().chain(std::iter::once(m))
+                backdrop.into_iter().chain(std::iter::once(model))
             })
             .collect();
 
@@ -1818,20 +1878,58 @@ impl Scene {
         include_preview_hidden: bool,
         plot_only: bool,
     ) -> Vec<HatchModel> {
+        self.instanced_hatch_models_for_document(
+            &self.document,
+            layout_block,
+            hatch_bg,
+            tint_selected,
+            frozen,
+            annotation_scale_handle,
+            all_visible,
+            viewport,
+            targets,
+            include_preview_hidden,
+            plot_only,
+        )
+    }
+
+    pub(super) fn instanced_hatch_models_for_document(
+        &self,
+        document: &Document,
+        layout_block: Handle,
+        hatch_bg: [f32; 4],
+        tint_selected: bool,
+        frozen: Option<&rustc_hash::FxHashSet<Handle>>,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+        viewport: Option<Handle>,
+        targets: Option<&rustc_hash::FxHashSet<Handle>>,
+        include_preview_hidden: bool,
+        plot_only: bool,
+    ) -> Vec<HatchModel> {
+        let constraint_display = (!plot_only && self.constraint_shading_active() && self.block_edit_block == Some(layout_block))
+            .then(|| (self.block_constraint_report(layout_block), self.constraint_palette()));
         let depth_map = self.draw_depth_map();
         let visibility_reveal = if plot_only {
             rustc_hash::FxHashSet::default()
         } else {
             self.visibility_reveal_handles()
         };
+        // Plot passes draw the stored drawing; live renders of the walked
+        // space hide layers outside its visible set (foreign viewports
+        // resolve to `None` inside `render_space_layer_walk`).
+        let layer_walk = (!plot_only)
+            .then(|| self.render_space_layer_walk(layout_block, viewport))
+            .flatten();
         let graph = crate::scene::render_graph::RenderSceneGraph::new(
-            &self.document,
+            document,
             frozen,
             annotation_scale_handle,
             all_visible,
             depth_map.as_ref(),
         )
         .with_visibility_reveal(&visibility_reveal)
+        .with_layer_walk(layer_walk)
         .with_annotation_scale(self.annotation_scale)
         .with_viewport(viewport);
         let mut hatch_block_memo = std::collections::HashMap::new();
@@ -1862,7 +1960,7 @@ impl Scene {
                         && targets.contains(&common.handle);
                 }
                 let block_uses: Vec<_> = crate::scene::render_graph::entity_render_block_uses(
-                    &self.document,
+                    document,
                     entity,
                     1.0,
                 )
@@ -1874,7 +1972,7 @@ impl Scene {
                 } else {
                     block_uses.into_iter().any(|block_use| {
                         crate::scene::render_graph::block_contains_hatch(
-                            &self.document,
+                            document,
                             &block_use.insert.block_name,
                             &mut hatch_block_memo,
                         )
@@ -1891,7 +1989,7 @@ impl Scene {
                 if plot_only && !self.layer_plottable_in_context(entity, context) {
                     return;
                 }
-                let style = context.style_for(&self.document, entity);
+                let style = context.style_for(document, entity);
                 let preserve_white_mask = source_hatch.is_solid
                     && matches!(source_hatch.common.color, codec::types::Color::Index(7));
                 let color = if preserve_white_mask {
@@ -1908,6 +2006,13 @@ impl Scene {
                 let Some(mut model) = Self::hatch_model_from_dxf(&hatch, color) else {
                     return;
                 };
+                if let Some((report, palette)) = &constraint_display {
+                    if let Some(mut color) = self.constraint_display_color(report, context.root_handle, palette) {
+                        color[3] = model.color[3];
+                        model.color = color;
+                        if let crate::scene::model::hatch_model::HatchPattern::Gradient { color2, .. } = &mut model.pattern { *color2 = color; }
+                    }
+                }
                 model.aci = style.4;
                 model.line_weight_px = style.3;
                 model.draw_depth =
@@ -2008,6 +2113,7 @@ impl Scene {
         frozen: Option<&rustc_hash::FxHashSet<Handle>>,
         annotation_scale_handle: Option<Handle>,
         all_visible: bool,
+        viewport: Option<Handle>,
     ) -> Vec<HatchModel> {
         let bg_color = if self.current_layout != "Model" {
             self.paper_bg_color
@@ -2022,6 +2128,7 @@ impl Scene {
             bg_color,
             false,
             false,
+            viewport,
         )
     }
 
@@ -2034,6 +2141,7 @@ impl Scene {
         bg_color: [f32; 4],
         tint_insert_selection: bool,
         plot_only: bool,
+        viewport: Option<Handle>,
     ) -> Vec<HatchModel> {
         let depth_map = self.draw_depth_map();
         let visibility_reveal = if plot_only {
@@ -2041,6 +2149,10 @@ impl Scene {
         } else {
             self.visibility_reveal_handles()
         };
+        // LAYWALK hides block-tree wipeouts only in the walked space itself.
+        let layer_walk = (!plot_only)
+            .then(|| self.render_space_layer_walk(target_block, viewport))
+            .flatten();
         let graph = crate::scene::render_graph::RenderSceneGraph::new(
             &self.document,
             frozen,
@@ -2049,6 +2161,7 @@ impl Scene {
             depth_map.as_ref(),
         )
         .with_visibility_reveal(&visibility_reveal)
+        .with_layer_walk(layer_walk)
         .with_annotation_scale(self.annotation_scale);
         let mut models = Vec::new();
         let mut wipeout_sources = rustc_hash::FxHashMap::default();
@@ -3269,7 +3382,7 @@ impl Scene {
 
     pub fn clear(&mut self) {
         self.document.record_all_entities_for_transaction();
-        self.document = CadDocument::new();
+        self.document = Document::new();
         self.replace_selection(HashSet::default());
         self.preview_wires = vec![];
         self.preview_text = vec![];
@@ -3313,8 +3426,11 @@ impl Scene {
         // current. Standard stays available for imperial work.
         self.document.header.measurement = 1;
         self.document.header.insertion_units = 6;
+        // Its solids are drawn with eight isolines.
+        self.document.header.isolines = 8;
         let iso = crate::scene::creation_style::ensure_iso_dim_style(&mut self.document);
         self.document.header.current_dimstyle_name = "ISO-25".to_string();
+        crate::scene::creation_style::sync_header_dim_vars(&mut self.document);
         // The name alone leaves the header pointing at the previous style, and
         // a DWG writes the current style by handle only.
         self.document.header.current_dimstyle_handle = iso;
@@ -3323,11 +3439,35 @@ impl Scene {
         // large until the first CANNOSCALE change shrank them. (#1674)
         self.sync_annotation_scale_from_header();
         for obj in self.document.objects.values_mut() {
-            if let codec::objects::ObjectType::Layout(l) = obj {
-                if l.name != "Model" {
+            match obj {
+                codec::objects::ObjectType::Layout(l) if l.name != "Model" => {
                     crate::scene::apply_default_page_setup(l, "");
                     self.unopened_layouts.insert(l.name.clone());
                 }
+                // The codec's Standard multileader style is sized in inches;
+                // the metric template's is in millimetres. Left as-is, a new
+                // leader's arrow and landing were a fraction of a millimetre,
+                // invisible on a sheet. (#2027)
+                codec::objects::ObjectType::MultiLeaderStyle(s)
+                    if s.name.eq_ignore_ascii_case("Standard") =>
+                {
+                    s.text_height = 4.0;
+                    s.arrowhead_size = 4.0;
+                    s.landing_gap = 2.0;
+                    s.landing_distance = 8.0;
+                    s.break_gap_size = 3.75;
+                }
+                // Likewise the Standard table style: the metric template's
+                // cells are 4.5 high (title 6) with 1.5 margins, not 0.18.
+                codec::objects::ObjectType::TableStyle(s)
+                    if s.name.eq_ignore_ascii_case("Standard") =>
+                {
+                    s.set_margins(1.5);
+                    s.data_row_style.text_height = 4.5;
+                    s.header_row_style.text_height = 4.5;
+                    s.title_row_style.text_height = 6.0;
+                }
+                _ => {}
             }
         }
     }
@@ -3344,7 +3484,26 @@ mod gradient_fill_tests {
     /// The model a click inside a 10 x 10 square makes.
     fn model() -> HatchModel {
         let ring = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
-        let mut command = GradientCommand::new(vec![ring], Default::default());
+        let segments: Vec<kernel::geom2d::Line> = ring
+            .iter()
+            .copied()
+            .zip(ring.iter().copied().cycle().skip(1))
+            .take(ring.len())
+            .map(|(start, end)| kernel::geom2d::Line { start, end })
+            .collect();
+        let mut sources = rustc_hash::FxHashMap::default();
+        sources.insert(
+            codec::Handle::new(1),
+            crate::scene::BoundarySource {
+                curves: segments
+                    .iter()
+                    .cloned()
+                    .map(kernel::geom2d::Curve::Line)
+                    .collect(),
+                segments,
+            },
+        );
+        let mut command = GradientCommand::new(sources);
         match command.on_point(glam::DVec3::new(5.0, 5.0, 0.0)) {
             CmdResult::CommitHatch(model) => model,
             _ => panic!("expected CommitHatch"),

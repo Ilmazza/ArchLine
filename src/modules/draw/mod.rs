@@ -28,16 +28,14 @@ impl CadModule for DrawModule {
     }
 
     fn ribbon_groups(&self) -> &[RibbonGroup] {
-        use crate::modules::annotate::{
-            angular_dim, leader_cmd, linear_dim, mleader_cmd, mtext, radius_dim, text,
-        };
+        use crate::modules::annotate::{leader_cmd, linear_dim, mleader_cmd, mtext, text};
         use crate::modules::insert::{attedit, create_block, edit_block, insert_block};
         use clipboard::{copy_clip, cut, paste};
         use draw::{arc, circle, ellipse, hatch, line, polyline, shapes};
         use groups::{group, ungroup};
         use inquiry::{area, dist, measuregeom};
         use layers::{
-            layfrz, layiso, laylck, layoff, layon, laythw, layulk, layuniso, make_current,
+            layfrz, layiso, laylck, layoff, layon, laythw, layulk, layuniso, laywalk, make_current,
             match_layer, panel,
         };
         use modify::{
@@ -137,23 +135,7 @@ impl CadModule for DrawModule {
                             id: "ANNOTATION_DIMENSIONS",
                             label: "Dimensions",
                             icon: linear_dim::ICON,
-                            items: vec![
-                                (
-                                    linear_dim::tool().id,
-                                    linear_dim::tool().label,
-                                    linear_dim::tool().icon,
-                                ),
-                                (
-                                    radius_dim::tool().id,
-                                    radius_dim::tool().label,
-                                    radius_dim::tool().icon,
-                                ),
-                                (
-                                    angular_dim::tool().id,
-                                    angular_dim::tool().label,
-                                    angular_dim::tool().icon,
-                                ),
-                            ],
+                            items: crate::modules::annotate::dimension_menu_items(),
                             default: "DIMLINEAR",
                         },
                         RibbonItem::LargeDropdown {
@@ -187,6 +169,7 @@ impl CadModule for DrawModule {
                                 laylck::tool(),
                                 make_current::tool(),
                                 layiso::tool(),
+                                laywalk::tool(),
                             ],
                             row3: vec![
                                 layon::tool(),

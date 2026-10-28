@@ -1,11 +1,12 @@
 //! Shared native graph construction for Block Editor authoring objects.
 pub(crate) mod graph;
 pub(crate) mod edit;
+pub(crate) mod metadata;
 use codec::objects::{
     BlockEvalExpression, BlockEvalValue, DynamicBlockData, DynamicBlockObject, ObjectType,
 };
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 pub(super) const MAJOR: i32 = 33;
 pub(super) const MINOR: i32 = 329;
@@ -22,10 +23,81 @@ pub(super) struct Slots {
     pub edge: i32,
 }
 
+type PublishedOwners = Vec<(usize, usize, std::sync::Arc<rustc_hash::FxHashSet<Handle>>)>;
+
+/// Documents whose dictionary owners are published: (address, guards, owners).
+static PUBLISHED: std::sync::RwLock<PublishedOwners> = std::sync::RwLock::new(Vec::new());
+
+/// The owners of every dictionary in a document, published for as long as
+/// this guard borrows it, so nothing can change them meanwhile.
+///
+/// Resolving a block's extension dictionary scans every object when the block
+/// has none (most blocks), and every INSERT placement asks for its block's
+/// base point: a drawing with half a million entities spent minutes there
+/// (#2023). Batch walks publish the owners once; [`definition_dictionary`]
+/// then answers "none" for an unowned block straight away, on any thread.
+pub(crate) struct DictionaryOwners<'a> {
+    address: usize,
+    _document: std::marker::PhantomData<&'a Document>,
+}
+
+impl<'a> DictionaryOwners<'a> {
+    pub(crate) fn publish(document: &'a Document) -> Self {
+        let address = document as *const Document as usize;
+        let mut published = PUBLISHED.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = published.iter_mut().find(|entry| entry.0 == address) {
+            entry.1 += 1;
+        } else {
+            let owners = document
+                .objects
+                .values()
+                .filter_map(|object| match object {
+                    ObjectType::Dictionary(dictionary) => Some(dictionary.owner),
+                    _ => None,
+                })
+                .collect();
+            published.push((address, 1, std::sync::Arc::new(owners)));
+        }
+        Self {
+            address,
+            _document: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for DictionaryOwners<'_> {
+    fn drop(&mut self) {
+        let mut published = PUBLISHED.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = published.iter().position(|entry| entry.0 == self.address) {
+            published[at].1 -= 1;
+            if published[at].1 == 0 {
+                published.swap_remove(at);
+            }
+        }
+    }
+}
+
+/// A block definition's extension dictionary. Skips the whole-document scan
+/// [`Document::extension_dictionary_handle`] falls back to when the
+/// document's dictionary owners are published and none is `definition`.
+pub(crate) fn definition_dictionary(document: &Document, definition: Handle) -> Option<Handle> {
+    let address = document as *const Document as usize;
+    let unowned = PUBLISHED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|entry| entry.0 == address)
+        .is_some_and(|entry| !entry.2.contains(&definition));
+    if unowned {
+        return None;
+    }
+    document.extension_dictionary_handle(definition)
+}
+
 /// Resolve a graph without touching it. Reject malformed/opaque relationships
 /// before opening a history transaction or allocating any new native objects.
 pub(super) fn graph(
-    document: &CadDocument,
+    document: &Document,
     definition: Handle,
 ) -> Result<Option<Handle>, &'static str> {
     if !document
@@ -35,7 +107,7 @@ pub(super) fn graph(
     {
         return Err("The block definition is no longer available.");
     }
-    let Some(dictionary) = document.extension_dictionary_handle(definition) else {
+    let Some(dictionary) = definition_dictionary(document, definition) else {
         return Ok(None);
     };
     let Some(ObjectType::Dictionary(record)) = document.objects.get(&dictionary) else {
@@ -110,7 +182,7 @@ fn slots(graph: Option<&codec::objects::BlockEvaluationGraph>) -> Result<Slots, 
 /// Prepare an existing graph for appending, or create the native graph and
 /// definition metadata once. Existing nodes, edges, GUIDs and relationships stay.
 pub(super) fn prepare(
-    document: &mut CadDocument,
+    document: &mut Document,
     definition: Handle,
 ) -> Result<(Handle, Slots), &'static str> {
     if let Some(handle) = graph(document, definition)? {
@@ -187,7 +259,7 @@ pub(super) fn prepare(
 
 /// Preflight the larger subgraph needed by parameters with state expressions.
 pub(super) fn capacity(
-    document: &CadDocument,
+    document: &Document,
     definition: Handle,
     nodes: i32,
     edges: i32,
@@ -213,7 +285,7 @@ pub(super) fn capacity(
 /// parameters and two-point parameters configured with one end grip.
 /// Graph node IDs, expression IDs and edge IDs are separate namespaces.
 pub(super) fn append(
-    document: &mut CadDocument,
+    document: &mut Document,
     handle: Handle,
     slots: Slots,
     expressions: [Handle; 4],
@@ -223,7 +295,7 @@ pub(super) fn append(
 
 /// Basepoint parameters and action objects can be standalone expressions.
 pub(super) fn append_single(
-    document: &mut CadDocument,
+    document: &mut Document,
     handle: Handle,
     slots: Slots,
     expression: Handle,
@@ -249,7 +321,7 @@ pub(super) fn append_single(
 /// Append a parameter and grip, followed by its location/state expressions.
 /// `components` gives the expression offsets in native dependency order.
 pub(super) fn append_components(
-    document: &mut CadDocument,
+    document: &mut Document,
     handle: Handle,
     slots: Slots,
     expressions: &[Handle],
@@ -312,7 +384,7 @@ pub(super) fn append_components(
     graph.first_node_id_copy = graph.first_node_id;
 }
 
-pub(super) fn register_classes(document: &mut CadDocument, classes: &[(&str, &str, i32)]) {
+pub(super) fn register_classes(document: &mut Document, classes: &[(&str, &str, i32)]) {
     for &(dxf_name, cpp_class_name, maintenance_version) in classes {
         if let Some(existing) = document.classes.get_mut_by_name(dxf_name) {
             existing.proxy_flags = codec::classes::ProxyFlags(1153);
@@ -338,7 +410,7 @@ pub(super) fn register_classes(document: &mut CadDocument, classes: &[(&str, &st
     }
 }
 
-pub(super) fn ensure_app_id(document: &mut CadDocument, name: &str) {
+pub(super) fn ensure_app_id(document: &mut Document, name: &str) {
     if !document.app_ids.contains(name) {
         let mut app = codec::tables::AppId::new(name);
         app.handle = document.allocate_handle();
@@ -375,7 +447,51 @@ pub(super) fn dynamic(
     object
 }
 
-pub(crate) fn members(document: &CadDocument, definition: Handle) -> Vec<Handle> {
+/// `definition`'s object graph, for a copy of the definition to carry. A
+/// draw-order table or associative network beside a dynamic block's graph
+/// holds objects the export cannot move, and one of them used to drop the
+/// whole graph, parameters and actions included; leave those two behind
+/// instead.
+pub(crate) fn export_graph(
+    document: &Document,
+    definition: Handle,
+) -> Option<codec::BlockGraph> {
+    if let Some(graph) = document.export_block_graph(definition) {
+        return Some(graph);
+    }
+    let root = document.extension_dictionary_handle(definition)?;
+    let Some(ObjectType::Dictionary(dictionary)) = document.objects.get(&root) else {
+        return None;
+    };
+    if !dictionary.entries.iter().any(|(key, _)| key == "ACAD_ENHANCEDBLOCK") {
+        return None;
+    }
+    let left = |key: &str| matches!(key, "ACAD_SORTENTS" | "ACAD_ASSOCNETWORK");
+    let dropped: Vec<Handle> = dictionary
+        .entries
+        .iter()
+        .filter(|(key, _)| left(key))
+        .map(|(_, handle)| *handle)
+        .collect();
+    // Other graph objects may still name them (reactors), so drop the
+    // objects themselves, not just their entries.
+    let gone: Vec<Handle> = document
+        .objects
+        .keys()
+        .copied()
+        .filter(|handle| dropped.iter().any(|top| document.owner_chain_reaches(*handle, *top)))
+        .collect();
+    let mut document = document.clone();
+    for handle in gone {
+        document.objects.remove(&handle);
+    }
+    if let Some(ObjectType::Dictionary(dictionary)) = document.objects.get_mut(&root) {
+        dictionary.entries.retain(|(key, _)| !left(key));
+    }
+    document.export_block_graph(definition)
+}
+
+pub(crate) fn members(document: &Document, definition: Handle) -> Vec<Handle> {
     document
         .block_records
         .iter()
@@ -418,7 +534,7 @@ pub(super) fn element_id(entity: &EntityType) -> Option<i32> {
 }
 
 pub(super) fn set_entity_tag(
-    document: &mut CadDocument,
+    document: &mut Document,
     handle: Handle,
     record: ExtendedDataRecord,
 ) {
@@ -438,7 +554,7 @@ pub(super) fn set_entity_tag(
 
 /// Point each tagged member's element tag back at the member itself, after
 /// the definition was copied onto new handles.
-pub(crate) fn retag_members(document: &mut CadDocument, definition: Handle) {
+pub(crate) fn retag_members(document: &mut Document, definition: Handle) {
     for handle in members(document, definition) {
         if let Some(id) = document.get_entity(handle).and_then(element_id) {
             let tagged = document.get_entity(handle).is_some_and(|entity| {
@@ -461,9 +577,23 @@ pub(crate) fn retag_members(document: &mut CadDocument, definition: Handle) {
     }
 }
 
+/// A copied definition owns its identity even when its evaluation IDs are retained.
+pub(crate) fn refresh_copied_identity(document: &mut Document, definition: Handle, name: &str) {
+    if !matches!(graph(document, definition), Ok(Some(_))) {
+        return;
+    }
+    let mut true_name = ExtendedDataRecord::new(TRUE_NAME);
+    true_name.add_value(XDataValue::String(name.to_owned()));
+    document.set_object_xdata_record(definition, true_name);
+    let mut guid = ExtendedDataRecord::new(GUID);
+    guid.add_value(XDataValue::String(new_guid()));
+    document.set_object_xdata_record(definition, guid);
+    retag_members(document, definition);
+}
+
 /// Give every object of the definition its element tag, numbering the new
 /// ones after the highest id in use, and record the next id on the block.
-pub(super) fn tag_members(document: &mut CadDocument, definition: Handle) {
+pub(super) fn tag_members(document: &mut Document, definition: Handle) {
     let members = members(document, definition);
     let stored_next = document
         .object_xdata(definition)

@@ -13,7 +13,7 @@ use codec::entities::hatch::BoundaryPathFlags;
 use codec::entities::{BoundaryEdge, BoundaryPath, EntityCommon, Hatch, PolylineEdge};
 use codec::tables::{AppId, Layer};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{CadDocument, Color, EntityType, Handle, Vector2, Vector3};
+use codec::{Document, Color, EntityType, Handle, Vector2, Vector3};
 use kernel::geom2d::signed_area;
 
 use super::{
@@ -321,7 +321,7 @@ pub fn read_zone(handle: Handle, entity: &EntityType) -> Option<ZoneGeom> {
 }
 
 /// Le zone dello spazio modello (non quelle in carta o dentro i blocchi).
-pub fn zones_in(doc: &CadDocument) -> Vec<ZoneGeom> {
+pub fn zones_in(doc: &Document) -> Vec<ZoneGeom> {
     doc.block_records
         .iter()
         .filter(|record| record.is_model_space())
@@ -342,7 +342,7 @@ pub fn restyle(entity: &mut EntityType, zone: &Zone) {
 }
 
 /// Manca uno dei quattro layer `AL-*` o uno dei due APPID?
-pub fn missing_layers(doc: &CadDocument) -> bool {
+pub fn missing_layers(doc: &Document) -> bool {
     LAYERS.iter().any(|(name, _)| !doc.layers.contains(name))
         || APPS.iter().any(|app| !doc.app_ids.contains(app))
 }
@@ -350,7 +350,7 @@ pub fn missing_layers(doc: &CadDocument) -> bool {
 /// Crea i layer `AL-*` e gli APPID che mancano, ognuno con il suo handle
 /// (senza, si perderebbero al salvataggio DWG). Quelli già presenti non si
 /// toccano. Niente undo: lo apre il chiamante.
-pub fn ensure_layers(doc: &mut CadDocument) {
+pub fn ensure_layers(doc: &mut Document) {
     for (name, aci) in LAYERS {
         if doc.layers.contains(name) {
             continue;
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn ensure_layers_creates_once_with_colors() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         assert!(missing_layers(&doc));
         ensure_layers(&mut doc);
         assert!(!missing_layers(&doc));
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn missing_layers_notices_each_piece() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         ensure_layers(&mut doc);
         assert!(!missing_layers(&doc));
         // Manca un solo APPID.
@@ -725,7 +725,7 @@ mod tests {
         no_layer.layers.remove(LAYER_LOCALI_PROGETTO);
         assert!(missing_layers(&no_layer));
         // Un layer già presente (di Mauro) non si tocca.
-        let mut mine = CadDocument::new();
+        let mut mine = Document::new();
         let mut layer = codec::Layer::new(LAYER_NUOVE);
         layer.handle = mine.allocate_handle();
         layer.color = codec::Color::from_index(30);
@@ -738,8 +738,8 @@ mod tests {
         assert!(!missing_layers(&mine));
     }
 
-    fn doc_with(zones: &[(Zone, Vec<Vec<[f64; 2]>>)]) -> (CadDocument, Vec<codec::Handle>) {
-        let mut doc = CadDocument::new();
+    fn doc_with(zones: &[(Zone, Vec<Vec<[f64; 2]>>)]) -> (Document, Vec<codec::Handle>) {
+        let mut doc = Document::new();
         ensure_layers(&mut doc);
         let handles = zones
             .iter()

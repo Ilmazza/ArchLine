@@ -27,6 +27,12 @@ pub(super) fn setvar_listing() -> String {
     format!("SETVAR (hatch): {}", HATCH_SYSVARS.join(" "))
 }
 
+/// Mirror the app's persisted `hatch_gap_tolerance` (the one HATCH's `Gap`
+/// option and `SETVAR` change) for the code that has no `App` at hand.
+pub(crate) fn set_gap_tolerance(gap: f64) {
+    HPGAPTOL.with(|c| c.set(gap));
+}
+
 /// The gap tolerance HATCH and GRADIENT build their boundaries with.
 pub(crate) fn gap_tolerance() -> f64 {
     let gap = HPGAPTOL.with(Cell::get);
@@ -45,7 +51,9 @@ impl OpenCADStudio {
             Some(v) => {
                 match v.replace(',', ".").parse::<f64>().ok().filter(|g| (0.0..=MAX_GAP).contains(g)) {
                     Some(gap) => {
-                        HPGAPTOL.with(|c| c.set(gap));
+                        set_gap_tolerance(gap);
+                        self.hatch_gap_tolerance = gap;
+                        self.persist_settings_if_changed();
                         self.command_line.push_output(&format!("{name} = {gap}"));
                     }
                     None => self.command_line.push_error(
@@ -54,7 +62,7 @@ impl OpenCADStudio {
                 }
             }
             None => {
-                let current = HPGAPTOL.with(Cell::get);
+                let current = self.hatch_gap_tolerance;
                 self.command_line.push_output(
                     crate::tf!("Enter new value for {name} <{current}>:").as_ref(),
                 );

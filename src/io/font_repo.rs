@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::CadDocument;
+use codec::Document;
 
 /// The community folder's GitHub contents API (lists name + download URL).
 #[cfg(not(target_arch = "wasm32"))]
@@ -88,7 +88,7 @@ pub struct RepoFont {
 /// Referenced-but-unresolvable `.shx` font files across the document's text
 /// styles. Names are deduplicated case-insensitively and reduced to the bare
 /// file name (`C:\Fonts\VNArial.shx` → `VNArial.shx`).
-pub fn missing_shx_fonts(doc: &CadDocument) -> Vec<String> {
+pub fn missing_shx_fonts(doc: &Document) -> Vec<String> {
     let mut missing: Vec<String> = Vec::new();
     let base = doc
         .source_path
@@ -99,9 +99,13 @@ pub fn missing_shx_fonts(doc: &CadDocument) -> Vec<String> {
         // The primary font and the big font (Asian double-byte glyphs) are
         // both plain .shx files the style depends on.
         for file in [style.font_file.trim(), style.big_font_file.trim()] {
+            // A font with a built-in stroke equivalent (romans, simplex, txt...)
+            // already draws as it should; only one that would fall back to an
+            // unrelated face is worth a download.
             if file.is_empty()
                 || !file.to_ascii_lowercase().ends_with(".shx")
                 || crate::io::linetypes::is_bundled_shape_file(file)
+                || crate::scene::text::lff::is_builtin(file)
             {
                 continue;
             }
@@ -317,7 +321,7 @@ mod tests {
         let dir = std::env::temp_dir().join("ocs_font_repo_tests");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("exists.shx"), b"stub").unwrap();
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mk = |name: &str, file: &str| {
             let mut style = codec::TextStyle::new(name);
             style.font_file = file.into();
@@ -327,6 +331,9 @@ mod tests {
         let _ = doc.text_styles.add(mk("B", "missing1.SHX"));
         let _ = doc.text_styles.add(mk("C", "exists.shx"));
         doc.source_path = Some(dir.join("drawing.dwg").to_string_lossy().into_owned());
+        // Fonts with a built-in stroke equivalent are not missing (#2156).
+        let _ = doc.text_styles.add(mk("D", "romans.shx"));
+        let _ = doc.text_styles.add(mk("E", "SIMPLEX.SHX"));
         let missing = missing_shx_fonts(&doc);
         assert_eq!(missing, vec!["MISSING1.shx".to_string()]);
         let _ = std::fs::remove_file(dir.join("exists.shx"));

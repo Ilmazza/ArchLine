@@ -6,13 +6,13 @@
 
 use crate::app::{Message, OpenCADStudio};
 use crate::command::{CadCommand, CmdResult};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use glam::DVec3;
 use iced::Task;
 use std::path::{Path, PathBuf};
 
 /// Writes the table `handle` to `path`.
-pub(crate) fn export_table(doc: &CadDocument, handle: Handle, path: &Path) -> Result<(), String> {
+pub(crate) fn export_table(doc: &Document, handle: Handle, path: &Path) -> Result<(), String> {
     let Some(EntityType::Table(table)) = doc.get_entity(handle) else {
         return Err(crate::t!("TABLEEXPORT: the object is not a table.").into_owned());
     };

@@ -400,6 +400,16 @@ fn cap_scale(face: &ttf_parser::Face) -> f32 {
     CAP_UNITS / cap
 }
 
+/// The face's descender depth over its cap height (see [`cap_scale`]).
+pub fn descent_ratio(family: &str) -> Option<f32> {
+    sysfont::with_face_data(family, |data, index| {
+        let face = ttf_parser::Face::parse(data, index).ok()?;
+        let depth = (face.descender() as f32).abs() * cap_scale(&face) / CAP_UNITS;
+        (depth > 0.0).then_some(depth)
+    })
+    .flatten()
+}
+
 fn triangulate_contours(contours: &[Vec<[f32; 2]>]) -> Vec<[f32; 2]> {
     if contours.is_empty() {
         return Vec::new();
@@ -1008,10 +1018,22 @@ fn build_shaped(family: &str, text: &str) -> Option<ShapedRun> {
     .flatten();
 
     let mut fs = font_system().lock().unwrap();
-    let attrs = if family.is_empty() {
+    // A styled family shapes with the bold / italic face it names.
+    let (name, bold, italic) = sysfont::split_style(family);
+    let attrs = if name.is_empty() {
         Attrs::new()
     } else {
-        Attrs::new().family(Family::Name(family))
+        Attrs::new().family(Family::Name(name))
+    };
+    let attrs = if bold {
+        attrs.weight(cosmic_text::Weight::BOLD)
+    } else {
+        attrs
+    };
+    let attrs = if italic {
+        attrs.style(cosmic_text::Style::Italic)
+    } else {
+        attrs
     };
     let mut buf = Buffer::new(&mut fs, Metrics::new(SHAPE_FS, SHAPE_FS));
     // No wrapping: a run is a single line.

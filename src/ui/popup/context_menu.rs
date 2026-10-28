@@ -431,6 +431,8 @@ pub enum MenuContext {
     /// Nothing running.
     Idle {
         has_selection: bool,
+        /// Exactly one hatch is selected: its edit row is offered.
+        single_hatch: bool,
         selected_constraint: Option<ConstraintId>,
         isolation_active: bool,
         /// Recently run commands, newest first.
@@ -454,6 +456,7 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
         } => command_rows(options, *has_point_step, recent_inputs, open_submenu),
         MenuContext::Idle {
             has_selection,
+            single_hatch,
             selected_constraint,
             isolation_active,
             recent_cmds,
@@ -463,6 +466,7 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
             props_open,
         } => idle_rows(
             *has_selection,
+            *single_hatch,
             *selected_constraint,
             *isolation_active,
             recent_cmds,
@@ -570,7 +574,7 @@ fn recent_input_submenu(items: Vec<MenuItem>, open_submenu: Option<SubmenuId>) -
 }
 
 /// Snap Overrides ▸: one-shot object snaps for the next pick, in the
-/// grouping (M2P, then the edge snaps, the curve snaps, the relation snaps,
+/// grouping (M2P / FROM, then the edge snaps, the curve snaps, the relation snaps,
 /// None) plus the settings dialog.
 fn snap_override_items(open_submenu: Option<SubmenuId>) -> Vec<MenuItem> {
     let snap = |label: &str, t: SnapType| {
@@ -655,6 +659,7 @@ fn navigation_rows(transparent: bool) -> Vec<MenuRow> {
 #[allow(clippy::too_many_arguments)]
 fn idle_rows(
     has_selection: bool,
+    single_hatch: bool,
     selected_constraint: Option<ConstraintId>,
     isolation_active: bool,
     recent_cmds: &[String],
@@ -738,6 +743,14 @@ fn idle_rows(
 
     // ── Selection edit block (the "Edit" shortcut menu of commercial solutions) ──
     if has_selection {
+        // An object-specific edit leads the block, as commercial solutions
+        // list "Hatch Edit..." first for a selected hatch.
+        if single_hatch {
+            rows.push(MenuRow::Item(cmd(
+                t!("Edit Hatch").into_owned(),
+                "HATCHEDIT",
+            )));
+        }
         rows.push(MenuRow::Item(
             MenuItem::new(t!("Erase").into_owned(), MenuAction::DeleteSelected)
                 .command_icon("ERASE"),
@@ -1143,6 +1156,7 @@ mod tests {
     fn idle_ctx(has_selection: bool) -> MenuContext {
         MenuContext::Idle {
             has_selection,
+            single_hatch: false,
             selected_constraint: None,
             isolation_active: false,
             recent_cmds: vec!["LINE".into(), "CIRCLE".into()],
@@ -1165,6 +1179,28 @@ mod tests {
         assert!(acts.contains(&MenuAction::Options));
         assert!(!acts.contains(&MenuAction::DeleteSelected));
         assert!(!acts.contains(&MenuAction::DeselectAll));
+    }
+
+    #[test]
+    fn a_single_selected_hatch_offers_edit_hatch_first() {
+        let mut ctx = idle_ctx(true);
+        let MenuContext::Idle { single_hatch, .. } = &mut ctx else {
+            unreachable!()
+        };
+        *single_hatch = true;
+        let acts = actions(&build_context_menu(&ctx, None));
+        let edit = acts
+            .iter()
+            .position(|a| *a == MenuAction::Command("HATCHEDIT".into()))
+            .expect("Edit Hatch offered");
+        let erase = acts
+            .iter()
+            .position(|a| *a == MenuAction::DeleteSelected)
+            .unwrap();
+        assert!(edit < erase, "Edit Hatch leads the selection block");
+
+        let other = actions(&build_context_menu(&idle_ctx(true), None));
+        assert!(!other.contains(&MenuAction::Command("HATCHEDIT".into())));
     }
 
     #[test]

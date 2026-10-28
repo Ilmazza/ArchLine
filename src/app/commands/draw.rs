@@ -748,7 +748,7 @@ impl OpenCADStudio {
 
             "HATCH" | "-HATCH" => {
                 use crate::modules::draw::draw::hatch::HatchCommand;
-                let (plane, boundary_sources, outlines) = self.hatch_boundary_context(i);
+                let (plane, boundary_sources, _) = self.hatch_boundary_context(i);
                 let selected = self.tabs[i]
                     .scene
                     .selected_entities()
@@ -761,7 +761,7 @@ impl OpenCADStudio {
                     Some((model, common.color.clone(), common.transparency))
                 });
                 let new_cmd =
-                    HatchCommand::new(outlines, boundary_sources, selected, inherited, plane)
+                    HatchCommand::new(boundary_sources, selected, inherited, plane)
                         .with_gap_tolerance(super::hatchvars::gap_tolerance())
                         .with_origin(self.tabs[i].scene.document.hatch_origin())
                         .with_associative(self.hatch_associative);
@@ -833,13 +833,14 @@ impl OpenCADStudio {
 
             "GRADIENT" | "-GRADIENT" => {
                 use crate::modules::draw::draw::hatch::GradientCommand;
-                let boundary_sources = self.tabs[i]
+                let plane = crate::command::WorkingPlane::default();
+                let mut boundary_sources =
+                    self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
+                self.tabs[i]
                     .scene
-                    .boundary_sources_on_plane(crate::command::WorkingPlane::default(), 1.0e-6);
-                let gap = super::hatchvars::gap_tolerance();
-                let outlines = crate::scene::boundary_faces(&boundary_sources, gap);
-                let new_cmd =
-                    GradientCommand::new(outlines, boundary_sources).with_gap_tolerance(gap);
+                    .retain_sources_on_screen(&mut boundary_sources, plane);
+                let new_cmd = GradientCommand::new(boundary_sources)
+                    .with_gap_tolerance(super::hatchvars::gap_tolerance());
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
@@ -851,20 +852,24 @@ impl OpenCADStudio {
                 } else {
                     crate::command::WorkingPlane::default()
                 };
-                let sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
+                let mut sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
+                self.tabs[i].scene.retain_sources_on_screen(&mut sources, plane);
                 let selected = self.tabs[i]
                     .scene
                     .selected_entities()
                     .iter()
                     .map(|(handle, _)| *handle)
                     .collect();
-                let new_cmd = BoundaryCommand::new(sources, selected, plane);
+                let new_cmd =
+                    BoundaryCommand::new(sources, selected, plane, self.hatch_gap_tolerance);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
             "ELLIPSE" => {
                 use crate::modules::draw::draw::ellipse::EllipseCommand;
+                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
@@ -872,6 +877,8 @@ impl OpenCADStudio {
 
             "ELLIPSE_AXIS" => {
                 use crate::modules::draw::draw::ellipse::EllipseAxisCommand;
+                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseAxisCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
@@ -879,6 +886,8 @@ impl OpenCADStudio {
 
             "ELLIPSE_ARC" => {
                 use crate::modules::draw::draw::ellipse::EllipseArcCommand;
+                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseArcCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
@@ -940,6 +949,12 @@ impl OpenCADStudio {
             }
 
             "ERASE" => {
+                // A selected Block Editor parameter/action erases like Delete.
+                if self.tabs[i].selected_authoring.is_some()
+                    && self.tabs[i].scene.selected.is_empty()
+                {
+                    return Some(self.update(Message::DeleteSelected));
+                }
                 let handles: Vec<_> = self.tabs[i]
                     .scene
                     .selected_entities()
@@ -1016,6 +1031,45 @@ impl OpenCADStudio {
                 }
             }
 
+            "DCDISPLAY" => {
+                use crate::command::ValuePromptCommand;
+                use crate::modules::draw::select::SelectObjectsCommand;
+                if self.tabs[i].scene.selected_handles_in_order().is_empty() {
+                    let sel = SelectObjectsCommand::new(cmd);
+                    self.command_line.push_info(&sel.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(sel));
+                } else {
+                    let c = ValuePromptCommand::new(
+                        "DCDISPLAY",
+                        "DCDISPLAY  Enter an option [Show/Hide] <Show>:",
+                    );
+                    self.command_line.push_info(&c.prompt());
+                    self.tabs[i].active_cmd = Some(Box::new(c));
+                }
+            }
+
+            cmd if cmd.starts_with("DCDISPLAY ") => {
+                let visible = match cmd["DCDISPLAY ".len()..].trim().to_ascii_uppercase().as_str() {
+                    "" | "S" | "SHOW" => true,
+                    "H" | "HIDE" => false,
+                    _ => {
+                        self.command_line
+                            .push_error(crate::t!("Usage: DCDISPLAY [Show|Hide]").as_ref());
+                        return Some(self.finish_dispatch(cmd));
+                    }
+                };
+                let handles = self.tabs[i].scene.selected_handles_in_order();
+                let scope = self.tabs[i].current_parametric_scope();
+                let count = self.tabs[i].scene.set_parametric_constraint_visibility(
+                    scope,
+                    Some(&handles),
+                    true,
+                    visible,
+                );
+                self.command_line
+                    .push_output(crate::tf!("{} constraint indicator(s) updated.", count).as_ref());
+            }
+
             "GCRESET" => {
                 let scope = self.tabs[i].current_parametric_scope();
                 let count = self.tabs[i]
@@ -1053,7 +1107,7 @@ impl OpenCADStudio {
                     visible,
                 );
                 self.command_line
-                    .push_output(format!("{} constraint indicator(s) updated.", count).as_str());
+                    .push_output(crate::tf!("{} constraint indicator(s) updated.", count).as_ref());
             }
 
             "DELCONSTRAINT" => {
@@ -2711,7 +2765,11 @@ impl OpenCADStudio {
                 } else {
                     height
                 };
-                let new_cmd = MTextCommand::with_defaults(height, style);
+                let annotative = crate::scene::annotative::text_style_is_annotative(
+                    &self.tabs[i].scene.document,
+                    &style,
+                );
+                let new_cmd = MTextCommand::with_defaults(height, style).with_annotative(annotative);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }

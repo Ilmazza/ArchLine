@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "OpenCADStudio"
-version = "2026.42.0"
+version = "2026.43.0"
 dependencies = [
- "acadrust",
+ "aes",
  "allsorts",
  "ashpd",
  "base64",
@@ -40,6 +40,7 @@ dependencies = [
  "libloading",
  "log",
  "lyon_tessellation",
+ "md-5",
  "meshopt",
  "naga 27.0.3",
  "objc2 0.5.2",
@@ -48,6 +49,7 @@ dependencies = [
  "ocs_plugin_api",
  "ocs_save",
  "open",
+ "opencaddocument",
  "opencadgraph",
  "opencadkernel",
  "opencadkernel-constraints",
@@ -95,8 +97,8 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "acadrust"
-version = "0.6.4"
-source = "git+https://github.com/HakanSeven12/opencadcodec.git?rev=0dcd5aa#0dcd5aa8639d4aaea983c9f96f7c2cf6396cf7cc"
+version = "0.6.6"
+source = "git+https://github.com/HakanSeven12/acadrust.git?rev=501b694#501b694eee3433b157e56a32da4268dc8b3b5bd3"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",
@@ -106,6 +108,7 @@ dependencies = [
  "foldhash 0.2.0",
  "indexmap",
  "itoa",
+ "memchr",
  "memmap2",
  "nom 7.1.3",
  "oem_cp",
@@ -1994,6 +1997,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fpmath"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f617488244e3bd5aa86da93efaf4072579a301832ca5a9c7e3493563b509a43d"
+
+[[package]]
 name = "fraction"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2929,6 +2938,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ifccad"
+version = "0.1.0"
+source = "git+https://github.com/OpenAEC-Foundation/ifccad.git?rev=14e6562#14e656204498864f3846406a8002aed296a123d5"
+dependencies = [
+ "base64",
+ "fpmath",
+ "jsonschema",
+ "minicbor",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3620,6 +3646,12 @@ dependencies = [
  "mime",
  "unicase",
 ]
+
+[[package]]
+name = "minicbor"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c12b4033ffaa92fbf9df03df38d19324f52bad130dd223f811734a8006dd2d69"
 
 [[package]]
 name = "minimal-lexical"
@@ -4333,13 +4365,13 @@ dependencies = [
 name = "ocs_plugin_api"
 version = "0.2.1"
 dependencies = [
- "acadrust",
  "bincode",
  "cargo-lock",
  "getrandom 0.2.17",
  "interprocess",
  "libloading",
  "memmap2",
+ "opencaddocument",
  "rkyv",
  "serde",
  "serde-reflection",
@@ -4352,8 +4384,8 @@ dependencies = [
 name = "ocs_save"
 version = "0.1.0"
 dependencies = [
- "acadrust",
  "bincode",
+ "opencaddocument",
  "serde",
 ]
 
@@ -4361,12 +4393,12 @@ dependencies = [
 name = "ocs_web_worker"
 version = "0.1.0"
 dependencies = [
- "acadrust",
  "bincode",
  "console_error_panic_hook",
  "getrandom 0.3.4",
  "js-sys",
  "ocs_save",
+ "opencaddocument",
  "serde",
  "sha2 0.10.9",
  "wasm-bindgen",
@@ -4404,9 +4436,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencaddocument"
+version = "0.1.0"
+source = "git+https://github.com/HakanSeven12/opencaddocument.git?rev=8a31478#8a31478370c1b877c7bcb42c5298d033354ad4e4"
+dependencies = [
+ "acadrust",
+ "ifccad",
+ "serde",
+ "web-time",
+]
+
+[[package]]
 name = "opencadgraph"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/opencadgraph.git?rev=3e9a466#3e9a466ebc2d237125057ca731ce007520425ddd"
+source = "git+https://github.com/HakanSeven12/opencadgraph.git?rev=0ce5f19#0ce5f19fad778e390bbb4674118afbd653e54565"
 dependencies = [
  "opencadkernel",
  "serde_json",
@@ -4415,7 +4458,7 @@ dependencies = [
 [[package]]
 name = "opencadkernel"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/opencadkernel.git?rev=0c0c9cc#0c0c9cc479f66ee9a4c7e4422bad801f666c501e"
+source = "git+https://github.com/HakanSeven12/opencadkernel.git?rev=0416237#0416237915e3e68b58a6a37bb1952d828dd9eaf4"
 dependencies = [
  "acadrust",
  "cavalier_contours",
@@ -4426,7 +4469,7 @@ dependencies = [
 [[package]]
 name = "opencadkernel-constraints"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/opencadkernel.git?rev=0c0c9cc#0c0c9cc479f66ee9a4c7e4422bad801f666c501e"
+source = "git+https://github.com/HakanSeven12/opencadkernel.git?rev=0416237#0416237915e3e68b58a6a37bb1952d828dd9eaf4"
 dependencies = [
  "nalgebra",
 ]

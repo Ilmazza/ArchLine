@@ -108,11 +108,22 @@ fn run_v4(
     client: V4Client,
     api_version: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // API v13: the ChannelReady attach ack is sent AFTER the first fully
+    // served request — at that point the manifest handshake is complete on
+    // the host side GetManifest is the first request served, so the host has
+    // pinned this process's real manifest id and the reader-thread ack
+    // attaches under the right name. A pre-handshake ack would arrive while
+    // the host still addresses the process by its empty placeholder id and
+    // be ignored.
+    let mut boot_acked = false;
     loop {
         // Drain any host notifications and dispatch them to the plugin's
         // state-only callback. Panics are caught so a bad callback does not
         // tear down the connection.
         while let Some((command_id, notification)) = client.try_recv_notification() {
+            if notification_api_version(&notification) > api_version {
+                continue;
+            }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 plugin.on_notification(command_id, notification)
             }));
@@ -129,6 +140,16 @@ fn run_v4(
                     payload,
                 ) {
                     client.send_response(id, resp)?;
+                    // API v13: the notification subscription is verifiably
+                    // live — a request has been fully served, so the loop is
+                    // draining and the host knows this process's id. The host
+                    // defers a process's boot-window broadcasts until this
+                    // ack (and flushes them then): a fresh boot's
+                    // notifications can never race the runner's startup.
+                    if !boot_acked {
+                        boot_acked = true;
+                        client.notify_plugin(None, crate::host::PluginNotification::ChannelReady);
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -136,6 +157,22 @@ fn run_v4(
         }
     }
     Ok(())
+}
+
+/// The API version that added a notification variant. A cdylib built against
+/// an older API has no such variant in its enum, so handing it one would be
+/// undefined behaviour; the runner drops it instead.
+fn notification_api_version(notification: &crate::host::HostNotification) -> u32 {
+    use crate::host::HostNotification as N;
+    match notification {
+        N::DocumentChangedRegions { .. } => 13,
+        N::DocumentOpened { .. } => 9,
+        N::CommandStateChanged { .. } | N::DrawingChanged { .. } => 7,
+        N::DocumentChangedV4 { .. }
+        | N::DocumentTabClosed { .. }
+        | N::SelectionChangedV4 { .. } => 4,
+        _ => 0,
+    }
 }
 
 fn handle_host_request(
@@ -194,7 +231,11 @@ fn handle_host_request(
                     InteractiveEvent::ObjectPick { handle, pt } => {
                         cmd_ref.on_object_pick(handle, pt)
                     }
+                    InteractiveEvent::SelectionComplete(handles) => {
+                        cmd_ref.on_selection_complete(handles)
+                    }
                     InteractiveEvent::Cancel => CommandStep::Cancel,
+                    InteractiveEvent::DialogResponse(res) => cmd_ref.on_dialog_response(res),
                 }));
                 match res {
                     Ok(s) => {
@@ -250,6 +291,51 @@ fn handle_host_request(
                 None => HostResponse::Error(format!("unknown interactive command {command_id}")),
             }
         }
+        HostRequest::IsSelectionGathering { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.is_selection_gathering()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => HostResponse::Bool(b),
+                Some(Err(_)) => HostResponse::Error("is_selection_gathering() panicked".to_string()),
+                None => HostResponse::Error(format!("unknown interactive command {command_id}")),
+            }
+        }
+        HostRequest::AcceptsDragSelection { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.accepts_drag_selection()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => HostResponse::Bool(b),
+                Some(Err(_)) => HostResponse::Error("accepts_drag_selection() panicked".to_string()),
+                None => HostResponse::Error(format!("unknown interactive command {command_id}")),
+            }
+        }
+        HostRequest::SelectionRejectsLockedLayers { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.selection_rejects_locked_layers()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => HostResponse::Bool(b),
+                Some(Err(_)) => HostResponse::Error("selection_rejects_locked_layers() panicked".to_string()),
+                None => HostResponse::Error(format!("unknown interactive command {command_id}")),
+            }
+        }
         HostRequest::CursorMove { command_id, pt } => {
             let result = {
                 let mut registry = interactive.borrow_mut();
@@ -265,8 +351,24 @@ fn handle_host_request(
                 None => HostResponse::PreviewWires(Vec::new()),
             }
         }
+        HostRequest::GetModalDialog { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).and_then(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.modal_dialog()
+                    }))
+                    .ok()
+                    .flatten()
+                })
+            };
+            HostResponse::ModalDialog(result)
+        }
         HostRequest::ExecuteCode { .. } => {
             HostResponse::Error("ExecuteCode requires V4 protocol".to_string())
+        }
+        HostRequest::CustomGripEvent { .. } => {
+            HostResponse::Error("custom grips require the V4 protocol".to_string())
         }
         HostRequest::Shutdown => {
             // Return a positive Ack so the host knows we received the request.
@@ -360,7 +462,11 @@ fn handle_host_request_v4(
                     InteractiveEvent::ObjectPick { handle, pt } => {
                         cmd_ref.on_object_pick(handle, pt)
                     }
+                    InteractiveEvent::SelectionComplete(handles) => {
+                        cmd_ref.on_selection_complete(handles)
+                    }
                     InteractiveEvent::Cancel => CommandStep::Cancel,
+                    InteractiveEvent::DialogResponse(res) => cmd_ref.on_dialog_response(res),
                 }));
                 match res {
                     Ok(s) => {
@@ -424,6 +530,63 @@ fn handle_host_request_v4(
                 ))),
             }
         }
+        HostRequest::IsSelectionGathering { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.is_selection_gathering()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => Some(HostResponse::Bool(b)),
+                Some(Err(_)) => Some(HostResponse::Error(
+                    "is_selection_gathering() panicked".to_string(),
+                )),
+                None => Some(HostResponse::Error(format!(
+                    "unknown interactive command {command_id}"
+                ))),
+            }
+        }
+        HostRequest::AcceptsDragSelection { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.accepts_drag_selection()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => Some(HostResponse::Bool(b)),
+                Some(Err(_)) => Some(HostResponse::Error(
+                    "accepts_drag_selection() panicked".to_string(),
+                )),
+                None => Some(HostResponse::Error(format!(
+                    "unknown interactive command {command_id}"
+                ))),
+            }
+        }
+        HostRequest::SelectionRejectsLockedLayers { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).map(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.selection_rejects_locked_layers()
+                    }))
+                })
+            };
+            match result {
+                Some(Ok(b)) => Some(HostResponse::Bool(b)),
+                Some(Err(_)) => Some(HostResponse::Error(
+                    "selection_rejects_locked_layers() panicked".to_string(),
+                )),
+                None => Some(HostResponse::Error(format!(
+                    "unknown interactive command {command_id}"
+                ))),
+            }
+        }
         HostRequest::CursorMove { command_id, pt } => {
             let result = {
                 let mut registry = interactive.borrow_mut();
@@ -438,6 +601,19 @@ fn handle_host_request_v4(
                 Some(Err(_)) => Some(HostResponse::PreviewWires(Vec::new())),
                 None => Some(HostResponse::PreviewWires(Vec::new())),
             }
+        }
+        HostRequest::GetModalDialog { command_id } => {
+            let result = {
+                let registry = interactive.borrow();
+                registry.get(&command_id).and_then(|cmd| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cmd.modal_dialog()
+                    }))
+                    .ok()
+                    .flatten()
+                })
+            };
+            Some(HostResponse::ModalDialog(result))
         }
         HostRequest::ExecuteCode {
             command_id,
@@ -457,6 +633,35 @@ fn handle_host_request_v4(
                 )),
                 Err(_) => Some(HostResponse::Error(
                     "plugin start_execute_code panicked".to_string(),
+                )),
+            }
+        }
+        HostRequest::CustomGripEvent { tab_index, event } => {
+            // API v11 gate: a cdylib compiled against API v10 or older has a
+            // BuiltinPlugin vtable without this slot — never call it (same
+            // rule as entity_classes). The grip was declared by this plugin,
+            // so the empty response simply keeps its preview as-is.
+            if api_version < 11 {
+                return Some(HostResponse::CustomGrip(Default::default()));
+            }
+            // A full HostApi proxy: the settle phase may write (possibly
+            // nested requests, served inline by the host) inside the
+            // plugin's own undo scope.
+            let mut proxy = client.plugin_host_api(tab_index, interactive.clone());
+            let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.on_custom_grip_event(&mut proxy, event)
+            }));
+            match guarded {
+                Ok(mut resp) => {
+                    // A v11 cdylib's response has no `live_entities` slot:
+                    // what sits there is not a Vec, so never read or drop it.
+                    if api_version < 12 {
+                        std::mem::forget(std::mem::take(&mut resp.live_entities));
+                    }
+                    Some(HostResponse::CustomGrip(resp))
+                }
+                Err(_) => Some(HostResponse::Error(
+                    "plugin on_custom_grip_event panicked".to_string(),
                 )),
             }
         }

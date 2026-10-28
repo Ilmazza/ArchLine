@@ -29,7 +29,7 @@ use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_BUTTON, OVERWRITE_NOTE};
 use codec::entities::{Arc, Line, LwPolyline, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{CadDocument, Color, EntityType, Handle, Vector3};
+use codec::{Document, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -67,7 +67,7 @@ fn undo(app: &mut OpenCADStudio) {
     let _ = app.update(Message::Undo);
 }
 
-fn doc(app: &OpenCADStudio) -> &CadDocument {
+fn doc(app: &OpenCADStudio) -> &Document {
     &app.tabs[app.active_tab].scene.document
 }
 
@@ -2352,7 +2352,9 @@ fn gap_closed_by_hpgaptol() {
     assert_eq!(mtext(&text).value, "A\\PS = 12,00 m²");
     let outline = polyline(&outline);
     assert!(outline.vertices.iter().all(|v| v.bulge == 0.0));
-    assert!((polyline_area(outline) - 12.0).abs() < 1e-3);
+    // Since upstream v2026.43 the ring closes a 2 mm gap by joining the two
+    // ends, so the outline loses the corner triangle (4 mm²).
+    assert!((polyline_area(outline) - 12.0).abs() < 1e-2);
 
     // AL_AGGIORNA lo ritrova uguale e lo ridice.
     forget_history(&mut app);
@@ -2802,7 +2804,7 @@ fn aggiorna_drops_the_note_when_the_gap_closes() {
 // ------------------------------------------------- Locali negli elaborati
 
 /// I testi (`MTEXT`) sul layer `layer` di un documento, in ordine alfabetico.
-fn labels_in(doc: &CadDocument, layer: &str) -> Vec<String> {
+fn labels_in(doc: &Document, layer: &str) -> Vec<String> {
     let mut labels: Vec<String> = doc
         .entities()
         .filter(|e| e.common().layer.eq_ignore_ascii_case(layer))
@@ -2819,7 +2821,7 @@ fn labels_in(doc: &CadDocument, layer: &str) -> Vec<String> {
 /// stesse in numero, e per ognuna una con la stessa chiusura e gli stessi
 /// vertici (entro 1e-6) e bulge.
 #[track_caller]
-fn same_survey_polylines(doc: &CadDocument, survey: &[(Handle, EntityType)], what: &str) {
+fn same_survey_polylines(doc: &Document, survey: &[(Handle, EntityType)], what: &str) {
     let found: Vec<&LwPolyline> = doc
         .entities()
         .filter_map(|e| match e {
@@ -2926,7 +2928,7 @@ fn full_flow_never_touches_the_survey() {
     assert_eq!(undo_steps(&app), steps);
 
     let paths = extracted_paths(tmp.path(), &tab_title(&app));
-    let loaded: Vec<CadDocument> = paths
+    let loaded: Vec<Document> = paths
         .iter()
         .map(|path| {
             assert!(path.is_file(), "{}: storia: {log}", path.display());

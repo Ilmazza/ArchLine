@@ -67,6 +67,10 @@ impl SelectionGesture {
 #[derive(Clone, Default)]
 pub struct SelectionInput {
     pub last_move_pos: Option<Point>,
+    /// The pointer left the viewport (or an overlay above it took the
+    /// pointer). `last_move_pos` is kept for keyboard-driven input, but the
+    /// cursor glyphs are not drawn at that stale spot.
+    pub pointer_away: bool,
     pub left_down: bool,
     pub left_press_pos: Option<Point>,
     pub left_press_time: Option<Instant>,
@@ -84,6 +88,9 @@ pub struct SelectionInput {
     pub middle_down: bool,
     pub middle_last_pos: Option<Point>,
     pub middle_last_press_time: Option<Instant>,
+    /// Where a middle drag that is panning started; Shift pressed during
+    /// that pan locks it to one axis instead of orbiting (#2155).
+    pub middle_pan_from: Option<Point>,
     /// Which way a ZOOM Dynamic drag is currently zooming: `true` while it is
     /// zooming out. Only the magnifier cursor reads it. The sign is latched
     /// rather than taken from the live `dy` so that the sub-pixel jitter of a

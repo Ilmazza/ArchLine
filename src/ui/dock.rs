@@ -44,9 +44,8 @@ pub enum DockMsg {
     SplitGrab(DockSide, usize, usize, usize),
     /// Give every pallet of a group the same height again (side, group).
     SplitReset(DockSide, usize),
-    /// Begin resizing floating `panel` from its corner grip; `true` for the
-    /// bottom-left grip (a panel whose title bar is on the right).
-    FloatResizeGrab(PanelId, bool),
+    /// Begin resizing floating `panel` from one of its sides or corners.
+    FloatResizeGrab(PanelId, FloatEdge),
     /// The pointer entered a docked title bar (shows its pin and close).
     TitleHover(PanelId),
     /// The pointer left that title bar.
@@ -121,11 +120,17 @@ pub enum PanelId {
     SheetSetManager,
     /// The Layer Manager (LAYERS).
     Layers,
+    /// The LAYWALK pallet.
+    Laywalk,
+    /// The calculator (QUICKCALC).
+    QuickCalc,
+    /// Dynamic plugin dockable side panel / palette (identified by unique numeric ID).
+    Plugin(u32),
 }
 
 impl PanelId {
     /// Every panel, in the order the pallet menu lists them.
-    pub const ALL: [PanelId; 11] = [
+    pub const ALL: [PanelId; 13] = [
         PanelId::Properties,
         PanelId::GraphicAttributes,
         PanelId::BlockPalette,
@@ -137,6 +142,8 @@ impl PanelId {
         PanelId::Count,
         PanelId::SheetSetManager,
         PanelId::Layers,
+        PanelId::Laywalk,
+        PanelId::QuickCalc,
     ];
 
     /// Localized-friendly display name used by the collapsed/edge chrome.
@@ -153,6 +160,9 @@ impl PanelId {
             PanelId::Count => "Count",
             PanelId::SheetSetManager => "Sheet Set Manager",
             PanelId::Layers => "Layer Manager",
+            PanelId::Laywalk => "Layer Walk",
+            PanelId::QuickCalc => "QuickCalc",
+            PanelId::Plugin(_) => "Plugin",
         }
     }
 
@@ -172,6 +182,9 @@ impl PanelId {
             PanelId::Count => include_bytes!("../../assets/icons/data_extract.svg"),
             PanelId::SheetSetManager => include_bytes!("../../assets/icons/sheetset.svg"),
             PanelId::Layers => include_bytes!("../../assets/icons/layers/panel.svg"),
+            PanelId::Laywalk => include_bytes!("../../assets/icons/layers/laywalk.svg"),
+            PanelId::QuickCalc => crate::ui::window::quick_calc::ICON,
+            PanelId::Plugin(_) => crate::ui::icons::MORE,
         }
     }
 
@@ -189,6 +202,9 @@ impl PanelId {
             PanelId::Count => 280.0,
             PanelId::SheetSetManager => 280.0,
             PanelId::Layers => 560.0,
+            PanelId::Laywalk => 420.0,
+            PanelId::QuickCalc => 320.0,
+            PanelId::Plugin(_) => 280.0,
         }
     }
 
@@ -350,6 +366,10 @@ pub struct FloatPanel {
     pub h: f32,
     /// Dragging the panel may dock it on an edge; off, it only ever floats.
     pub docking: bool,
+    /// The side its vertical title bar is on. It starts on the side the
+    /// pallet was docked on and only changes when a drag brings the panel
+    /// against an edge (see `dock_float_target`).
+    pub bar: DockSide,
 }
 
 /// On-disk form of a floating panel. A short-lived build floated groups,
@@ -366,6 +386,9 @@ struct FloatRepr {
     h: f32,
     #[serde(default = "docking_default")]
     docking: bool,
+    /// Missing in a config from before the bar kept its side.
+    #[serde(default)]
+    bar: Option<DockSide>,
 }
 
 fn docking_default() -> bool {
@@ -381,13 +404,15 @@ impl TryFrom<FloatRepr> for FloatPanel {
                 .ok_or("floating panel without id")?;
         Ok(Self {
             docking: r.docking,
+            bar: r.bar.unwrap_or(DockSide::Left),
             ..Self::new(id, r.x, r.y, r.w, r.h)
         })
     }
 }
 
 impl FloatPanel {
-    /// Panel `id` floating at `x`, `y`, sized `w` × `h`, free to dock.
+    /// Panel `id` floating at `x`, `y`, sized `w` × `h`, free to dock, with
+    /// its title bar on the left.
     pub fn new(id: PanelId, x: f32, y: f32, w: f32, h: f32) -> Self {
         Self {
             id,
@@ -396,6 +421,7 @@ impl FloatPanel {
             w,
             h,
             docking: true,
+            bar: DockSide::Left,
         }
     }
 
@@ -407,6 +433,48 @@ impl FloatPanel {
         self.y = finite_or(self.y, 0.0).max(0.0);
         self.w = finite_or(self.w, self.id.default_width()).clamp(DOCK_MIN_W, self.id.max_width());
         self.h = finite_or(self.h, FLOAT_MIN_H).max(FLOAT_MIN_H);
+    }
+}
+
+/// The side or corner of a floating panel being dragged to resize it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatEdge {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl FloatEdge {
+    pub const N: Self = Self::new(false, false, true, false);
+    pub const S: Self = Self::new(false, false, false, true);
+    pub const W: Self = Self::new(true, false, false, false);
+    pub const E: Self = Self::new(false, true, false, false);
+    pub const NW: Self = Self::new(true, false, true, false);
+    pub const NE: Self = Self::new(false, true, true, false);
+    pub const SW: Self = Self::new(true, false, false, true);
+    pub const SE: Self = Self::new(false, true, false, true);
+
+    const fn new(left: bool, right: bool, top: bool, bottom: bool) -> Self {
+        Self {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    /// The resize cursor for this side or corner.
+    pub fn interaction(self) -> iced::mouse::Interaction {
+        use iced::mouse::Interaction;
+        let sideways = self.left || self.right;
+        let upright = self.top || self.bottom;
+        match (sideways, upright) {
+            (true, true) if self.left == self.top => Interaction::ResizingDiagonallyDown,
+            (true, true) => Interaction::ResizingDiagonallyUp,
+            (true, false) => Interaction::ResizingHorizontally,
+            _ => Interaction::ResizingVertically,
+        }
     }
 }
 
@@ -813,16 +881,34 @@ impl DockState {
         }
     }
 
-    /// Resize a floating panel, keeping it at least a usable size. With
-    /// `keep_right` the right edge stays put (resizing from the left corner).
-    pub fn resize_float(&mut self, id: PanelId, w: f32, h: f32, keep_right: bool) {
-        if let Some(f) = self.floating.iter_mut().find(|f| f.id == id) {
-            let new_w = w.clamp(DOCK_MIN_W, id.max_width());
-            if keep_right {
-                f.x += f.w - new_w;
-            }
-            f.w = new_w;
-            f.h = h.max(FLOAT_MIN_H);
+    /// Resize floating panel `id` by dragging `edge` (`dx`, `dy`) from where
+    /// it was at `start` (x, y, w, h), keeping it at least a usable size; a
+    /// dragged left or top side moves the panel, never past the workspace's
+    /// left or top, and the opposite side stays put.
+    pub fn resize_float(
+        &mut self,
+        id: PanelId,
+        edge: FloatEdge,
+        start: (f32, f32, f32, f32),
+        dx: f32,
+        dy: f32,
+    ) {
+        let (x0, y0, w0, h0) = start;
+        let Some(f) = self.floating.iter_mut().find(|f| f.id == id) else {
+            return;
+        };
+        let max_w = id.max_width();
+        if edge.left {
+            f.w = (w0 - dx).min(x0 + w0).clamp(DOCK_MIN_W, max_w);
+            f.x = (x0 + w0 - f.w).max(0.0);
+        } else if edge.right {
+            f.w = (w0 + dx).clamp(DOCK_MIN_W, max_w);
+        }
+        if edge.top {
+            f.h = (h0 - dy).min(y0 + h0).max(FLOAT_MIN_H);
+            f.y = (y0 + h0 - f.h).max(0.0);
+        } else if edge.bottom {
+            f.h = (h0 + dy).max(FLOAT_MIN_H);
         }
     }
 
@@ -874,6 +960,9 @@ pub enum DockDrag {
         origin: Option<iced::Point>,
         target: Option<DropTarget>,
         grab: iced::Vector,
+        /// The side a floating landing puts the title bar on (set once the
+        /// drag starts).
+        bar: DockSide,
     },
     /// Sizing the width of docked `panel`'s group.
     Width(PanelId),
@@ -884,9 +973,14 @@ pub enum DockDrag {
         upper: usize,
         lower: usize,
     },
-    /// Sizing floating `panel` from its bottom-left (`from_left`) or
-    /// bottom-right corner.
-    FloatSize { panel: PanelId, from_left: bool },
+    /// Sizing floating `panel` by `edge`, from its place `start` (x, y, w,
+    /// h) when the pointer was first seen at `origin`.
+    FloatSize {
+        panel: PanelId,
+        edge: FloatEdge,
+        start: (f32, f32, f32, f32),
+        origin: Option<iced::Point>,
+    },
     /// Sizing the Layer Manager's Name column.
     LayerColumn,
 }
@@ -900,6 +994,7 @@ impl DockDrag {
             origin: None,
             target: None,
             grab: iced::Vector::new(0.0, 0.0),
+            bar: DockSide::Left,
         }
     }
 
@@ -930,8 +1025,9 @@ pub enum DropTarget {
         group: usize,
         index: usize,
     },
-    /// Floating with its top-left corner at (`x`, `y`).
-    Float { x: f32, y: f32 },
+    /// Floating with its top-left corner at (`x`, `y`) and its title bar on
+    /// `bar`.
+    Float { x: f32, y: f32, bar: DockSide },
 }
 
 /// Split `avail` pixels of height between stacked pallets of `weights`,
@@ -960,7 +1056,7 @@ pub fn portion(weight: f32) -> u16 {
 /// `width` clamped to what fits on screen: at least [`DOCK_MIN_W`], at most
 /// `max` and 45 % of a `win_w` wide window.
 fn on_screen_width(width: f32, max: f32, win_w: f32) -> f32 {
-    width.clamp(DOCK_MIN_W, max.min(win_w * 0.45).max(DOCK_MIN_W))
+    width.clamp(DOCK_MIN_W, max.min(win_w * 0.75).max(DOCK_MIN_W))
 }
 
 /// Smallest docked width a panel may be dragged or sized to.
@@ -971,6 +1067,8 @@ pub const DOCK_MAX_W: f32 = 600.0;
 pub const DOCK_EDGE_ZONE: f32 = 48.0;
 /// Width of the grabbable divider between a docked group and the viewport.
 pub const DOCK_DIVIDER_W: f32 = 5.0;
+/// Width of a floating panel's vertical title bar.
+pub const DOCK_FLOAT_BAR_W: f32 = 28.0;
 /// Width of an edge's vertical icon strip.
 pub const DOCK_STRIP_W: f32 = 40.0;
 /// Height of one pallet icon in the strip.
@@ -1356,10 +1454,10 @@ mod tests {
     fn width_respects_maximum_window_fraction() {
         let mut state = DockState::default();
         state.set_group_width(DockSide::Right, 0, 500.0);
-        // Window too narrow -> capped by the 0.45 fraction, not DOCK_MAX_W.
+        // Window too narrow -> capped by the 0.75 fraction, not DOCK_MAX_W.
         assert_eq!(
-            state.group_width_px(DockSide::Right, 0, 800.0),
-            DOCK_MAX_W.min(360.0)
+            state.group_width_px(DockSide::Right, 0, 600.0),
+            DOCK_MAX_W.min(450.0)
         );
     }
 
@@ -1611,14 +1709,68 @@ mod tests {
     #[test]
     fn float_resize_respects_minimums() {
         let mut state = DockState::default();
-        state.float(FloatPanel::new(PanelId::Count, 0.0, 0.0, 300.0, 300.0));
-        state.resize_float(PanelId::Count, 10.0, 10.0, false);
+        state.float(FloatPanel::new(PanelId::Count, 100.0, 100.0, 300.0, 300.0));
+        let start = (100.0, 100.0, 300.0, 300.0);
+        state.resize_float(PanelId::Count, FloatEdge::SE, start, -290.0, -290.0);
         let f = state.float_rect(PanelId::Count).unwrap();
-        assert_eq!((f.w, f.h), (DOCK_MIN_W, FLOAT_MIN_H));
-        // From the left corner the right edge stays where it was.
-        state.resize_float(PanelId::Count, 350.0, 300.0, true);
+        assert_eq!(
+            (f.x, f.y, f.w, f.h),
+            (100.0, 100.0, DOCK_MIN_W, FLOAT_MIN_H)
+        );
+        // From the left or top side the opposite side stays where it was.
+        state.resize_float(PanelId::Count, FloatEdge::NW, start, -50.0, 40.0);
         let f = state.float_rect(PanelId::Count).unwrap();
-        assert_eq!((f.x, f.w), (DOCK_MIN_W - 350.0, 350.0));
+        assert_eq!((f.x, f.y, f.w, f.h), (50.0, 140.0, 350.0, 260.0));
+        // Shrinking from the left stops at the minimum without moving the
+        // right side.
+        state.resize_float(PanelId::Count, FloatEdge::W, start, 250.0, 0.0);
+        let f = state.float_rect(PanelId::Count).unwrap();
+        assert_eq!((f.x, f.w), (400.0 - DOCK_MIN_W, DOCK_MIN_W));
+        // Growing from the top stops at the workspace's top.
+        state.resize_float(PanelId::Count, FloatEdge::N, start, 0.0, -500.0);
+        let f = state.float_rect(PanelId::Count).unwrap();
+        assert_eq!((f.y, f.h), (0.0, 400.0));
+    }
+
+    #[test]
+    fn float_resize_edge_cursors() {
+        use iced::mouse::Interaction;
+        assert_eq!(FloatEdge::N.interaction(), Interaction::ResizingVertically);
+        assert_eq!(
+            FloatEdge::E.interaction(),
+            Interaction::ResizingHorizontally
+        );
+        assert_eq!(
+            FloatEdge::NW.interaction(),
+            Interaction::ResizingDiagonallyDown
+        );
+        assert_eq!(
+            FloatEdge::SE.interaction(),
+            Interaction::ResizingDiagonallyDown
+        );
+        assert_eq!(
+            FloatEdge::NE.interaction(),
+            Interaction::ResizingDiagonallyUp
+        );
+        assert_eq!(
+            FloatEdge::SW.interaction(),
+            Interaction::ResizingDiagonallyUp
+        );
+    }
+
+    #[test]
+    fn floating_title_bar_side_round_trips_and_defaults_left() {
+        let mut state = DockState::default();
+        state.float(FloatPanel {
+            bar: DockSide::Right,
+            ..FloatPanel::new(PanelId::Count, 1.0, 2.0, 300.0, 400.0)
+        });
+        let json = serde_json::to_string(&state).unwrap();
+        let back: DockState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.floating[0].bar, DockSide::Right);
+        let old = r#"{"floating":[{"id":"count","x":1.0,"y":2.0,"w":300.0,"h":400.0}]}"#;
+        let state: DockState = serde_json::from_str(old).unwrap();
+        assert_eq!(state.floating[0].bar, DockSide::Left);
     }
 
     #[test]

@@ -110,6 +110,12 @@ fn main() -> iced::Result {
             let _ = env_logger::try_init();
         }
 
+        // Unattended script runs need no window, so no GPU either.
+        if let Some(script) = args.batch.as_ref().or(args.each.as_ref()) {
+            let files = if args.each.is_some() { &args.files[..] } else { &[] };
+            std::process::exit(app::run_batch(script, files, args.read_only));
+        }
+
         // GPU backend selection. Explicit `--backend` wins; `--safe-mode`
         // forces GL for flaky drivers. On Windows the preference order starts
         // with DX12/Vulkan so the AMD OpenGL ICD (atio6axx.dll) is never
@@ -129,7 +135,7 @@ fn main() -> iced::Result {
         // Headless modes exit without ever creating a window.
         if let Some(port) = args.http {
             if args.files.is_empty() {
-                rest::serve(port);
+                rest::serve(port, args.read_only);
                 return Ok(());
             }
             // Files + --http: boot the GUI and host the loopback REST channel
@@ -140,7 +146,7 @@ fn main() -> iced::Result {
         }
         if args.serve {
             // `app::serve` reads --port itself from the raw args.
-            app::serve();
+            app::serve(args.read_only);
             return Ok(());
         }
         if let Some(io) = &args.export {

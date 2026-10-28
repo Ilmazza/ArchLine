@@ -19,11 +19,14 @@ use codec::entities::{
     LwPolyline, LwVertex, MText, Point, Polyline3D, Spline, Text, TextHorizontalAlignment,
     TextVerticalAlignment,
 };
+use codec::tables::DimStyle;
 use codec::types::{Color, LineWeight, Vector2, Vector3};
 use codec::EntityType;
 
 use crate::command::{CadCommand, CmdOption, CmdResult, InputKind};
-use crate::scene::model::underlay_vector::{By, DgnElement, DgnGeom, DgnImport, P3};
+use crate::scene::model::underlay_vector::{
+    By, DgnDimLook, DgnDimStyle, DgnElement, DgnGeom, DgnImport, P3,
+};
 
 /// What one import reads and where it goes.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,7 +74,12 @@ pub enum ExistingReference {
 #[derive(Default)]
 pub struct Converted {
     pub layers: Vec<(String, Color)>,
+    /// Layers that come in turned off.
+    pub layers_off: Vec<String>,
     pub styles: Vec<(String, String)>,
+    /// Dimension styles, by name, in the file's table order, with the
+    /// values the file gives them (none: the drawing's style of the name).
+    pub dim_styles: Vec<(String, Option<DimStyle>)>,
     pub blocks: Vec<(String, Vec<EntityType>)>,
     pub entities: Vec<EntityType>,
 }
@@ -211,6 +219,30 @@ fn to_ocs(normal: P3, p: P3) -> Vector3 {
     codec::types::Matrix3::arbitrary_axis(v3(normal)).transpose() * v3(p)
 }
 
+/// The unit normal of the plane the points lie in (Newell's, turned to
+/// +z), `None` when they leave it by more than a millionth of their span.
+/// Points on one line lie in the XY plane's parallel.
+fn plane_normal(points: &[P3]) -> Option<P3> {
+    let mut n = [0.0; 3];
+    for (k, p) in points.iter().enumerate() {
+        let q = points[(k + 1) % points.len()];
+        n[0] += (p[1] - q[1]) * (p[2] + q[2]);
+        n[1] += (p[2] - q[2]) * (p[0] + q[0]);
+        n[2] += (p[0] - q[0]) * (p[1] + q[1]);
+    }
+    let len = norm(n);
+    let span = points.iter().map(|p| norm(sub(*p, points[0]))).fold(0.0, f64::max);
+    if !(len > 1e-12 * span * span) {
+        return flat(points).then_some([0.0, 0.0, 1.0]);
+    }
+    let mut n = [n[0] / len, n[1] / len, n[2] / len];
+    if n[2] < 0.0 || (n[2] == 0.0 && (n[1] < 0.0 || (n[1] == 0.0 && n[0] < 0.0))) {
+        n = [-n[0], -n[1], -n[2]];
+    }
+    let off = |p: &P3| dot(sub(*p, points[0]), n).abs();
+    points.iter().all(|p| off(p) <= 1e-6 * span.max(1e-12)).then_some(n)
+}
+
 /// True when every point is at the first one's z.
 fn flat(points: &[P3]) -> bool {
     let z = points.first().map_or(0.0, |p| p[2]);
@@ -237,6 +269,49 @@ fn polyline(points: &[P3], bulges: &[f64]) -> EntityType {
         })
         .collect();
     EntityType::LwPolyline(pl)
+}
+
+/// A flat outline that winds clockwise seen from +z (by its vertices, the
+/// closing edge included) in its entity coordinates about -z: x and z
+/// negated, the bulges negated. `None` when it winds the other way.
+fn turned_about_minus_z(points: &[P3], bulges: &[f64]) -> Option<(Vec<P3>, Vec<f64>)> {
+    let n = points.len();
+    let area: f64 = (0..n)
+        .map(|k| {
+            let (a, b) = (points[k], points[(k + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    (n >= 2 && flat(points) && area < 0.0).then(|| {
+        (
+            points.iter().map(|p| [-p[0], p[1], -p[2]]).collect(),
+            bulges.iter().map(|b| -b).collect(),
+        )
+    })
+}
+
+/// [`polyline`] and its filling [`solid_hatch`], about -z when `by_winding`
+/// and the outline winds clockwise.
+fn outline(points: &[P3], bulges: &[f64], filled: bool, by_winding: bool) -> Vec<EntityType> {
+    let turned = by_winding.then(|| turned_about_minus_z(points, bulges)).flatten();
+    let (points, bulges) = match &turned {
+        Some((p, b)) => (p.as_slice(), b.as_slice()),
+        None => (points, bulges),
+    };
+    let mut out = vec![polyline(points, bulges)];
+    if filled {
+        out.extend(solid_hatch(points, bulges));
+    }
+    if turned.is_some() {
+        for entity in &mut out {
+            match entity {
+                EntityType::LwPolyline(pl) => pl.normal = Vector3::new(0.0, 0.0, -1.0),
+                EntityType::Hatch(h) => h.normal = Vector3::new(0.0, 0.0, -1.0),
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// A solid hatch filling a closed outline (with its bulges) at the
@@ -302,6 +377,7 @@ fn chain_points(parts: &[DgnGeom], use_bulges: bool) -> (Vec<P3>, Vec<f64>) {
                 add(*b, None);
             }
             DgnGeom::Points(pts) => pts.iter().for_each(|p| add(*p, None)),
+            DgnGeom::Curve(pts) => curve_fit_points(pts).iter().for_each(|p| add(*p, None)),
             DgnGeom::Arc {
                 center,
                 u,
@@ -562,13 +638,21 @@ fn mtext_of_node(
     color: Option<u16>,
 ) -> Option<EntityType> {
     let (_, first, height, rotation, _) = lines.iter().find_map(text_line)?;
-    let texts: Vec<String> = lines
-        .iter()
-        .filter_map(text_line)
-        .map(|l| mtext_escape(l.0))
-        .collect();
+    // A component on the line of the one before it (its origin less than
+    // half a text height away across the line) continues that line.
+    let up_dir = [-rotation.sin(), rotation.cos(), 0.0];
+    let mut joined = String::new();
+    let mut previous: Option<P3> = None;
+    for (text, origin, h, _, _) in lines.iter().filter_map(text_line) {
+        if let Some(p) = previous {
+            if dot(sub(origin, p), up_dir).abs() >= 0.5 * h.max(height) {
+                joined.push_str("\\P");
+            }
+        }
+        joined.push_str(&mtext_escape(text));
+        previous = Some(origin);
+    }
     let mut m = MText::new();
-    let joined = texts.join("\\P");
     m.value = match color {
         Some(c) => format!("{{\\C{c};{joined}}}"),
         None => joined,
@@ -639,7 +723,9 @@ fn arc_entity(center: P3, u: P3, v: P3, start: f64, sweep: f64) -> Vec<EntityTyp
         return vec![polyline(&arc_points(center, u, v, start, sweep), &[])];
     }
     // P(t) = c + cos t·u + sin t·v as an ellipse on its major axis with the
-    // minor axis turned counter-clockwise from it about the normal.
+    // minor axis turned counter-clockwise from it about the normal. A longer
+    // second axis makes the major axis the first one turned back a quarter
+    // (-v), as the reference does.
     let ccw = !flipped;
     let (major, ratio, map): (P3, f64, Box<dyn Fn(f64) -> f64>) = if lu >= lv {
         if ccw {
@@ -648,9 +734,9 @@ fn arc_entity(center: P3, u: P3, v: P3, start: f64, sweep: f64) -> Vec<EntityTyp
             (u, lv / lu, Box::new(|t: f64| -t))
         }
     } else if ccw {
-        (v, lu / lv, Box::new(|t: f64| t - std::f64::consts::FRAC_PI_2))
+        (v.map(|c| -c), lu / lv, Box::new(|t: f64| t + std::f64::consts::FRAC_PI_2))
     } else {
-        (v, lu / lv, Box::new(|t: f64| std::f64::consts::FRAC_PI_2 - t))
+        (v.map(|c| -c), lu / lv, Box::new(|t: f64| -t - std::f64::consts::FRAC_PI_2))
     };
     let mut e = Ellipse::from_center_axes(v3(center), v3(major), ratio);
     e.normal = v3(normal);
@@ -661,6 +747,333 @@ fn arc_entity(center: P3, u: P3, v: P3, start: f64, sweep: f64) -> Vec<EntityTyp
         e.end_parameter = e.start_parameter + (to - from);
     }
     vec![EntityType::Ellipse(e)]
+}
+
+/// The name of the dimension style with this id (Standard when the
+/// table has none).
+fn dim_style_name(import: &DgnImport, id: u32) -> String {
+    import
+        .dim_styles
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| symbol_name(&s.name))
+        .unwrap_or_else(|| "Standard".to_string())
+}
+
+/// A V8 font (number, kind) as its name and the font file it imports with.
+fn dgn_font(import: &DgnImport, font: (u8, u8)) -> Option<(&str, &str)> {
+    import
+        .fonts
+        .iter()
+        .find(|f| (f.0, f.1) == font)
+        .map(|f| (f.2.as_str(), f.3.as_str()))
+}
+
+/// The text style a V8 dimension style's text takes: "Style" and its
+/// font's name, with that font's file.
+fn dim_text_style(import: &DgnImport, ds: &DgnDimStyle) -> (String, String) {
+    match dgn_font(import, ds.font) {
+        Some((name, file)) => (format!("Style{name}"), file.to_string()),
+        None => ("Standard".to_string(), "txt.shx".to_string()),
+    }
+}
+
+/// A V8 dimension style as a dimension style: its values over the
+/// defaults (lengths times `k`), its text in [`dim_text_style`], closed
+/// arrows and text beside the first extension line, as the reference
+/// import gives every such style. Decimal accuracy reads as engineering
+/// units in a feet and inches file, a fractional one as architectural.
+fn dim_style_values(import: &DgnImport, ds: &DgnDimStyle, k: f64, name: &str) -> DimStyle {
+    let mut s = DimStyle::dxf_defaults(name);
+    s.dimtxt = ds.text_height * k;
+    s.dimasz = ds.arrow * k;
+    s.dimexo = ds.ext_offset * k;
+    s.dimexe = ds.ext_extension * k;
+    s.dimgap = ds.gap * k;
+    s.dimdli = ds.stack_offset * k;
+    s.dimcen = ds.center * k;
+    s.dimscale = ds.scale;
+    let bits = ds.accuracy & 0x7f;
+    let places = if bits == 0 { 0 } else { bits.trailing_zeros() as i16 + 1 };
+    s.dimdec = places;
+    s.dimtdec = places;
+    s.dimadec = i16::from(ds.angle_places);
+    s.dimlunit = if ds.accuracy & 0x80 == 0 && bits != 0 {
+        4
+    } else if ds.two_units {
+        3
+    } else {
+        2
+    };
+    s.dimzin = if ds.trailing_zeros { 3 } else { 11 };
+    s.dimtad = if ds.inline_text { 0 } else { 1 };
+    s.dimtih = ds.horizontal_text;
+    s.dimtoh = ds.horizontal_text;
+    s.dimtofl = ds.line_inside;
+    s.dimsah = true;
+    s.dimblk1_name = "_Closed".to_string();
+    s.dimblk2_name = "_Closed".to_string();
+    // ponytail: text beside the first extension line on every imported style,
+    // as every exported sample read; the record bit for it is not known.
+    s.dimjust = 1;
+    s.dimaltd = 3;
+    s.dimalttd = 3;
+    s.dimaltf = 1.0 / 25.4 / if ds.two_units { 12.0 } else { 1.0 };
+    s.dimtxsty = dim_text_style(import, ds).0;
+    s
+}
+
+/// A V8 dimension as a dimension object, in the dimension's own style:
+/// linear (1) as a rotated dimension along its x axis, the dimension line
+/// `offset` from its last point along its y axis; angle size (5) as a
+/// three-point angle (vertex, first, second point) with its arc through the
+/// first point; radius (11) and diameter (12) from the centre and a point
+/// on the circle, the text at the third point.
+/// It takes `text` and the variable `overrides` the reference import gives.
+/// An angle's arc point follows from its text `layout`.
+fn dimension_entity(
+    kind: u8,
+    points: &[P3],
+    offset: f64,
+    axes: &[[f64; 2]; 2],
+    style: &str,
+    text: String,
+    overrides: &[(i16, codec::xdata::XDataValue)],
+    layout: &DimTextLayout,
+) -> Option<EntityType> {
+    use codec::entities::{Dimension, DimensionDiameter, DimensionLinear, DimensionRadius};
+    let at = |k: usize| points.get(k).copied();
+    let along = |p: P3, d: [f64; 2], t: f64| [p[0] + d[0] * t, p[1] + d[1] * t, p[2]];
+    let mut entity = match kind {
+        1 => {
+            let (p0, p1) = (at(0)?, at(1)?);
+            let [x, y] = *axes;
+            // The direction the dimension line reads along: x or -x, whichever
+            // turns less than a half turn from the world x axis.
+            let x = if x[0] < -1e-12 || (x[0].abs() <= 1e-12 && x[1] < 0.0) {
+                [-x[0], -x[1]]
+            } else {
+                x
+            };
+            let length = x[0].hypot(x[1]);
+            if !(length > 1e-12) {
+                return None;
+            }
+            let x = [x[0] / length, x[1] / length];
+            let line = along(p1, y, offset);
+            let mut d = DimensionLinear::rotated(v3(p0), v3(p1), x[1].atan2(x[0]));
+            d.definition_point = v3(line);
+            d.base.actual_measurement = d.measurement();
+            EntityType::Dimension(Box::new(Dimension::Linear(d)))
+        }
+        5 => {
+            let (vertex, first, second) = (at(0)?, at(1)?, at(2)?);
+            let a0 = (first[1] - vertex[1]).atan2(first[0] - vertex[0]);
+            let mut sweep = (second[1] - vertex[1]).atan2(second[0] - vertex[0]) - a0;
+            if sweep < 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            let radius = norm(sub(first, vertex));
+            // The arc's point a third of the way round from the first line;
+            // two thirds when the text, laid beside the second extension line
+            // (a terminator, three gaps when it breaks the arc, one when it
+            // does not, and half its width along the arc), fits between the
+            // lines and reaches past the middle.
+            let label = format!("{:.*}\u{b0}", layout.angle_places, sweep.to_degrees());
+            let width = crate::entities::text_support::text_local_bounds(
+                &layout.font,
+                &label,
+                layout.height as f32,
+                1.0,
+                0.0,
+            )
+            .map(|b| f64::from(b.ink_max[0] - b.ink_min[0]))
+            .unwrap_or(0.0);
+            let length = radius * sweep;
+            let gaps = if layout.in_line { 3.0 } else { 1.0 };
+            let beside = layout.arrow + gaps * layout.gap + width / 2.0;
+            let fits = length >= layout.arrow + gaps * layout.gap + width;
+            let third = if fits && beside > length / 2.0 { 2.0 } else { 1.0 };
+            let mid = a0 + sweep * third / 3.0;
+            let arc = [vertex[0] + radius * mid.cos(), vertex[1] + radius * mid.sin(), vertex[2]];
+            let dvec = |p: P3| glam::DVec3::from_array(p);
+            crate::modules::annotate::angular_dim::angular_three_point_entity(
+                dvec(vertex),
+                dvec(first),
+                dvec(second),
+                dvec(arc),
+                None,
+            )?
+        }
+        11 | 12 => {
+            let (center, point) = (at(0)?, at(1)?);
+            let text = at(2).unwrap_or(point);
+            let mut d = if kind == 11 {
+                let mut d = DimensionRadius::new(v3(center), v3(point));
+                d.base.definition_point = v3(center);
+                d.leader_length = norm(sub(text, point));
+                Dimension::Radius(d)
+            } else {
+                let far = sub(center, sub(point, center));
+                let mut d = DimensionDiameter::new(v3(point), v3(far));
+                d.leader_length = norm(sub(text, point));
+                Dimension::Diameter(d)
+            };
+            // A diameter's text stays where the file has it; a radius's text
+            // is laid out by its style along its arc point's direction.
+            if kind == 12 {
+                let base = d.base_mut();
+                base.text_middle_point = v3(text);
+                base.insertion_point = v3(text);
+                base.text_user_positioned = true;
+            }
+            EntityType::Dimension(Box::new(d))
+        }
+        _ => return None,
+    };
+    if let EntityType::Dimension(d) = &mut entity {
+        d.base_mut().style_name = style.to_string();
+        crate::entities::dimension::set_dimension_text_override(d.base_mut(), Some(text));
+    }
+    for (code, value) in overrides {
+        crate::entities::dim_override::set_on_entity(&mut entity, *code, Some(value.clone()));
+    }
+    Some(entity)
+}
+
+/// What lays out an imported dimension's text: its height, terminator,
+/// gap and font, and whether it sits in the dimension line.
+struct DimTextLayout {
+    height: f64,
+    arrow: f64,
+    gap: f64,
+    font: String,
+    in_line: bool,
+    angle_places: usize,
+}
+
+/// The text, the variable overrides and the text layout an imported
+/// dimension takes: its text carries its colour and, when its font is not
+/// its style's text font, that font; it draws no centre mark, fits text
+/// and arrows best, and takes its own text height, terminator, extension
+/// line offset and extension (each over its style's scale squared, as the
+/// reference reads them), horizontal text as its style and, linear or
+/// angular, text beside the first extension line. Text in its line takes
+/// the margin as its gap; text off the line sits outside it at its own gap.
+fn dimension_settings(
+    import: &DgnImport,
+    kind: u8,
+    look: &DgnDimLook,
+    style: Option<&DgnDimStyle>,
+    color: u16,
+) -> (String, Vec<(i16, codec::xdata::XDataValue)>, DimTextLayout) {
+    use crate::entities::dim_override as ov;
+    use codec::xdata::XDataValue::{Integer16, Real};
+    let own = dgn_font(import, look.font);
+    let style_font = style.and_then(|s| dgn_font(import, s.font));
+    let differs = |file: &str| style_font.is_some_and(|(_, f)| !f.eq_ignore_ascii_case(file));
+    let font = match own {
+        Some((name, file)) if differs(file) && look.font.1 == 4 => {
+            format!(r"\F{name}|b0|i0|c0;")
+        }
+        Some((name, file)) if differs(file) => format!(r"\F{name}|c0;"),
+        _ => String::new(),
+    };
+    let text = format!(r"{{{font}\C{color};<>}}");
+    let scale = style.map(|s| s.scale).filter(|s| *s > 0.0).unwrap_or(1.0);
+    let length = |v: f64| v / (scale * scale);
+    let gap = length(if look.text_outside { look.gap } else { look.margin });
+    let horizontal = i16::from(style.is_some_and(|s| s.horizontal_text));
+    let mut overrides = vec![
+        (ov::DIMCEN, Real(0.0)),
+        (ov::DIMATFIT, Integer16(3)),
+        (ov::DIMSCALE, Real(scale)),
+        (ov::DIMTXT, Real(length(look.text_height))),
+        (ov::DIMASZ, Real(length(look.arrow))),
+        (ov::DIMEXO, Real(length(look.ext_offset))),
+        (ov::DIMEXE, Real(length(look.ext_extension))),
+        (ov::DIMGAP, Real(gap)),
+        (ov::DIMTAD, Integer16(if look.text_outside { 2 } else { 0 })),
+        (ov::DIMTIH, Integer16(horizontal)),
+        (ov::DIMTOH, Integer16(horizontal)),
+    ];
+    if matches!(kind, 1 | 5) {
+        overrides.push((ov::DIMJUST, Integer16(1)));
+    }
+    let layout = DimTextLayout {
+        height: length(look.text_height),
+        arrow: length(look.arrow),
+        gap,
+        font: own.or(style_font).map_or("txt", |f| f.0).to_string(),
+        in_line: !look.text_outside,
+        angle_places: style.map_or(0, |s| usize::from(s.angle_places)),
+    };
+    (text, overrides, layout)
+}
+
+/// A mesh's face loops (1-based point numbers, a negative one hiding the
+/// edge from it) as polyface meshes: a loop past four corners is fanned into
+/// triangles whose inner edges are hidden. A polyface numbers its vertices
+/// in 16 bits, so faces that need further vertices go on further meshes.
+fn polyfaces(points: &[P3], loops: &[Vec<i32>]) -> Vec<EntityType> {
+    use codec::entities::{PolyfaceFace, PolyfaceMesh, PolyfaceVertex};
+    const MAX_VERTICES: usize = i16::MAX as usize;
+    let mut out = Vec::new();
+    let mut mesh = PolyfaceMesh::new();
+    let mut ids: HashMap<usize, i16> = HashMap::new();
+    for face in loops {
+        // Each corner: its point and whether the edge from it shows.
+        let corners: Vec<(usize, bool)> = face
+            .iter()
+            .filter_map(|&k| {
+                let p = (k.unsigned_abs() as usize).checked_sub(1)?;
+                (p < points.len()).then_some((p, k > 0))
+            })
+            .collect();
+        let n = corners.len();
+        if n < 3 || n < face.len() {
+            continue;
+        }
+        let parts: Vec<Vec<(usize, bool)>> = if n <= 4 {
+            vec![corners]
+        } else {
+            (1..n - 1)
+                .map(|k| {
+                    let (first, last) = (corners[0], corners[k + 1]);
+                    vec![(first.0, first.1 && k == 1), corners[k], (last.0, last.1 && k == n - 2)]
+                })
+                .collect()
+        };
+        for part in parts {
+            let new = part.iter().filter(|c| !ids.contains_key(&c.0)).count();
+            if mesh.vertices.len() + new > MAX_VERTICES {
+                out.push(std::mem::replace(&mut mesh, PolyfaceMesh::new()));
+                ids.clear();
+            }
+            let mut index = Vec::with_capacity(4);
+            for (p, shown) in part {
+                let id = match ids.get(&p) {
+                    Some(id) => *id,
+                    None => {
+                        let id = mesh.add_vertex(PolyfaceVertex::new(v3(points[p])));
+                        ids.insert(p, id);
+                        id
+                    }
+                };
+                index.push(if shown { id } else { -id });
+            }
+            mesh.add_face(match index[..] {
+                [a, b, c] => PolyfaceFace::triangle(a, b, c),
+                [a, b, c, d] => PolyfaceFace::quad(a, b, c, d),
+                _ => continue,
+            });
+        }
+    }
+    out.push(mesh);
+    out.into_iter()
+        .filter(|m| !m.faces.is_empty())
+        .map(EntityType::PolyfaceMesh)
+        .collect()
 }
 
 /// A shared cell instance as an INSERT: a mirrored placement looks along
@@ -702,25 +1115,34 @@ struct Converter<'a> {
     defs: HashMap<String, &'a [DgnElement]>,
     /// (cell, made inside a copy) → copy block name.
     copies: HashMap<(String, bool), String>,
-    names: Vec<String>,
+    /// Block names given so far, upper-cased.
+    names: std::collections::HashSet<String>,
+    /// For each name used as a base, the first number not yet tried.
+    next_number: HashMap<String, usize>,
     /// Converting a shared cell definition: the cells inside it are not
     /// blocks of their own, their objects are part of the definition.
     in_definition: bool,
+    /// The construction layer of each level, once one is made.
+    construction: HashMap<u32, String>,
 }
 
 impl<'a> Converter<'a> {
     /// `base`, or `base` and the first number that makes it a new name.
     fn unique(&mut self, base: &str) -> String {
-        let taken = |n: &str| self.names.iter().any(|t| t.eq_ignore_ascii_case(n));
-        let name = if taken(base) {
-            (1..)
-                .map(|k| format!("{base}{k}"))
-                .find(|n| !taken(n))
-                .unwrap_or_default()
+        let upper = base.to_ascii_uppercase();
+        let name = if self.names.contains(&upper) {
+            // Numbers below the last one given are all taken: carry on from
+            // there (a file can place one cell tens of thousands of times).
+            let mut k = self.next_number.get(&upper).copied().unwrap_or(1);
+            while self.names.contains(&format!("{upper}{k}")) {
+                k += 1;
+            }
+            self.next_number.insert(upper, k + 1);
+            format!("{base}{k}")
         } else {
             base.to_string()
         };
-        self.names.push(name.clone());
+        self.names.insert(name.to_ascii_uppercase());
         name
     }
 
@@ -768,6 +1190,23 @@ impl<'a> Converter<'a> {
         // A cell's objects are on layer 0 of its block.
         let layer = if in_cell {
             "0".to_string()
+        } else if element.construction && self.import.construction_layers {
+            // A construction element of a file whose view hides them is
+            // on "<level>(Construction)", turned off; a name another level
+            // took gets a number.
+            if let Some(name) = self.construction.get(&element.level) {
+                return name.clone();
+            }
+            let base = format!("{}(Construction)", layer_name(self.import, element.level));
+            let mut name = base.clone();
+            let mut k = 1;
+            while self.construction.values().any(|n| *n == name) {
+                name = format!("{base}{k}");
+                k += 1;
+            }
+            self.construction.insert(element.level, name.clone());
+            self.out.layers_off.push(name.clone());
+            name
         } else {
             layer_name(self.import, element.level)
         };
@@ -785,6 +1224,13 @@ impl<'a> Converter<'a> {
         layer
     }
 
+    /// Whether a flat outline's normal follows its winding (-z when it
+    /// winds clockwise): in V8 files and V7 3D files; a V7 2D file's are
+    /// all +z.
+    fn by_winding(&self) -> bool {
+        !self.import.v7 || self.import.three_d
+    }
+
     /// The object(s) one element converts to.
     fn geom(
         &mut self,
@@ -800,13 +1246,76 @@ impl<'a> Converter<'a> {
             DgnGeom::Line(a, b) => vec![EntityType::Line(Line::from_points(v3(*a), v3(*b)))],
             // A filled shape is its outline and a solid hatch inside it.
             DgnGeom::Points(pts) if pts.len() >= 2 => {
-                let mut out = vec![polyline(pts, &[])];
-                if element.filled {
-                    out.extend(solid_hatch(pts, &[]));
-                }
-                out
+                outline(pts, &[], element.filled, self.by_winding())
             }
             DgnGeom::Points(_) => Vec::new(),
+            DgnGeom::Curve(pts) => {
+                let fit = curve_fit_points(pts);
+                if fit.len() < 2 {
+                    return Vec::new();
+                }
+                let mut s = Spline::new();
+                s.degree = 3;
+                s.fit_points = fit.iter().map(|p| v3(*p)).collect();
+                // A curve through points in one plane is planar about that
+                // plane's normal; a 3D curve off any plane is not.
+                match plane_normal(&fit) {
+                    Some(n) => {
+                        s.flags.planar = true;
+                        s.normal = v3(n);
+                    }
+                    None => s.flags.planar = false,
+                }
+                vec![EntityType::Spline(s)]
+            }
+            DgnGeom::Dimension {
+                kind,
+                points,
+                offset,
+                axes,
+                style,
+                look,
+            } => {
+                let record = self.import.dim_styles.iter().find(|s| s.id == *style);
+                let (text, overrides, layout) =
+                    dimension_settings(self.import, *kind, look, record, color_code(element.color));
+                let style = dim_style_name(self.import, *style);
+                dimension_entity(*kind, points, *offset, axes, &style, text, &overrides, &layout)
+                    .into_iter()
+                    .collect()
+            }
+            DgnGeom::Mesh { points, loops } => polyfaces(points, loops),
+            DgnGeom::Leader { points, style } => {
+                let mut leader = codec::entities::Leader::new();
+                leader.vertices = points.iter().map(|p| v3(*p)).collect();
+                leader.dimension_style = dim_style_name(self.import, *style);
+                vec![EntityType::Leader(leader)]
+            }
+            DgnGeom::Arc {
+                center,
+                u,
+                v,
+                start,
+                sweep,
+            } if self.import.v7
+                && *sweep < 0.0
+                && *sweep > -std::f64::consts::TAU
+                && circular(*u, *v)
+                && u[2].abs() < 1e-12
+                && v[2].abs() < 1e-12
+                && cross(*u, *v)[2] > 0.0 =>
+            {
+                // A V7 circular arc drawn clockwise comes in as a two-point
+                // polyline from its start to its end with a negative bulge.
+                let at = |t: f64| {
+                    [
+                        center[0] + u[0] * t.cos() + v[0] * t.sin(),
+                        center[1] + u[1] * t.cos() + v[1] * t.sin(),
+                        center[2],
+                    ]
+                };
+                vec![polyline(&[at(*start), at(*start + *sweep)], &[(*sweep / 4.0).tan()])]
+            }
             DgnGeom::Arc {
                 center,
                 u,
@@ -836,11 +1345,7 @@ impl<'a> Converter<'a> {
                 if points.len() < 2 {
                     return Vec::new();
                 }
-                let mut out = vec![polyline(&points, &bulges)];
-                if element.filled {
-                    out.extend(solid_hatch(&points, &bulges));
-                }
-                out
+                outline(&points, &bulges, element.filled, self.by_winding())
             }
             // V7 text is TEXT, V8 text an MTEXT.
             DgnGeom::Text { font: Some(_), .. } => {
@@ -875,16 +1380,22 @@ impl<'a> Converter<'a> {
             }
             // A cell that is not shared becomes a block of its own ("the
             // cell's name, else AnonymousCell" and a number) placed at the
-            // origin; its objects keep their layers.
+            // cell's origin: its objects move by the origin only (not turned
+            // or scaled back) and keep their layers.
             DgnGeom::CellGroup { parts, .. } if self.in_definition => {
                 self.elements(parts, true, copy, depth + 1)
             }
-            DgnGeom::CellGroup { name, parts } => {
+            DgnGeom::CellGroup { name, origin, parts } => {
                 let base = if name.is_empty() { "AnonymousCell" } else { name.as_str() };
                 let block = self.unique(&block_name(base));
-                let entities = self.elements(parts, false, copy, depth + 1);
+                let local = crate::scene::model::underlay_vector::scaled_elements(
+                    parts,
+                    1.0,
+                    origin.map(|c| -c),
+                );
+                let entities = self.elements(&local, false, copy, depth + 1);
                 self.out.blocks.push((block.clone(), entities));
-                vec![insert_entity(block, [1.0, 0.0, 0.0, 1.0], [0.0; 3], 1.0)]
+                vec![insert_entity(block, [1.0, 0.0, 0.0, 1.0], *origin, 1.0)]
             }
             DgnGeom::Cell {
                 name,
@@ -944,14 +1455,109 @@ impl<'a> Converter<'a> {
     }
 }
 
+/// The points a V7 curve's spline is fitted through. The curve runs from
+/// its third point to its third last, each coordinate an Akima spline over
+/// the points' chord length (a repeated point counts 0.0001 long and adds a
+/// level stretch); the first two and last two points only set the end
+/// slopes. It is sampled at 3n + 3 equal steps of chord length (n points),
+/// and its own points between the ends are kept among the samples, a
+/// sample on one of them (within 2.54e-8) giving way to it.
+fn curve_fit_points(pts: &[P3]) -> Vec<P3> {
+    let n = pts.len();
+    if n < 6 {
+        return Vec::new();
+    }
+    let mut u = vec![0.0];
+    for k in 1..n {
+        u.push(u[k - 1] + dot(sub(pts[k], pts[k - 1]), sub(pts[k], pts[k - 1])).sqrt().max(1e-4));
+    }
+    // Each coordinate's slope at the points 2..n-3 (Akima).
+    let slopes: Vec<Vec<f64>> = (0..3)
+        .map(|c| {
+            let m: Vec<f64> = (0..n - 1)
+                .map(|k| (pts[k + 1][c] - pts[k][c]) / (u[k + 1] - u[k]))
+                .collect();
+            (0..n)
+                .map(|i| {
+                    if i < 2 || i + 2 >= n {
+                        return 0.0;
+                    }
+                    let (w1, w2) = ((m[i + 1] - m[i]).abs(), (m[i - 1] - m[i - 2]).abs());
+                    if w1 + w2 == 0.0 {
+                        (m[i - 1] + m[i]) / 2.0
+                    } else {
+                        (w1 * m[i - 1] + w2 * m[i]) / (w1 + w2)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let at = |at: f64| -> P3 {
+        let mut i = 2;
+        while i < n - 4 && at > u[i + 1] {
+            i += 1;
+        }
+        let h = u[i + 1] - u[i];
+        let t = (at - u[i]) / h;
+        let (t2, t3) = (t * t, t * t * t);
+        let (h00, h10) = (2.0 * t3 - 3.0 * t2 + 1.0, t3 - 2.0 * t2 + t);
+        let (h01, h11) = (-2.0 * t3 + 3.0 * t2, t3 - t2);
+        std::array::from_fn(|c| {
+            h00 * pts[i][c]
+                + h10 * slopes[c][i] * h
+                + h01 * pts[i + 1][c]
+                + h11 * slopes[c][i + 1] * h
+        })
+    };
+    let (start, end) = (u[2], u[n - 3]);
+    let steps = 3 * n + 3;
+    let mut marks: Vec<(f64, Option<P3>)> = (0..=steps)
+        .map(|k| {
+            let point = match k {
+                0 => Some(pts[2]),
+                k if k == steps => Some(pts[n - 3]),
+                _ => None,
+            };
+            (start + (end - start) * k as f64 / steps as f64, point)
+        })
+        .collect();
+    marks.extend((3..n - 3).map(|i| (u[i], Some(pts[i]))));
+    marks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<P3> = Vec::new();
+    for (position, point) in marks {
+        let q = point.unwrap_or_else(|| at(position));
+        if let Some(last) = out.last_mut() {
+            if dot(sub(q, *last), sub(q, *last)).sqrt() <= 2.54e-8 {
+                if point.is_some() {
+                    *last = q;
+                }
+                continue;
+            }
+        }
+        out.push(q);
+    }
+    out
+}
+
+/// Sub units per drawing unit: a file with 12 sub units to its master
+/// unit (feet and inches, V7 or V8) comes in in sub units whichever is
+/// chosen.
+pub fn unit_scale(import: &DgnImport, sub_units: bool) -> f64 {
+    if sub_units || (import.sub_per_master - 12.0).abs() < 1e-9 {
+        import.sub_per_master
+    } else {
+        1.0
+    }
+}
+
 /// The import's objects, in sub units when `sub_units`. V7 cell
 /// definitions become blocks as drawn; each is placed through a copy (the
 /// definition's name and a number), made before the blocks that place it. V8 cells are blocks placed as they
 /// are. A V8 file's levels all become layers, in its level table's order.
 pub fn convert(import: &DgnImport, sub_units: bool, explode_text_nodes: bool) -> Converted {
-    let k = if sub_units { import.sub_per_master } else { 1.0 };
+    let k = unit_scale(import, sub_units);
     let scale = |elements: &[DgnElement]| {
-        crate::scene::model::underlay_vector::scaled_elements(elements, k, [0.0, 0.0])
+        crate::scene::model::underlay_vector::scaled_elements(elements, k, [0.0; 3])
     };
     let cells: Vec<(String, Vec<DgnElement>)> = import
         .cells
@@ -968,8 +1574,10 @@ pub fn convert(import: &DgnImport, sub_units: bool, explode_text_nodes: bool) ->
             .map(|(name, elements)| (name.to_ascii_uppercase(), elements.as_slice()))
             .collect(),
         copies: HashMap::new(),
-        names: cells.iter().map(|(name, _)| block_name(name)).collect(),
+        names: cells.iter().map(|(name, _)| block_name(name).to_ascii_uppercase()).collect(),
+        next_number: HashMap::new(),
         in_definition: false,
+        construction: HashMap::new(),
     };
     if !import.v7 {
         for level in &import.level_order {
@@ -980,8 +1588,22 @@ pub fn convert(import: &DgnImport, sub_units: bool, explode_text_nodes: bool) ->
                 style: By::Level,
                 geom: DgnGeom::Points(Vec::new()),
                 filled: false,
+                construction: false,
             };
             c.layer(&element, false);
+        }
+    }
+    // Every dimension style of the file's table comes in, used or not, with
+    // its values and its text style.
+    for ds in &import.dim_styles {
+        let name = symbol_name(&ds.name);
+        if !c.out.dim_styles.iter().any(|s| s.0 == name) {
+            let (style, font) = dim_text_style(import, ds);
+            if style != "Standard" && !c.out.styles.iter().any(|s| s.0 == style) {
+                c.out.styles.push((style, font));
+            }
+            let values = dim_style_values(import, ds, k, &name);
+            c.out.dim_styles.push((name, Some(values)));
         }
     }
     // Every text style of the file's table comes in, used or not.
@@ -1013,6 +1635,27 @@ pub fn convert(import: &DgnImport, sub_units: bool, explode_text_nodes: bool) ->
     for (_, entities) in &mut c.out.blocks {
         entities.retain(placed);
     }
+    // An anonymous definition (a "*" name, as a dimension's drawing) that
+    // nothing places is not kept as a block.
+    let anonymous: HashSet<String> = cells
+        .iter()
+        .filter(|(name, _)| name.starts_with('*'))
+        .map(|(name, _)| block_name(name).to_ascii_uppercase())
+        .collect();
+    let used: HashSet<String> = c
+        .out
+        .entities
+        .iter()
+        .chain(c.out.blocks.iter().flat_map(|b| b.1.iter()))
+        .filter_map(|e| match e {
+            EntityType::Insert(i) => Some(i.block_name.to_ascii_uppercase()),
+            _ => None,
+        })
+        .collect();
+    c.out.blocks.retain(|(name, _)| {
+        let key = name.to_ascii_uppercase();
+        !anonymous.contains(&key) || used.contains(&key)
+    });
     c.out
 }
 

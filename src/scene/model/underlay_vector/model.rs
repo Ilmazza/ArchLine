@@ -574,6 +574,8 @@ pub struct DgnElement {
     pub geom: DgnGeom,
     /// The element is a filled shape (it has a fill linkage).
     pub filled: bool,
+    /// Its class is construction (V7).
+    pub construction: bool,
 }
 
 /// A point of a DGN element (z 0 in a 2D file).
@@ -584,6 +586,9 @@ pub enum DgnGeom {
     Line(P3, P3),
     /// A line string, curve or shape (its points end where they start).
     Points(Vec<P3>),
+    /// A V7 curve: its points, the first two and last two of which only
+    /// set the slopes at its ends.
+    Curve(Vec<P3>),
     /// An elliptical arc: the point at parameter t is
     /// `center + cos t · u + sin t · v`, from `start` over `sweep` (radians).
     Arc {
@@ -626,12 +631,32 @@ pub enum DgnGeom {
         just: u8,
         line_spacing: Option<f64>,
     },
-    /// A cell that is not shared: its name (empty when anonymous) and its
-    /// components, each with its own level and symbology.
+    /// A cell that is not shared: its name (empty when anonymous), its
+    /// origin and its components (already placed), each with its own level
+    /// and symbology.
     CellGroup {
         name: String,
+        origin: P3,
         parts: Vec<DgnElement>,
     },
+    /// A dimension (V8, in the XY plane): its type (1 linear, 5 angle,
+    /// 11 radius, 12 diameter), its points, the dimension line's offset
+    /// from the last point (along `axes[1]`) and its x and y axes; `style`
+    /// is its dimension style's id, `look` the settings it carries itself.
+    Dimension {
+        kind: u8,
+        points: Vec<P3>,
+        offset: f64,
+        axes: [[f64; 2]; 2],
+        style: u32,
+        look: DgnDimLook,
+    },
+    /// A note's leader (V8): its points, the arrow first, and its
+    /// dimension style's id.
+    Leader { points: Vec<P3>, style: u32 },
+    /// A mesh (V8): its points and its face loops, each corner a 1-based
+    /// point number, negative when the edge from it to the next is hidden.
+    Mesh { points: Vec<P3>, loops: Vec<Vec<i32>> },
     /// A shared cell instance: x' = m[0]·x + m[1]·y + origin.x,
     /// y' = m[2]·x + m[3]·y + origin.y.
     Cell {
@@ -645,12 +670,36 @@ pub enum DgnGeom {
 
 impl DgnGeom {
     /// The geometry through x' = s·x + t (lengths scaled by `s`).
-    pub fn scaled(&self, s: f64, t: [f64; 2]) -> DgnGeom {
-        let p = |q: P3| [q[0] * s + t[0], q[1] * s + t[1], q[2] * s];
+    pub fn scaled(&self, s: f64, t: P3) -> DgnGeom {
+        let p = |q: P3| [q[0] * s + t[0], q[1] * s + t[1], q[2] * s + t[2]];
         let v = |q: P3| [q[0] * s, q[1] * s, q[2] * s];
         match self {
             DgnGeom::Line(a, b) => DgnGeom::Line(p(*a), p(*b)),
             DgnGeom::Points(pts) => DgnGeom::Points(pts.iter().map(|q| p(*q)).collect()),
+            DgnGeom::Curve(pts) => DgnGeom::Curve(pts.iter().map(|q| p(*q)).collect()),
+            DgnGeom::Dimension {
+                kind,
+                points,
+                offset,
+                axes,
+                style,
+                look,
+            } => DgnGeom::Dimension {
+                kind: *kind,
+                points: points.iter().map(|q| p(*q)).collect(),
+                offset: offset * s,
+                axes: *axes,
+                style: *style,
+                look: look.scaled(s),
+            },
+            DgnGeom::Leader { points, style } => DgnGeom::Leader {
+                points: points.iter().map(|q| p(*q)).collect(),
+                style: *style,
+            },
+            DgnGeom::Mesh { points, loops } => DgnGeom::Mesh {
+                points: points.iter().map(|q| p(*q)).collect(),
+                loops: loops.clone(),
+            },
             DgnGeom::Arc {
                 center,
                 u,
@@ -676,8 +725,9 @@ impl DgnGeom {
                 closed: *closed,
             },
             DgnGeom::Chain(parts) => DgnGeom::Chain(parts.iter().map(|g| g.scaled(s, t)).collect()),
-            DgnGeom::CellGroup { name, parts } => DgnGeom::CellGroup {
+            DgnGeom::CellGroup { name, origin, parts } => DgnGeom::CellGroup {
                 name: name.clone(),
+                origin: p(*origin),
                 parts: scaled_elements(parts, s, t),
             },
             DgnGeom::TextNode {
@@ -795,6 +845,69 @@ impl DgnCollector {
     }
 }
 
+/// The settings a V8 dimension carries itself (lengths in master units):
+/// its text font (number, kind), text height, extension line offset and
+/// extension, text gap, text margin and terminator width, and whether its
+/// text sits off the dimension line.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DgnDimLook {
+    pub font: (u8, u8),
+    pub text_height: f64,
+    pub ext_offset: f64,
+    pub ext_extension: f64,
+    pub gap: f64,
+    pub margin: f64,
+    pub arrow: f64,
+    pub text_outside: bool,
+}
+
+impl DgnDimLook {
+    pub fn scaled(&self, s: f64) -> DgnDimLook {
+        DgnDimLook {
+            text_height: self.text_height * s,
+            ext_offset: self.ext_offset * s,
+            ext_extension: self.ext_extension * s,
+            gap: self.gap * s,
+            margin: self.margin * s,
+            arrow: self.arrow * s,
+            ..*self
+        }
+    }
+}
+
+/// A V8 dimension style (lengths in master units): its element id, name
+/// and text style id; text height, terminator width, extension line
+/// offset and extension and text gap (the last four as text heights);
+/// stack offset and centre mark size; the accuracy byte (0x80 and a bit
+/// per decimal place, else a fraction); whether trailing zeros show, the
+/// text sits in the line, reads horizontally and draws a line between
+/// the extension lines; its scale; and whether its units are two (master
+/// and sub).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DgnDimStyle {
+    pub id: u32,
+    pub name: String,
+    pub text_style: u32,
+    /// Its text style's font (number, kind).
+    pub font: (u8, u8),
+    pub text_height: f64,
+    pub arrow: f64,
+    pub ext_offset: f64,
+    pub ext_extension: f64,
+    pub gap: f64,
+    pub stack_offset: f64,
+    pub center: f64,
+    pub accuracy: u8,
+    /// Decimal places of an angle.
+    pub angle_places: u8,
+    pub trailing_zeros: bool,
+    pub inline_text: bool,
+    pub horizontal_text: bool,
+    pub line_inside: bool,
+    pub scale: f64,
+    pub two_units: bool,
+}
+
 /// What DGNIMPORT reads from a model: its elements and the shared cells
 /// they place (in master units, the global origin at 0,0), the levels by
 /// number or id (name, colour) and the sub units per master unit.
@@ -815,6 +928,16 @@ pub struct DgnImport {
     pub references: Vec<DgnReference>,
     /// The text style table (V8): each style's id, name and font file.
     pub text_styles: Vec<(u32, String, String)>,
+    /// The dimension style table (V8).
+    pub dim_styles: Vec<DgnDimStyle>,
+    /// The font table (V8): number, kind (2 SHX, 4 TrueType), name and
+    /// the font file it imports with.
+    pub fonts: Vec<(u8, u8, String, String)>,
+    /// A 3D V7 file.
+    pub three_d: bool,
+    /// The file's first view hides construction elements (V7): they come in
+    /// on layers of their own, turned off.
+    pub construction_layers: bool,
 }
 
 /// A reference attachment of a DGN model: the file and model it shows and
@@ -831,7 +954,7 @@ pub struct DgnReference {
 }
 
 /// The elements through x' = s·x + t.
-pub fn scaled_elements(elements: &[DgnElement], s: f64, t: [f64; 2]) -> Vec<DgnElement> {
+pub fn scaled_elements(elements: &[DgnElement], s: f64, t: P3) -> Vec<DgnElement> {
     elements
         .iter()
         .map(|e| DgnElement {

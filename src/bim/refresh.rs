@@ -3,7 +3,7 @@
 //! chi chiama: l'app sul disegno, l'estrazione sulla sua copia.
 
 use codec::entities::{LwPolyline, LwVertex, MText};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use super::report::Notice;
 use super::rooms::{
@@ -96,7 +96,7 @@ struct FattoParts<'a> {
 /// entro `tol` nell'ordine di disegno: ogni parte va al primo locale con il
 /// seme vicino che non ne ha ancora una di quel tipo. Un contorno che non è
 /// una `LWPOLYLINE`, o un testo che non è un `MTEXT`, non conta.
-fn fatto_parts(doc: &CadDocument, tol: f64) -> Vec<FattoParts<'_>> {
+fn fatto_parts(doc: &Document, tol: f64) -> Vec<FattoParts<'_>> {
     let mut rooms: Vec<FattoParts> = Vec::new();
     for (handle, room, part) in rooms_in(doc) {
         if room.phase != Phase::Fatto {
@@ -154,7 +154,7 @@ fn fatto_parts(doc: &CadDocument, tol: f64) -> Vec<FattoParts<'_>> {
 /// [`Notice::FuoriPiano`] se ci sono muri fuori dal piano XY. Senza locali di
 /// fatto non c'è niente da dire. Il disegno non si tocca: le modifiche le
 /// applica chi chiama ([`RoomEdit::apply_to`]).
-pub fn refresh_rooms(doc: &CadDocument, unit: DrawingUnit, tol: f64) -> RoomsRefresh {
+pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefresh {
     let mut out = RoomsRefresh::default();
     let rooms = fatto_parts(doc, tol);
     if rooms.is_empty() {
@@ -324,7 +324,7 @@ fn label_area_m2(value: &str) -> Option<f64> {
 /// I locali di fatto del disegno, uno per locale: contorno e testo accoppiati
 /// per seme entro `tol`, come li accoppia [`refresh_rooms`]. Per i locali di
 /// progetto dell'estrazione (`rooms::project_rooms`).
-pub fn fatto_rooms(doc: &CadDocument, tol: f64) -> Vec<Room> {
+pub fn fatto_rooms(doc: &Document, tol: f64) -> Vec<Room> {
     fatto_parts(doc, tol)
         .into_iter()
         .map(|parts| parts.room)
@@ -333,7 +333,7 @@ pub fn fatto_rooms(doc: &CadDocument, tol: f64) -> Vec<Room> {
 
 /// Il disegno ha locali di fatto (un contorno o un testo) nello spazio
 /// modello?
-pub fn has_fatto_rooms(doc: &CadDocument) -> bool {
+pub fn has_fatto_rooms(doc: &Document) -> bool {
     rooms_in(doc)
         .iter()
         .any(|(_, room, part)| room.phase == Phase::Fatto && *part != RoomPart::Seme)
@@ -374,7 +374,7 @@ mod tests {
     use codec::Vector2;
 
     /// L'handle della `LINE` da `a` a `b`.
-    fn line_handle(doc: &CadDocument, a: [f64; 2], b: [f64; 2]) -> Handle {
+    fn line_handle(doc: &Document, a: [f64; 2], b: [f64; 2]) -> Handle {
         doc.entities()
             .find(|e| matches!(e, EntityType::Line(l) if near(l.start, a) && near(l.end, b)))
             .map(|e| e.common().handle)
@@ -622,7 +622,7 @@ mod tests {
 
     /// La faccia est di A (la `LINE` del caso a linee, o il lato ovest del
     /// tramezzo a polilinea) portata a `x`.
-    fn move_east_face_of_a(doc: &mut CadDocument, x: f64) {
+    fn move_east_face_of_a(doc: &mut Document, x: f64) {
         let handles: Vec<Handle> = doc
             .entities()
             .filter(|e| {
@@ -651,7 +651,7 @@ mod tests {
 
     /// La riga dell'unico locale cambiato, e le sue modifiche.
     #[track_caller]
-    fn only_change(doc: &CadDocument) -> (String, Vec<(Handle, RoomEdit)>) {
+    fn only_change(doc: &Document) -> (String, Vec<(Handle, RoomEdit)>) {
         let refresh = refresh_rooms(doc, M, TOL);
         let [change] = &refresh.changed[..] else {
             panic!("{:?}", refresh.changed)

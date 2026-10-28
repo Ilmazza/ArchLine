@@ -13,6 +13,7 @@
 //     Dimension   → Lines (extension + dimension + arrows) + Text
 //     MText       → Text lines
 //     Region      → Lines, Arcs, Circles, Ellipses, Splines (from ACIS B-Rep loops or wires)
+//     Hatch       → Lines of its pattern, clipped to the boundary (not solid/gradient)
 //
 //   Unsupported entity types are skipped silently.
 
@@ -26,7 +27,7 @@ use codec::entities::{
 use codec::entities::{Polyline, Polyline2D};
 use codec::tables::BlockRecord;
 use codec::types::Vector3;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::entities::curve::lwpolyline_world_xy;
@@ -63,7 +64,7 @@ pub fn explode_polyline_segments(entity: &EntityType) -> Vec<EntityType> {
 
 /// Decompose an entity into its constituent simple entities.
 /// Returns an empty vec if the entity cannot be exploded.
-pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<EntityType> {
+pub fn explode_entity(entity: &EntityType, document: &Document) -> Vec<EntityType> {
     match entity {
         EntityType::Line(line) => {
             let Some(association) =
@@ -100,22 +101,28 @@ pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<Entity
         {
             vec![]
         }
+        // The codec's explode_from_document refuses a MINSERT; expand it cell
+        // by cell from the block's entities instead.
         EntityType::Insert(ins) => ins
-            .explode_from_document(document)
+            .block_entities_from_document(document)
+            .map(|entities| ins.explode(&entities))
+            .unwrap_or_default()
             .into_iter()
+            .filter(|entity| !crate::scene::block_construction::is_construction(entity.common()))
             .map(normalize_insert_entity)
             .collect(),
         EntityType::MLine(ml) => explode_mline(ml),
         EntityType::Dimension(dim) => explode_dimension(dim, document),
         EntityType::MText(t) => crate::entities::mtext::explode_mtext(t, document),
         EntityType::Region(region) => explode_region(region),
+        EntityType::Hatch(hatch) => explode_hatch(hatch),
         _ => vec![],
     }
 }
 
 /// Explode every entity; one piece list per input, input order preserved,
 /// empty lists kept. Used by benchmarks and regression tests.
-pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &CadDocument) -> Vec<Vec<EntityType>> {
+pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &Document) -> Vec<Vec<EntityType>> {
     items.iter().map(|(_, e)| explode_entity(e, doc)).collect()
 }
 
@@ -123,7 +130,7 @@ pub fn explode_batch(items: &[(Handle, &EntityType)], doc: &CadDocument) -> Vec<
 /// order-preserving, empty pieces dropped (matching the command arm).
 pub fn plan_explode(
     selected: &[(Handle, &EntityType)],
-    doc: &CadDocument,
+    doc: &Document,
 ) -> Vec<(Handle, Vec<EntityType>)> {
     selected
         .iter()
@@ -428,6 +435,37 @@ fn explode_mline(ml: &MLine) -> Vec<EntityType> {
     }
 
     result
+}
+
+// ── Hatch explode ──────────────────────────────────────────────────────────
+
+/// The pattern lines exactly as the renderer draws them, lifted from world XY
+/// back onto the hatch plane. Solid and gradient fills yield nothing, so they
+/// stay intact and are reported as not explodable.
+fn explode_hatch(hatch: &codec::entities::Hatch) -> Vec<EntityType> {
+    let Some(model) = crate::scene::Scene::hatch_model_from_dxf(hatch, [1.0; 4]) else {
+        return vec![];
+    };
+    let plane = crate::entities::curve::ocs_plane(hatch.normal, hatch.elevation);
+    let lift = |xy: [f64; 2]| plane.coordinates_at_xy(xy).map(|uv| plane.point_at(uv));
+    let mut common = hatch.common.clone();
+    common.handle = Handle::NULL;
+    common.owner_handle = Handle::NULL;
+    common.xdictionary_handle = None;
+    common.reactors.clear();
+    model
+        .pattern_segments()
+        .into_iter()
+        .filter_map(|[a, b]| {
+            let (a, b) = (lift(a)?, lift(b)?);
+            Some(EntityType::Line(LineEnt {
+                common: common.clone(),
+                start: Vector3::new(a[0], a[1], a[2]),
+                end: Vector3::new(b[0], b[1], b[2]),
+                ..LineEnt::new()
+            }))
+        })
+        .collect()
 }
 
 // ── Region explode ─────────────────────────────────────────────────────────
@@ -891,7 +929,14 @@ fn dim_geom_entities(
     dim_common: &codec::entities::EntityCommon,
 ) -> Vec<EntityType> {
     let mut entities = Vec::new();
-    let point = |value: [f32; 3]| Vector3::new(value[0] as f64, value[1] as f64, value[2] as f64);
+    let origin = geometry.origin;
+    let point = |value: [f32; 3]| {
+        Vector3::new(
+            value[0] as f64 + origin.x,
+            value[1] as f64 + origin.y,
+            value[2] as f64 + origin.z,
+        )
+    };
     for (points, common) in [
         (geometry.ext_lines.as_slice(), ext_common),
         (geometry.dim_lines.as_slice(), dim_common),
@@ -964,16 +1009,25 @@ fn dim_terminator(
                 out.push(dim_seg(r, tip, common));
             }
         }
-        A::Tick { size } => {
+        A::Tick { size, width } => {
             let s = *size as f64;
             let (ox, oy) = (dx + px, dy + py);
             let m = (ox * ox + oy * oy).sqrt().max(1e-9);
-            let (ox, oy) = (ox / m * s, oy / m * s);
-            out.push(dim_seg(
+            let (ux, uy) = (ox / m, oy / m);
+            let (ox, oy) = (ux * s, uy * s);
+            let (a, b) = (
                 Vector3::new(tip.x - ox, tip.y - oy, tip.z),
                 Vector3::new(tip.x + ox, tip.y + oy, tip.z),
-                common,
-            ));
+            );
+            out.push(dim_seg(a, b, common));
+            if *width > 0.0 {
+                // The architectural tick's band, as filled triangles.
+                let h = *width as f64 * 0.5;
+                let side =
+                    |p: Vector3, k: f64| Vector3::new(p.x - uy * h * k, p.y + ux * h * k, p.z);
+                tri(side(a, -1.0), side(a, 1.0), side(b, 1.0), &mut out);
+                tri(side(a, -1.0), side(b, 1.0), side(b, -1.0), &mut out);
+            }
         }
         A::Open { size, half_angle } => {
             let size = *size as f64;
@@ -985,10 +1039,16 @@ fn dim_terminator(
             let r = *size as f64 * 0.5;
             terminator_circle(tip, r, *filled, common, &mut out);
         }
-        A::Origin { size } => {
-            terminator_circle(tip, *size as f64 * 0.25, true, common, &mut out);
-            let half = *size as f64 * 0.5;
-            out.push(dim_seg(pt(0.0, -half), pt(0.0, half), common));
+        A::Origin { size, inner } => {
+            // Same geometry as the "_Origin" / "_Origin2" blocks; see
+            // `ArrowKind::Origin`.
+            let size = *size as f64;
+            terminator_circle(tip, size * 0.5, false, common, &mut out);
+            if *inner {
+                terminator_circle(tip, size * 0.25, false, common, &mut out);
+            }
+            let start = if *inner { size * 0.5 } else { 0.0 };
+            out.push(dim_seg(pt(start, 0.0), pt(size, 0.0), common));
         }
         A::Box_ { size, filled } => {
             let h = *size as f64 * 0.5;
@@ -1202,7 +1262,7 @@ struct DimMetrics {
 }
 
 /// Resolve style metrics used by saved dimension geometry.
-fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
+fn dim_metrics(dim: &Dimension, doc: &Document) -> DimMetrics {
     let name = dim.base().style_name.as_str();
     let effective_style = doc
         .dim_styles
@@ -1226,6 +1286,7 @@ fn dim_metrics(dim: &Dimension, doc: &CadDocument) -> DimMetrics {
     let (arrow1, arrow2) = if dimtsz > 1e-9 {
         let t = ArrowKind::Tick {
             size: dimtsz as f32,
+            width: 0.0,
         };
         (t.clone(), t)
     } else if let Some(s) = style {
@@ -1320,7 +1381,7 @@ fn dim_common(
 
 fn with_dim_linetype(
     mut common: codec::entities::EntityCommon,
-    doc: &CadDocument,
+    doc: &Document,
     handle: Handle,
 ) -> codec::entities::EntityCommon {
     common.linetype = doc
@@ -1468,7 +1529,7 @@ fn norm2(dx: f64, dy: f64, fx: f64, fy: f64) -> (f64, f64) {
     }
 }
 
-fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
+fn explode_dimension(dim: &Dimension, doc: &Document) -> Vec<EntityType> {
     if let Dimension::Arc(arc) = dim {
         if let Some((local_arc, normal)) = crate::entities::dimension::arc_dimension_in_ocs(arc) {
             let (x_axis, y_axis) =
@@ -1676,7 +1737,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
                 anchor
             };
             result.push(make_seg(&point, &leader, &dim_c));
-            result.extend(dim_center_mark(center, met.dimcen, len, &dim_c));
+            // The dimension line reaches the centre, so no centre mark.
         }
         Dimension::Diameter(d) => {
             let (edge, far) = (d.angle_vertex, d.definition_point);
@@ -1765,7 +1826,11 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
                     }
                 }
             }
-            result.extend(dim_center_mark(center, met.dimcen, len * 0.5, &dim_c));
+            // A centre mark only when no part of the dimension line crosses
+            // the circle.
+            if met.dimsd1 && met.dimsd2 {
+                result.extend(dim_center_mark(center, met.dimcen, len * 0.5, &dim_c));
+            }
         }
         Dimension::Angular2Ln(d) => {
             result.extend(angular_block_segs(
@@ -1846,7 +1911,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
     // position, height, rotation, alignment, text style, MText handling all
     // shared), so the baked block matches the on-screen dimension and the label
     // doesn't shift when the file is saved and reopened. `None` = suppressed.
-    if let Some(mut tent) = crate::entities::dimension::baked_dimension_text_entity(dim, doc, 1.0) {
+    for mut tent in crate::entities::dimension::baked_dimension_text_entities(dim, doc, 1.0) {
         // Apply the text colour / lineweight (DIMCLRT) onto the entity.
         let tc = dim_common(&base.common, met.dimclrt, -2);
         tent.common_mut().color = tc.color;
@@ -1870,7 +1935,7 @@ fn explode_dimension(dim: &Dimension, doc: &CadDocument) -> Vec<EntityType> {
 /// field but not `base`, so without this the saved group 10 goes stale and the
 /// dimension's line / leader / origin jumps on reload (#181). Angular-2-line
 /// keeps a distinct base point (the second line's point) and is left alone.
-fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<Handle> {
+fn sync_dimension_base_points_and_collect_pending(doc: &mut Document) -> Vec<Handle> {
     let existing_blocks: rustc_hash::FxHashSet<String> = doc
         .block_records
         .iter()
@@ -1915,8 +1980,49 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut CadDocument) -> Vec<
     pending
 }
 
+/// Remove `*D` pictures no dimension or insert names any more: a rotated
+/// or mirrored dimension detaches its old one (kept in the open drawing so an
+/// undo can point back to it), which a saved file should not carry.
+fn drop_detached_dimension_blocks(doc: &mut Document) {
+    let named: std::collections::HashSet<String> = doc
+        .entities()
+        .chain(
+            doc.block_records
+                .iter()
+                .flat_map(|record| record.entity_handles.iter())
+                .filter_map(|handle| doc.get_entity(*handle)),
+        )
+        .filter_map(|entity| match entity {
+            EntityType::Dimension(d) => Some(d.base().block_name.to_ascii_uppercase()),
+            EntityType::Insert(insert) => Some(insert.block_name.to_ascii_uppercase()),
+            _ => None,
+        })
+        .collect();
+    let detached: Vec<String> = doc
+        .block_records
+        .iter()
+        .map(|record| record.name.clone())
+        .filter(|name| {
+            let upper = name.to_ascii_uppercase();
+            upper.starts_with("*D") && !named.contains(&upper)
+        })
+        .collect();
+    for name in detached {
+        if let Some(record) = doc.block_records.remove(&name) {
+            let mut owned = record.entity_handles.clone();
+            owned.push(record.block_entity_handle);
+            owned.push(record.block_end_handle);
+            for handle in owned {
+                if !handle.is_null() {
+                    doc.remove_entity(handle);
+                }
+            }
+        }
+    }
+}
+
 /// Smallest free `*D<n>` anonymous block name in `doc`.
-fn next_dimension_block_name(doc: &CadDocument, next: &mut u64) -> String {
+fn next_dimension_block_name(doc: &Document, next: &mut u64) -> String {
     loop {
         let n = *next;
         *next = (*next).saturating_add(1);
@@ -1928,7 +2034,8 @@ fn next_dimension_block_name(doc: &CadDocument, next: &mut u64) -> String {
 }
 
 /// Build missing anonymous dimension geometry blocks before writing.
-pub fn bake_dimension_blocks(doc: &mut CadDocument) {
+pub fn bake_dimension_blocks(doc: &mut Document) {
+    drop_detached_dimension_blocks(doc);
     // Keep group-10 in step and find missing blocks in one entity pass. Existing
     // `*D` blocks are the save cache: only invalidated/new dimensions enter the
     // relatively expensive geometry generation below.
@@ -1942,7 +2049,7 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
         .collect();
 
     use crate::par::prelude::*;
-    let doc_ref: &CadDocument = doc;
+    let doc_ref: &Document = doc;
     let generated: Vec<(Handle, Vec<EntityType>)> = dimensions
         .par_iter()
         .map(|(handle, dim)| (*handle, explode_dimension(dim, doc_ref)))
@@ -1998,7 +2105,7 @@ pub fn bake_dimension_blocks(doc: &mut CadDocument) {
 }
 
 /// Drop baked dimension geometry so the next save regenerates it.
-pub fn invalidate_dim_block(doc: &mut CadDocument, handle: Handle) {
+pub fn invalidate_dim_block(doc: &mut Document, handle: Handle) {
     let bn = match doc.get_entity(handle) {
         Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
         _ => return,
@@ -2063,7 +2170,7 @@ mod tests {
 
     #[test]
     fn minsert_too_large_to_materialize_is_left_intact() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut block = codec::tables::BlockRecord::new("B1");
         block.handle = doc.allocate_handle();
         doc.block_records.add(block).unwrap();
@@ -2073,12 +2180,58 @@ mod tests {
         assert!(explode_entity(&EntityType::Insert(insert), &doc).is_empty());
     }
 
+    /// A pattern hatch explodes into its pattern lines on the hatch plane,
+    /// inside the boundary; a solid fill does not explode.
+    #[test]
+    fn pattern_hatch_explodes_to_clipped_lines() {
+        use codec::entities::hatch::{BoundaryEdge, BoundaryPath, HatchPatternLine, LineEdge};
+        use codec::types::Vector2;
+        let mut path = BoundaryPath::new();
+        for (s, e) in [((0.0, 0.0), (10.0, 0.0)), ((10.0, 0.0), (10.0, 10.0))]
+            .into_iter()
+            .chain([((10.0, 10.0), (0.0, 10.0)), ((0.0, 10.0), (0.0, 0.0))])
+        {
+            path.edges.push(BoundaryEdge::Line(LineEdge {
+                start: Vector2::new(s.0, s.1),
+                end: Vector2::new(e.0, e.1),
+            }));
+        }
+        let mut hatch = codec::entities::Hatch::new();
+        hatch.paths.push(path);
+        hatch.elevation = 3.0;
+        hatch.common.layer = "HATCH".into();
+        let doc = Document::new();
+        assert!(explode_entity(&EntityType::Hatch(Box::new(hatch.clone())), &doc).is_empty());
+
+        hatch.is_solid = false;
+        hatch.pattern.name = "ANSI31".into();
+        hatch.pattern.lines = vec![HatchPatternLine {
+            angle: std::f64::consts::FRAC_PI_4,
+            base_point: Vector2::new(0.0, 0.0),
+            offset: Vector2::new(-1.0, 1.0),
+            dash_lengths: vec![],
+        }];
+        let pieces = explode_entity(&EntityType::Hatch(Box::new(hatch)), &doc);
+        assert!(pieces.len() > 5);
+        for piece in &pieces {
+            let EntityType::Line(line) = piece else {
+                panic!("hatch exploded into a non-line");
+            };
+            assert_eq!(line.common.layer, "HATCH");
+            for p in [line.start, line.end] {
+                assert!((p.z - 3.0).abs() < 1e-9);
+                assert!((-1e-6..=10.0 + 1e-6).contains(&p.x));
+                assert!((-1e-6..=10.0 + 1e-6).contains(&p.y));
+            }
+        }
+    }
+
     /// EXPLODE resolves ByBlock transparency and linetype on the children it
     /// produces, the same way the render path does, so an exploded entity does
     /// not keep a ByBlock sentinel that nothing downstream resolves.
     #[test]
     fn explode_resolves_byblock_transparency_and_linetype() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut block = BlockRecord::new("BYBLOCK_STYLE");
         block.handle = doc.allocate_handle();
@@ -2119,7 +2272,7 @@ mod tests {
     /// only the ByBlock sentinel is replaced.
     #[test]
     fn explode_keeps_explicit_child_transparency_and_linetype() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut block = BlockRecord::new("EXPLICIT_STYLE");
         block.handle = doc.allocate_handle();
@@ -2156,7 +2309,7 @@ mod tests {
 
     #[test]
     fn unexplodable_block_is_not_exploded() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut block = codec::tables::BlockRecord::new("NO_EXPLODE");
         block.handle = doc.allocate_handle();
         block.explodable = false;
@@ -2171,7 +2324,7 @@ mod tests {
     /// no-op (already has a valid block).
     #[test]
     fn bakes_block_for_blockless_dimension_and_is_idempotent() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
@@ -2209,7 +2362,7 @@ mod tests {
     /// dimension shifted. Regression test for #181.
     #[test]
     fn bake_zeroes_insertion_point() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
@@ -2238,7 +2391,7 @@ mod tests {
     /// save re-bakes a fresh block. Guards the stale-export fix for #181.
     #[test]
     fn invalidate_removes_block_and_leaves_no_orphan() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
@@ -2299,7 +2452,7 @@ mod tests {
     }
 
     // Collect the line segments baked into the dimension's `*D` block.
-    fn baked_segments(doc: &CadDocument, block_name: &str) -> Vec<(Vector3, Vector3)> {
+    fn baked_segments(doc: &Document, block_name: &str) -> Vec<(Vector3, Vector3)> {
         let rec = doc.block_records.get(block_name).expect("block record");
         doc.entities()
             .filter_map(|e| match e {
@@ -2317,7 +2470,7 @@ mod tests {
     // where a shared offset tilted the dimension line.
     #[test]
     fn linear_dim_line_stays_level_over_sloped_points() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 5.0, 0.0));
         d.rotation = 0.0;
         d.definition_point = Vector3::new(0.0, 8.0, 0.0);
@@ -2347,7 +2500,7 @@ mod tests {
     // type. (Default style: DIMTSZ=0 -> arrows, two of them.)
     #[test]
     fn linear_dim_bakes_filled_arrowheads() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         let handle = doc
@@ -2370,7 +2523,7 @@ mod tests {
     }
 
     /// The line segments EXPLODE turns the dimension into.
-    fn exploded_segments(dim: &Dimension, doc: &CadDocument) -> Vec<(DVec3, DVec3)> {
+    fn exploded_segments(dim: &Dimension, doc: &Document) -> Vec<(DVec3, DVec3)> {
         let point = |v: Vector3| DVec3::new(v.x, v.y, v.z);
         explode_dimension(dim, doc)
             .into_iter()
@@ -2388,7 +2541,7 @@ mod tests {
     #[test]
     fn exploding_a_linear_dimension_off_world_z_keeps_its_plane() {
         use crate::command::EntityTransform;
-        let doc = CadDocument::new();
+        let doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
         d.definition_point = Vector3::new(0.0, 5.0, 0.0);
         let flat = Dimension::Linear(d);
@@ -2427,7 +2580,7 @@ mod tests {
     #[test]
     fn angular_dim_bakes_an_arc() {
         use codec::entities::DimensionAngular3Pt;
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionAngular3Pt::new(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(10.0, 0.0, 0.0),
@@ -2457,7 +2610,7 @@ mod tests {
     #[test]
     fn diameter_dim_bakes_through_center() {
         use codec::entities::DimensionDiameter;
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let center = Vector3::new(3.0, 4.0, 0.0);
         let edge = Vector3::new(8.0, 4.0, 0.0); // radius 5 along +x
         let far = Vector3::new(-2.0, 4.0, 0.0);
@@ -2490,7 +2643,7 @@ mod tests {
     // line instead of a vertical one.
     #[test]
     fn rotated_linear_dim_bakes_at_its_angle() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 10.0, 0.0));
         d.rotation = std::f64::consts::FRAC_PI_2; // 90°, vertical dimension line
         d.definition_point = Vector3::new(8.0, 0.0, 0.0);
@@ -2583,7 +2736,7 @@ mod tests {
     fn dimlinear_survives_save_reload_with_baked_geometry() {
         let mut failures = Vec::new();
         for ext in ["dxf", "dwg"] {
-            let mut doc = CadDocument::new();
+            let mut doc = Document::new();
             let mut d =
                 DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
             d.definition_point = Vector3::new(0.0, 5.0, 0.0);
@@ -2650,7 +2803,7 @@ mod tests {
     /// No extension dictionary may be referenced by more than one entity.
     /// Shared xdict ownership fails file validation as
     /// "Extension dictionary <H> Cannot access".
-    fn assert_no_shared_xdicts(doc: &CadDocument) {
+    fn assert_no_shared_xdicts(doc: &Document) {
         use std::collections::HashMap;
         let mut owners: HashMap<codec::Handle, usize> = HashMap::new();
         for entity in doc.entities() {
@@ -2679,7 +2832,7 @@ mod tests {
     /// with exactly N "Cannot access" errors.
     #[test]
     fn baked_children_do_not_share_dimension_xdict() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
 
         // Made-up dictionary object for the dimension to own.
         let dict_handle = doc.allocate_handle();

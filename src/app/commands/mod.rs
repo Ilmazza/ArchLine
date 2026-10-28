@@ -1,6 +1,5 @@
 use super::{Message, OpenCADStudio};
 use crate::command::CadCommand;
-use crate::scene::Scene;
 use iced::Task;
 use std::path::PathBuf;
 
@@ -10,34 +9,48 @@ mod bim;
 mod block_cmdline;
 mod blocks;
 mod blockvars;
+mod block_editor_vars;
 mod bvisibility;
 mod count;
+mod dash;
 mod dgn_import;
 mod dim;
+mod dim_cmd;
+mod dim_inspect;
+mod dim_layer;
+mod mleader_layer;
 pub(crate) mod display;
 mod draw;
 mod field;
 mod fileops;
 mod hatch_dialog;
 mod hatch_gradient;
+mod hyperlink;
+pub(crate) use hyperlink::{hyperlink_options, set_hyperlink_options};
 mod inquiry;
 mod layerprops;
 mod layers;
 mod model_import;
+mod ole;
+pub(crate) use ole::{ole_quality, set_ole_quality};
 mod pc_colormap;
 mod pc_extract;
 mod pdf_dialogs;
 pub(crate) mod pdf_import;
+mod pdf_password;
 mod pdf_shx_text;
 mod pdf_underlay;
 mod autocad_names;
 pub(crate) mod blockedit_target;
-mod hatchvars;
+pub(in crate::app) mod hatchvars;
 mod plotvars;
 mod point_cloud;
 mod refedit;
 pub(crate) mod sheet_set;
+mod spell;
 mod styleprops;
+mod text_edit;
+mod text_layer;
 mod ucsfollow;
 mod table_export;
 mod view;
@@ -169,6 +182,22 @@ impl OpenCADStudio {
     }
 
     fn dispatch_command_inner(&mut self, cmd: &str, allow_suggest: bool) -> Task<Message> {
+        self.try_dispatch_command(cmd, allow_suggest)
+            .unwrap_or_else(|| {
+                self.command_line
+                    .push_error(crate::tf!("Unknown command: {cmd}").as_ref());
+                self.finish_dispatch(cmd)
+            })
+    }
+
+    /// Dispatch `cmd`, or `None` when no command answers to it (nothing is
+    /// reported then). A script line uses it to tell a command that took
+    /// the words after it from one that did not.
+    pub(in crate::app) fn try_dispatch_command(
+        &mut self,
+        cmd: &str,
+        allow_suggest: bool,
+    ) -> Option<Task<Message>> {
         let i = self.active_tab;
         // Expand a command alias ("L" → "LINE") on the leading token before any
         // routing, so every path below (Start-tab gate, plugins, all dispatch
@@ -185,11 +214,54 @@ impl OpenCADStudio {
         // AutoCAD names ArchLine has under another one (commands/autocad_names.rs).
         let renamed = autocad_names::rename(cmd);
         let cmd = renamed.as_deref().unwrap_or(cmd);
+        if let Some(task) = self.dispatch_block_editor_vars(cmd, i) {
+            return Some(task);
+        }
+        if cmd.trim_start_matches(['_', '.']) == "BGRIPSET" {
+            return Some(self.start_block_grip_set());
+        }
+        let construction = cmd.trim_start_matches(['_', '.']);
+        if construction == "BCONSTRUCTION" || construction.starts_with("BCONSTRUCTION ") {
+            return Some(self.start_block_construction(construction.strip_prefix("BCONSTRUCTION").unwrap().trim()));
+        }
+        if cmd.trim_start_matches(['_', '.']) == "BCYCLEORDER" {
+            return Some(self.open_block_cycle_order());
+        }
+        let verb = cmd
+            .split([' ', ':'])
+            .next()
+            .unwrap_or(cmd)
+            .trim_start_matches(['_', '.']);
+        if self.block_editor_preferences.locked
+            && matches!(verb, "BEDIT" | "BEDIT_BEGIN" | "BEDIT_OPEN" | "BEDIT_NEW")
+        {
+            self.command_line.push_error(
+                crate::t!("The Block Editor is locked by BLOCKEDITLOCK.").as_ref(),
+            );
+            return Some(Task::none());
+        }
         if cmd == "BACTIONSET" {
             if let Some(error) = self.action_set_error() {
                 self.command_line.push_error(crate::t!(error).as_ref());
-                return Task::none();
+                return Some(Task::none());
             }
+        }
+        if cmd == "BASSOCIATE" {
+            if let Some(error)=self.action_association_error() {
+                self.command_line.push_error(crate::t!(error).as_ref());
+                return Some(Task::none());
+            }
+        }
+        if cmd == "BACTIONBAR" || cmd.starts_with("BACTIONBAR ") {
+            if let Some(error)=self.action_bar_error() {
+                self.command_line.push_error(crate::t!(error).as_ref());
+                return Some(Task::none());
+            }
+        }
+        if self.block_editor_preferences.action_bars && self.tabs[i].active_block_edit_session().is_some()
+            && matches!(verb,"BACTIONSET"|"BASSOCIATE"|"BLOOKUPTABLE") {
+            self.command_line.push_error(crate::t!("Use the action bar to edit this action, or set BACTIONBARMODE to 0.").as_ref());
+            return Some(Task::none());
         }
         if matches!(
             cmd.split(' ').next(),
@@ -207,11 +279,11 @@ impl OpenCADStudio {
                     )
                     .as_ref(),
                 );
-                return Task::none();
+                return Some(Task::none());
             }
             if let Some(error) = self.action_error(crate::scene::block_actions::Kind::parse(args)) {
                 self.command_line.push_error(crate::t!(error).as_ref());
-                return Task::none();
+                return Some(Task::none());
             }
         }
         if cmd == "BPARAMETER" || cmd.starts_with("BPARAMETER ") {
@@ -219,20 +291,28 @@ impl OpenCADStudio {
                 self.parameter_placement_error(cmd.strip_prefix("BPARAMETER").unwrap().trim())
             {
                 self.command_line.push_error(crate::t!(error).as_ref());
-                return Task::none();
+                return Some(Task::none());
             }
         }
         if cmd == "BLOOKUPTABLE" || cmd.starts_with("BLOOKUPTABLE ") {
             if let Some(error) = self.lookup_table_error() {
                 self.command_line.push_error(crate::t!(error).as_ref());
-                return Task::none();
+                return Some(Task::none());
             }
         }
-        if cmd == "BPROPERTIESTABLE" || cmd.starts_with("BPROPERTIESTABLE ") {
+        if cmd == "BTABLE" || cmd == "BPROPERTIESTABLE" || cmd.starts_with("BPROPERTIESTABLE ") {
             if let Some(error) = self.properties_table_error() {
                 self.command_line.push_error(crate::t!(error).as_ref());
-                return Task::none();
+                return Some(Task::none());
             }
+        }
+        if matches!(cmd, "RESETBLOCK" | "RESETBLOCK APPLY")
+            && self.tabs[i].active_block_edit_session().is_some()
+        {
+            self.command_line.push_error(
+                crate::t!("RESETBLOCK is not available inside the Block Editor.").as_ref(),
+            );
+            return Some(Task::none());
         }
         if self.tabs[i].block_test.is_some() {
             let name = cmd.split([' ', ':']).next().unwrap_or(cmd);
@@ -258,7 +338,7 @@ impl OpenCADStudio {
                     crate::t!("Close Test Block before saving or opening another block editor.")
                         .as_ref(),
                 );
-                return Task::none();
+                return Some(Task::none());
             }
         }
         // V7 (reference check): inside a block editor session a set of
@@ -270,6 +350,10 @@ impl OpenCADStudio {
             if matches!(
                 name,
                 "LAYOUT"
+                    | "-LAYOUT"
+                    | "-PURGE"
+                    | "-RENAME"
+                    | "-PLOT"
                     | "VPORTS"
                     | "MVIEW"
                     | "WBLOCK"
@@ -282,11 +366,11 @@ impl OpenCADStudio {
                 self.command_line.push_error(
                     crate::tf!("{} command not allowed in block editor", name).as_ref(),
                 );
-                return Task::none();
+                return Some(Task::none());
             }
         }
         if is_spacemouse_command(cmd) {
-            return self.run_action(cmd);
+            return Some(self.run_action(cmd));
         }
         // A drafting aid only flips a flag, so it must not disturb whatever is
         // already running: pressing F8 partway through a LINE means "constrain
@@ -307,7 +391,13 @@ impl OpenCADStudio {
             let task = self.dispatch_families(cmd, i).unwrap_or_else(Task::none);
             // A one-shot zoom is over already — resume straight away.
             self.resume_transparent_parent(i);
-            return task;
+            return Some(task);
+        }
+        // A walk is only a temporary hide, and these commands take ownership of
+        // layer visibility from here on: starting one puts the drawing back
+        // first, so the override never swallows the result it is hiding.
+        if self.tabs[i].layer_walk.is_some() && Self::layer_walk_conflicts_with(cmd) {
+            self.abandon_layer_walk_on(i);
         }
         // A new command abandons any grip edit and its numeric input.
         let had_pending_grip_input = self.grip_pending.take().is_some();
@@ -330,6 +420,9 @@ impl OpenCADStudio {
         // Cancel any running command before starting a new one.
         if self.tabs[i].active_cmd.is_some() {
             self.hatch_dialog_abandon_for_new_command(i);
+            self.tabs[i].pending_parameter_set_follow_up = None;
+            self.tabs[i].pending_xy_box_set = None;
+            self.tabs[i].pending_action_pair = None;
             self.tabs[i].scene.clear_preview_wire();
             self.tabs[i].active_cmd = None;
             // Interrupting an ADDSELECTED draw with another command reverts its
@@ -341,7 +434,7 @@ impl OpenCADStudio {
         if let Some(path_str) = cmd.strip_prefix("OPEN_RECENT:") {
             let path = PathBuf::from(path_str);
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            return Task::done(Message::OpenPathPicked(Some((path, size))));
+            return Some(Task::done(Message::OpenPathPicked(Some((path, size)))));
         }
 
         // The Start (welcome) tab has no drawing to act on, so a drawing
@@ -357,7 +450,7 @@ impl OpenCADStudio {
             self.command_line.push_info(
                 crate::t!("No drawing open. Use NEW or OPEN to start a drawing.").as_ref(),
             );
-            return Task::none();
+            return Some(Task::none());
         }
 
         // Light the ribbon button of the command now starting, however it was
@@ -378,7 +471,48 @@ impl OpenCADStudio {
             if self.tabs[i].active_cmd.is_none() {
                 self.ribbon.deactivate_tool();
             }
-            return self.finish_dispatch(cmd);
+            return Some(self.finish_dispatch(cmd));
+        }
+
+        // Direct plugin panel toggle command matching
+        let cmd_upper = cmd.trim().to_uppercase();
+        let stripped_cmd = cmd_upper.replace([' ', '_', '-'], "");
+        let panel_match = self.plugin_panels.iter().find_map(|(id, state)| {
+            let matches_cmd = state.def.command.as_deref().map(|c| {
+                let cu = c.to_uppercase();
+                cu == cmd_upper || cu.replace([' ', '_', '-'], "") == stripped_cmd
+            }).unwrap_or(false);
+            let matches_id = {
+                let id_u = id.to_uppercase();
+                id_u == cmd_upper || id_u.replace([' ', '_', '-'], "") == stripped_cmd
+            };
+            let matches_title = {
+                let tu = state.def.title.to_uppercase();
+                tu == cmd_upper || tu.replace([' ', '_', '-'], "") == stripped_cmd
+            };
+            if matches_cmd || matches_id || matches_title {
+                Some((id.clone(), state.def.title.clone()))
+            } else {
+                None
+            }
+        });
+        if let Some((panel_id, title)) = panel_match {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use ocs_plugin_api::host::HostApi;
+                let mut host = crate::app::plugin_host::HostSession::new(self, i);
+                let toggled = host.toggle_panel(&panel_id, None);
+                if toggled {
+                    self.command_line.push_info(&format!("{title} palette toggled."));
+                    self.tabs[i].last_cmd = Some(cmd.to_string());
+                    self.command_line.record_recent(cmd);
+                    return Some(self.finish_dispatch(cmd));
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (panel_id, title);
+            }
         }
 
         // Command families are dispatched in source order (see
@@ -390,7 +524,7 @@ impl OpenCADStudio {
             // resolution so a partial verb completed via the suggestion
             // fallback (`BAC`) stores the real command (`BACKGROUND`).
             self.command_line.record_recent(cmd);
-            return t;
+            return Some(t);
         }
 
         // Scripts and typed input may carry the international (`_`) and
@@ -399,7 +533,7 @@ impl OpenCADStudio {
         // (`_PCCROPPOLY`), so a name is tried as written first and loses its
         // prefixes only when nothing handles it.
         if let Some(bare) = strip_command_prefixes(cmd) {
-            return self.dispatch_command_inner(bare, allow_suggest);
+            return self.try_dispatch_command(bare, allow_suggest);
         }
 
         // No family matched. From the interactive command line, run the
@@ -416,13 +550,11 @@ impl OpenCADStudio {
             .next()
             {
                 if !top.eq_ignore_ascii_case(cmd) {
-                    return self.dispatch_command_inner(&top, false);
+                    return self.try_dispatch_command(&top, false);
                 }
             }
         }
-        self.command_line
-            .push_error(crate::tf!("Unknown command: {cmd}").as_ref());
-        self.finish_dispatch(cmd)
+        None
     }
 
     /// Try each command family in source order, returning the first that
@@ -431,6 +563,24 @@ impl OpenCADStudio {
     /// `finish_dispatch`), or `None` to defer to the next — equivalent to one
     /// sequential `match` over all arms.
     fn dispatch_families(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+        if let Some(t) = self.dispatch_text_layer(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_dim_layer(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_dim_cmd(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_dim_inspect(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_mleader_layer(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_dash(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_ucsfollow(cmd, i) {
             return Some(t);
         }
@@ -470,6 +620,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_attdef(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_ole(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_sheet_set(cmd, i) {
             return Some(t);
         }
@@ -477,6 +630,15 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_hatch_dialog(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_hyperlink(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_text_edit(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_spell(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_count(cmd, i) {
@@ -527,7 +689,8 @@ impl OpenCADStudio {
     /// Shared tail run after a `dispatch_*` family handler whose matched arm
     /// did not early-return. Focuses the command line whenever a command just
     /// became active.
-    fn finish_dispatch(&mut self, cmd: &str) -> Task<Message> {
+    pub(crate) fn finish_dispatch(&mut self, cmd: &str) -> Task<Message> {
+        crate::ui::ribbon::keytip_note_command_finished();
         let i = self.active_tab;
         if self.tabs[i].active_cmd.is_some() {
             self.tabs[i].last_cmd = Some(cmd.to_string());
@@ -580,6 +743,7 @@ pub fn is_transparent(cmd: &str) -> bool {
                 | "DSETTINGS"
                 | "BAUTHORPALETTE"
                 | "BAUTHORPALETTECLOSE"
+                | "PARAMETERSCLOSE"
         )
 }
 
@@ -600,7 +764,12 @@ fn is_spacemouse_command(cmd: &str) -> bool {
 /// source of truth: the dispatch gate refuses everything else, and the ribbon
 /// dims the tools this rejects.
 pub fn start_allowed(cmd: &str) -> bool {
+    // A batch script starts from no drawing: it sets FILEDIA / SDI and
+    // opens the drawings it works on by path, and EXIT answers its save
+    // questions from any tab.
+    let verb = cmd.split_whitespace().next().unwrap_or("");
     is_spacemouse_command(cmd)
+        || matches!(verb, "OPEN" | "SCRIPT" | "SCR" | "FILEDIA" | "SDI" | "EXIT")
         || matches!(
             cmd,
             "NEW"
@@ -646,11 +815,22 @@ inventory::submit!(crate::command::CommandRegistration {
         "-WBLOCK",
         "-WB",
         "-ATTEDIT",
+        // Script forms of the table commands.
+        "-LAYER",
+        "-PURGE",
+        "-OVERKILL",
+        "-STYLE",
+        "-RENAME",
+        "-DIMSTYLE",
+        "-LAYOUT",
+        "-PLOT",
         "CLEANSCREEN",
         "TOOLBARRESET",
         "CUI",
         "DSETTINGS",
         "PARAMETERS",
+        "PARAMETERSCLOSE",
+        "BTABLE",
         "GRID",
         "GRAPHICATTRIBUTES",
         "ISODRAFT",
@@ -830,12 +1010,14 @@ inventory::submit!(crate::command::CommandRegistration {
         "PERSPECTIVE",
         "GRIDMODE",
         "GRIDUNIT",
+        "QPMODE",
         "ZOOMWHEEL",
         "ZOOMFACTOR",
         "SHORTCUTMENU",
         "SHORTCUTMENUDURATION",
         "CURSORSIZE",
         "PICKBOX",
+        "APERTURE",
         "CURSORTYPE",
         "SNAPANG",
         "ATTREQ",
@@ -846,6 +1028,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "REGENMODE",
         "BLIPMODE",
         "SPLFRAME",
+        "CAMERADISPLAY",
         "DELOBJ",
         "PLINEGEN",
         "PSLTSCALE",
@@ -904,7 +1087,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "UOSNAP",
         "FIELDDISPLAY",
         "FILEDIA",
+        "SDI",
         "TRIMEXTENDMODE",
+        "PELLIPSE",
         "SELECTIONCYCLING",
         "UCSDETECT",
         "SURFACEASSOCIATIVITY",
@@ -1008,6 +1193,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "COLORSCHEME",
         "COUNT",
         "DATAEXTRACTION",
+        "-DATAEXTRACTION",
         "DE",
         "DESELALL",
         "DESELECT",
@@ -1055,6 +1241,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "LAYOUTTAB",
         "LAYTHW",
         "LAYUNISO",
+        "LAYWALK",
         "LI",
         "LINETYPE",
         "LIST",
@@ -1333,6 +1520,75 @@ mod marquee_cancel_tests {
         assert_eq!(
             app.tabs[i].active_cmd.as_deref().map(|cmd| cmd.name()),
             Some("LINE")
+        );
+    }
+
+    #[test]
+    fn plugin_panel_toggle_by_command_and_title() {
+        use ocs_plugin_api::dialog::PanelDef;
+        use ocs_plugin_api::host::HostApi;
+
+        let mut app = fresh();
+        let i = app.active_tab;
+
+        // Register a panel
+        let panel_def = PanelDef::new("sample_palette", "Sample Palette")
+            .with_width(360.0)
+            .with_command("SAMPLEPALETTE");
+
+        {
+            let mut host = crate::app::plugin_host::HostSession::new(&mut app, i);
+            assert!(host.register_panel(panel_def));
+        }
+
+        // Initially panel is registered and not visible
+        assert!(!app.plugin_panels.get("sample_palette").unwrap().visible);
+        assert!(app.command_line.dynamic_commands.contains(&"SAMPLEPALETTE".to_string()));
+
+        // Dispatch SAMPLEPALETTE command to toggle on
+        let _ = app.dispatch_command("SAMPLEPALETTE");
+        assert!(app.plugin_panels.get("sample_palette").unwrap().visible);
+
+        // Dispatch SAMPLEPALETTE command to toggle off
+        let _ = app.dispatch_command("SAMPLEPALETTE");
+        assert!(!app.plugin_panels.get("sample_palette").unwrap().visible);
+
+        // Dispatch with spaces or lowercase "sample palette"
+        let _ = app.dispatch_command("sample palette");
+        assert!(app.plugin_panels.get("sample_palette").unwrap().visible);
+
+        let _ = app.dispatch_command("samplepalette");
+        assert!(!app.plugin_panels.get("sample_palette").unwrap().visible);
+    }
+
+    #[test]
+    fn plugin_show_dialog_opens_modal() {
+        use ocs_plugin_api::dialog::{DialogControl, DialogDef, DialogResponse, DialogRow};
+        use ocs_plugin_api::host::HostApi;
+
+        let mut app = fresh();
+        let i = app.active_tab;
+
+        let dialog = DialogDef::new("Test Modal").with_row(DialogRow::single(DialogControl::Text {
+            id: "name".to_string(),
+            label: "Name".to_string(),
+            default: "DefaultVal".to_string(),
+        }));
+
+        {
+            let mut host = crate::app::plugin_host::HostSession::new(&mut app, i);
+            let resp = host.show_dialog(dialog);
+            assert!(matches!(resp, DialogResponse::Cancelled));
+        }
+
+        assert!(app.plugin_dialog_state.is_some());
+        assert_eq!(
+            app.active_modal,
+            Some(crate::app::ModalKind::PluginDialog)
+        );
+        assert_eq!(
+            app.plugin_dialog_state.as_ref().unwrap().title(),
+            "Test Modal"
         );
     }
 }

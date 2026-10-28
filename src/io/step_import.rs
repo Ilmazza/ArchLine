@@ -2,7 +2,7 @@
 //! AP203/AP214/AP242 file, as kernel bodies, with the product's name and the
 //! file's length unit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kernel::brep::{
     Circle3, Cone, Curve3, Cylinder, EdgeKey, Ellipse3, Line3, Sphere, Surface, Torus, VertexKey,
@@ -63,6 +63,10 @@ struct Cursor<'a> {
     i: usize,
     /// How many parameter lists deep the cursor is.
     depth: usize,
+    /// Scratch shared by every number token of the file: a `.` that needs
+    /// a `0` after it is normalized here instead of allocating a fresh
+    /// String per number.
+    buf: Vec<u8>,
 }
 
 impl Cursor<'_> {
@@ -88,7 +92,9 @@ impl Cursor<'_> {
     fn eat(&mut self, c: u8) -> Option<()> {
         (self.peek()? == c).then(|| self.i += 1)
     }
-    fn word(&mut self) -> String {
+    /// The bytes of the next word, without materializing them: they run to
+    /// the first byte that is not alphanumeric, `_` or `-`.
+    fn word_span(&mut self) -> std::ops::Range<usize> {
         self.skip();
         let start = self.i;
         while self
@@ -98,13 +104,61 @@ impl Cursor<'_> {
         {
             self.i += 1;
         }
-        String::from_utf8_lossy(&self.s[start..self.i]).to_ascii_uppercase()
+        start..self.i
+    }
+    /// The next word, uppercased for keyword matching — one allocation,
+    /// only for the words that are actually stored (entity names, enum
+    /// values). Callers that just parse or check the word use
+    /// [`Cursor::word_span`] / [`Cursor::word_id`] and allocate nothing.
+    fn word(&mut self) -> String {
+        let span = self.word_span();
+        String::from_utf8_lossy(&self.s[span]).to_ascii_uppercase()
+    }
+    /// The next word read as an instance id (`#12`, `#345`). Digits are
+    /// untouched by the uppercasing [`Cursor::word`] would apply, so the
+    /// copy could never change the parse.
+    fn word_id(&mut self) -> Option<u64> {
+        let span = self.word_span();
+        std::str::from_utf8(&self.s[span]).ok()?.parse().ok()
+    }
+    /// Whether Rust's float parser needs a `0` written after the `.` at
+    /// `i`: it takes `1.E-3` as nothing (it wants `1.0E-3`), while a dot
+    /// with no digit anywhere before it — the malformed `+.` — is a
+    /// rejection the reader has always passed straight through.
+    fn dot_needs_zero(raw: &[u8], i: usize) -> bool {
+        let next = raw.get(i + 1);
+        !next.is_some_and(|n| n.is_ascii_digit())
+            && (matches!(next, Some(b'e' | b'E')) || raw[..i].iter().any(u8::is_ascii_digit))
+    }
+    /// One number token, parsed in place: a `.` that needs a `0` after it
+    /// (per [`Cursor::dot_needs_zero`]) is normalized into the scratch
+    /// `buf` this cursor shares across every token of the file, and
+    /// tokens needing no `0` parse straight out of the file's bytes —
+    /// where two `str::replace` calls used to allocate two Strings for
+    /// every number in every file.
+    fn number(&mut self, start: usize, end: usize) -> Option<f64> {
+        let raw = &self.s[start..end];
+        if !raw
+            .iter()
+            .enumerate()
+            .any(|(i, &c)| c == b'.' && Self::dot_needs_zero(raw, i))
+        {
+            return std::str::from_utf8(raw).ok()?.parse().ok();
+        }
+        self.buf.clear();
+        for (i, &c) in raw.iter().enumerate() {
+            self.buf.push(c);
+            if c == b'.' && Self::dot_needs_zero(raw, i) {
+                self.buf.push(b'0');
+            }
+        }
+        std::str::from_utf8(&self.buf).ok()?.parse().ok()
     }
     fn param(&mut self) -> Option<P> {
         Some(match self.peek()? {
             b'#' => {
                 self.i += 1;
-                P::Ref(self.word().parse().ok()?)
+                P::Ref(self.word_id()?)
             }
             b'\'' => {
                 self.i += 1;
@@ -143,11 +197,10 @@ impl Cursor<'_> {
                 {
                     self.i += 1;
                 }
-                let raw = String::from_utf8_lossy(&self.s[start..self.i]).replace(".E", ".0E");
-                P::Num(raw.replace(".e", ".0e").parse().ok()?)
+                P::Num(self.number(start, self.i)?)
             }
             _ => {
-                if self.word().is_empty() {
+                if self.word_span().is_empty() {
                     return None;
                 }
                 P::Typed(self.params()?)
@@ -186,7 +239,7 @@ impl Cursor<'_> {
     /// `#id = TYPE(...)` or `#id = (A(...) B(...))`, up to its `;`.
     fn instance(&mut self) -> Option<(u64, Instance)> {
         self.eat(b'#')?;
-        let id = self.word().parse().ok()?;
+        let id = self.word_id()?;
         self.eat(b'=')?;
         let mut parts = Vec::new();
         if self.eat(b'(').is_some() {
@@ -606,7 +659,13 @@ pub struct StepBody {
 /// One product: its own bodies and where each of its components sits.
 pub struct StepProduct {
     pub name: String,
+    /// A representation of a file without products: the block is named
+    /// after the file and this entity number (`<file>-<number>`).
+    pub numbered: Option<u64>,
     pub bodies: Vec<StepBody>,
+    /// The scale its bodies take in its block (1 but for a representation
+    /// mapped without length units; see `without_products`).
+    pub scale: f64,
     /// Components: the product (an index into [`StepModel::products`]) and
     /// its placement in this one.
     pub children: Vec<(usize, Placement)>,
@@ -614,8 +673,12 @@ pub struct StepProduct {
 
 /// What a STEP file holds.
 pub struct StepModel {
-    /// Millimetres per file length unit.
-    pub unit_mm: f64,
+    /// Millimetres per file length unit; `None` when the file names no
+    /// length unit (its numbers are then taken as drawing units).
+    pub unit_mm: Option<f64>,
+    /// Solids that go straight into the drawing: those of a file without
+    /// products whose top representation places nothing else.
+    pub direct: Vec<StepBody>,
     pub products: Vec<StepProduct>,
     /// The products no other one is a component of.
     pub roots: Vec<usize>,
@@ -654,6 +717,19 @@ fn unit_size(doc: &Doc, mut id: u64) -> Option<f64> {
         );
     }
     None
+}
+
+/// The millimetres of the length unit a representation context assigns,
+/// or `None` when it assigns none.
+fn length_unit_mm(doc: &Doc, context: u64) -> Option<f64> {
+    doc.part(context, "GLOBAL_UNIT_ASSIGNED_CONTEXT")
+        .and_then(|units| units.first())
+        .map(P::list)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(P::reference)
+        .find(|unit| doc.part(*unit, "LENGTH_UNIT").is_some())
+        .map(|unit| unit_size(doc, unit).unwrap_or(1.0))
 }
 
 /// The bodies of one B-rep item: a solid, a solid with voids, or each shell
@@ -708,6 +784,26 @@ fn item_bodies(doc: &Doc, id: u64) -> Vec<StepBody> {
 }
 
 impl Doc {
+    /// Where a mapped item puts its representation: an axis placement, or
+    /// a Cartesian transformation operator (axes, origin, uniform scale).
+    fn target_frame(&self, id: u64) -> Option<Placement> {
+        if self.kind(id) != "CARTESIAN_TRANSFORMATION_OPERATOR_3D" {
+            return self.frame(id);
+        }
+        let (_, p) = self.simple(id)?;
+        let axis = |k: usize| p.get(k).and_then(|d| self.direction(d)).map(Vec3::from);
+        let x = axis(3).and_then(Vec3::normalize).unwrap_or(Vec3::new(1.0, 0.0, 0.0));
+        let z = axis(7).and_then(Vec3::normalize).unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        let y = axis(4)
+            .and_then(Vec3::normalize)
+            .or_else(|| z.cross(x).normalize())
+            .unwrap_or(Vec3::new(0.0, 1.0, 0.0));
+        let o = p.get(5).and_then(|o| self.point(o)).unwrap_or([0.0; 3]);
+        // Its scale is not applied (as the reference reads it).
+        let [x, y, z] = [x, y, z].map(|v| [v.x, v.y, v.z]);
+        Some([0, 1, 2].map(|r| [x[r], y[r], z[r], o[r]]))
+    }
+
     /// An axis placement as a placement matrix.
     fn frame(&self, id: u64) -> Option<Placement> {
         let plane = self.placement(&P::Ref(id))?;
@@ -750,6 +846,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         s: &text.as_bytes()[data..],
         i: 0,
         depth: 0,
+        buf: Vec::new(),
     };
     let mut instances = HashMap::new();
     while cursor.peek() == Some(b'#') {
@@ -773,7 +870,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         styles: HashMap::new(),
     };
 
-    let mut unit_mm = 1.0;
+    let mut unit_mm = None;
     let mut angle = 1.0;
     let mut ids: Vec<u64> = doc.instances.keys().copied().collect();
     ids.sort_unstable();
@@ -784,7 +881,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         for unit in units.first().map(P::list).unwrap_or_default() {
             let Some(unit) = unit.reference() else { continue };
             if doc.part(unit, "LENGTH_UNIT").is_some() {
-                unit_mm = unit_size(&doc, unit).unwrap_or(1.0);
+                unit_mm = Some(unit_size(&doc, unit).unwrap_or(1.0));
             } else if doc.part(unit, "PLANE_ANGLE_UNIT").is_some() {
                 angle = unit_size(&doc, unit).unwrap_or(1.0);
             }
@@ -818,7 +915,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             .filter(|&id| doc.kind(id) == kind)
             .collect()
     };
-    let param = |id: u64, k: usize| doc.simple(id).and_then(|(_, p)| p.get(k)).and_then(P::reference);
+    let param = |id: u64, k: usize| {
+        doc.simple(id).and_then(|(_, p)| p.get(k)).and_then(P::reference)
+    };
 
     // Product definitions and the name of the product each defines.
     let definitions: Vec<u64> = ids
@@ -842,6 +941,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             .unwrap_or_default()
             .to_string()
     };
+    if definitions.is_empty() {
+        return Some(without_products(&doc, &ids, unit_mm));
+    }
     // The shape of a definition (or an occurrence), and the representations
     // attached to a shape.
     let shape_of: HashMap<u64, u64> = of_kind("PRODUCT_DEFINITION_SHAPE")
@@ -885,7 +987,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
 
     let mut index: HashMap<u64, usize> = HashMap::new();
     let mut products: Vec<StepProduct> = Vec::new();
-    let mut used_items: Vec<u64> = Vec::new();
+    let mut used_items: HashSet<u64> = HashSet::new();
     for &definition in &definitions {
         let mut bodies = Vec::new();
         for rep in shape_of.get(&definition).and_then(|pds| reps_of_shape.get(pds)).into_iter().flatten() {
@@ -893,7 +995,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
                 if !used_items.contains(&item) {
                     let found = item_bodies(&doc, item);
                     if !found.is_empty() {
-                        used_items.push(item);
+                        used_items.insert(item);
                     }
                     bodies.extend(found);
                 }
@@ -902,12 +1004,24 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         index.insert(definition, products.len());
         products.push(StepProduct {
             name: product_name(definition),
+            numbered: None,
+            scale: 1.0,
             bodies,
             children: Vec::new(),
         });
     }
 
     // Components, placed by the transformation of their occurrence.
+    // The first context-dependent shape representation of each product
+    // definition shape, by entity number — the one the placement lookup
+    // below picks; indexed here so each occurrence is found in O(1)
+    // instead of a scan over every id in the file.
+    let mut cdsr_of_shape: HashMap<u64, u64> = HashMap::new();
+    for cdsr in of_kind("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
+        if let Some(pds) = param(cdsr, 1) {
+            cdsr_of_shape.entry(pds).or_insert(cdsr);
+        }
+    }
     let mut component = vec![false; products.len()];
     for occurrence in of_kind("NEXT_ASSEMBLY_USAGE_OCCURRENCE") {
         let (Some(&parent), Some(&child)) = (
@@ -918,11 +1032,7 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         };
         let placement = shape_of
             .get(&occurrence)
-            .and_then(|pds| {
-                ids.iter().copied().find(|&id| {
-                    doc.kind(id) == "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" && param(id, 1) == Some(*pds)
-                })
-            })
+            .and_then(|pds| cdsr_of_shape.get(pds).copied())
             .and_then(|cdsr| param(cdsr, 0))
             .and_then(|relation| doc.part(relation, "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"))
             .and_then(|p| p.first()?.reference())
@@ -953,6 +1063,8 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         component.push(false);
         products.push(StepProduct {
             name,
+            numbered: None,
+            scale: 1.0,
             bodies: loose_bodies,
             children: Vec::new(),
         });
@@ -963,7 +1075,107 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         .collect();
     Some(StepModel {
         unit_mm,
+        direct: Vec::new(),
         products,
         roots,
     })
+}
+
+/// A file without products: each representation holding solids or placing
+/// other representations (mapped items) is a block, a mapped item an insert
+/// of the representation it maps. A top representation (one no other maps)
+/// that places nothing puts its solids straight into the drawing.
+fn without_products(doc: &Doc, ids: &[u64], unit_mm: Option<f64>) -> StepModel {
+    let param = |id: u64, k: usize| {
+        doc.simple(id).and_then(|(_, p)| p.get(k)).and_then(P::reference)
+    };
+    let reps: Vec<u64> = ids
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let kind = doc.kind(id);
+            kind.ends_with("REPRESENTATION") && kind != "SHAPE_DEFINITION_REPRESENTATION"
+        })
+        .collect();
+    let mut index: HashMap<u64, usize> = HashMap::new();
+    let mut products: Vec<StepProduct> = Vec::new();
+    let mut mapped: Vec<(usize, u64, Placement)> = Vec::new();
+    for &rep in &reps {
+        // The items list: the second parameter, or the first where an
+        // early writer left the name out.
+        let items: Vec<u64> = doc
+            .simple(rep)
+            .and_then(|(_, p)| p.iter().find(|v| matches!(v, P::List(_))))
+            .map(P::list)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(P::reference)
+            .collect();
+        let mut bodies = Vec::new();
+        for &item in &items {
+            if doc.kind(item) == "MAPPED_ITEM" {
+                // MAPPED_ITEM(name, map, target): the map's representation,
+                // moved from the map's origin to the target.
+                let Some(map) = param(item, 1) else { continue };
+                let Some(source) = param(map, 1) else { continue };
+                let from = param(map, 0).and_then(|o| doc.frame(o)).unwrap_or(IDENTITY);
+                let to = param(item, 2).and_then(|t| doc.target_frame(t)).unwrap_or(IDENTITY);
+                mapped.push((products.len(), source, compose(&to, &invert(&from))));
+            } else {
+                bodies.extend(item_bodies(doc, item));
+            }
+        }
+        index.insert(rep, products.len());
+        products.push(StepProduct {
+            name: String::new(),
+            numbered: Some(rep),
+            scale: 1.0,
+            bodies,
+            children: Vec::new(),
+        });
+    }
+    // A representation one without length units maps, itself without
+    // them, comes in at a hundredth of its size (as the reference reads it).
+    let context = |rep: u64| {
+        doc.simple(rep)
+            .and_then(|(_, p)| p.last())
+            .and_then(P::reference)
+    };
+    let unit = |rep: u64| context(rep).and_then(|c| length_unit_mm(doc, c));
+    let unitless = |rep: u64| unit(rep).is_none();
+    let parents: HashMap<usize, u64> = index.iter().map(|(rep, k)| (*k, *rep)).collect();
+    let mut component = vec![false; products.len()];
+    for (parent, source, placement) in mapped {
+        if let Some(&child) = index.get(&source) {
+            if unitless(source) && parents.get(&parent).is_some_and(|rep| unitless(*rep)) {
+                products[child].scale = 0.01;
+            }
+            products[parent].children.push((child, placement));
+            component[child] = true;
+        }
+    }
+    // The drawing takes the length unit of the top representation (the
+    // first one no other maps), as the reference reads it.
+    let mut top_unit = None;
+    let mut direct = Vec::new();
+    let mut roots = Vec::new();
+    for k in 0..products.len() {
+        if component[k] || (products[k].bodies.is_empty() && products[k].children.is_empty()) {
+            continue;
+        }
+        if direct.is_empty() && roots.is_empty() {
+            top_unit = Some(parents.get(&k).and_then(|rep| unit(*rep)));
+        }
+        if products[k].children.is_empty() {
+            direct.append(&mut products[k].bodies);
+        } else {
+            roots.push(k);
+        }
+    }
+    StepModel {
+        unit_mm: top_unit.unwrap_or(unit_mm),
+        direct,
+        products,
+        roots,
+    }
 }

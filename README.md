@@ -81,7 +81,47 @@ A ogni push su `lavoro` o su un branch `claude/**` il workflow [archline-windows
 
 ### Dal sorgente
 
-Requisiti: Git, toolchain Rust stabile, librerie grafiche e font della piattaforma. Su Ubuntu/Debian:
+The Flatpak opens and saves drawings through the file chooser. External references and underlays that point at other files need home access:
+
+```bash
+flatpak override --user --filesystem=home io.github.HakanSeven12.OpenCadStudio
+```
+
+Each release also carries a snap. It is not in the Snap Store yet, so snapd installs it only with `--dangerous`, and it does not update itself:
+
+```bash
+sudo snap install --dangerous OpenCADStudio-*-linux-x86_64.snap
+```
+
+### macOS
+
+The published macOS package supports Apple Silicon:
+
+1. Download `OpenCADStudio-*-macos-arm64.dmg`.
+2. Open the image and drag `OpenCADStudio.app` into **Applications**.
+3. If Gatekeeper blocks the first launch, approve the app from **System Settings → Privacy & Security**.
+
+The application is ad-hoc signed but is not currently notarized by Apple.
+
+## Languages
+
+Open CAD Studio can follow the system language or use any of these 23 interface languages:
+
+> Arabic · Brazilian Portuguese · Bulgarian · Czech · Dutch · English · Finnish · French · German · Greek · Hindi · Hungarian · Italian · Japanese · Korean · Lao · Polish · Russian · Simplified Chinese · Spanish · Traditional Chinese · Turkish · Vietnamese
+
+Change the language from the application settings. The browser version also uses the browser's preferred locale when **System** is selected.
+
+## Build from source
+
+### Desktop
+
+Requirements:
+
+- Git
+- Current stable Rust toolchain
+- Platform graphics and font development libraries
+
+On Ubuntu or Debian, install the native dependencies with:
 
 ```bash
 sudo apt update

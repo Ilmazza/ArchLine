@@ -281,15 +281,16 @@ pub static PROPERTY: OpDef = OpDef {
 
 pub static GRIP_DRAG: OpDef = OpDef {
     name: "grip_drag",
-    doc: "Drag one grip of an entity to a world point the way a grip pick-and-place in the viewport does. Read grips for the ids; object snaps, ortho and polar are off for the move.",
+    doc: "Drag one grip to a world point the way a grip pick-and-place in the viewport does. Built-ins: supply handle (read grips for the ids); object snaps, ortho and polar are off for the move. Plugin-declared custom grips (API v11): supply plugin (the owner id from the grips read's plugin_grips) instead of a handle — the drag routes to the owning plugin (begin, move, settle), whose settle writes are its own single undo step.",
     batchable: true,
     params: &[
-        req("handle", Ty::Handle, "Entity whose grip moves."),
-        req("grip_id", Ty::Int, "Grip id from the grips read."),
+        opt("handle", Ty::Handle, "Entity whose grip moves (built-in grips)."),
+        req("grip_id", Ty::Int, "Grip id from the grips read (entity grip id, or the plugin grip's id for custom grips)."),
         req("point", Ty::Point, "World point [x, y, z] the grip moves to."),
+        opt("plugin", Ty::Str, "Owner plugin id when dragging a plugin-declared custom grip (from the grips read's plugin_grips); omit for built-in entity grips."),
     ],
     rules: &[],
-    example: r#"{"op":"grip_drag","handle":"2A","grip_id":0,"point":[10,0,0]}"#,
+    example: r#"{"op":"grip_drag","plugin":"opencad.civil_ifc","grip_id":7,"point":[10,0,0]}"#,
 };
 
 pub static CLICK: OpDef = OpDef {
@@ -312,7 +313,7 @@ pub static POINTER: OpDef = OpDef {
         req(
             "events",
             Ty::ArrayOf(&Ty::Raw(r#"{"type":"object","properties":{"move":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"move_world":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"press":{"type":"string","enum":["left","right","middle"]},"release":{"type":"string","enum":["left","right","middle"]},"wheel":{"type":"number"}}}"#)),
-            "Events in order; each holds one of move, move_world, press, release or wheel (lines, positive zooms in).",
+            "Events in order; each holds one of move, move_world, press, release, wheel (lines, positive zooms in) or leave (true: the pointer leaves the canvas).",
         ),
         opt("modifiers", Ty::Str, "Keys held throughout: \"ctrl\", \"shift\" or \"ctrl+shift\"."),
     ],
@@ -878,6 +879,157 @@ pub static BATCH: OpDef = OpDef {
     example: r#"{"op":"batch","steps":[{"op":"run","cmd":"LINE 0,0 10,0"}]}"#,
 };
 
+// Read-only operations curated for intent tools. These deliberately live
+// outside OPS: OPS is the execute request catalogue and validator.
+pub static STATE: OpDef = OpDef {
+    name: "state",
+    doc: "Inspect the active document, selection, viewport and command state.",
+    batchable: false,
+    params: &[],
+    rules: &[],
+    example: r#"{"op":"state"}"#,
+};
+
+pub static QUERY: OpDef = OpDef {
+    name: "query",
+    doc: "Query entities with property, type, layer and spatial filters.",
+    batchable: false,
+    params: &[
+        opt("handles", Ty::ArrayOf(&Ty::Str), "Exact entity handles."),
+        opt("type", Ty::Str, "Entity type filter."),
+        opt("layer", Ty::Str, "Layer name filter for query."),
+        opt(
+            "detail",
+            Ty::Raw(
+                r#"{"type":"string","enum":["summary","geometry","full"],"default":"geometry"}"#,
+            ),
+            "Entity detail returned by query.",
+        ),
+        opt(
+            "fields",
+            Ty::ArrayOf(&Ty::Str),
+            "Return only these entity fields plus handle.",
+        ),
+        opt(
+            "where",
+            Ty::Raw(
+                r#"{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}}"#,
+            ),
+            "Property filter predicates.",
+        ),
+        opt(
+            "near",
+            Ty::Raw(r#"{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3}"#),
+            "Rank planar curves by exact kernel distance to this world XY point.",
+        ),
+        opt(
+            "contains_point",
+            Ty::Raw(r#"{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3}"#),
+            "Return closed planar curves containing this world XY point.",
+        ),
+        opt(
+            "bounds",
+            Ty::Window,
+            "Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y].",
+        ),
+        opt(
+            "intersections",
+            Ty::Raw(r#"{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2}"#),
+            "Return exact kernel intersections between two planar curve handles.",
+        ),
+        opt(
+            "offset",
+            Ty::Raw(r#"{"type":"integer","minimum":0}"#),
+            "Number of matching entities to skip.",
+        ),
+        opt(
+            "limit",
+            Ty::Raw(r#"{"type":"integer","minimum":1,"maximum":10000}"#),
+            "Maximum number of entities to return.",
+        ),
+    ],
+    rules: &[],
+    example: r#"{"op":"query","layer":"Walls"}"#,
+};
+
+pub static TEXT_SEARCH: OpDef = OpDef {
+    name: "text_search",
+    doc: "Find drawing text, including text in block definitions.",
+    batchable: false,
+    params: &[
+        req("find", Ty::Str, "Text query string for text_search."),
+        opt(
+            "match_case",
+            Ty::Raw(r#"{"type":"boolean","default":false}"#),
+            "Case-sensitive text search.",
+        ),
+        opt(
+            "whole_word",
+            Ty::Raw(r#"{"type":"boolean","default":false}"#),
+            "Match only whole words.",
+        ),
+        opt(
+            "ignore_accents",
+            Ty::Bool,
+            "Ignore accents/diacritics in text (defaults to true when match_case is false).",
+        ),
+        opt(
+            "scope",
+            Ty::Raw(r#"{"type":"string","enum":["all","active_space","blocks"],"default":"all"}"#),
+            "Text search scope.",
+        ),
+    ],
+    rules: &[],
+    example: r#"{"op":"text_search","find":"DOOR"}"#,
+};
+
+pub static AUDIT: OpDef = OpDef {
+    name: "audit",
+    doc: "Audit document compatibility for an intended CAD output.",
+    batchable: false,
+    params: &[
+        opt(
+            "path",
+            Ty::Str,
+            "Optional intended output path for audit; extension determines target format.",
+        ),
+        opt(
+            "target_format",
+            Ty::Enum(&["dwg", "dxf"]),
+            "Intended output format for audit.",
+        ),
+        opt(
+            "target_version",
+            Ty::Enum(TARGET_VERSIONS),
+            "Intended CAD output version for audit.",
+        ),
+    ],
+    rules: &[],
+    example: r#"{"op":"audit","target_format":"dxf","target_version":"2018"}"#,
+};
+
+pub static COMMANDS: OpDef = OpDef {
+    name: "commands",
+    doc: "List available commands and their prompt manifests.",
+    batchable: false,
+    params: &[opt("name", Ty::Str, "Command name manifest to return.")],
+    rules: &[],
+    example: r#"{"op":"commands","name":"LINE"}"#,
+};
+
+pub static MEASURE: OpDef = OpDef {
+    name: "measure",
+    doc: "Measure exact curve, bounds and mesh properties for entities.",
+    batchable: false,
+    params: &[opt(
+        "handles",
+        Ty::ArrayOf(&Ty::Str),
+        "Exact entity handles; omit to measure the selection.",
+    )],
+    rules: &[],
+    example: r#"{"op":"measure","handles":["2A"]}"#,
+};
+
 pub static OPS: &[&OpDef] = &[
     &NEW,
     &OPEN,
@@ -958,7 +1110,7 @@ fn ty_schema(ty: &Ty) -> Value {
     }
 }
 
-fn primitive_defs() -> Value {
+pub(crate) fn primitive_defs() -> Value {
     json!({
         "point": {"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3},
         "window": {"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},

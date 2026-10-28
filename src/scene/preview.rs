@@ -3,6 +3,8 @@ use super::*;
 use crate::command::{AreaPreviewRegion, AreaPreviewSource};
 use crate::scene::model::hatch_model::HatchPattern;
 
+mod block_parameter;
+
 impl Scene {
     // ── Preview wire ──────────────────────────────────────────────────────
 
@@ -31,6 +33,111 @@ impl Scene {
 
     pub fn set_command_preview_hatches(&mut self, models: Vec<HatchModel>) {
         self.preview_hatches = std::sync::Arc::new(models);
+    }
+
+    /// Selected Model-space hatches use a small overlay instead of baking the
+    /// selection colour into the resident hatch list. This keeps selection
+    /// changes from regenerating and uploading every hatch in a large drawing.
+    pub(super) fn selected_hatch_overlay_models(&self) -> std::sync::Arc<Vec<HatchModel>> {
+        if self.current_layout != "Model" || !self.document.header.fill_mode {
+            return std::sync::Arc::new(Vec::new());
+        }
+        let selection_sig = self.selected_hatch_sig();
+        if selection_sig == 0 {
+            return std::sync::Arc::new(Vec::new());
+        }
+        if let Some((epoch, sig, models)) = self.selected_hatch_overlay_cache.borrow().as_ref() {
+            if *epoch == self.geometry_epoch && *sig == selection_sig {
+                return std::sync::Arc::clone(models);
+            }
+        }
+
+        let started = crate::perf::enabled().then(iced::time::Instant::now);
+        let depth_map = self.draw_depth_map();
+        let target_block = self.content_render_block_handle();
+        let annotation_scale = self.displayed_annotation_scale_handle();
+        let all_visible = self.annotation_all_visible();
+        // Same visibility and style sync as the resident set, so the tinted
+        // copy lands exactly on the fill it covers.
+        let mut models: Vec<HatchModel> = self
+            .selected
+            .iter()
+            .filter_map(|&handle| Some((handle, self.hatches.get(&handle)?)))
+            .filter(|&(handle, _)| {
+                self.hatch_fill_shown(handle, target_block, None, annotation_scale, all_visible)
+            })
+            .map(|(handle, model)| {
+                self.synced_hatch_model(
+                    handle,
+                    model,
+                    annotation_scale,
+                    None,
+                    self.bg_color,
+                    &depth_map,
+                    true,
+                )
+                .1
+            })
+            .collect();
+        let selected_inserts: Vec<Handle> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|&handle| {
+                let Some(codec::EntityType::Insert(insert)) = self.document.get_entity(handle)
+                else {
+                    return false;
+                };
+                let common = &insert.common;
+                !self.display_entity_invisible(common)
+                    && !self.entity_temporarily_hidden(handle)
+                    && !self.layer_hidden(&common.layer)
+            })
+            .collect();
+        models.extend(self.preview_insert_hatch_models(&selected_inserts));
+        let models = std::sync::Arc::new(models);
+        let elapsed_ms = crate::perf::elapsed_ms(started);
+        if elapsed_ms >= 1.0 {
+            crate::perf_record!(
+                "[perf] hatch-selection-overlay build={elapsed_ms:.1}ms selected={} models={}",
+                self.selected.len(),
+                models.len(),
+            );
+        }
+        *self.selected_hatch_overlay_cache.borrow_mut() = Some((
+            self.geometry_epoch,
+            selection_sig,
+            std::sync::Arc::clone(&models),
+        ));
+        models
+    }
+
+    /// Merge command/grip previews with the selected-hatch tint overlay and
+    /// reuse the result until either source changes.
+    pub(super) fn render_preview_hatches(&self) -> std::sync::Arc<Vec<HatchModel>> {
+        let selected = self.selected_hatch_overlay_models();
+        if selected.is_empty() {
+            return std::sync::Arc::clone(&self.preview_hatches);
+        }
+        if let Some((preview, overlay, combined)) =
+            self.combined_preview_hatch_cache.borrow().as_ref()
+        {
+            if std::sync::Arc::ptr_eq(preview, &self.preview_hatches)
+                && std::sync::Arc::ptr_eq(overlay, &selected)
+            {
+                return std::sync::Arc::clone(combined);
+            }
+        }
+        let mut models = Vec::with_capacity(self.preview_hatches.len() + selected.len());
+        models.extend(self.preview_hatches.iter().cloned());
+        models.extend(selected.iter().cloned());
+        let combined = std::sync::Arc::new(models);
+        *self.combined_preview_hatch_cache.borrow_mut() = Some((
+            std::sync::Arc::clone(&self.preview_hatches),
+            selected,
+            std::sync::Arc::clone(&combined),
+        ));
+        combined
     }
 
     pub fn set_area_preview_regions(&mut self, regions: &[AreaPreviewRegion]) {
@@ -221,41 +328,7 @@ impl Scene {
             .map_or(0.0, |depth| depth[0]);
 
         if let EntityType::Hatch(hatch) = entity {
-            if let Some(background) = crate::entities::hatch::background_color(hatch) {
-                let mut backdrop = model.clone();
-                backdrop.pattern = crate::scene::model::hatch_model::HatchPattern::Solid;
-                let (background_color, background_aci) = match background {
-                    codec::types::Color::ByLayer => {
-                        let layer = self.document.layers.get(&hatch.common.layer);
-                        let aci = layer
-                            .and_then(|layer| match &layer.color {
-                                codec::types::Color::Index(index) => Some(*index),
-                                _ => None,
-                            })
-                            .unwrap_or(0);
-                        (
-                            crate::scene::view::render::layer_render_style(
-                                &self.document,
-                                &hatch.common.layer,
-                            )
-                            .color,
-                            aci,
-                        )
-                    }
-                    codec::types::Color::ByBlock => (style.0, style.4),
-                    codec::types::Color::Index(index) => (
-                        crate::scene::convert::tess_util::aci_to_rgba(&codec::types::Color::Index(
-                            index,
-                        )),
-                        index,
-                    ),
-                    other => (crate::scene::convert::tess_util::aci_to_rgba(&other), 0),
-                };
-                backdrop.color = background_color;
-                backdrop.aci = background_aci;
-                backdrop.name = "SOLID".into();
-                models.push(backdrop);
-            }
+            models.extend(self.hatch_backdrop(hatch, &model, (style.0, style.4), None));
         }
         models.push(model);
     }
@@ -267,6 +340,7 @@ impl Scene {
     }
 
     pub fn clear_preview_wire(&mut self) {
+        self.set_command_preview_hidden(&[]);
         // No geometry bump — see `set_preview_wires`. Dropping the overlay
         // flips the wire content id back to the base tessellation id, which
         // re-uploads the base wires (without the preview) on the next frame.

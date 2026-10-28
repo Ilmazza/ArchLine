@@ -93,7 +93,7 @@
 
 use codec::entities::{AttachmentPoint, EntityCommon, LwPolyline, LwVertex, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{CadDocument, EntityType, Handle, Vector2, Vector3};
+use codec::{Document, EntityType, Handle, Vector2, Vector3};
 use kernel::geom2d::{
     contains, distance_to, segment_crossing, signed_area, triangulate, triangulate_rings, Curve,
     Line, SegmentCrossing, Tolerance,
@@ -151,7 +151,7 @@ pub enum TextFallback {
 /// disegno se positiva e non oltre [`MAX_ROOM_TEXT_M`], altrimenti
 /// [`DEFAULT_ROOM_TEXT_M`] in unità del disegno, con il motivo (fix finale,
 /// punto 6, per `Implausible`).
-pub fn room_text_height(doc: &CadDocument, unit: DrawingUnit) -> (f64, Option<TextFallback>) {
+pub fn room_text_height(doc: &Document, unit: DrawingUnit) -> (f64, Option<TextFallback>) {
     let height = doc.header.text_height;
     let fallback = if !(height.is_finite() && height > 0.0) {
         Some(TextFallback::NotPositive)
@@ -303,7 +303,7 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
 
 /// Le entità di locale dello spazio modello (non quelle in carta o dentro i
 /// blocchi), in ordine di disegno.
-pub fn rooms_in(doc: &CadDocument) -> Vec<(Handle, Room, RoomPart)> {
+pub fn rooms_in(doc: &Document) -> Vec<(Handle, Room, RoomPart)> {
     doc.block_records
         .iter()
         .filter(|record| record.is_model_space())
@@ -1456,7 +1456,7 @@ mod tests {
     #[test]
     fn room_text_height_falls_back_on_an_implausible_textsize() {
         let (m, mm) = (DrawingUnit::Metri, DrawingUnit::Millimetri);
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         for (unit, textsize, want) in [
             (m, 2.5, (0.25, Some(TextFallback::Implausible))),
             (m, 1.0, (1.0, None)),
@@ -2340,7 +2340,7 @@ mod tests {
     fn rooms_in_reads_the_model_space_and_survives_dxf_and_dwg() {
         let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
         let a = computed(&faces, &sources, "A", [2.0, 1.5]);
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         ensure_layers(&mut doc);
         let mut handles = Vec::new();
         for entity in room_entities(&a, Phase::Fatto, &sources, 0.25, TOL) {

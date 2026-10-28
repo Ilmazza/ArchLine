@@ -89,7 +89,7 @@
 
 use codec::entities::Line as LineEntity;
 use codec::xdata::ExtendedData;
-use codec::{CadDocument, Color, EntityType, Handle, Vector3};
+use codec::{Document, Color, EntityType, Handle, Vector3};
 use kernel::geom2d::{
     contains, distance_to, inside_spans, intersect, normalize_angle, segment_crossing,
     Arc as KernelArc, Curve, Extent, Line, SegmentCrossing, Tolerance,
@@ -147,7 +147,7 @@ pub struct ProjectGeometry {
 /// (`DrawingUnit::tolerance`). `zones` sono quelle dello spazio modello
 /// (`zone::zones_in`), con il contorno esterno in `rings[0]`.
 pub fn project_geometry(
-    doc: &CadDocument,
+    doc: &Document,
     walls: &WallSet,
     zones: &[ZoneGeom],
     new_walls_layer: &str,
@@ -468,7 +468,7 @@ fn centroid(ring: &[[f64; 2]]) -> [f64; 2] {
 }
 
 /// Il blocco dello spazio modello e le sue entità, in ordine di disegno.
-fn model_space(doc: &CadDocument) -> Option<(Handle, &[Handle])> {
+fn model_space(doc: &Document) -> Option<(Handle, &[Handle])> {
     doc.block_records
         .iter()
         .find(|record| record.is_model_space())
@@ -1309,7 +1309,7 @@ fn proper_crossing(e: Line, f: Line, tolerance: Tolerance) -> Option<[f64; 2]> {
 // ---------------------------------------------------------------------------
 
 fn point_and_uncuttable(
-    doc: &CadDocument,
+    doc: &Document,
     walls: &WallSet,
     zones: &[ZoneGeom],
     demolished: &[&ZoneInfo],

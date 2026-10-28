@@ -11,7 +11,7 @@
 //! di upstream (tutti i fili visibili) non si tocca.
 
 use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use kernel::geom2d::{
     contains, distance_to, segment_crossing, signed_area, Curve, Line, SegmentCrossing, Tolerance,
     Transform,
@@ -54,19 +54,19 @@ pub struct WallSet {
 /// L'entità conta come muro? `LINE`, `ARC`, `LWPOLYLINE` o `POLYLINE` 2D,
 /// nello spazio modello, su un layer acceso e non congelato che non inizia con
 /// `AL-`. Un layer bloccato conta; uno che manca nella tabella vale acceso.
-pub fn is_wall_entity(doc: &CadDocument, entity: &EntityType) -> bool {
+pub fn is_wall_entity(doc: &Document, entity: &EntityType) -> bool {
     model_space(doc).is_some_and(|(model, _)| is_wall_in(doc, model, entity))
 }
 
 /// Il blocco dello spazio modello e le sue entità, in ordine di disegno.
-fn model_space(doc: &CadDocument) -> Option<(Handle, &[Handle])> {
+fn model_space(doc: &Document) -> Option<(Handle, &[Handle])> {
     doc.block_records
         .iter()
         .find(|record| record.is_model_space())
         .map(|record| (record.handle, record.entity_handles.as_slice()))
 }
 
-fn is_wall_in(doc: &CadDocument, model: Handle, entity: &EntityType) -> bool {
+fn is_wall_in(doc: &Document, model: Handle, entity: &EntityType) -> bool {
     let common = entity.common();
     matches!(
         entity,
@@ -92,7 +92,7 @@ pub(crate) fn is_bim_layer(name: &str) -> bool {
 /// layer e tipo soltanto. Ogni calcolo BIM sul disegno usa
 /// [`wall_set_without_rooms`]: qui una parte di locale spostata a mano su un
 /// layer non `AL-*` passerebbe per un muro.
-pub fn wall_set(doc: &CadDocument, tol: f64) -> WallSet {
+pub fn wall_set(doc: &Document, tol: f64) -> WallSet {
     wall_set_except(doc, tol, &FxHashSet::default())
 }
 
@@ -104,13 +104,13 @@ pub fn wall_set(doc: &CadDocument, tol: f64) -> WallSet {
 /// del locale: area vecchia dichiarata esatta. La usano `AL_LOCALE`
 /// (`room_snapshot`), `AL_AGGIORNA` e il ricalcolo dello stato di fatto
 /// (`refresh_rooms`), le zone (`zone_snapshot`) e lo stato di progetto.
-pub fn wall_set_without_rooms(doc: &CadDocument, tol: f64) -> WallSet {
+pub fn wall_set_without_rooms(doc: &Document, tol: f64) -> WallSet {
     wall_set_except(doc, tol, &room_part_handles(doc))
 }
 
 /// Gli handle delle parti dei locali dello spazio modello (contorni, testi e
 /// semi: `rooms::rooms_in`), su qualunque layer.
-pub(crate) fn room_part_handles(doc: &CadDocument) -> FxHashSet<Handle> {
+pub(crate) fn room_part_handles(doc: &Document) -> FxHashSet<Handle> {
     rooms_in(doc)
         .into_iter()
         .map(|(handle, _, _)| handle)
@@ -119,7 +119,7 @@ pub(crate) fn room_part_handles(doc: &CadDocument) -> FxHashSet<Handle> {
 
 /// [`wall_set`] senza le entità di `skip`, tolte prima della geometria (non
 /// contano nemmeno tra quelle fuori piano).
-fn wall_set_except(doc: &CadDocument, tol: f64, skip: &FxHashSet<Handle>) -> WallSet {
+fn wall_set_except(doc: &Document, tol: f64, skip: &FxHashSet<Handle>) -> WallSet {
     let entities: Vec<(Handle, EntityType)> = model_space(doc)
         .map(|(model, handles)| {
             handles
@@ -943,7 +943,7 @@ mod tests {
 
     /// Regione e area in m² attorno a `p` (unità del disegno), con i muri di
     /// `doc`. L'area deve venire esatta.
-    fn measure(doc: &CadDocument, p: [f64; 2]) -> (Region, f64) {
+    fn measure(doc: &Document, p: [f64; 2]) -> (Region, f64) {
         let unit =
             DrawingUnit::from_insunits(doc.header.insertion_units).expect("unità supportata");
         let tol = unit.tolerance();
@@ -955,7 +955,7 @@ mod tests {
         (region, area_m2(area, unit))
     }
 
-    fn area_in(doc: &CadDocument, p: [f64; 2]) -> f64 {
+    fn area_in(doc: &Document, p: [f64; 2]) -> f64 {
         measure(doc, p).1
     }
 
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[test]
     fn wall_filter_types_and_layers() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         for (name, state) in [
             (LAYER_MURI, ""),
             ("GELO", "frozen"),

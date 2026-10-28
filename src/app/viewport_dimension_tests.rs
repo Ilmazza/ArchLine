@@ -6,7 +6,7 @@ use crate::scene::Scene;
 use crate::snap::{SnapResult, SnapType};
 use codec::entities::{Circle, Dimension, Line, Viewport};
 use codec::types::{Handle, Vector3};
-use codec::{CadDocument, EntityType};
+use codec::{Document, EntityType};
 use glam::DVec3;
 
 fn fixture() -> (OpenCADStudio, Handle, ViewportFrame) {
@@ -63,7 +63,7 @@ fn point(app: &mut OpenCADStudio, frame: ViewportFrame, source: Handle, model: D
     let _ = app.apply_cmd_result(result);
 }
 
-fn dimension(doc: &CadDocument) -> &Dimension {
+fn dimension(doc: &Document) -> &Dimension {
     doc.entities()
         .find_map(|e| match e {
             EntityType::Dimension(d) => Some(d),
@@ -72,7 +72,7 @@ fn dimension(doc: &CadDocument) -> &Dimension {
         .unwrap()
 }
 
-fn displayed(doc: &CadDocument) -> f64 {
+fn displayed(doc: &Document) -> f64 {
     let dim = dimension(doc);
     if matches!(dim, Dimension::Angular2Ln(_) | Dimension::Angular3Pt(_)) {
         return dim.measurement();
@@ -750,7 +750,7 @@ fn viewport_dimension_spline_tangency_is_parallel_and_validated() {
         ..Default::default()
     };
     let result = feature_point(
-        &CadDocument::new(),
+        &Document::new(),
         &entity,
         &reference,
         FeatureContext {
@@ -764,7 +764,7 @@ fn viewport_dimension_spline_tangency_is_parallel_and_validated() {
         "{result:?}"
     );
     assert!(feature_point(
-        &CadDocument::new(),
+        &Document::new(),
         &entity,
         &reference,
         FeatureContext {
@@ -1494,4 +1494,28 @@ fn viewport_dimension_invalid_paths_leave_no_partial_association() {
             vec![(1, crate::scene::ReferenceStatus::Resolved)]
         );
     }
+}
+
+#[test]
+fn layer_state_restored_in_a_viewport_turns_off_only_there() {
+    let (mut app, _, frame) = fixture();
+    let i = app.active_tab;
+    let doc = &mut app.tabs[i].scene.document;
+    let mut red = codec::tables::Layer::new("Red");
+    red.handle = doc.allocate_handle();
+    let _ = doc.layers.add(red);
+    doc.layers.get_mut("Red").unwrap().flags.off = true;
+    doc.capture_layer_state("NO RED", "");
+    doc.layers.get_mut("Red").unwrap().flags.off = false;
+    app.tabs[i].scene.active_viewport = Some(frame.viewport);
+
+    app.restore_layer_state_here(i, "NO RED");
+
+    let doc = &app.tabs[i].scene.document;
+    let red = doc.layers.get("Red").unwrap();
+    assert!(!red.flags.off, "the drawing-wide layer stays on");
+    let Some(EntityType::Viewport(vp)) = doc.get_entity(frame.viewport) else {
+        panic!()
+    };
+    assert!(vp.frozen_layers.contains(&red.handle));
 }

@@ -32,8 +32,8 @@ use super::OpenCADStudio;
 /// a time (the document session persists across reconnects); every socket
 /// request carries `"token"` (see `rest::api_token`).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn serve() {
-    let mut app = OpenCADStudio::new();
+pub fn serve(read_only: bool) {
+    let mut app = OpenCADStudio::new_headless(read_only);
     match port_arg() {
         Some(port) => serve_socket(
             &mut app,
@@ -78,6 +78,19 @@ pub fn export_headless(
         Err(e) => {
             eprintln!("export: cannot write {}: {e}", output.display());
             1
+        }
+    }
+}
+
+/// Unattended script run (`--batch SCRIPT`, or `--each SCRIPT FILES...`)
+/// with no window; returns the process exit code (2: unreadable script).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_batch(script: &std::path::Path, files: &[PathBuf], read_only: bool) -> i32 {
+    match std::fs::read_to_string(script) {
+        Ok(text) => OpenCADStudio::new_headless(read_only).run_batch(&text, files),
+        Err(e) => {
+            eprintln!("batch: cannot read {}: {e}", script.display());
+            2
         }
     }
 }
@@ -202,7 +215,7 @@ fn serve_socket_with_idle(
 
 /// The entities inside block definitions: owned by (or listed in) a block
 /// record that is not a layout's model or paper space.
-fn definition_members(document: &codec::CadDocument) -> std::collections::HashSet<codec::Handle> {
+fn definition_members(document: &codec::Document) -> std::collections::HashSet<codec::Handle> {
     let mut layouts: std::collections::HashSet<codec::Handle> = document
         .objects
         .values()
@@ -496,7 +509,7 @@ fn is_generated_dimension_block_name(name: &str) -> bool {
 /// Save-time baking materializes a Dimension's graphics in an anonymous
 /// `*D<n>` block. Those members are derived display geometry, not additional
 /// logical drawing entities; named block members remain part of the manifest.
-fn is_dimension_display_entity(document: &codec::CadDocument, entity: &codec::EntityType) -> bool {
+fn is_dimension_display_entity(document: &codec::Document, entity: &codec::EntityType) -> bool {
     let owner = entity.common().owner_handle;
     document
         .block_records
@@ -504,7 +517,7 @@ fn is_dimension_display_entity(document: &codec::CadDocument, entity: &codec::En
         .any(|block| block.handle == owner && is_generated_dimension_block_name(&block.name))
 }
 
-fn document_manifest(document: &codec::CadDocument) -> Value {
+fn document_manifest(document: &codec::Document) -> Value {
     let mut by_type: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_layer: BTreeMap<String, u64> = BTreeMap::new();
     let mut total = 0u64;
@@ -551,6 +564,9 @@ fn audit_ascii_dxf_references(path: &std::path::Path) -> Result<Value, String> {
     let mut pairs = Vec::new();
     let mut version = None;
     let mut variable = None;
+    // Only a record's first 5/105 is its own handle; SORTENTSTABLE stores its
+    // sort handles under 5 as well (#2211).
+    let mut record_has_handle = false;
     for pair in lines.chunks_exact(2) {
         let Ok(code) = pair[0].trim().parse::<i32>() else {
             return Ok(
@@ -565,8 +581,12 @@ fn audit_ascii_dxf_references(path: &std::path::Path) -> Result<Value, String> {
             version = Some(value.clone());
             variable = None;
         }
-        if code == 5 || code == 105 {
-            if !declared.insert(value.clone()) {
+        if code == 0 {
+            record_has_handle = false;
+        } else if code == 5 || code == 105 {
+            if !std::mem::replace(&mut record_has_handle, true)
+                && !declared.insert(value.clone())
+            {
                 duplicate.insert(value.clone());
             }
         } else if [330, 340, 350, 360, 390].contains(&code) {
@@ -674,6 +694,28 @@ fn audit_ascii_dxf_references(path: &std::path::Path) -> Result<Value, String> {
 }
 
 impl OpenCADStudio {
+    /// A headless session. `read_only` is the `--read-only` launch flag,
+    /// which the GUI takes from its startup config instead. (#1928)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_headless(read_only: bool) -> Self {
+        let mut app = Self::new();
+        app.read_only = read_only;
+        app
+    }
+
+    /// The refusal every automation write of the drawing gives in a
+    /// `--read-only` session, matching the GUI's SAVE / SAVEAS / SAVEALL.
+    pub(super) fn read_only_save_refusal(&self) -> Option<Value> {
+        self.read_only.then(|| {
+            json!({
+                "ok": false,
+                "status": "failed",
+                "code": "read_only",
+                "error": "Read-only session (--read-only): saving is disabled.",
+            })
+        })
+    }
+
     /// Handle one JSON request line and return the JSON response.
     #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(crate) fn automation_op(&mut self, line: &str) -> Value {
@@ -780,6 +822,9 @@ impl OpenCADStudio {
                         self.tabs[i].adopt_active_ucs_from_header();
                         self.tabs[i].current_path = Some(path_buf);
                         self.tabs[i].is_start = false;
+                        // As the GUI open does: save stamps ORTHOMODE / OSMODE
+                        // back from the app state.
+                        self.adopt_header_sysvars(i);
                         self.tabs[i].scene.rebuild_derived_caches();
                         // The opened document settled (API v9): the post-op
                         // boundary announces `DocumentOpened` once for this load.
@@ -849,6 +894,10 @@ impl OpenCADStudio {
             "text_search" => self.automation_text_search(&req),
             "text_audit" => self.automation_text_audit(&req),
             "text_replace" => self.automation_text_replace(&req),
+            "blocks"
+            | "block_instances"
+            | "cad_get_blocks"
+            | "cad_extract_block_instances" => self.automation_blocks(&req),
             "records" => self.record_query(&req),
             "record_schema" => self.record_schema(&req),
             "capabilities" => self.record_capabilities(),
@@ -1018,6 +1067,9 @@ impl OpenCADStudio {
                 json!({ "ok": true, "selected": self.tabs[i].scene.selected_entities().len() })
             }
             "save" => {
+                if let Some(refusal) = self.read_only_save_refusal() {
+                    return refusal;
+                }
                 if self.tabs[self.active_tab].block_test.is_some() {
                     return err("Test Block is temporary and cannot be saved.");
                 }
@@ -1544,7 +1596,7 @@ impl OpenCADStudio {
             "document_id": tab.id,
             "source": {
                 "path": tab.current_path,
-                "format": if source_is_dxf { "dxf" } else { "dwg" },
+                "format": source_format(tab.current_path.as_deref(), source_is_dxf),
                 "version": format!("{:?}", document.version),
                 "sha256": source_sha256,
                 "dxf_structure": source_dxf_structure,
@@ -2045,7 +2097,7 @@ mod tests {
             "a start-tab-free app does not announce spurious opens: {log:?}"
         );
     }
-    use crate::app::OpenCADStudio;
+    use crate::app::{Message, OpenCADStudio};
     use serde_json::{json, Value};
 
     #[test]
@@ -2109,9 +2161,9 @@ mod tests {
         use codec::entities::{Dimension, DimensionLinear, Line};
         use codec::tables::BlockRecord;
         use codec::types::Vector3;
-        use codec::{CadDocument, EntityType};
+        use codec::{Document, EntityType};
 
-        let mut document = CadDocument::new();
+        let mut document = Document::new();
         let mut detail = BlockRecord::new("DETAIL");
         detail.handle = document.allocate_handle();
         let detail_handle = detail.handle;
@@ -2282,6 +2334,24 @@ mod tests {
         let audit = super::audit_ascii_dxf_references(&path).unwrap();
         assert_eq!(audit["ok"], false, "{audit}");
         assert_eq!(audit["dangling_handles"], serde_json::json!(["2"]));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// SORTENTSTABLE keeps its sort handles under code 5 after its own; they
+    /// are not declared handles (#2211). A record's second own handle still is.
+    #[test]
+    fn raw_dxf_audit_counts_only_a_records_own_handle() {
+        let path = std::env::temp_dir().join(format!("ocs_sortents_{}.dxf", std::process::id()));
+        std::fs::write(
+            &path,
+            "  0\nTEXT\n  5\n2F\n  0\nTEXT\n  5\n30\n  0\nSORTENTSTABLE\n  5\n33\n331\n2F\n  5\n30\n331\n30\n  5\n2F\n",
+        )
+        .unwrap();
+        let audit = super::audit_ascii_dxf_references(&path).unwrap();
+        assert_eq!(audit["duplicate_handles"], serde_json::json!([]), "{audit}");
+        std::fs::write(&path, "  0\nTEXT\n  5\n2F\n  0\nLINE\n  5\n2F\n").unwrap();
+        let audit = super::audit_ascii_dxf_references(&path).unwrap();
+        assert_eq!(audit["duplicate_handles"], serde_json::json!(["2F"]), "{audit}");
         let _ = std::fs::remove_file(path);
     }
 
@@ -2651,6 +2721,36 @@ mod tests {
         let opened = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
         assert_eq!(opened["ok"], true, "{}", opened["error"]);
         assert_eq!(opened["total"], 2);
+        drop(app);
+        let sidecar = path.with_file_name(format!(
+            ".{}.ocs.lock",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_file(sidecar);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_op_keeps_orthomode_through_save() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.tabs[i].scene.document.header.ortho_mode = true;
+        let path = std::env::temp_dir().join(format!("ocs_ortho_{}.dxf", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().replace('\\', "\\\\");
+        // Written straight from the document, not through save's stamping.
+        crate::io::save(&app.tabs[i].scene.document, &path).unwrap();
+
+        let mut app = OpenCADStudio::new_for_test();
+        let opened = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
+        assert_eq!(opened["ok"], true, "{}", opened["error"]);
+        let saved = app.automation_op(&format!(r#"{{"op":"save","path":"{p}"}}"#));
+        assert_eq!(saved["ok"], true, "{}", saved["error"]);
+        let reopened = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
+        assert_eq!(reopened["ok"], true, "{}", reopened["error"]);
+        let i = app.active_tab;
+        assert!(app.tabs[i].scene.document.header.ortho_mode);
         drop(app);
         let sidecar = path.with_file_name(format!(
             ".{}.ocs.lock",
@@ -3520,6 +3620,8 @@ mod tests {
             let _ = app.run_command_line("LINE 0,0 10,10");
             app.tabs[i].scene.selection.borrow_mut().view.vp_size = (800.0, 600.0);
             let _ = app.run_command_line("ZOOM EXTENTS");
+            // Extents leave a 3-pixel border, so the window paths run 1 px
+            // inside the view edge to enclose the line.
             // Both directions. Crossing = a right → left diagonal sweep (the
             // freeform path may be degenerate — crossing counts hits).
             // Window = a left → right perimeter walk so the freeform ring
@@ -3529,11 +3631,11 @@ mod tests {
                 (0..=10)
                     .map(|k| {
                         let t = k as f32 / 10.0;
-                        (20.0 + t * 760.0, 20.0 + t * 560.0)
+                        (1.0 + t * 798.0, 1.0 + t * 598.0)
                     })
                     .collect()
             } else if add {
-                let (sx, sy, ex, ey) = (780.0f32, 580.0f32, 20.0f32, 20.0f32);
+                let (sx, sy, ex, ey) = (799.0f32, 599.0f32, 1.0f32, 1.0f32);
                 (0..=10)
                     .map(|k| {
                         let t = k as f32 / 10.0;
@@ -3542,14 +3644,14 @@ mod tests {
                     .collect()
             } else {
                 vec![
-                    (20.0, 20.0),
-                    (400.0, 20.0),
-                    (780.0, 20.0),
-                    (780.0, 300.0),
-                    (780.0, 580.0),
-                    (400.0, 580.0),
-                    (20.0, 580.0),
-                    (20.0, 300.0),
+                    (1.0, 1.0),
+                    (400.0, 1.0),
+                    (799.0, 1.0),
+                    (799.0, 300.0),
+                    (799.0, 599.0),
+                    (400.0, 599.0),
+                    (1.0, 599.0),
+                    (1.0, 300.0),
                 ]
             };
             let _ = app.update(Message::ViewportMove(iced::Point::new(
@@ -3933,7 +4035,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
 
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let mut good = codec::entities::Circle::new();
         good.center = codec::types::Vector3::new(5.0, 5.0, 0.0);
         good.radius = 2.0;
@@ -4689,6 +4791,147 @@ mod tests {
     }
 
     #[test]
+    fn from_relative_offset_starts_line() {
+        let mut app = from_line_test_app();
+        for token in ["FROM", "10,10", "@5,0"] {
+            from_submit(&mut app, token);
+        }
+        assert!(app.tabs[0].scene.document.entities().next().is_none());
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().unwrap().resolved_anchor(),
+            Some(glam::DVec3::new(15.0, 10.0, 0.0))
+        );
+        assert_eq!(app.last_point, Some(glam::DVec3::new(15.0, 10.0, 0.0)));
+        assert!(app.tabs[0].suspended_cmd.is_none());
+    }
+
+    #[test]
+    fn from_polar_offset_starts_line() {
+        let mut app = from_line_test_app();
+        for token in ["_FROM", "0,0", "@10<90"] {
+            from_submit(&mut app, token);
+        }
+        assert!(app.tabs[0].scene.document.entities().next().is_none());
+        let anchor = app.tabs[0]
+            .active_cmd
+            .as_ref()
+            .unwrap()
+            .resolved_anchor()
+            .unwrap();
+        assert!((anchor - glam::DVec3::new(0.0, 10.0, 0.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn from_direct_distance_starts_line() {
+        for tracked in [false, true] {
+            let mut app = from_line_test_app();
+            for token in ["FROM", "0,0"] {
+                from_submit(&mut app, token);
+            }
+            app.tabs[0].last_cursor_world = glam::DVec3::new(20.0, 0.0, 0.0);
+            if tracked {
+                app.otrack_active = Some((glam::DVec3::splat(100.0), glam::DVec3::Y));
+            }
+            from_submit(&mut app, "7");
+            assert!(app.tabs[0].scene.document.entities().next().is_none());
+            assert_eq!(
+                app.tabs[0].active_cmd.as_ref().unwrap().resolved_anchor(),
+                Some(glam::DVec3::new(7.0, 0.0, 0.0))
+            );
+        }
+    }
+
+    #[test]
+    fn from_escape_offset_restores_parent() {
+        let mut app = from_line_test_app();
+        for previous in [None, Some(glam::DVec3::new(3.0, 4.0, 0.0))] {
+            app.last_point = previous;
+            let prompt = app.tabs[0].active_cmd.as_ref().unwrap().prompt();
+            for token in ["FROM", "10,10"] {
+                from_submit(&mut app, token);
+            }
+            let _ = app.update(Message::CommandEscape);
+            assert_eq!(
+                app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+                Some("LINE")
+            );
+            assert_eq!(app.tabs[0].active_cmd.as_ref().unwrap().prompt(), prompt);
+            assert!(app.tabs[0]
+                .active_cmd
+                .as_ref()
+                .unwrap()
+                .resolved_anchor()
+                .is_none());
+            assert_eq!(app.last_point, previous);
+            assert!(app.tabs[0].suspended_cmd.is_none());
+            assert!(app.tabs[0].scene.document.entities().next().is_none());
+        }
+    }
+
+    #[test]
+    fn from_script_offset_uses_rotated_ucs() {
+        let mut app = from_line_test_app();
+        let mut ucs = codec::tables::Ucs::new("FROM-test");
+        ucs.origin = codec::types::Vector3::new(100.0, 200.0, 0.0);
+        ucs.x_axis = codec::types::Vector3::new(0.0, 1.0, 0.0);
+        ucs.y_axis = codec::types::Vector3::new(-1.0, 0.0, 0.0);
+        app.tabs[0].active_ucs = Some(ucs);
+        for token in ["_FROM", "0,0", "@5,0"] {
+            let _ = app.feed_active_cmd(token);
+        }
+        assert!(app.tabs[0].scene.document.entities().next().is_none());
+        assert_eq!(
+            app.tabs[0].active_cmd.as_ref().unwrap().resolved_anchor(),
+            Some(glam::DVec3::new(100.0, 205.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn from_cancel_preserves_existing_line_anchor() {
+        for enter in [false, true] {
+            for pick_base in [false, true] {
+                let mut app = from_line_test_app();
+                from_submit(&mut app, "3,4");
+                let prompt = app.tabs[0].active_cmd.as_ref().unwrap().prompt();
+                from_submit(&mut app, "FROM");
+                if pick_base {
+                    from_submit(&mut app, "10,10");
+                }
+                if enter {
+                    from_submit(&mut app, "");
+                } else {
+                    let _ = app.update(Message::CommandEscape);
+                }
+                assert_eq!(
+                    app.tabs[0].active_cmd.as_ref().map(|c| c.name()),
+                    Some("LINE")
+                );
+                assert_eq!(app.tabs[0].active_cmd.as_ref().unwrap().prompt(), prompt);
+                assert_eq!(
+                    app.tabs[0].active_cmd.as_ref().unwrap().resolved_anchor(),
+                    Some(glam::DVec3::new(3.0, 4.0, 0.0))
+                );
+                assert_eq!(app.last_point, Some(glam::DVec3::new(3.0, 4.0, 0.0)));
+                assert!(app.tabs[0].scene.document.entities().next().is_none());
+            }
+        }
+    }
+
+    fn from_submit(app: &mut OpenCADStudio, token: &str) {
+        let _ = app.update(Message::CommandInput(token.to_string()));
+        let _ = app.update(Message::CommandSubmit);
+    }
+
+    fn from_line_test_app() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.tabs[0].scene.selection.borrow_mut().view.vp_size = (1920.0, 1080.0);
+        app.tabs[0].scene.sync_tiles_from_panes(1920.0, 1080.0);
+        from_submit(&mut app, "LINE");
+        app
+    }
+
+    #[test]
     fn test_snap_override_typed_in_line_command() {
         use crate::app::Message;
         let mut app = OpenCADStudio::new_for_test();
@@ -4942,5 +5185,17 @@ mod tests {
         let query = app.automation_op(r#"{"op":"query","type":"Point"}"#);
         assert_eq!(query["entities"][0]["type"], "Point");
         assert_eq!(query["entities"][0]["display_type"], "Point");
+    }
+}
+
+/// A file's format: "dxf", "dwg", or a converter's lowercase name.
+pub(super) fn source_format(path: Option<&std::path::Path>, source_is_dxf: bool) -> String {
+    let converter = path
+        .and_then(std::path::Path::extension)
+        .and_then(|ext| ocs_save::external_format(&ext.to_string_lossy()));
+    match converter {
+        Some(format) => format.name().to_ascii_lowercase(),
+        None if source_is_dxf => "dxf".to_string(),
+        None => "dwg".to_string(),
     }
 }

@@ -164,6 +164,35 @@ fn ascent(font: &Font) -> f64 {
     ascent_from_file(font)
 }
 
+/// The installed face's Windows descent and the advance of `value`, both
+/// over its cap height (a text's height): what a text of the font
+/// reaches below its baseline and how long it runs, per unit of height.
+fn run_metrics(font: &Font, value: &str) -> Option<(f64, f64)> {
+    let weight = fontdb::Weight(font.weight.clamp(1, 1000) as u16);
+    [font.face.as_str(), "Arial"].into_iter().find_map(|family| {
+        crate::scene::text::sysfont::with_face_data_weighted(family, weight, |data, index| {
+            let face = ttf_parser::Face::parse(data, index).ok()?;
+            let upem = f64::from(face.units_per_em());
+            let cap = face
+                .capital_height()
+                .filter(|&c| c > 0)
+                .map_or(0.7 * upem, f64::from);
+            let descent = face
+                .tables()
+                .os2
+                .map_or(-f64::from(face.descender()), |os2| -f64::from(os2.windows_descender()));
+            let advance: f64 = value
+                .chars()
+                .filter_map(|ch| face.glyph_index(ch))
+                .filter_map(|glyph| face.glyph_hor_advance(glyph))
+                .map(f64::from)
+                .sum();
+            Some((descent / cap, advance / cap))
+        })
+        .flatten()
+    })
+}
+
 /// [`file_ascent`] of the font's installed face.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn ascent_from_file(font: &Font) -> f64 {
@@ -318,22 +347,21 @@ fn arc_points(bounds: [f64; 4], start: [f64; 2], end: [f64; 2]) -> Vec<[f64; 2]>
     let [left, top, right, bottom] = bounds.map(|v| v as i64);
     let (cx, cy) = ((left + right).div_euclid(2), (top + bottom).div_euclid(2));
     let (rx, ry) = ((right - left).abs() / 2, (bottom - top).abs() / 2);
-    // The angles are stepped out from zero one step at a time in degrees,
-    // rounding and all, as the points come out.
-    let mut degrees = vec![0.0f64; ARC_STEPS as usize + 1];
-    for k in 1..degrees.len() {
-        degrees[k] = degrees[k - 1] + 360.0 / ARC_STEPS as f64;
+    // The unit vectors are stepped out from zero by turning the last one
+    // through 1/99 turn in plain doubles, rounding and all, so the error
+    // grows from step to step as the points come out.
+    const STEP_COS: f64 = 0.99798667647188444; // cos(2π/99)
+    const STEP_SIN: f64 = 0.063423919656564506; // sin(2π/99)
+    let mut turns = vec![(1.0f64, 0.0f64); ARC_STEPS as usize + 1];
+    for k in 1..turns.len() {
+        let (c, s) = turns[k - 1];
+        turns[k] = (c * STEP_COS - s * STEP_SIN, s * STEP_COS + c * STEP_SIN);
     }
-    // Centre plus radius times cosine (sine) is worked out wider than a
-    // double and rounded to one once, then cut to whole units: a point
-    // that lands within rounding of a whole unit falls on the side the
-    // exact value lies.
     let point = |k: i64| {
-        let a = degrees[k as usize] * (std::f64::consts::PI / 180.0);
-        let (cos, sin) = wide::cos_sin(a);
+        let (cos, sin) = turns[k as usize];
         [
-            wide::add(wide::mul(cos, rx as f64), cx as f64).0.trunc(),
-            wide::add(wide::mul(sin, -(ry as f64)), cy as f64).0.trunc(),
+            (cx as f64 + rx as f64 * cos).trunc(),
+            (cy as f64 - ry as f64 * sin).trunc(),
         ]
     };
     let grid: Vec<[f64; 2]> = (0..ARC_STEPS).map(point).collect();
@@ -386,74 +414,6 @@ fn arc_points(bounds: [f64; 4], start: [f64; 2], end: [f64; 2]) -> Vec<[f64; 2]>
         }
     }
     steps.into_iter().map(point).collect()
-}
-
-/// Double-double arithmetic (a value as an unevaluated sum hi + lo), for
-/// the arc points' cosine and sine and the sums made with them.
-mod wide {
-    pub type Wide = (f64, f64);
-
-    fn two_sum(a: f64, b: f64) -> Wide {
-        let s = a + b;
-        let v = s - a;
-        (s, (a - (s - v)) + (b - v))
-    }
-
-    fn quick(hi: f64, lo: f64) -> Wide {
-        let s = hi + lo;
-        (s, lo - (s - hi))
-    }
-
-    pub fn add(a: Wide, b: f64) -> Wide {
-        let (s, e) = two_sum(a.0, b);
-        quick(s, e + a.1)
-    }
-
-    fn add_wide(a: Wide, b: Wide) -> Wide {
-        let (s, e) = two_sum(a.0, b.0);
-        quick(s, e + a.1 + b.1)
-    }
-
-    pub fn mul(a: Wide, b: f64) -> Wide {
-        let p = a.0 * b;
-        quick(p, a.0.mul_add(b, -p) + a.1 * b)
-    }
-
-    fn mul_wide(a: Wide, b: Wide) -> Wide {
-        let p = a.0 * b.0;
-        quick(p, a.0.mul_add(b.0, -p) + a.0 * b.1 + a.1 * b.0)
-    }
-
-    fn div(a: Wide, b: f64) -> Wide {
-        let q = a.0 / b;
-        let r = add_wide(a, mul((q, 0.0), -b));
-        quick(q, r.0 / b)
-    }
-
-    /// cos and sin of `a` (radians, the double taken as exact).
-    pub fn cos_sin(a: f64) -> (Wide, Wide) {
-        // Reduced by quarter turns to |r| <= pi/4.
-        const HALF_PI: Wide = (1.5707963267948966, 6.123233995736766e-17);
-        let n = (a / HALF_PI.0).round();
-        let r = add_wide((a, 0.0), mul(HALF_PI, -n));
-        let r2 = mul_wide(r, r);
-        let (mut c, mut s) = ((1.0, 0.0), r);
-        let (mut tc, mut ts) = ((1.0, 0.0), r);
-        for k in 1..20 {
-            let k = f64::from(k);
-            tc = div(mul_wide(tc, r2), -(2.0 * k - 1.0) * (2.0 * k));
-            ts = div(mul_wide(ts, r2), -(2.0 * k) * (2.0 * k + 1.0));
-            c = add_wide(c, tc);
-            s = add_wide(s, ts);
-        }
-        let neg = |w: Wide| (-w.0, -w.1);
-        match (n as i64).rem_euclid(4) {
-            0 => (c, s),
-            1 => (neg(s), c),
-            2 => (neg(c), neg(s)),
-            _ => (s, neg(c)),
-        }
-    }
 }
 
 /// Reads a metafile, scaled so the picture fits within `fit` (width and
@@ -532,6 +492,7 @@ pub fn read(bytes: &[u8], fit: [f64; 2]) -> Option<Picture> {
         face: String::new(),
     };
     let mut text_rgb = [0, 0, 0];
+    let mut text_align = 0u16;
     let mut table: Vec<Option<Object>> = Vec::new();
     let mut current = [0.0, 0.0];
     for (function, p) in &records {
@@ -597,6 +558,8 @@ pub fn read(bytes: &[u8], fit: [f64; 2]) -> Option<Picture> {
                     *slot = None;
                 }
             }
+            // SETTEXTALIGN
+            0x012E => text_align = p.first().copied().unwrap_or(0),
             // SETTEXTCOLOR
             0x0209 => text_rgb = colorref(p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0)),
             // MOVETO, LINETO (y, x)
@@ -686,15 +649,34 @@ pub fn read(bytes: &[u8], fit: [f64; 2]) -> Option<Picture> {
                 }
                 raw.truncate(count);
                 let value: String = raw.iter().map(|b| char::from(*b)).collect();
-                if value.trim().is_empty() {
+                // A run of spaces is still a text object; only no text is none.
+                if value.is_empty() {
                     continue;
                 }
-                // The reference point is the cell's top; the baseline sits
-                // the font's ascent below it, and the text is four fifths
-                // of that ascent tall.
+                // The text is four fifths of the font's ascent tall. The
+                // alignment places it as a text of the full ascent's height
+                // would sit: a top reference point has the baseline that
+                // height below it, a bottom one the face's Windows descent
+                // at that height above it, a baseline one on it; a right
+                // reference point ends the run's advance at it, a centre one
+                // halves it.
                 let rotation = font.escapement.to_radians();
-                let drop = ascent(&font);
-                let base = player.at(x + drop * rotation.sin(), y + drop * rotation.cos());
+                let height = ascent(&font);
+                let (descent, width) = run_metrics(&font, &value).unwrap_or((0.0, 0.0));
+                let drop = match text_align & 0x18 {
+                    0x08 => -descent * height,
+                    0x18 => 0.0,
+                    _ => height,
+                };
+                let along = match text_align & 0x06 {
+                    0x02 => -width * height,
+                    0x06 => -0.5 * width * height,
+                    _ => 0.0,
+                };
+                let base = player.at(
+                    x + drop * rotation.sin() + along * rotation.cos(),
+                    y + drop * rotation.cos() - along * rotation.sin(),
+                );
                 let face = Face {
                     name: font.face.clone(),
                     bold: font.weight >= 600,
@@ -710,7 +692,7 @@ pub fn read(bytes: &[u8], fit: [f64; 2]) -> Option<Picture> {
                 let mut text = Text::new();
                 text.value = value;
                 text.insertion_point = base;
-                text.height = 0.8 * drop * scale;
+                text.height = 0.8 * height * scale;
                 text.rotation = rotation;
                 text.common.color = color(text_rgb);
                 player.text_fonts.push((player.entities.len(), index));

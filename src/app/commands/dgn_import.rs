@@ -283,6 +283,7 @@ impl OpenCADStudio {
                         "Imports a DGN model as drawing objects: levels as layers, cells as blocks."
                     ),
                     "3ds" => std::borrow::Cow::Owned(crate::tr!("import-3ds", "help")),
+                    "3ds-material" => std::borrow::Cow::Owned(crate::tr!("import-3ds-alert", "help")),
                     _ => crate::t!(
                         "Imports a file of the chosen format with the format's importer."
                     ),
@@ -450,6 +451,32 @@ impl OpenCADStudio {
                 self.close_active_modal();
                 return self.start_tds_import(i, state);
             }
+            // ── Multiple-material mesh ──────────────────────────────────
+            ImportDialogMsg::TdsMatChoice(k) => {
+                if let Some(s) = self.import_dialogs.tds_material.as_mut() {
+                    s.choice = k.min(2);
+                    s.list_open = false;
+                }
+            }
+            ImportDialogMsg::TdsMatList(open) => {
+                if let Some(s) = self.import_dialogs.tds_material.as_mut() {
+                    s.list_open = open && s.choice == 2;
+                }
+            }
+            ImportDialogMsg::TdsMatPick(k) => {
+                if let Some(s) = self.import_dialogs.tds_material.as_mut() {
+                    let count = s.queue.first().map_or(0, |(_, m)| m.len());
+                    s.choice = 2;
+                    s.material = k.min(count);
+                    s.list_open = false;
+                }
+            }
+            ImportDialogMsg::TdsMatRemember(on) => {
+                if let Some(s) = self.import_dialogs.tds_material.as_mut() {
+                    s.remember = on;
+                }
+            }
+            ImportDialogMsg::TdsMatApply => self.answer_tds_material(),
             // ── DGN Import ───────────────────────────────────────────────
             ImportDialogMsg::DgnChange => return self.pick_dgn_file(),
             ImportDialogMsg::DgnPicked(Some(path)) => {
@@ -555,6 +582,14 @@ impl OpenCADStudio {
         };
         let converted =
             dgn_import::convert(&import, request.sub_units, request.explode_text_nodes);
+        let no_references =
+            request.references == ReferenceMode::Ignore || import.references.is_empty();
+        if converted.entities.is_empty() && no_references {
+            self.command_line.push_error(
+                crate::t!("The DGN model has nothing that can be imported.").as_ref(),
+            );
+            return Task::none();
+        }
         let mut task = Task::none();
         let i = if request.current_drawing {
             i
@@ -577,7 +612,7 @@ impl OpenCADStudio {
         };
         let layers = place_converted(&mut self.tabs[i].scene, converted, &naming);
         if request.references != ReferenceMode::Ignore {
-            let k = if request.sub_units { import.sub_per_master } else { 1.0 };
+            let k = dgn_import::unit_scale(&import, request.sub_units);
             // A reference is placed on the model's default level.
             let layer = import
                 .levels
@@ -777,6 +812,9 @@ fn place_converted(
             let mut layer = codec::tables::Layer::new(target.as_str());
             layer.handle = scene.document.allocate_handle();
             layer.color = *color;
+            if converted.layers_off.contains(name) {
+                layer.flags.off = true;
+            }
             let _ = scene.document.layers.add(layer);
         }
         layers.insert(name.clone(), target);
@@ -794,16 +832,55 @@ fn place_converted(
         }
         styles.insert(name.clone(), target);
     }
-    let mut blocks: HashMap<String, String> = HashMap::new();
-    let mut claimed: Vec<String> = Vec::new();
-    for (name, _) in &converted.blocks {
+    // Dimension styles take the values the file gives them, their text in
+    // the text style they name and closed arrows (a leader none); without
+    // values, the drawing's style of the same name (else the current one).
+    let mut dim_styles: HashMap<String, String> = HashMap::new();
+    for (name, values) in &converted.dim_styles {
         let doc = &scene.document;
-        let taken = |n: &str| {
-            doc.block_records.iter().any(|b| b.name.eq_ignore_ascii_case(n))
-                || claimed.iter().any(|c| c.eq_ignore_ascii_case(n))
-        };
+        let taken = |n: &str| doc.dim_styles.iter().any(|s| s.name.eq_ignore_ascii_case(n));
+        let target = naming.name('s', name, &taken);
+        if !scene.document.dim_styles.iter().any(|s| s.name.eq_ignore_ascii_case(&target)) {
+            let doc = &scene.document;
+            let base = values.clone().or_else(|| {
+                doc.dim_styles
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(name))
+                    .or_else(|| {
+                        doc.dim_styles
+                            .iter()
+                            .find(|s| s.name.eq_ignore_ascii_case(&doc.header.current_dimstyle_name))
+                    })
+                    .cloned()
+            });
+            let mut style = base.unwrap_or_else(|| codec::tables::DimStyle::new(target.as_str()));
+            if values.is_some() {
+                let text = styles.get(&style.dimtxsty).cloned().unwrap_or_else(|| style.dimtxsty.clone());
+                if let Some(t) = scene.document.text_styles.iter().find(|t| t.name.eq_ignore_ascii_case(&text)) {
+                    style.dimtxsty = t.name.clone();
+                    style.dimtxsty_handle = t.handle;
+                }
+                let arrow = crate::entities::arrowheads::resolve(&mut scene.document, "_Closed");
+                style.dimblk1 = arrow.unwrap_or(codec::Handle::NULL);
+                style.dimblk2 = style.dimblk1;
+                style.dimldrblk = crate::entities::arrowheads::resolve(&mut scene.document, "_None")
+                    .unwrap_or(codec::Handle::NULL);
+            }
+            style.name = target.clone();
+            style.handle = scene.document.allocate_handle();
+            let _ = scene.document.dim_styles.add(style);
+        }
+        dim_styles.insert(name.clone(), target);
+    }
+    let mut blocks: HashMap<String, String> = HashMap::new();
+    // Names the drawing has or this import gave, upper-cased: one lookup
+    // each, however many blocks the file brings.
+    let mut claimed: std::collections::HashSet<String> =
+        scene.document.block_records.iter().map(|b| b.name.to_ascii_uppercase()).collect();
+    for (name, _) in &converted.blocks {
+        let taken = |n: &str| claimed.contains(&n.to_ascii_uppercase());
         let target = naming.name('b', name, &taken);
-        claimed.push(target.clone());
+        claimed.insert(target.to_ascii_uppercase());
         blocks.insert(name.clone(), target);
     }
     let fix = |mut entity: codec::EntityType| {
@@ -827,6 +904,16 @@ fn place_converted(
                     insert.block_name = b.clone();
                 }
             }
+            codec::EntityType::Dimension(d) => {
+                if let Some(s) = dim_styles.get(&d.base().style_name) {
+                    d.base_mut().style_name = s.clone();
+                }
+            }
+            codec::EntityType::Leader(l) => {
+                if let Some(s) = dim_styles.get(&l.dimension_style) {
+                    l.dimension_style = s.clone();
+                }
+            }
             _ => {}
         }
         entity
@@ -836,12 +923,35 @@ fn place_converted(
         if scene.document.block_records.get(target).is_some() {
             continue;
         }
-        let entities = entities.into_iter().map(&fix).collect();
+        let entities = entities
+            .into_iter()
+            .map(|e| placed_dimension_text(&scene.document, fix(e)))
+            .collect();
         if let Ok(handles) = scene.define_block_from_owned_entities(entities, target, glam::DVec3::ZERO) {
             scene.bind_outline_hatches(&handles);
         }
     }
-    let handles: Vec<_> = converted.entities.into_iter().map(|entity| scene.add_entity(fix(entity))).collect();
+    let mut handles = Vec::new();
+    for entity in converted.entities {
+        let entity = placed_dimension_text(&scene.document, fix(entity));
+        handles.push(scene.add_entity(entity));
+    }
     scene.bind_outline_hatches(&handles);
     layers
+}
+
+/// A dimension whose text the user has not placed gets the place its style
+/// lays the text out at in this drawing.
+fn placed_dimension_text(
+    document: &codec::Document,
+    mut entity: codec::EntityType,
+) -> codec::EntityType {
+    if let codec::EntityType::Dimension(d) = &mut entity {
+        if !d.base().text_user_positioned {
+            if let Some(p) = crate::entities::dimension::automatic_text_position(document, d) {
+                d.base_mut().text_middle_point = p;
+            }
+        }
+    }
+    entity
 }

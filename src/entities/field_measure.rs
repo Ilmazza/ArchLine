@@ -15,7 +15,7 @@
 use codec::entities::table::CellValue;
 use codec::fields::FieldContext;
 use codec::objects::ObjectType;
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 
 /// The value of `prop` (`Area`, `Length`, `Perimeter`) of `entity`, for the
 /// kinds of object the codec leaves out. `None` for any other combination.
@@ -72,7 +72,7 @@ fn parse<'a>(code: &'a str, objects: &[Handle]) -> Option<Request<'a>> {
 }
 
 /// The text of an `AcObjProp` code the codec could not evaluate.
-pub(crate) fn evaluate(doc: &CadDocument, code: &str, objects: &[Handle], ctx: &dyn FieldContext) -> Option<String> {
+pub(crate) fn evaluate(doc: &Document, code: &str, objects: &[Handle], ctx: &dyn FieldContext) -> Option<String> {
     let request = parse(code, objects)?;
     let value = measured_value(doc.get_entity(request.object)?, request.prop)?;
     let formula = match request.picture {
@@ -83,7 +83,7 @@ pub(crate) fn evaluate(doc: &CadDocument, code: &str, objects: &[Handle], ctx: &
 }
 
 /// Owner of an object handle (a field or a dictionary); `None` for an entity.
-fn owner_of(doc: &CadDocument, handle: Handle) -> Option<Handle> {
+fn owner_of(doc: &Document, handle: Handle) -> Option<Handle> {
     if let Some(field) = doc.fields.get(&handle) {
         return Some(field.owner);
     }
@@ -95,7 +95,7 @@ fn owner_of(doc: &CadDocument, handle: Handle) -> Option<Handle> {
 }
 
 /// The entity a text container belongs to: where its chain of owners ends.
-fn host_of(doc: &CadDocument, container: Handle) -> Option<Handle> {
+fn host_of(doc: &Document, container: Handle) -> Option<Handle> {
     let mut current = container;
     for _ in 0..12 {
         let owner = owner_of(doc, current)?;
@@ -140,7 +140,7 @@ fn text_slot(entity: &mut EntityType) -> Option<&mut String> {
 }
 
 /// Puts `text` into the host, returning what it showed before.
-fn set_host_text(doc: &mut CadDocument, host: Handle, text: &str) -> Option<String> {
+fn set_host_text(doc: &mut Document, host: Handle, text: &str) -> Option<String> {
     if doc.get_entity(host).is_some() {
         return text_slot(doc.get_entity_mut(host)?).map(|slot| std::mem::replace(slot, text.to_string()));
     }
@@ -167,7 +167,7 @@ fn text_checksum(text: &str) -> f64 {
 /// codec: the field's own evaluation options pick it, and only a value that
 /// changed is rewritten, in the field and in the host text. Returns the hosts
 /// whose text changed.
-pub(crate) fn update(doc: &mut CadDocument, event: i32, only: Option<&[Handle]>, ctx: &dyn FieldContext) -> Vec<Handle> {
+pub(crate) fn update(doc: &mut Document, event: i32, only: Option<&[Handle]>, ctx: &dyn FieldContext) -> Vec<Handle> {
     struct Plan {
         host: Handle,
         container: Handle,
@@ -248,7 +248,7 @@ mod tests {
         Vertex3DPolyline,
     };
     use codec::types::{Vector2, Vector3};
-    use codec::{CadDocument, EntityType, Handle};
+    use codec::{Document, EntityType, Handle};
 
     const AREA: &str = "\\AcObjProp Object(%<\\_ObjIdx 0>%).Area";
     const LENGTH: &str = "\\AcObjProp Object(%<\\_ObjIdx 0>%).Length";
@@ -257,11 +257,11 @@ mod tests {
         format!("{code} \\f \"{picture}\"")
     }
 
-    fn show(doc: &CadDocument, code: &str, object: Handle) -> Option<String> {
+    fn show(doc: &Document, code: &str, object: Handle) -> Option<String> {
         evaluate(doc, code, &[object], None)
     }
 
-    fn rectangle(doc: &mut CadDocument, width: f64, height: f64) -> Handle {
+    fn rectangle(doc: &mut Document, width: f64, height: f64) -> Handle {
         let mut polyline = LwPolyline::from_points(vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(width, 0.0),
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_closed_polyline_shows_its_area_and_perimeter() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         assert_eq!(show(&doc, &with_picture(AREA, "%lu2%pr2"), rect).as_deref(), Some("12.00"));
         assert_eq!(show(&doc, &with_picture(LENGTH, "%lu2%pr2"), rect).as_deref(), Some("14.00"));
@@ -282,14 +282,14 @@ mod tests {
 
     #[test]
     fn without_a_picture_the_value_has_six_decimals_like_every_other_property() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         assert_eq!(show(&doc, AREA, rect).as_deref(), Some("12.000000"));
     }
 
     #[test]
     fn an_open_polyline_with_a_bulge_counts_its_arc() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut polyline = LwPolyline::from_points(vec![Vector2::new(0.0, 0.0), Vector2::new(2.0, 0.0)]);
         polyline.vertices[0].bulge = 1.0;
         let semicircle = doc.add_entity(EntityType::LwPolyline(polyline)).unwrap();
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_hatch_shows_the_area_it_covers() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut hatch = Hatch::new();
         let mut path = BoundaryPath::external();
         let corners = [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)];
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn an_ellipse_shows_area_and_length() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let ellipse = Ellipse::from_center_axes(Vector3::ZERO, Vector3::new(2.0, 0.0, 0.0), 0.5);
         let handle = doc.add_entity(EntityType::Ellipse(ellipse)).unwrap();
         assert_eq!(show(&doc, &with_picture(AREA, "%lu2%pr2"), handle).as_deref(), Some("6.28"));
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn a_3d_polyline_shows_its_spatial_length() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut polyline = Polyline3D::new();
         polyline.vertices = vec![Vertex3DPolyline::from_xyz(0.0, 0.0, 0.0), Vertex3DPolyline::from_xyz(3.0, 4.0, 12.0)];
         let handle = doc.add_entity(EntityType::Polyline3D(polyline)).unwrap();
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_spline_shows_its_length() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let spline = Spline::from_control_points(
             3,
             vec![Vector3::ZERO, Vector3::new(3.0, 0.0, 0.0), Vector3::new(7.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0)],
@@ -343,21 +343,21 @@ mod tests {
 
     #[test]
     fn the_conversion_factor_of_the_picture_applies() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         assert_eq!(show(&doc, &with_picture(AREA, "%lu2%pr4%ct8[0.01]"), rect).as_deref(), Some("0.1200"));
     }
 
     #[test]
     fn the_picture_the_dialog_writes_for_an_area_evaluates() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         assert_eq!(show(&doc, &with_picture(AREA, "%lu2%pr2%ct8[0.01]%qf1"), rect).as_deref(), Some("0.12"));
     }
 
     #[test]
     fn a_property_the_object_does_not_have_stays_unevaluated() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let line = doc
             .add_entity(EntityType::Line(Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0))))
             .unwrap();
@@ -365,13 +365,13 @@ mod tests {
     }
 
     /// An MTEXT hosting the field, its cached text stale on purpose.
-    fn host_with_field(doc: &mut CadDocument, code: &str, object: Handle, cached: &str) -> Handle {
+    fn host_with_field(doc: &mut Document, code: &str, object: Handle, cached: &str) -> Handle {
         let host = doc.add_entity(EntityType::MText(Box::new(MText::new()))).unwrap();
         crate::entities::field::set_text_field(doc, host, Some((code.to_string(), vec![object])), cached);
         host
     }
 
-    fn shown_by(doc: &CadDocument, host: Handle) -> String {
+    fn shown_by(doc: &Document, host: Handle) -> String {
         match doc.get_entity(host) {
             Some(EntityType::MText(text)) => text.value.clone(),
             other => panic!("not a text: {other:?}"),
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn updating_the_fields_follows_the_polyline_not_the_stored_text() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         let host = host_with_field(&mut doc, &with_picture(AREA, "%lu2%pr2"), rect, "99.00");
         assert_eq!(shown_by(&doc, host), "99.00", "inserted with the stored value");
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn an_update_leaves_alone_a_host_it_was_not_asked_about() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let rect = rectangle(&mut doc, 4.0, 3.0);
         let host = host_with_field(&mut doc, &with_picture(AREA, "%lu2%pr2"), rect, "99.00");
         let other = host_with_field(&mut doc, &with_picture(LENGTH, "%lu2%pr2"), rect, "98.00");

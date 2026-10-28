@@ -29,7 +29,7 @@ use crate::command::{
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::scene::Scene;
 use crate::ui::window::bim_extract::{BimMsg, ExtractDialog};
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 use iced::Task;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -777,7 +777,7 @@ fn unquote(text: &str) -> &str {
 /// record, altrimenti il più frequente tra i muri del disegno
 /// ([`extract::propose_new_walls_layer`]); `None` se non c'è né l'uno né
 /// l'altro.
-fn proposed_new_walls_layer(doc: &CadDocument) -> Option<String> {
+fn proposed_new_walls_layer(doc: &Document) -> Option<String> {
     record::read(doc)
         .new_walls_layer
         .map(|name| name.trim().to_string())
@@ -791,7 +791,7 @@ fn proposed_new_walls_layer(doc: &CadDocument) -> Option<String> {
 /// carattere di controllo, più di 255 caratteri). Un layer che il disegno ha
 /// già va sempre bene.
 fn new_walls_layer_error(
-    doc: &CadDocument,
+    doc: &Document,
     elaborati: &[Elaborato],
     layer: &str,
 ) -> Option<String> {
@@ -1005,7 +1005,7 @@ fn commits_to_model_space(scene: &Scene) -> bool {
 /// L'istantanea della geometria per [`ZoneCommand`] e il numero di entità muro
 /// rimaste fuori dal piano XY. Le facce si saldano anche sui vuoti entro
 /// `HPGAPTOL`, come HATCH; il resto usa la tolleranza dell'unità.
-fn zone_snapshot(doc: &CadDocument, unit: DrawingUnit) -> (ZoneSnapshot, usize) {
+fn zone_snapshot(doc: &Document, unit: DrawingUnit) -> (ZoneSnapshot, usize) {
     let tol = unit.tolerance();
     // R67: le parti dei locali non sono muri (punto interno, asse, convalida).
     let set = walls::wall_set_without_rooms(doc, tol);
@@ -1050,12 +1050,12 @@ mod tests {
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
     use codec::tables::Layer;
-    use codec::{CadDocument, Handle};
+    use codec::{Document, Handle};
     use std::path::{Path, PathBuf};
 
     #[test]
     fn new_walls_layer_must_be_a_valid_name_for_the_project() {
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut old = Layer::new("VECCHIO;LAYER");
         old.handle = doc.allocate_handle();
         doc.layers.add(old).unwrap();

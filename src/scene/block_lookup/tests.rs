@@ -1,11 +1,14 @@
 use super::*;
+mod multiple_outputs;
+mod expressions;
+mod rename;
 use crate::scene::{block_basepoint, block_distance_parameter as distance, render_graph, Scene};
 use codec::{
     entities::{Insert, Line},
     EntityType,
 };
 
-fn fixture() -> (CadDocument, Handle) {
+fn fixture() -> (Document, Handle) {
     let mut scene = Scene::new();
     scene.define_block_raw(
         "LOOKUP",
@@ -18,7 +21,7 @@ fn fixture() -> (CadDocument, Handle) {
     let definition = scene.document.block_records.get("LOOKUP").unwrap().handle;
     (scene.document, definition)
 }
-fn add_distance(document: &mut CadDocument, definition: Handle) {
+fn add_distance(document: &mut Document, definition: Handle) {
     distance::create(
         document,
         definition,
@@ -29,7 +32,7 @@ fn add_distance(document: &mut CadDocument, definition: Handle) {
     )
     .unwrap();
 }
-fn draft(document: &CadDocument, definition: Handle, parameter: Handle) -> BlockLookupAction {
+fn draft(document: &Document, definition: Handle, parameter: Handle) -> BlockLookupAction {
     let p = parameters(document, definition)
         .into_iter()
         .find(|(h, _)| *h == parameter)
@@ -44,7 +47,7 @@ fn draft(document: &CadDocument, definition: Handle, parameter: Handle) -> Block
     table.expressions = vec!["2".into(), "Small".into(), "4".into(), "Large".into()];
     table
 }
-fn graph_data(document: &CadDocument, definition: Handle) -> codec::objects::BlockEvaluationGraph {
+fn graph_data(document: &Document, definition: Handle) -> codec::objects::BlockEvaluationGraph {
     let ObjectType::DynamicBlock(o) =
         &document.objects[&graph_handle(document, definition).unwrap()]
     else {
@@ -55,7 +58,7 @@ fn graph_data(document: &CadDocument, definition: Handle) -> codec::objects::Blo
     };
     g.clone()
 }
-fn assert_links(document: &CadDocument, definition: Handle) {
+fn assert_links(document: &Document, definition: Handle) {
     let g = graph_data(document, definition);
     for n in &g.nodes {
         assert!(graph::valid_lists(&g, n.id), "invalid node {}", n.id);
@@ -76,7 +79,7 @@ fn assert_links(document: &CadDocument, definition: Handle) {
         );
     }
 }
-fn roundtrip(document: &CadDocument, definition: Handle) {
+fn roundtrip(document: &Document, definition: Handle) {
     let graph = graph_handle(document, definition).unwrap();
     for extension in ["dwg", "dxf"] {
         let bytes = crate::io::save_to_bytes(document, extension, document.version).unwrap();
@@ -257,6 +260,14 @@ fn lookup_reverse_selection_evaluates_saved_reference_geometry() {
         .add_entity(EntityType::Insert(Insert::new("LOOKUP", Vector3::ZERO)))
         .unwrap();
 
+    let mut hidden = document.clone();
+    let grips = crate::scene::block_grips::config::locations(&hidden, definition, lookup).unwrap().into_iter().map(|g| (g.role, g.handle, g.point, g.key_point, g.direction)).collect::<Vec<_>>();
+    crate::scene::block_authoring::metadata::set_visible(&mut hidden, definition, lookup, false).unwrap();
+    assert!(reference_property(&hidden, insert).is_none());
+    assert_eq!(crate::scene::block_grips::config::locations(&hidden, definition, lookup).unwrap().into_iter().map(|g| (g.role, g.handle, g.point, g.key_point, g.direction)).collect::<Vec<_>>(), grips);
+    let hidden_evaluated = evaluate_reference_choice(&hidden, insert, "Large").unwrap().unwrap();
+    assert!(reference_property(&hidden_evaluated, insert).is_none());
+
     let initial = reference_property(&document, insert).unwrap();
     let crate::scene::model::object::PropValue::Choice { selected, options } = initial.value else {
         panic!("Lookup property should be a choice.")
@@ -295,10 +306,63 @@ fn lookup_reverse_selection_evaluates_saved_reference_geometry() {
     let mut unsupported = document.clone();
     let (_, mut malformed) = table(&unsupported, definition, lookup).unwrap().unwrap();
     malformed.columns[0].connection_name = "UpdatedAngle".into();
-    apply_table(&mut unsupported, definition, lookup, malformed).unwrap();
+    let before = unsupported.clone();
+    assert!(apply_table(&mut unsupported, definition, lookup, malformed.clone()).is_err());
+    assert_eq!(unsupported, before);
+    // Simulate a retained imported binding without authoring it through Apply.
+    let (handle, _) = table(&unsupported, definition, lookup).unwrap().unwrap();
+    let ObjectType::DynamicBlock(object) = unsupported.objects.get_mut(&handle).unwrap() else { panic!() };
+    object.data = DynamicBlockData::LookupAction(malformed);
     let before = unsupported.clone();
     assert!(evaluate_reference_choice(&unsupported, insert, "Large").is_err());
     assert_eq!(unsupported, before);
+}
+
+#[test]
+fn lookup_and_property_table_rows_preserve_changed_bases_in_drawing_and_test_contexts() {
+    use crate::scene::{block_actions as actions, block_properties_table as table};
+    use glam::DVec3;
+    for testing in [false, true] {
+        for lookup in [false, true] {
+            let (mut document, definition) = fixture();
+            add_distance(&mut document, definition);
+            let p = actions::all_parameters(&document, definition).remove(0);
+            let line = document.block_records.get("LOOKUP").unwrap().entity_handles[0];
+            actions::create(&mut document, definition, actions::Kind::Move, p.handle, &[line], DVec3::ZERO).unwrap();
+            if lookup {
+                let lookup = create(&mut document, definition, Vector3::ZERO).unwrap();
+                let draft = draft(&document, definition, lookup);
+                apply_table(&mut document, definition, lookup, draft).unwrap();
+            } else {
+                let columns = table::columns(&document, definition);
+                table::apply(&mut document, definition, &columns, &[vec![2.], vec![4.]], false).unwrap();
+            }
+            let insert = document.add_entity(EntityType::Insert(Insert::new("LOOKUP", Vector3::ZERO))).unwrap();
+            let baseline = document.clone();
+            let input = actions::Value::Frame { base: DVec3::new(-2., 0., 0.), end: p.end };
+            document = if testing {
+                actions::instance::evaluate_test_value(&document, &baseline, definition, insert, p.handle, input)
+            } else { actions::instance::evaluate_value(&document, insert, p.handle, input) }.unwrap().unwrap();
+            for row in [0, 1, 0] {
+                document = if lookup {
+                    let label = if row == 0 { "Small" } else { "Large" };
+                    if testing { evaluate_test_choice(&document, &baseline, insert, label) }
+                    else { evaluate_reference_choice(&document, insert, label) }
+                } else {
+                    let columns = table::table(&document, definition).unwrap().unwrap().columns;
+                    if testing { actions::instance::evaluate_test_table_row(&document, &baseline, insert, &columns, row) }
+                    else { actions::instance::evaluate_table_row(&document, insert, &columns, row) }
+                }.unwrap().unwrap();
+                let frame = actions::instance::frame(&document, insert, &p).unwrap();
+                assert_eq!(frame.base, DVec3::new(-2., 0., 0.));
+                assert_eq!(frame.end, DVec3::new(if row == 0 { 0. } else { 2. }, 0., 0.));
+                let EntityType::Insert(reference) = document.get_entity(insert).unwrap() else { panic!() };
+                let member = document.block_records.get(&reference.block_name).unwrap().entity_handles[0];
+                let EntityType::Line(line) = document.get_entity(member).unwrap() else { panic!() };
+                assert_eq!(line.start, Vector3::new(if row == 0 { -2. } else { 0. }, 0., 0.));
+            }
+        }
+    }
 }
 
 #[test]
@@ -384,6 +448,8 @@ fn lookup_existing_expressions_survive_row_reordering_and_output_edits() {
     edited.expressions[1] = "Renamed".into();
     assert!(validate(&edited, Some(&original)).is_ok());
     edited.expressions[0] = "[7,9]".into();
+    assert!(validate(&edited, Some(&original)).is_ok());
+    edited.expressions[0] = "{opaque}".into();
     assert!(validate(&edited, Some(&original)).is_err());
 }
 #[test]

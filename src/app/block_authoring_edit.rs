@@ -9,12 +9,15 @@ const EDIT_GRIP_START: usize = usize::MAX / 4;
 pub(super) fn is_editor_grip(id: usize) -> bool {
     (EDIT_GRIP_START..EDIT_GRIP_START + 16).contains(&id)
 }
+pub(super) fn editor_grip_index(id: usize) -> Option<usize> {
+    is_editor_grip(id).then(|| id - EDIT_GRIP_START)
+}
 struct EditCommand {
     document: u64,
     definition: Handle,
     handle: Handle,
     part: Part,
-    document_snapshot: codec::CadDocument,
+    document_snapshot: codec::Document,
 }
 impl CadCommand for EditCommand {
     fn name(&self) -> &'static str {
@@ -73,22 +76,304 @@ impl CadCommand for EditCommand {
     }
 }
 impl OpenCADStudio {
-    pub(super) fn commit_authoring_name(&mut self) -> Task<Message> {
+    pub(super) fn set_authoring_alignment_type(&mut self, value: &str) -> Task<Message> {
         let i = self.active_tab;
-        let key = crate::ui::properties::FieldKey::Geom("authoring_name");
-        let Some(name) = self.tabs[i]
-            .properties
-            .edit_buf
-            .remove(&key)
-            .map(|s| s.trim().to_owned())
-        else {
+        let Some(definition) = self.tabs[i].active_block_edit_session().map(|session| session.br_handle) else { return Task::none() };
+        let Some(parameter) = self.tabs[i].selected_authoring else { return Task::none() };
+        let perpendicular = if value.eq_ignore_ascii_case("Perpendicular") || value == crate::t!("Perpendicular").as_ref() { true }
+            else if value.eq_ignore_ascii_case("Tangent") || value == crate::t!("Tangent").as_ref() { false }
+            else { self.command_line.push_error(crate::t!("Choose Perpendicular or Tangent.").as_ref()); return Task::none() };
+        let mut staged = self.tabs[i].scene.document.clone();
+        match crate::scene::block_orientation_parameter::set_alignment_type(&mut staged, definition, parameter, perpendicular) {
+            Ok(changed) => {
+                if changed {
+                    self.push_undo_snapshot(i, "Alignment type");
+                    self.apply_action_document(i, staged);
+                    self.tabs[i].scene.bump_geometry();
+                    self.tabs[i].dirty = true;
+                    self.finish_pending_history(i);
+                }
+                self.tabs[i].properties.edit_choice_open = false;
+                self.refresh_properties();
+            }
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+        }
+        Task::none()
+    }
+
+    pub(super) fn commit_authoring_action_option(&mut self, field: &'static str) -> Task<Message> {
+        if field.starts_with("authoring_action_base_") {
+            return self.commit_authoring_action_base(field);
+        }
+        use crate::scene::block_actions::options;
+        let i = self.active_tab;
+        let Some(session) = self.tabs[i].active_block_edit_session() else { return Task::none() };
+        let definition = session.br_handle;
+        let Some(handle) = self.tabs[i].selected_authoring else { return Task::none() };
+        let key = crate::ui::properties::FieldKey::Geom(field);
+        let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else { return Task::none() };
+        let Some(before) = options::offsets(&self.tabs[i].scene.document, handle) else { return Task::none() };
+        let value = crate::app::expr_eval::eval_to_string(input).parse::<f64>();
+        let Ok(value) = value else {
+            self.command_line.push_error(crate::t!("Enter a finite action override.").as_ref());
             return Task::none();
         };
-        if name.is_empty() {
-            self.command_line
-                .push_error(crate::t!("Parameter name cannot be empty.").as_ref());
-            return Task::none();
+        let (multiplier, angle) = match field {
+            "authoring_action_multiplier" => (value, before.angle_offset),
+            "authoring_action_angle" => (before.distance_multiplier, value.to_radians()),
+            _ => return Task::none(),
+        };
+        let mut staged = self.tabs[i].scene.document.clone();
+        match options::set(&mut staged, definition, handle, multiplier, angle) {
+            Ok(true) => {
+                let staged = match crate::scene::block_actions::instance::refresh(&staged, definition) {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        self.command_line.push_error(crate::t!(error).as_ref());
+                        return Task::none();
+                    }
+                };
+                self.push_undo_snapshot(i, "Edit block action override");
+                self.apply_action_document(i, staged);
+                self.tabs[i].dirty = true;
+                self.tabs[i].scene.bump_geometry();
+                self.finish_pending_history(i);
+                self.tabs[i].properties.edit_buf.remove(&key);
+                self.refresh_properties();
+            }
+            Ok(false) => { self.tabs[i].properties.edit_buf.remove(&key); }
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
         }
+        Task::none()
+    }
+
+    pub(super) fn commit_authoring_action_base(&mut self, field: &'static str) -> Task<Message> {
+        use crate::scene::block_actions::{instance, options};
+        let i = self.active_tab;
+        let Some(session) = self.tabs[i].active_block_edit_session() else { return Task::none() };
+        let definition = session.br_handle;
+        let Some(handle) = self.tabs[i].selected_authoring else { return Task::none() };
+        let Some(before) = options::base(&self.tabs[i].scene.document, handle) else { return Task::none() };
+        let key = crate::ui::properties::FieldKey::Geom(field);
+        let editing_offset = matches!(field, "authoring_action_base_offset_x" | "authoring_action_base_offset_y");
+        let mut point = if editing_offset { DVec3::new(before.offset.x, before.offset.y, before.offset.z) }
+            else { DVec3::new(before.base_point.x, before.base_point.y, before.base_point.z) };
+        let dependent = if field == "authoring_action_base_dependent" { !before.dependent } else { before.dependent };
+        let point = if field == "authoring_action_base_dependent" { None } else {
+            if editing_offset != dependent { return Task::none() }
+            let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else { return Task::none() };
+            let Ok(value) = crate::app::expr_eval::eval_to_string(input).parse::<f64>() else {
+                self.command_line.push_error(crate::t!("Specify a finite action base point.").as_ref());
+                return Task::none();
+            };
+            match field {
+                "authoring_action_base_x" => point.x = value,
+                "authoring_action_base_y" => point.y = value,
+                "authoring_action_base_offset_x" => point.x = value,
+                "authoring_action_base_offset_y" => point.y = value,
+                _ => return Task::none(),
+            }
+            Some(point)
+        };
+        let mut staged = self.tabs[i].scene.document.clone();
+        let result = if editing_offset {
+            options::set_base_offset(&mut staged, definition, handle, point.unwrap())
+        } else { options::set_base(&mut staged, definition, handle, dependent, point) };
+        match result {
+            Ok(true) => match instance::refresh(&staged, definition) {
+                Ok(staged) => {
+                    self.push_undo_snapshot(i, "Edit block action base point");
+                    self.apply_action_document(i, staged);
+                    self.tabs[i].dirty = true;
+                    self.tabs[i].scene.bump_geometry();
+                    self.finish_pending_history(i);
+                    self.tabs[i].properties.edit_buf.remove(&key);
+                    self.refresh_properties();
+                }
+                Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+            },
+            Ok(false) => { self.tabs[i].properties.edit_buf.remove(&key); }
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+        }
+        Task::none()
+    }
+
+    fn authoring_label_corners(
+        &self,
+        graphic: &crate::scene::block_distance_parameter::Graphic,
+        anchor: Point,
+        label: &str,
+        index: usize,
+        camera: &crate::scene::view::camera::Camera,
+        bounds: Rectangle,
+    ) -> [Point; 4] {
+        let prefs = &self.block_editor_preferences;
+        let angle = if prefs.text_horizontal {
+            0.0
+        } else {
+            graphic
+                .dimensions
+                .get(index)
+                .or_else(|| graphic.dimensions.first())
+                .and_then(|[a, b]| {
+                    let a = camera.project(DVec3::new(a.x, a.y, a.z), bounds)?;
+                    let b = camera.project(DVec3::new(b.x, b.y, b.z), bounds)?;
+                    Some(crate::ui::overlay::authoring::readable_angle(
+                        (b.y - a.y).atan2(b.x - a.x),
+                    ))
+                })
+                .unwrap_or(0.0)
+        };
+        crate::ui::overlay::authoring::label_corners(
+            anchor,
+            label,
+            angle,
+            prefs.parameter_size,
+            &prefs.parameter_font,
+        )
+    }
+
+    pub(super) fn authoring_grip_hit(
+        &self,
+        point: Point,
+        bounds: Rectangle,
+    ) -> Option<(usize, usize, bool, DVec3)> {
+        let tab = &self.tabs[self.active_tab];
+        tab.active_block_edit_session()?;
+        let camera = tab.scene.camera.borrow();
+        let half = self.block_editor_preferences.grip_size.max(1) as f32 / 2.0 + 3.0;
+        tab.selected_grips
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| is_editor_grip(g.id))
+            .filter_map(|(index, g)| {
+                let screen = camera.project(g.world, bounds)?;
+                let dx = (screen.x - point.x).abs();
+                let dy = (screen.y - point.y).abs();
+                (dx <= half && dy <= half).then_some((dx.hypot(dy), index, g))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, index, g)| (index, g.id, g.is_midpoint, g.world))
+    }
+    pub(super) fn authoring_parameter_properties(
+        &self,
+        handle: Handle,
+    ) -> Option<(
+        bool,
+        Vec<(
+            &'static str,
+            &'static str,
+            &codec::objects::BlockParameterValueSet,
+        )>,
+    )> {
+        let Some(codec::objects::ObjectType::DynamicBlock(object)) = self.tabs[self.active_tab]
+            .scene
+            .document
+            .objects
+            .get(&handle)
+        else {
+            return None;
+        };
+        let (chain_actions, value_sets) = match &object.data {
+            codec::objects::DynamicBlockData::LinearParameter(parameter) => (
+                parameter.parameter.parameter.chain_actions,
+                vec![("linear_distance", "Distance", &parameter.value_set)],
+            ),
+            codec::objects::DynamicBlockData::PolarParameter(parameter) => (
+                parameter.parameter.parameter.chain_actions,
+                vec![
+                    ("polar_distance", "Distance", &parameter.distance_value_set),
+                    ("polar_angle", "Angle", &parameter.angle_value_set),
+                ],
+            ),
+            codec::objects::DynamicBlockData::XYParameter(parameter) => (
+                parameter.parameter.parameter.chain_actions,
+                vec![
+                    ("xy_x", "X Distance", &parameter.x_value_set),
+                    ("xy_y", "Y Distance", &parameter.y_value_set),
+                ],
+            ),
+            codec::objects::DynamicBlockData::RotationParameter(parameter) => (
+                parameter.parameter.parameter.chain_actions,
+                vec![("rotation_angle", "Angle", &parameter.value_set)],
+            ),
+            codec::objects::DynamicBlockData::PointParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            codec::objects::DynamicBlockData::AlignmentParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            codec::objects::DynamicBlockData::FlipParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            codec::objects::DynamicBlockData::BasePointParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            codec::objects::DynamicBlockData::LookupParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            codec::objects::DynamicBlockData::UserParameter(parameter) => {
+                (parameter.parameter.parameter.chain_actions, vec![])
+            }
+            _ => return None,
+        };
+        Some((chain_actions, value_sets))
+    }
+
+    pub(super) fn toggle_authoring_value_set_flag(&mut self, field: &'static str) -> Task<Message> {
+        let i = self.active_tab;
+        let Some(handle) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
+        let mut document = self.tabs[i].scene.document.clone();
+        match toggle_authoring_value_set_flag(&mut document, handle, field) {
+            Ok(true) => {
+                self.push_undo_snapshot(i, "BEDIT Parameter value set");
+                self.tabs[i].scene.document = document;
+                self.tabs[i].scene.bump_geometry();
+                self.tabs[i].dirty = true;
+                self.refresh_properties();
+            }
+            Ok(false) => {}
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+        }
+        Task::none()
+    }
+
+    pub(super) fn commit_authoring_value_set(&mut self, field: &'static str) -> Task<Message> {
+        let i = self.active_tab;
+        let Some(handle) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
+        let key = crate::ui::properties::FieldKey::Geom(field);
+        let Some(input) = self.tabs[i].properties.edit_buf.get(&key).cloned() else {
+            return Task::none();
+        };
+        let mut document = self.tabs[i].scene.document.clone();
+        match set_authoring_value_set_field(&mut document, handle, field, &input) {
+            Ok(true) => {
+                self.push_undo_snapshot(i, "BEDIT Parameter value set");
+                self.tabs[i].scene.document = document;
+                self.tabs[i].scene.bump_geometry();
+                self.tabs[i].dirty = true;
+                self.tabs[i].properties.edit_buf.remove(&key);
+                self.refresh_properties();
+            }
+            Ok(false) => {
+                self.tabs[i].properties.edit_buf.remove(&key);
+            }
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+        }
+        Task::none()
+    }
+
+    pub(super) fn commit_authoring_name(&mut self) -> Task<Message> {
+        self.commit_authoring_metadata("authoring_name")
+    }
+
+    pub(super) fn commit_authoring_metadata(&mut self, key: &'static str) -> Task<Message> {
+        use crate::scene::block_authoring::metadata;
+        let i = self.active_tab;
         let Some(handle) = self.tabs[i].selected_authoring else {
             return Task::none();
         };
@@ -96,84 +381,65 @@ impl OpenCADStudio {
             return Task::none();
         };
         let definition = session.br_handle;
-        let doc = &self.tabs[i].scene.document;
-        if edit::items(doc, definition)
-            .iter()
-            .any(|item| item.handle != handle && item.name.eq_ignore_ascii_case(&name))
-        {
-            self.command_line
-                .push_error(crate::t!("Parameter names must be unique.").as_ref());
-            return Task::none();
-        }
-        let mut staged = doc.clone();
-        let changed = match staged.objects.get_mut(&handle) {
-            Some(codec::objects::ObjectType::BlockVisibilityParameter(parameter)) => {
-                parameter.name = name;
-                true
-            }
-            Some(codec::objects::ObjectType::DynamicBlock(object)) => match &mut object.data {
-                codec::objects::DynamicBlockData::PointParameter(p) => {
-                    p.position_name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::LinearParameter(p) => {
-                    p.distance_name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::PolarParameter(p) => {
-                    p.distance_name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::XYParameter(p) => {
-                    p.x_label = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::RotationParameter(p) => {
-                    p.angle_name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::AlignmentParameter(p) => {
-                    p.parameter.parameter.element.name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::FlipParameter(p) => {
-                    p.flip_label = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::BasePointParameter(p) => {
-                    p.parameter.parameter.element.name = name;
-                    true
-                }
-                codec::objects::DynamicBlockData::LookupParameter(p) => {
-                    p.lookup_name = name;
-                    true
-                }
-                _ => false,
-            },
-            _ => false,
+        let mut staged = self.tabs[i].scene.document.clone();
+        let result = if key == "authoring_show_properties" {
+            metadata::read(&staged, definition, handle)
+                .and_then(|m| {
+                    m.visible
+                        .ok_or("This parameter has no supported reference property row.")
+                })
+                .and_then(|visible| {
+                    metadata::set_visible(&mut staged, definition, handle, !visible)
+                })
+        } else {
+            let Some(field) = metadata::Field::from_key(key) else {
+                return Task::none();
+            };
+            let Some(input) = self.tabs[i]
+                .properties
+                .edit_buf
+                .get(&crate::ui::properties::FieldKey::Geom(key))
+            else {
+                return Task::none();
+            };
+            metadata::set_text(&mut staged, definition, handle, field, input)
         };
-        if changed {
-            if let Some(codec::objects::ObjectType::BlockVisibilityParameter(parameter)) =
-                staged.objects.get(&handle)
-            {
-                staged
-                    .block_visibility_params
-                    .insert(handle, parameter.clone());
+        match result {
+            Ok(changed) => {
+                if changed {
+                    self.push_undo_snapshot(i, "Edit block parameter metadata");
+                    self.tabs[i].scene.document = staged;
+                    self.tabs[i].dirty = true;
+                    self.tabs[i].scene.bump_geometry();
+                    self.finish_pending_history(i);
+                }
+                self.tabs[i]
+                    .properties
+                    .edit_buf
+                    .remove(&crate::ui::properties::FieldKey::Geom(key));
+                self.refresh_properties();
             }
-            self.push_undo_snapshot(i, "Rename block parameter");
-            self.tabs[i].scene.document = staged;
-            self.tabs[i].dirty = true;
-            self.tabs[i].scene.bump_geometry();
-            self.finish_pending_history(i);
-            self.refresh_properties();
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
         }
         Task::none()
     }
-    pub(super) fn pick_authoring_box(&mut self, a: Point, b: Point, crossing: bool) -> bool {
+    /// Select the authoring object a selection box catches. A box that also
+    /// caught drawing objects keeps those instead (#2217): the authoring
+    /// selection would clear them.
+    pub(super) fn pick_authoring_box(
+        &mut self,
+        a: Point,
+        b: Point,
+        crossing: bool,
+        caught_objects: bool,
+    ) -> bool {
         let i = self.active_tab;
         let Some(session) = self.tabs[i].active_block_edit_session() else {
             return false;
         };
+        if caught_objects {
+            return false;
+        }
         let items = edit::items(&self.tabs[i].scene.document, session.br_handle);
         let bounds = iced::Rectangle {
             x: 0.0,
@@ -186,6 +452,13 @@ impl OpenCADStudio {
         let max = Point::new(a.x.max(b.x), a.y.max(b.y));
         let hit = items
             .into_iter()
+            .filter(|item| {
+                !self.block_editor_preferences.action_bars
+                    || !crate::scene::block_action_bars::is_action(
+                        &self.tabs[i].scene.document,
+                        item.handle,
+                    )
+            })
             .filter_map(|item| {
                 let mut projected = Vec::new();
                 for (_, p) in &item.grips {
@@ -209,12 +482,21 @@ impl OpenCADStudio {
                     .graphic
                     .labels
                     .iter()
-                    .filter_map(|(point, label)| {
+                    .enumerate()
+                    .filter_map(|(index, (point, label))| {
                         let point =
                             camera.project(DVec3::new(point.x, point.y, point.z), bounds)?;
                         let point = Point::new(point.x, point.y);
-                        projected.push(point);
-                        Some((point, label.chars().count() as f32 * 7.0 + 20.0, 16.0))
+                        let corners = self.authoring_label_corners(
+                            &item.graphic,
+                            point,
+                            label,
+                            index,
+                            &camera,
+                            bounds,
+                        );
+                        projected.extend(corners);
+                        Some(corners)
                     })
                     .collect::<Vec<_>>();
                 let inside =
@@ -251,11 +533,13 @@ impl OpenCADStudio {
                 };
                 let any = projected.iter().any(|p| inside(*p))
                     || segments.iter().copied().any(crosses)
-                    || labels.iter().any(|(p, width, height)| {
-                        p.x <= max.x
-                            && p.x + width >= min.x
-                            && p.y - height <= max.y
-                            && p.y >= min.y
+                    || labels.iter().any(|corners| {
+                        corners
+                            .iter()
+                            .zip(corners.iter().cycle().skip(1))
+                            .take(4)
+                            .any(|(a, b)| crosses([*a, *b]))
+                            || crate::ui::overlay::authoring::label_contains(*corners, min)
                     });
                 let all = !projected.is_empty() && projected.iter().all(|p| inside(*p));
                 (if crossing { any } else { all }).then_some(item.handle)
@@ -281,17 +565,32 @@ impl OpenCADStudio {
         let camera = tab.scene.camera.borrow();
         edit::items(&tab.scene.document, session.br_handle)
             .into_iter()
+            .filter(|item| {
+                !self.block_editor_preferences.action_bars
+                    || !crate::scene::block_action_bars::is_action(&tab.scene.document, item.handle)
+            })
             .find_map(|item| {
-                item.graphic.labels.iter().find_map(|(point, label)| {
-                    let projected =
-                        camera.project(DVec3::new(point.x, point.y, point.z), bounds)?;
-                    let anchor = Point::new(projected.x, projected.y);
-                    let width = (label.chars().count() as f32 * 7.0).max(20.0);
-                    (p.x >= anchor.x - 8.0
-                        && p.x <= anchor.x + width + 12.0
-                        && (p.y - anchor.y).abs() < 16.0)
+                item.graphic
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, (point, label))| {
+                        let projected =
+                            camera.project(DVec3::new(point.x, point.y, point.z), bounds)?;
+                        let anchor = Point::new(projected.x, projected.y);
+                        crate::ui::overlay::authoring::label_contains(
+                            self.authoring_label_corners(
+                                &item.graphic,
+                                anchor,
+                                label,
+                                index,
+                                &camera,
+                                bounds,
+                            ),
+                            p,
+                        )
                         .then(|| (item.handle, label.clone()))
-                })
+                    })
             })
     }
 
@@ -343,11 +642,18 @@ impl OpenCADStudio {
         };
         let hit = items
             .iter()
+            .filter(|item| {
+                !self.block_editor_preferences.action_bars
+                    || !crate::scene::block_action_bars::is_action(&tab.scene.document, item.handle)
+            })
             .filter_map(|item| {
                 let mut d = f32::INFINITY;
                 for (_, v) in &item.grips {
                     if let Some(v) = project(*v) {
-                        d = d.min(segment(v, v));
+                        let distance = segment(v, v);
+                        if distance <= self.block_editor_preferences.grip_size as f32 / 2.0 + 3.0 {
+                            d = d.min(0.0);
+                        }
                     }
                 }
                 for [a, b] in &item.graphic.lines {
@@ -355,16 +661,24 @@ impl OpenCADStudio {
                         d = d.min(segment(a, b));
                     }
                 }
-                for (v, label) in &item.graphic.labels {
+                for (index, (v, label)) in item.graphic.labels.iter().enumerate() {
                     if let Some(v) = project(*v) {
-                        // Labels are drawn starting beside their anchor, in screen pixels.
-                        let width = (label.chars().count() as f32 * 7.).max(20.);
-                        if p.x >= v.x - 8. && p.x <= v.x + width + 12. && (p.y - v.y).abs() < 16. {
+                        if crate::ui::overlay::authoring::label_contains(
+                            self.authoring_label_corners(
+                                &item.graphic,
+                                v,
+                                label,
+                                index,
+                                &camera,
+                                bounds,
+                            ),
+                            p,
+                        ) {
                             d = d.min(0.);
                         }
                     }
                 }
-                (d <= 10.).then_some((d, item.handle, item.name.clone()))
+                (d <= 10.0).then_some((d, item.handle, item.name.clone()))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
         drop(camera);
@@ -399,6 +713,11 @@ impl OpenCADStudio {
         let Some(handle) = self.tabs[i].selected_authoring else {
             return;
         };
+        if self.block_editor_preferences.action_bars
+            && crate::scene::block_action_bars::is_action(&self.tabs[i].scene.document, handle)
+        {
+            return;
+        }
         let item = self.tabs[i].active_block_edit_session().and_then(|s| {
             edit::items(&self.tabs[i].scene.document, s.br_handle)
                 .into_iter()
@@ -427,6 +746,11 @@ impl OpenCADStudio {
             return false;
         }
         let i = self.active_tab;
+        if self.block_editor_preferences.action_bars
+            && crate::scene::block_action_bars::is_action(&self.tabs[i].scene.document, handle)
+        {
+            return false;
+        }
         let Some(session) = self.tabs[i].active_block_edit_session() else {
             return false;
         };
@@ -514,6 +838,165 @@ impl OpenCADStudio {
         }
         Task::none()
     }
+}
+
+fn authoring_value_set_mut<'a>(
+    data: &'a mut codec::objects::DynamicBlockData,
+    key: &str,
+) -> Option<&'a mut codec::objects::BlockParameterValueSet> {
+    use codec::objects::DynamicBlockData as Data;
+    match (data, key) {
+        (Data::LinearParameter(parameter), "linear_distance") => Some(&mut parameter.value_set),
+        (Data::PolarParameter(parameter), "polar_distance") => {
+            Some(&mut parameter.distance_value_set)
+        }
+        (Data::PolarParameter(parameter), "polar_angle") => Some(&mut parameter.angle_value_set),
+        (Data::XYParameter(parameter), "xy_x") => Some(&mut parameter.x_value_set),
+        (Data::XYParameter(parameter), "xy_y") => Some(&mut parameter.y_value_set),
+        (Data::RotationParameter(parameter), "rotation_angle") => Some(&mut parameter.value_set),
+        _ => None,
+    }
+}
+
+fn set_authoring_value_set_field(
+    document: &mut codec::Document,
+    handle: Handle,
+    field: &str,
+    input: &str,
+) -> Result<bool, &'static str> {
+    let rest = field
+        .strip_prefix("authoring_set_")
+        .ok_or("Unknown parameter value-set field.")?;
+    let (set_key, member) = rest
+        .rsplit_once('_')
+        .ok_or("Unknown parameter value-set field.")?;
+    let Some(codec::objects::ObjectType::DynamicBlock(object)) = document.objects.get_mut(&handle)
+    else {
+        return Err("Select an authoring parameter.");
+    };
+    let Some(value_set) = authoring_value_set_mut(&mut object.data, set_key) else {
+        return Err("This parameter does not have that value set.");
+    };
+    let changed = match member {
+        "minimum" | "maximum" | "increment" => {
+            let value = input
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| "Enter a finite number for the parameter value set.")?;
+            if !value.is_finite() {
+                return Err("Enter a finite number for the parameter value set.");
+            }
+            match member {
+                "minimum" if value != value_set.minimum => {
+                    value_set.minimum = value;
+                    value_set.flags |= 1;
+                }
+                "maximum" if value != value_set.maximum => {
+                    value_set.maximum = value;
+                    value_set.flags |= 2;
+                }
+                "increment" if value < 0.0 => {
+                    return Err("Parameter value-set increment cannot be negative.");
+                }
+                "increment" if value != value_set.increment => {
+                    value_set.increment = value;
+                    if value == 0.0 {
+                        value_set.flags &= !4;
+                    } else {
+                        value_set.flags = (value_set.flags | 4) & !8;
+                    }
+                }
+                _ => return Ok(false),
+            }
+            if value_set.flags & 3 == 3 && value_set.minimum > value_set.maximum {
+                return Err("Parameter value-set minimum cannot exceed its maximum.");
+            }
+            true
+        }
+        "values" => {
+            let values = if input.trim().is_empty() {
+                Vec::new()
+            } else {
+                input
+                    .split(',')
+                    .map(|item| {
+                        let value = item
+                            .trim()
+                            .parse::<f64>()
+                            .map_err(|_| "Enter allowed values as comma-separated numbers.")?;
+                        if !value.is_finite() {
+                            return Err("Allowed parameter values must be finite.");
+                        }
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err("Allowed parameter values must be in strictly increasing order.");
+            }
+            if values == value_set.values {
+                return Ok(false);
+            }
+            value_set.values = values;
+            if value_set.values.is_empty() {
+                value_set.flags &= !8;
+            } else {
+                value_set.flags = (value_set.flags | 8) & !4;
+            }
+            true
+        }
+        _ => return Err("Unknown parameter value-set field."),
+    };
+    Ok(changed)
+}
+
+fn toggle_authoring_value_set_flag(
+    document: &mut codec::Document,
+    handle: Handle,
+    field: &str,
+) -> Result<bool, &'static str> {
+    let rest = field
+        .strip_prefix("authoring_set_")
+        .and_then(|field| field.strip_suffix("_enabled"))
+        .ok_or("Unknown parameter value-set option.")?;
+    let (set_key, member) = rest
+        .rsplit_once('_')
+        .ok_or("Unknown parameter value-set option.")?;
+    let bit = match member {
+        "minimum" => 1,
+        "maximum" => 2,
+        "increment" => 4,
+        "values" => 8,
+        _ => return Err("Unknown parameter value-set option."),
+    };
+    let Some(codec::objects::ObjectType::DynamicBlock(object)) = document.objects.get_mut(&handle)
+    else {
+        return Err("Select an authoring parameter.");
+    };
+    let Some(value_set) = authoring_value_set_mut(&mut object.data, set_key) else {
+        return Err("This parameter does not have that value set.");
+    };
+    if bit == 8 && value_set.values.is_empty() {
+        return Err("Add at least one allowed value before enabling the value list.");
+    }
+    let enabled = value_set.flags & bit == 0;
+    if enabled && bit == 4 && value_set.increment <= 0.0 {
+        return Err("Enter a positive increment before enabling the increment.");
+    }
+    if enabled {
+        value_set.flags |= bit;
+        if bit == 4 {
+            value_set.flags &= !8;
+        } else if bit == 8 {
+            value_set.flags &= !4;
+        }
+    } else {
+        value_set.flags &= !bit;
+    }
+    if value_set.flags & 3 == 3 && value_set.minimum > value_set.maximum {
+        return Err("Parameter value-set minimum cannot exceed its maximum.");
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

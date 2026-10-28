@@ -8,7 +8,7 @@ use crate::snap::SnapResult;
 use crate::t;
 use crate::ui::{LayerPanel, PropertiesPanel};
 use codec::tables::{normalize_name, Ucs};
-use codec::{CadDocument, EntityType, Handle};
+use codec::{Document, EntityType, Handle};
 use iced;
 use std::any::Any;
 use std::collections::HashMap;
@@ -17,6 +17,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 static NEXT_DOCUMENT_TAB_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayisoMode {
+    Off,
+    LockAndFade,
+}
+
+#[derive(Clone)]
+pub(super) struct LayisoLayerSnapshot {
+    pub(super) name: String,
+    pub(super) before: codec::tables::Layer,
+    pub(super) after: codec::tables::Layer,
+}
+
+#[derive(Clone)]
+pub(super) struct LayisoState {
+    pub(super) mode: LayisoMode,
+    pub(super) layers: Vec<LayisoLayerSnapshot>,
+}
 
 // ── Dynamic input ──────────────────────────────────────────────────────────
 
@@ -157,10 +176,31 @@ pub(super) struct DocumentTab {
     pub(super) tab_title: String,
     pub(super) properties: PropertiesPanel,
     pub(super) layers: LayerPanel,
+    /// The LAYWALK pallet session, while a walk is open on this drawing.
+    pub(super) layer_walk: Option<crate::ui::window::layer_walk::LayerWalkSession>,
+    /// Rows cached for that session, so the pallet and the pure logic agree on
+    /// one view of the layer table (rebuilt by `walk_rebuild`).
+    pub(super) layer_walk_rows: Vec<crate::ui::window::layer_walk::LayerWalkRow>,
+    /// The pallet asked for a pick (Select Objects) and is hidden while the
+    /// selection prompt owns the pointer.
+    pub(super) layer_walk_picking: bool,
+    /// Saved wildcard filters, per drawing (not persisted with the DWG).
+    pub(super) layer_walk_filters: Vec<String>,
+    /// Dropdown state for `layer_walk_filters`.
+    pub(super) layer_walk_combo: iced::widget::combo_box::State<String>,
     pub(super) active_cmd: Option<Box<dyn CadCommand>>,
+    /// Follow-up command for a Parameter Set macro after parameter placement.
+    pub(super) pending_parameter_set_follow_up: Option<&'static str>,
+    pub(super) pending_xy_box_set: Option<(codec::Handle, crate::scene::block_actions::Kind, u8)>,
+    pub(super) pending_action_pair: Option<(codec::Handle, crate::scene::block_actions::Kind, u8)>,
     pub(super) measurement: super::measurement::MeasurementDisplay,
     /// Remaining command tokens queued behind a PAUSE (or `\`) awaiting user interaction.
     pub(super) pending_pause_tokens: Option<Vec<String>>,
+    /// The last LAYISO state for this drawing. It is intentionally kept on the
+    /// tab rather than globally, so LAYUNISO never crosses drawing tabs.
+    pub(super) layiso_state: Option<LayisoState>,
+    /// The mode used by the next LAYISO command. AutoCAD defaults to Off.
+    pub(super) layiso_mode: LayisoMode,
     /// The selection set the most recent command worked on, captured when a
     /// finishing command drops the live selection — re-selectable with the
     /// "Previous" keyword at any Select objects prompt (#426).
@@ -174,6 +214,30 @@ pub(super) struct DocumentTab {
     pub(super) selected_grips: Vec<GripDef>,
     /// Entity handle for each entry in `selected_grips`.
     pub(super) selected_grip_handles: Vec<Handle>,
+    /// Plugin-declared custom grip points for this tab (API v11): session
+    /// display state only — never persisted, never host-interpreted.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) plugin_grips: crate::plugin::grip_points::PluginGripStore,
+    /// DIRTY REGION accumulation (API v13): the identity set of what plugin
+    /// and built-in paths changed since the previous boundary notification —
+    /// `DocumentChangedRegions` carries it so boundary work is O(changed),
+    /// not O(store). Cleared at each boundary; over the cap the sets
+    /// degrade to empty (an honest full-walk signal).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) plugin_dirty_entities: rustc_hash::FxHashSet<codec::Handle>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) plugin_dirty_records: rustc_hash::FxHashSet<(codec::Handle, String)>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) plugin_dirty_overflow: bool,
+    /// Geometry epoch the last region set was published at; a plugin write
+    /// starting from another epoch means something else changed the drawing
+    /// in between, so the sets degrade to empty.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) plugin_dirty_epoch: u64,
+    /// The active custom-grip drag, if any (at most one; rides the same
+    /// drag/active-command lifecycle as built-in grip drags).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) active_plugin_grip: Option<crate::plugin::grip_points::ActivePluginGrip>,
     /// Shift-selected grips, keyed by entity and object-local grip id.
     pub(super) hot_grips: rustc_hash::FxHashSet<(Handle, usize)>,
     /// Grip-mode "Copy" toggle (context menu): each grip placement leaves the
@@ -184,6 +248,7 @@ pub(super) struct DocumentTab {
     pub(super) grip_base_pending: bool,
     pub(super) selected_handle: Option<Handle>,
     pub(super) selected_authoring: Option<Handle>,
+    pub(super) action_bars: super::block_action_bars::ViewState,
     /// Dynamic-block visibility grip for the current single selection.
     pub(super) visibility_grip: Option<super::visibility::VisibilityGrip>,
     pub(super) wireframe: bool,
@@ -224,6 +289,8 @@ pub(super) struct DocumentTab {
     /// handle numbering, so an app-global set keyed by raw handle leaks one
     /// tab's opt-out into another tab reusing the value (#47).
     pub(super) props_asym_scale: std::collections::HashSet<u64>,
+    /// OLE objects' scale base and aspect lock, by handle.
+    pub(super) ole_frames: std::collections::HashMap<u64, crate::entities::ole2frame::FrameState>,
     /// Node graph shown by the command line's graph button.
     pub(super) graph: crate::ui::node_graph::Graph,
     /// Currently active UCS. `None` means WCS (identity transform).
@@ -262,7 +329,6 @@ pub(super) struct DocumentTab {
     pub(super) layer_prev: Vec<Vec<(String, codec::tables::Layer)>>,
     /// Layers LAYISO turned off, so LAYUNISO turns back on exactly those (layers that were
     /// already off before LAYISO stay off). Empty when no isolation is active.
-    pub(super) layiso_off: Vec<String>,
     /// References attached with a relative path while the drawing had no
     /// file yet: stored full until the first save, then made relative.
     pub(super) xref_relative_on_save: rustc_hash::FxHashSet<String>,
@@ -273,11 +339,19 @@ pub(super) struct DocumentTab {
     /// The palette renders a neutral "open EXTERNALREFERENCES" notice while non-zero;
     /// never auto-opens a modal. Cleared by a clean palette refresh.
     pub(super) xref_missing: usize,
+    /// Every external reference resolved when this drawing was opened:
+    /// (name, path, status). Automation reports it in `state.xrefs`.
+    pub(super) xref_report: Vec<(String, String, crate::io::xref::XrefStatus)>,
     /// Sentinel "Welcome / Start" tab. Always at index 0 when present.
     /// Cannot be closed; the viewport area renders a welcome page instead
     /// of the model-space shader. The scene is still constructed so the
     /// rest of the code can treat it as a normal tab when reading.
     pub(super) is_start: bool,
+    /// Room the docked edges took beside the viewport (left, right) when
+    /// this drawing was last on screen, and the window size then. A dock
+    /// change pans the view by the difference so the drawing stays put,
+    /// and either change sets the viewport's new size right away.
+    pub(super) dock_inset: Option<(f32, f32, (f32, f32))>,
     /// Interactive PAN mode (the PAN command / tool). While active, a left-
     /// button drag pans the view instead of selecting — the only pan path on a
     /// device with no middle mouse button (a trackpad / web client). Exited
@@ -338,6 +412,61 @@ impl DocumentTab {
                 crate::scene::parametric_constraints::ParametricScope::Block(session.br_handle)
             }
             None => crate::scene::parametric_constraints::ParametricScope::ModelSpace,
+        }
+    }
+
+    /// Record one entity a plugin write touched (API v13 dirty regions).
+    /// `epoch_before` is the geometry epoch before that write.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) fn mark_plugin_entity_dirty(&mut self, handle: codec::Handle, epoch_before: u64) {
+        if !self.plugin_dirty_degraded(epoch_before) {
+            self.plugin_dirty_entities.insert(handle);
+        }
+    }
+
+    /// Record one (entity, app) XDATA/XRecord touch (API v13 dirty regions).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) fn mark_plugin_record_dirty(
+        &mut self,
+        handle: codec::Handle,
+        app: String,
+        epoch_before: u64,
+    ) {
+        if !self.plugin_dirty_degraded(epoch_before) {
+            self.plugin_dirty_records.insert((handle, app));
+        }
+    }
+
+    /// Degrade the sets to "walk everything" when they can no longer be
+    /// complete: over the cap, or when the drawing changed outside plugin
+    /// writes since the last publish.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn plugin_dirty_degraded(&mut self, epoch_before: u64) -> bool {
+        const DIRTY_CAP: usize = 10_000;
+        if epoch_before != self.plugin_dirty_epoch
+            || self.plugin_dirty_entities.len() + self.plugin_dirty_records.len() >= DIRTY_CAP
+        {
+            self.plugin_dirty_overflow = true;
+            self.plugin_dirty_entities.clear();
+            self.plugin_dirty_records.clear();
+        }
+        self.plugin_dirty_overflow
+    }
+
+    /// Take the region sets for a boundary publish at the current epoch;
+    /// empty sets ("walk everything") when degraded.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) fn take_plugin_dirty(
+        &mut self,
+    ) -> (Vec<codec::Handle>, Vec<(codec::Handle, String)>) {
+        let entities = std::mem::take(&mut self.plugin_dirty_entities);
+        let records = std::mem::take(&mut self.plugin_dirty_records);
+        let degraded = std::mem::replace(&mut self.plugin_dirty_overflow, false);
+        self.plugin_dirty_epoch = self.scene.geometry_epoch;
+        if degraded {
+            (Vec::new(), Vec::new())
+        } else {
+            (entities.into_iter().collect(), records.into_iter().collect())
         }
     }
 
@@ -653,19 +782,33 @@ impl DocumentTab {
             properties: PropertiesPanel::empty(),
             layers: LayerPanel::default(),
             active_cmd: None,
+            pending_parameter_set_follow_up: None,
+            pending_xy_box_set: None,
+            pending_action_pair: None,
             measurement: super::measurement::MeasurementDisplay::default(),
             pending_pause_tokens: None,
+            layiso_state: None,
+            layiso_mode: LayisoMode::Off,
             last_cmd: None,
             last_draw_anchor: None,
             snap_result: None,
             active_grip: None,
             selected_grips: vec![],
             selected_grip_handles: vec![],
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_grips: Default::default(),
+            plugin_dirty_entities: Default::default(),
+            plugin_dirty_records: Default::default(),
+            plugin_dirty_overflow: false,
+            plugin_dirty_epoch: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            active_plugin_grip: None,
             hot_grips: rustc_hash::FxHashSet::default(),
             grip_copy: false,
             grip_base_pending: false,
             selected_handle: None,
             selected_authoring: None,
+            action_bars: Default::default(),
             visibility_grip: None,
             table_grip: None,
             wireframe: false,
@@ -685,6 +828,7 @@ impl DocumentTab {
             block_test: None,
             active_layer: "0".to_string(),
             props_asym_scale: std::collections::HashSet::new(),
+            ole_frames: std::collections::HashMap::new(),
             graph: Default::default(),
             active_ucs: None,
             sketch_session: None,
@@ -701,11 +845,12 @@ impl DocumentTab {
             last_synced_camera_gen: 0,
             xref_unloaded: crate::io::xref_model::UnloadSet::default(),
             layer_prev: Vec::new(),
-            layiso_off: Vec::new(),
             xref_relative_on_save: rustc_hash::FxHashSet::default(),
             xref_stat_cache: crate::io::xref_model::RefStatCache::default(),
             xref_missing: 0,
+            xref_report: Vec::new(),
             is_start: false,
+            dock_inset: None,
             pan_mode: false,
             orbit_mode: false,
             zoom_dynamic_mode: false,
@@ -714,6 +859,11 @@ impl DocumentTab {
             transparent_resume: false,
             last_crossing_window: None,
             recent_colors: Vec::new(),
+            layer_walk: None,
+            layer_walk_rows: Vec::new(),
+            layer_walk_picking: false,
+            layer_walk_filters: Vec::new(),
+            layer_walk_combo: iced::widget::combo_box::State::new(Vec::new()),
         }
     }
 
@@ -861,6 +1011,9 @@ pub(super) struct DeltaSnapshot {
     pub(super) dirty_before: bool,
     pub(super) dirty_after: bool,
     pub(super) active_layer: Option<(String, String)>,
+    /// LAYISO state changed by this history entry, if any. Other commands leave
+    /// the isolation state untouched, so their history entries keep this None.
+    pub(super) layiso_state: Option<(Option<LayisoState>, Option<LayisoState>)>,
     /// Opposite non-entity document state. `apply_delta_state` swaps this with
     /// the live structure, so the same allocation shuttles between undo/redo.
     pub(super) structure: Option<StructureSnapshot>,
@@ -889,7 +1042,7 @@ pub(super) enum StructureSnapshot {
     /// A broad save-time synchronization followed by a command's bounded edits.
     Combined(Vec<StructureSnapshot>),
     /// Compatibility fallback for genuinely broad structural commands.
-    Full(CadDocument),
+    Full(Document),
     /// Exact layer-table entries touched by one command.
     Layers(Vec<TableEntryDelta<codec::tables::Layer>>),
     /// Exact text-style entries touched by one command.
@@ -979,7 +1132,7 @@ pub(super) struct PendingHistorySnapshot {
     pub(super) active_layer: String,
     pub(super) selected_before: Vec<Handle>,
     pub(super) dirty_before: bool,
-    pub(super) structure_before: CadDocument,
+    pub(super) structure_before: Document,
     pub(super) recorder: Arc<codec::document::EntityChangeRecorder>,
     /// First-touch before-values of reference-only designations (API v9)
     /// mutated inside this plugin scope (see `scene::reference_only`). Set
@@ -987,6 +1140,14 @@ pub(super) struct PendingHistorySnapshot {
     /// set's current state as the after-image and keeping entries whose value
     /// actually flipped.
     pub(super) reference_designations_before: Vec<(Handle, bool)>,
+    /// Parametric constraint sets when the scope opened; the scope closes
+    /// with a before/after entry for every set that changed, so undo also
+    /// removes a constraint a plugin created inside its scope.
+    pub(super) parametric_constraints_before:
+        Vec<crate::scene::parametric_constraints::ParametricConstraintSet>,
+    /// Opened by a plugin's `push_undo`: while a plugin request runs, the
+    /// commands it drives join this scope instead of closing it.
+    pub(super) plugin_owned: bool,
     /// Kept as an undo step even when nothing changed.
     pub(super) keep_empty: bool,
 }

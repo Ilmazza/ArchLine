@@ -1,5 +1,5 @@
 use codec::entities::{
-    Dimension, DimensionAngular2Ln, DimensionAngular3Pt, DimensionBase, DimensionLinear,
+    Dimension, DimensionAngular2Ln, DimensionAngular3Pt, DimensionLinear,
     DimensionOrdinate,
 };
 use codec::types::Vector3;
@@ -14,6 +14,7 @@ use kernel::space::Plane;
 use crate::command::{
     CadCommand, CmdOption, CmdResult, DimensionAssociationInput, DimensionPreview,
 };
+use super::dim_baseline::SourceStyle;
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use crate::scene::model::wire_model::WireModel;
 
@@ -25,35 +26,6 @@ pub fn tool() -> ToolDef {
         label: "Continue",
         icon: ICON,
         event: ModuleEvent::Command("DIMCONTINUE".to_string()),
-    }
-}
-
-#[derive(Clone)]
-struct SourceStyle {
-    layer: String,
-    style_name: String,
-    normal: Vector3,
-    text_rotation: f64,
-    horizontal_direction: f64,
-}
-
-impl SourceStyle {
-    fn from_base(base: &DimensionBase) -> Self {
-        Self {
-            layer: base.common.layer.clone(),
-            style_name: base.style_name.clone(),
-            normal: base.normal,
-            text_rotation: base.text_rotation,
-            horizontal_direction: base.horizontal_direction,
-        }
-    }
-
-    fn apply(&self, base: &mut DimensionBase) {
-        base.common.layer = self.layer.clone();
-        base.style_name = self.style_name.clone();
-        base.normal = self.normal;
-        base.text_rotation = self.text_rotation;
-        base.horizontal_direction = self.horizontal_direction;
     }
 }
 
@@ -94,6 +66,8 @@ pub struct DimContinueCommand {
     injected: Option<EntityType>,
     history: Vec<ContinueState>,
     preserve_base_style: bool,
+    /// Run from DIM's Continue option: its own wording.
+    in_dim: bool,
 }
 
 impl DimContinueCommand {
@@ -103,11 +77,17 @@ impl DimContinueCommand {
             injected: None,
             history: Vec::new(),
             preserve_base_style,
+            in_dim: false,
         };
         if let Some(entity) = recent {
             let _ = command.install_base(&entity, None);
         }
         command
+    }
+
+    /// DIM's Continue: the dimension to continue is picked.
+    pub fn run_from_dim(&mut self) {
+        self.in_dim = true;
     }
 
     fn install_base(&mut self, entity: &EntityType, pick_world: Option<DVec3>) -> bool {
@@ -284,7 +264,9 @@ impl DimContinueCommand {
                 Dimension::Ordinate(result)
             }
         };
-        state.style.apply(dimension.base_mut());
+        state
+            .style
+            .apply(dimension.base_mut(), self.preserve_base_style);
         refresh_measurement(&mut dimension, state.plane);
         dimension.base_mut().common.handle = Handle::NULL;
         dimension.base_mut().block_name.clear();
@@ -326,6 +308,15 @@ impl CadCommand for DimContinueCommand {
     }
 
     fn prompt(&self) -> String {
+        if self.in_dim {
+            return match &self.base {
+                None => crate::tr!("dim-cmd", "continue-first"),
+                Some(base) if matches!(&base.kind, ContinueKind::Ordinate { .. }) => {
+                    crate::tr!("dim-cmd", "continue-ordinate")
+                }
+                Some(_) => crate::tr!("dim-cmd", "continue-second"),
+            };
+        }
         if self.base.is_none() {
             crate::t!("DIMCONTINUE  Select continued dimension:").into_owned()
         } else if self
@@ -545,8 +536,8 @@ fn refresh_measurement(dimension: &mut Dimension, plane: Plane) {
             let axis = Vec2::new(value.rotation.cos(), value.rotation.sin());
             value.base.actual_measurement = (second - first).dot(axis).abs();
         }
-        Dimension::Angular2Ln(value) => value.base.actual_measurement = value.measurement_degrees(),
-        Dimension::Angular3Pt(value) => value.base.actual_measurement = value.measurement_degrees(),
+        Dimension::Angular2Ln(value) => value.base.actual_measurement = value.measurement_radians(),
+        Dimension::Angular3Pt(value) => value.base.actual_measurement = value.measurement_radians(),
         Dimension::Ordinate(value) => value.refresh_measurement(),
         _ => {}
     }
@@ -590,7 +581,7 @@ fn preview_for_dimension(dimension: &Dimension) -> WireModel {
                 lines[1][1] - vertex,
                 project(&plane, value.dimension_arc),
                 project(&plane, value.base.text_middle_point),
-                value.base.actual_measurement,
+                value.measurement_degrees(),
             );
         }
         Dimension::Angular3Pt(value) => {
@@ -604,7 +595,7 @@ fn preview_for_dimension(dimension: &Dimension) -> WireModel {
                 project(&plane, value.second_point) - vertex,
                 project(&plane, value.definition_point),
                 project(&plane, value.base.text_middle_point),
-                value.base.actual_measurement,
+                value.measurement_degrees(),
             );
         }
         Dimension::Ordinate(value) => {

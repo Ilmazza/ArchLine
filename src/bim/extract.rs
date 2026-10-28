@@ -36,7 +36,7 @@ use codec::entities::{Insert, MLine};
 use codec::objects::{MLineStyle, ObjectType};
 use codec::tables::{BlockRecord, DimStyle, Layer, TextStyle};
 use codec::xdata::ExtendedData;
-use codec::{CadDocument, DxfVersion, EntityType, Handle, Vector3};
+use codec::{Document, DxfVersion, EntityType, Handle, Vector3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::app::{copy_to_clipboard_kernel, paste_entities_kernel, ClipboardDeps, PasteSpace};
@@ -107,7 +107,7 @@ pub struct ExtractOptions {
 
 /// I documenti estratti, nell'ordine chiesto, e gli avvisi.
 pub struct Extracted {
-    pub docs: Vec<(Elaborato, CadDocument)>,
+    pub docs: Vec<(Elaborato, Document)>,
     pub notices: Vec<Notice>,
 }
 
@@ -132,7 +132,7 @@ pub struct Extracted {
 /// I tre documenti passano dalla stessa copia ([`copy_out`]). In fondo, se è
 /// uscito almeno un documento, un avviso per ogni layout con entità: lo
 /// spazio carta non si estrae.
-pub fn extract(src: &CadDocument, opts: &ExtractOptions) -> Extracted {
+pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
     let mut ex = Extracted {
         docs: Vec::new(),
         notices: Vec::new(),
@@ -258,7 +258,7 @@ fn room_tol(opts: &ExtractOptions) -> f64 {
 /// ([`Notice::EtichettaDaAggiornare`]) per ogni locale la cui etichetta
 /// nell'estratto non è quella scritta nel disegno di lavoro, che è quindi
 /// vecchio. Il solo contorno cambiato non dà righe.
-fn refresh_fatto_rooms(work: &mut CadDocument, unit: DrawingUnit, room_tol: f64) -> Vec<Notice> {
+fn refresh_fatto_rooms(work: &mut Document, unit: DrawingUnit, room_tol: f64) -> Vec<Notice> {
     let refresh = refresh_rooms(work, unit, room_tol);
     let mut notices = refresh.notices;
     for change in refresh.changed {
@@ -290,7 +290,7 @@ fn refresh_fatto_rooms(work: &mut CadDocument, unit: DrawingUnit, room_tol: f64)
 /// semi niente, nemmeno gli avvisi (un varco senza locali non ha nulla da
 /// dire).
 fn project_room_entities(
-    src: &CadDocument,
+    src: &Document,
     walls: &WallSet,
     pg_room_entities: &[(Handle, EntityType)],
     zones: &[ZoneGeom],
@@ -355,7 +355,7 @@ fn project_room_entities(
 /// `src` se c'è, o come `zone::ensure_layers` (colore 7). Senza, il DWG
 /// metterebbe i locali sul layer «0»: se la tabella lo rifiutasse, lo dice
 /// l'avviso restituito ([`add_layer`]).
-fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) -> Option<Notice> {
+fn ensure_rooms_layer(src: &Document, out: &mut Document) -> Option<Notice> {
     if out.layers.contains(LAYER_LOCALI) {
         return None;
     }
@@ -381,7 +381,7 @@ fn ensure_rooms_layer(src: &CadDocument, out: &mut CadDocument) -> Option<Notice
 /// un nome già presente, che i chiamanti escludono prima) non si tace: un
 /// [`Notice::NonCopiata`] «Layer <nome>» con l'handle riservato (fix finale,
 /// punto 3).
-fn add_layer(out: &mut CadDocument, layer: Layer) -> Option<Notice> {
+fn add_layer(out: &mut Document, layer: Layer) -> Option<Notice> {
     let (handle, kind) = (layer.handle, format!("Layer {}", layer.name));
     out.layers
         .add(layer)
@@ -404,7 +404,7 @@ fn carries_zone_record(entity: &EntityType, zone_app: Option<u64>) -> bool {
 /// Un avviso per ogni layout (blocco `*Paper_Space*`) con entità, a parte il
 /// viewport generale (id 1) che ogni layout ha: `kind` = `"Layout <nome>"`,
 /// `handle` = il record del blocco.
-fn layout_notices(doc: &CadDocument) -> Vec<Notice> {
+fn layout_notices(doc: &Document) -> Vec<Notice> {
     doc.block_records
         .iter()
         .filter(|record| record.is_paper_space())
@@ -424,7 +424,7 @@ fn layout_notices(doc: &CadDocument) -> Vec<Notice> {
 
 /// Il nome del layout del blocco di carta: l'oggetto `LAYOUT` che lo indica,
 /// altrimenti il nome del blocco.
-fn layout_name(doc: &CadDocument, record: &BlockRecord) -> String {
+fn layout_name(doc: &Document, record: &BlockRecord) -> String {
     doc.objects
         .values()
         .find_map(|object| match object {
@@ -444,7 +444,7 @@ fn layout_name(doc: &CadDocument, record: &BlockRecord) -> String {
 /// Un handle senza entità resta: la copia non lo restituirà e finirà tra le
 /// non copiate.
 fn model_space_handles(
-    doc: &CadDocument,
+    doc: &Document,
     keep: impl Fn(Handle, &EntityType) -> bool,
 ) -> Vec<Handle> {
     doc.block_records
@@ -476,7 +476,7 @@ fn on_rooms_layer(entity: &EntityType) -> bool {
 
 /// Il layer dei muri nuovi: il nome senza spazi attorno («0» se vuoto), scritto
 /// come nella tabella dei layer di `src` se c'è.
-fn new_walls_layer_name(src: &CadDocument, name: &str) -> String {
+fn new_walls_layer_name(src: &Document, name: &str) -> String {
     let name = match name.trim() {
         "" => DEFAULT_LAYER,
         name => name,
@@ -494,7 +494,7 @@ fn new_walls_layer_name(src: &CadDocument, name: &str) -> String {
 /// Restituisce i loro handle, nell'ordine, e un [`Notice::NonCopiata`] (handle
 /// riservato in `work`, tipo dell'entità) per ognuna che `work` rifiuta: non
 /// sparisce in silenzio (fix finale, punto 3).
-fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> (Vec<Handle>, Vec<Notice>) {
+fn add_drawn(work: &mut Document, drawn: &[EntityType]) -> (Vec<Handle>, Vec<Notice>) {
     add_drawn_with(work, drawn, |work, entity| work.add_entity(entity).ok())
 }
 
@@ -502,9 +502,9 @@ fn add_drawn(work: &mut CadDocument, drawn: &[EntityType]) -> (Vec<Handle>, Vec<
 /// L'handle si riserva prima, come farebbe `add_entity` con un handle nullo:
 /// così l'avviso di un rifiuto ha l'handle e il tipo.
 fn add_drawn_with(
-    work: &mut CadDocument,
+    work: &mut Document,
     drawn: &[EntityType],
-    mut add: impl FnMut(&mut CadDocument, EntityType) -> Option<Handle>,
+    mut add: impl FnMut(&mut Document, EntityType) -> Option<Handle>,
 ) -> (Vec<Handle>, Vec<Notice>) {
     let model = work
         .block_records
@@ -542,7 +542,7 @@ fn add_drawn_with(
 /// esistenti»; R46) il layer più frequente dei muri,
 /// [`propose_new_walls_layer`]. `None` senza né l'uno né l'altro: valori
 /// predefiniti.
-pub fn new_walls_layer_template<'a>(src: &'a CadDocument, name: &str) -> Option<&'a Layer> {
+pub fn new_walls_layer_template<'a>(src: &'a Document, name: &str) -> Option<&'a Layer> {
     src.layers
         .get(name)
         .or_else(|| propose_new_walls_layer(src).and_then(|walls| src.layers.get(&walls)))
@@ -556,7 +556,7 @@ pub fn new_walls_layer_template<'a>(src: &'a CadDocument, name: &str) -> Option<
 /// Senza, il DWG metterebbe i muri nuovi sul layer «0» ([`add_layer`] dice
 /// se la tabella lo rifiuta). Il tipo di linea, se manca, lo porta poi
 /// [`copy_layer_linetypes`].
-fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) -> Option<Notice> {
+fn ensure_new_walls_layer(src: &Document, out: &mut Document, name: &str) -> Option<Notice> {
     if out.layers.contains(name) {
         return None;
     }
@@ -582,11 +582,11 @@ fn ensure_new_walls_layer(src: &CadDocument, out: &mut CadDocument, name: &str) 
 /// dato, tipi di linea dei layer, avvisi per ciò che non si copia (nell'ordine
 /// degli handle).
 fn copy_out(
-    src: &CadDocument,
-    work: &mut CadDocument,
+    src: &Document,
+    work: &mut Document,
     handles: &[Handle],
     new_walls_layer: Option<&str>,
-) -> (CadDocument, Vec<Notice>) {
+) -> (Document, Vec<Notice>) {
     let left_out: FxHashSet<Handle> = {
         let mut portable = Portability::new(work);
         handles
@@ -605,7 +605,7 @@ fn copy_out(
         .collect();
     strip_our_xdata(work, &handles_in);
 
-    let mut out = CadDocument::new();
+    let mut out = Document::new();
     out.version = output_version(src.version);
     // L'errore dice solo che non c'era nulla da copiare (nessun handle, o
     // nessuno copiabile): il documento resta vuoto e gli avvisi sotto
@@ -669,13 +669,13 @@ fn copy_out(
 ///   blocco che contiene (anche in un blocco annidato) una delle entità sopra,
 ///   3D escluso: i solidi 3D dentro un blocco restano, la copia li porta interi.
 struct Portability<'a> {
-    doc: &'a CadDocument,
+    doc: &'a Document,
     /// Blocco (nome in maiuscolo) → si copia intero.
     blocks: FxHashMap<String, bool>,
 }
 
 impl<'a> Portability<'a> {
-    fn new(doc: &'a CadDocument) -> Self {
+    fn new(doc: &'a Document) -> Self {
         Self {
             doc,
             blocks: FxHashMap::default(),
@@ -743,7 +743,7 @@ impl<'a> Portability<'a> {
 /// tipo di linea, spessore e stato del layer «0»; carattere, altezza,
 /// larghezza e inclinazione dello stile di testo «Standard». Il tipo di linea
 /// del layer «0», se manca, lo aggiunge [`copy_layer_linetypes`].
-fn copy_drawing_settings(src: &CadDocument, out: &mut CadDocument) {
+fn copy_drawing_settings(src: &Document, out: &mut Document) {
     let (from, to) = (&src.header, &mut out.header);
     to.linetype_scale = from.linetype_scale;
     to.paper_space_linetype_scaling = from.paper_space_linetype_scaling;
@@ -798,7 +798,7 @@ fn is_ours(app: &str) -> bool {
 /// Passo 3: toglie da `handles` i record `ARCHLINE_ZONA`, `ARCHLINE_LOCALE`
 /// (e ogni altro `ARCHLINE_*`), compresi i blocchi grezzi letti da un DWG.
 /// Fatto prima della copia, né i record né i loro APPID passano in `out`.
-fn strip_our_xdata(work: &mut CadDocument, handles: &[Handle]) {
+fn strip_our_xdata(work: &mut Document, handles: &[Handle]) {
     let our_apps: Vec<(String, u64)> = work
         .app_ids
         .iter()
@@ -833,7 +833,7 @@ fn strip_our_xdata(work: &mut CadDocument, handles: &[Handle]) {
 /// Dopo la copia: le entità delle definizioni di blocco copiate come
 /// dipendenze (e gli attributi) possono ancora portare XDATA nostro, e con
 /// esso il suo APPID. Via record, blocchi grezzi e APPID `ARCHLINE_*`.
-fn scrub_our_data(out: &mut CadDocument) {
+fn scrub_our_data(out: &mut Document) {
     let our_apps: Vec<(String, u64)> = out
         .app_ids
         .iter()
@@ -869,7 +869,7 @@ fn scrub_our_data(out: &mut CadDocument) {
 /// Passo 5: `ClipboardDeps` copia i tipi di linea delle entità, non quelli dei
 /// layer. Un layer di `out` con un tipo di linea che `out` non ha lo riceve da
 /// `src`, con un handle nuovo.
-fn copy_layer_linetypes(src: &CadDocument, out: &mut CadDocument) {
+fn copy_layer_linetypes(src: &Document, out: &mut Document) {
     let names: Vec<String> = out
         .layers
         .iter()
@@ -879,7 +879,7 @@ fn copy_layer_linetypes(src: &CadDocument, out: &mut CadDocument) {
 }
 
 /// Lo stile di una multilinea in `doc`: per handle, altrimenti per nome.
-fn mline_style<'a>(doc: &'a CadDocument, mline: &MLine) -> Option<&'a MLineStyle> {
+fn mline_style<'a>(doc: &'a Document, mline: &MLine) -> Option<&'a MLineStyle> {
     let by_handle = mline.style_handle.and_then(|h| match doc.objects.get(&h) {
         Some(ObjectType::MLineStyle(style)) => Some(style),
         _ => None,
@@ -901,7 +901,7 @@ fn mline_style<'a>(doc: &'a CadDocument, mline: &MLine) -> Option<&'a MLineStyle
 /// «Standard» del documento nuovo) prende i valori di `src` e tiene il suo
 /// handle. Poi i tipi di linea degli elementi, se mancano. Le multilinee il
 /// cui stile manca anche in `src` non arrivano qui (`Portability`).
-fn copy_mline_styles(src: &CadDocument, out: &mut CadDocument) {
+fn copy_mline_styles(src: &Document, out: &mut Document) {
     let styles: Vec<MLineStyle> = out
         .entities()
         .filter_map(|entity| match entity {
@@ -961,7 +961,7 @@ fn copy_mline_styles(src: &CadDocument, out: &mut CadDocument) {
 
 /// I tipi di linea nominati che `out` non ha, copiati da `src` con un handle
 /// nuovo.
-fn copy_missing_linetypes(src: &CadDocument, out: &mut CadDocument, names: Vec<String>) {
+fn copy_missing_linetypes(src: &Document, out: &mut Document, names: Vec<String>) {
     for name in names {
         if name.is_empty() {
             continue;
@@ -982,7 +982,7 @@ fn copy_missing_linetypes(src: &CadDocument, out: &mut CadDocument, names: Vec<S
 /// annidati e i layer, i tipi di linea e gli stili dei loro membri: la stessa
 /// unione della copia di WBLOCK (`ClipboardDeps` di un `INSERT` di prova,
 /// incollato senza entità).
-fn merge_blocks(src: &CadDocument, out: &mut CadDocument, names: Vec<String>) {
+fn merge_blocks(src: &Document, out: &mut Document, names: Vec<String>) {
     let probes: Vec<EntityType> = names
         .into_iter()
         .filter(|name| {
@@ -1003,7 +1003,7 @@ fn merge_blocks(src: &CadDocument, out: &mut CadDocument, names: Vec<String>) {
 /// quelle inseriscono (le frecce, nei file di AutoCAD) no: ogni `INSERT` di
 /// `out`, anche dentro un blocco, che nomina un blocco mancante lo riceve da
 /// `src`.
-fn copy_inserted_blocks(src: &CadDocument, out: &mut CadDocument) {
+fn copy_inserted_blocks(src: &Document, out: &mut Document) {
     let missing: Vec<String> = out
         .entities()
         .filter_map(|entity| match entity {
@@ -1019,7 +1019,7 @@ fn copy_inserted_blocks(src: &CadDocument, out: &mut CadDocument) {
 /// Lo stile di testo `style` di `src` in `out`: l'omonimo, oppure, per gli
 /// stili senza nome dei file di forme, quello con lo stesso file; se manca,
 /// una copia con un handle nuovo.
-fn ensure_text_style(out: &mut CadDocument, style: &TextStyle) -> Option<Handle> {
+fn ensure_text_style(out: &mut Document, style: &TextStyle) -> Option<Handle> {
     let found = if style.name.is_empty() {
         out.text_styles
             .iter()
@@ -1050,7 +1050,7 @@ fn ensure_text_style(out: &mut CadDocument, style: &TextStyle) -> Option<Handle>
 /// DIMLTEX1, DIMLTEX2) si risolvono in `src` per handle (o per nome), si
 /// portano in `out` se mancano e si ripuntano; ciò che in `src` non si
 /// risolve resta nullo (il predefinito).
-fn copy_dim_style_references(src: &CadDocument, out: &mut CadDocument) {
+fn copy_dim_style_references(src: &Document, out: &mut Document) {
     let styles: Vec<DimStyle> = out
         .dim_styles
         .iter()
@@ -1133,7 +1133,7 @@ fn copy_dim_style_references(src: &CadDocument, out: &mut CadDocument) {
 /// di linea di `out` con un omonimo in `src`, lo stile di ogni elemento
 /// complesso si porta in `out` e si ripunta (nullo se in `src` non si
 /// risolve).
-fn copy_complex_linetype_styles(src: &CadDocument, out: &mut CadDocument) {
+fn copy_complex_linetype_styles(src: &Document, out: &mut Document) {
     let plan: Vec<(String, Vec<(usize, Option<TextStyle>)>)> = out
         .line_types
         .iter()
@@ -1183,7 +1183,7 @@ fn copy_complex_linetype_styles(src: &CadDocument, out: &mut CadDocument) {
 
 /// Le voci del dizionario `ACAD_PLOTSTYLENAME` (dall'intestazione o dal
 /// dizionario radice).
-fn plot_style_entries(doc: &CadDocument) -> Vec<(String, Handle)> {
+fn plot_style_entries(doc: &Document) -> Vec<(String, Handle)> {
     let root = || match doc.objects.get(&doc.header.named_objects_dict_handle) {
         Some(ObjectType::Dictionary(root)) => root.get("ACAD_PLOTSTYLENAME"),
         _ => None,
@@ -1200,7 +1200,7 @@ fn plot_style_entries(doc: &CadDocument) -> Vec<(String, Handle)> {
 
 /// `Layer.plotstyle_handle` arriva con l'handle di `src`: si ripunta per nome
 /// allo stile di stampa omonimo di `out`, o a nulla se `out` non lo ha.
-fn copy_layer_plot_styles(src: &CadDocument, out: &mut CadDocument) {
+fn copy_layer_plot_styles(src: &Document, out: &mut Document) {
     let src_names: FxHashMap<Handle, String> = plot_style_entries(src)
         .into_iter()
         .map(|(name, handle)| (handle, name))
@@ -1233,7 +1233,7 @@ fn copy_layer_plot_styles(src: &CadDocument, out: &mut CadDocument) {
 /// locali: R67), senza distinguere le maiuscole come tutti i nomi dei layer,
 /// scritto come nella tabella dei layer (o come la prima entità, se la tabella
 /// non lo ha). A parità vince l'ordine alfabetico. `None` senza entità muro.
-pub fn propose_new_walls_layer(doc: &CadDocument) -> Option<String> {
+pub fn propose_new_walls_layer(doc: &Document) -> Option<String> {
     // Nome in maiuscolo → (nome da mostrare, entità).
     let mut counts: FxHashMap<String, (String, usize)> = FxHashMap::default();
     let rooms = room_part_handles(doc);
@@ -1364,13 +1364,13 @@ mod tests {
     }
 
     /// Il caso A in metri (INSUNITS 6) nella forma data, con i layer `AL-*`.
-    fn case_a_doc(form: Form) -> CadDocument {
+    fn case_a_doc(form: Form) -> Document {
         case_a_doc_in(form, M)
     }
 
     /// Il caso A nell'unità data (con il suo INSUNITS), con i layer `AL-*`.
-    fn case_a_doc_in(form: Form, unit: DrawingUnit) -> CadDocument {
-        let mut doc = CadDocument::new();
+    fn case_a_doc_in(form: Form, unit: DrawingUnit) -> Document {
+        let mut doc = Document::new();
         doc.header.insertion_units = unit.insunits();
         let mut muri = Layer::new(LAYER_MURI);
         muri.handle = doc.allocate_handle();
@@ -1384,13 +1384,13 @@ mod tests {
 
     /// Una zona demolita «muro tra due punti» sull'asse `p1`-`p2`, sulle facce
     /// dei muri di `doc`.
-    fn add_demolition(doc: &mut CadDocument, p1: [f64; 2], p2: [f64; 2]) -> Handle {
+    fn add_demolition(doc: &mut Document, p1: [f64; 2], p2: [f64; 2]) -> Handle {
         add_demolition_in(doc, M, p1, p2)
     }
 
     /// Lo stesso nell'unità data; `p1` e `p2` in metri.
     fn add_demolition_in(
-        doc: &mut CadDocument,
+        doc: &mut Document,
         unit: DrawingUnit,
         p1: [f64; 2],
         p2: [f64; 2],
@@ -1419,7 +1419,7 @@ mod tests {
     }
 
     /// Una zona nuova «linea + spessore».
-    fn add_new_wall(doc: &mut CadDocument, p1: [f64; 2], p2: [f64; 2], thickness: f64) -> Handle {
+    fn add_new_wall(doc: &mut Document, p1: [f64; 2], p2: [f64; 2], thickness: f64) -> Handle {
         let rect = rect_from_axis_thickness(p1, p2, thickness).unwrap();
         let nuova = Zone {
             state: ZoneState::Nuovo,
@@ -1434,7 +1434,7 @@ mod tests {
 
     /// Il caso A in metri nella forma data, con il tramezzo demolito per
     /// intero (asse (4,05; 0)-(4,05; 3)).
-    fn doc_with_demolition(form: Form) -> CadDocument {
+    fn doc_with_demolition(form: Form) -> Document {
         let mut doc = case_a_doc(form);
         add_demolition(&mut doc, [4.05, 0.0], [4.05, 3.0]);
         doc
@@ -1443,7 +1443,7 @@ mod tests {
     /// Caso A in metri (linee continue, INSUNITS 6), una zona demolita sul
     /// tramezzo (asse (4,05; 0)-(4,05; 3)) e una zona nuova da 0,12 sull'asse
     /// (2; 0,5)-(2; 2,5), più il record `ARCHLINE_PROGETTO`.
-    fn doc_with_zones() -> CadDocument {
+    fn doc_with_zones() -> Document {
         let mut doc = doc_with_demolition(Form::Continua);
         add_new_wall(&mut doc, [2.0, 0.5], [2.0, 2.5], 0.12);
 
@@ -1457,7 +1457,7 @@ mod tests {
         doc
     }
 
-    fn hatches(doc: &CadDocument) -> Vec<&codec::entities::Hatch> {
+    fn hatches(doc: &Document) -> Vec<&codec::entities::Hatch> {
         doc.entities()
             .filter_map(|e| match e {
                 EntityType::Hatch(h) => Some(h.as_ref()),
@@ -1466,7 +1466,7 @@ mod tests {
             .collect()
     }
 
-    fn lines_on<'a>(doc: &'a CadDocument, layer: &str) -> Vec<&'a codec::entities::Line> {
+    fn lines_on<'a>(doc: &'a Document, layer: &str) -> Vec<&'a codec::entities::Line> {
         doc.entities()
             .filter_map(|e| match e {
                 EntityType::Line(l) if l.common.layer == layer => Some(l),
@@ -1475,7 +1475,7 @@ mod tests {
             .collect()
     }
 
-    fn model_space_count(doc: &CadDocument) -> usize {
+    fn model_space_count(doc: &Document) -> usize {
         doc.block_records
             .iter()
             .filter(|r| r.is_model_space())
@@ -1486,7 +1486,7 @@ mod tests {
     /// Nessun XDATA, nessun APPID e nessun record del dizionario radice di
     /// ArchLine.
     #[track_caller]
-    fn assert_no_archline_data(out: &CadDocument) {
+    fn assert_no_archline_data(out: &Document) {
         let our_record = |e: &EntityType| {
             e.common()
                 .extended_data
@@ -1653,7 +1653,7 @@ mod tests {
     #[test]
     fn source_is_never_modified() {
         let src = doc_with_zones();
-        let snapshot = |doc: &CadDocument| {
+        let snapshot = |doc: &Document| {
             (
                 doc.entities().cloned().collect::<Vec<EntityType>>(),
                 doc.app_ids
@@ -1721,7 +1721,7 @@ mod tests {
         let ex = extract(&src, &opts(&both()));
         let (_, fatto_out) = &ex.docs[0];
         let (_, comparativa) = &ex.docs[1];
-        let on = |doc: &CadDocument, layer: &str| {
+        let on = |doc: &Document, layer: &str| {
             doc.entities()
                 .filter(|e| e.common().layer.eq_ignore_ascii_case(layer))
                 .count()
@@ -1917,7 +1917,7 @@ mod tests {
 
     #[test]
     fn empty_drawing_gives_empty_documents() {
-        let mut src = CadDocument::new();
+        let mut src = Document::new();
         src.header.insertion_units = 5;
         let ex = extract(&src, &opts(&both()));
         assert_eq!(ex.docs.len(), 2);
@@ -2109,7 +2109,7 @@ mod tests {
     }
 
     /// Un'immagine raster la cui definizione sta negli oggetti di `doc`.
-    fn image_entity(doc: &mut CadDocument) -> EntityType {
+    fn image_entity(doc: &mut Document) -> EntityType {
         let definition = doc.allocate_handle();
         let mut def = codec::objects::ImageDefinition::new("foto.png");
         def.handle = definition;
@@ -2273,7 +2273,7 @@ mod tests {
         standard.oblique_angle = 0.25;
 
         #[track_caller]
-        fn check(out: &CadDocument, psltscale: bool, what: &str) {
+        fn check(out: &Document, psltscale: bool, what: &str) {
             let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
             let h = &out.header;
             assert!(close(h.linetype_scale, 50.0), "{what}: LTSCALE");
@@ -2325,7 +2325,7 @@ mod tests {
         }
         // Gli handle restano quelli di `out`.
         let out = &ex.docs[0].1;
-        let fresh = CadDocument::new();
+        let fresh = Document::new();
         assert_eq!(
             out.layers.get("0").unwrap().handle,
             fresh.layers.get("0").unwrap().handle
@@ -2383,7 +2383,7 @@ mod tests {
 
     /// Lo stile di multilinea `name` nel dizionario `ACAD_MLINESTYLE` di `doc`.
     fn mline_style_named<'a>(
-        doc: &'a CadDocument,
+        doc: &'a Document,
         name: &str,
     ) -> Option<(Handle, &'a codec::objects::MLineStyle)> {
         let Some(ObjectType::Dictionary(dict)) =
@@ -2414,7 +2414,7 @@ mod tests {
         tratto.handle = src.allocate_handle();
         src.line_types.add(tratto).unwrap();
         let dict = src.header.acad_mlinestyle_dict_handle;
-        let add_style = |src: &mut CadDocument, name: &str, offset: f64| {
+        let add_style = |src: &mut Document, name: &str, offset: f64| {
             let mut style = codec::objects::MLineStyle::new(name);
             let mut outer = codec::objects::MLineStyleElement::new(offset);
             outer.linetype = "TRATTO_ML".into();
@@ -2466,7 +2466,7 @@ mod tests {
             ]
         );
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             let mlines: Vec<&codec::entities::MLine> = out
                 .entities()
                 .filter_map(|e| match e {
@@ -2522,7 +2522,7 @@ mod tests {
 
     // ---- Fix round 1 (R31): riferimenti per handle delle tabelle ----
 
-    fn add_text_style(doc: &mut CadDocument, name: &str, font: &str) -> Handle {
+    fn add_text_style(doc: &mut Document, name: &str, font: &str) -> Handle {
         let mut style = codec::tables::TextStyle::new(name);
         style.font_file = font.into();
         style.handle = doc.allocate_handle();
@@ -2531,7 +2531,7 @@ mod tests {
         handle
     }
 
-    fn add_line_type(doc: &mut CadDocument, line_type: LineType) -> Handle {
+    fn add_line_type(doc: &mut Document, line_type: LineType) -> Handle {
         let mut line_type = line_type;
         line_type.handle = doc.allocate_handle();
         let handle = line_type.handle;
@@ -2540,20 +2540,20 @@ mod tests {
     }
 
     fn handle_of_text_style(
-        doc: &CadDocument,
+        doc: &Document,
         handle: Handle,
     ) -> Option<&codec::tables::TextStyle> {
         doc.text_styles.iter().find(|s| s.handle == handle)
     }
 
-    fn block_named_by(doc: &CadDocument, handle: Handle) -> Option<String> {
+    fn block_named_by(doc: &Document, handle: Handle) -> Option<String> {
         doc.block_records
             .iter()
             .find(|r| r.handle == handle)
             .map(|r| r.name.clone())
     }
 
-    fn line_type_named_by(doc: &CadDocument, handle: Handle) -> Option<String> {
+    fn line_type_named_by(doc: &Document, handle: Handle) -> Option<String> {
         doc.line_types
             .iter()
             .find(|l| l.handle == handle)
@@ -2561,7 +2561,7 @@ mod tests {
     }
 
     /// Il segnaposto `name` del dizionario `ACAD_PLOTSTYLENAME`.
-    fn plot_style_named(doc: &CadDocument, name: &str) -> Option<Handle> {
+    fn plot_style_named(doc: &Document, name: &str) -> Option<Handle> {
         match doc
             .objects
             .get(&doc.header.acad_plotstylename_dict_handle)?
@@ -2684,7 +2684,7 @@ mod tests {
         src.add_entity(EntityType::Line(nota)).unwrap();
 
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             let arch = out
                 .dim_styles
                 .get("ARCH")
@@ -2792,7 +2792,7 @@ mod tests {
     }
 
     /// Le `LINE` dello spazio modello di `doc`, con il layer.
-    fn model_lines(doc: &CadDocument) -> Vec<(String, [f64; 2], [f64; 2])> {
+    fn model_lines(doc: &Document) -> Vec<(String, [f64; 2], [f64; 2])> {
         let model = doc
             .block_records
             .iter()
@@ -2810,7 +2810,7 @@ mod tests {
 
     /// I tratti dritti dello spazio modello: le `LINE` e i lati delle
     /// `LWPOLYLINE` (chiusura compresa).
-    fn model_segments(doc: &CadDocument) -> Vec<([f64; 2], [f64; 2])> {
+    fn model_segments(doc: &Document) -> Vec<([f64; 2], [f64; 2])> {
         let mut segments: Vec<_> = model_lines(doc)
             .into_iter()
             .map(|(_, a, b)| (a, b))
@@ -2837,14 +2837,14 @@ mod tests {
     }
 
     /// C'è una `LINE` da `a` a `b`, in qualunque verso, entro 1e-6?
-    fn has_line(doc: &CadDocument, a: [f64; 2], b: [f64; 2]) -> bool {
+    fn has_line(doc: &Document, a: [f64; 2], b: [f64; 2]) -> bool {
         model_lines(doc)
             .iter()
             .any(|(_, p, q)| (near(*p, a) && near(*q, b)) || (near(*p, b) && near(*q, a)))
     }
 
     /// Un tratto dritto su `x` (entro 1e-6) con una parte in `y0 < y < y1`?
-    fn stretch_on_x(doc: &CadDocument, x: f64, (y0, y1): (f64, f64)) -> bool {
+    fn stretch_on_x(doc: &Document, x: f64, (y0, y1): (f64, f64)) -> bool {
         model_segments(doc).iter().any(|(a, b)| {
             let on_x = (a[0] - x).abs() <= 1e-6 && (b[0] - x).abs() <= 1e-6;
             let (lo, hi) = (a[1].min(b[1]), a[1].max(b[1]));
@@ -2860,7 +2860,7 @@ mod tests {
 
     /// Nessuna campitura sui layer `AL-*`: le zone non entrano nel progetto.
     #[track_caller]
-    fn assert_no_zone_hatches(out: &CadDocument) {
+    fn assert_no_zone_hatches(out: &Document) {
         assert!(
             !hatches(out)
                 .iter()
@@ -2882,7 +2882,7 @@ mod tests {
         assert!(ex.notices.is_empty(), "{:?}", ex.notices);
 
         #[track_caller]
-        fn check(out: &CadDocument, src: &CadDocument, what: &str) {
+        fn check(out: &Document, src: &Document, what: &str) {
             assert!(
                 has_line(out, [4.0, 0.0], [4.1, 0.0]),
                 "{what}: chiusura sud"
@@ -2948,7 +2948,7 @@ mod tests {
             app.handle = src.allocate_handle();
             src.app_ids.add(app).unwrap();
         }
-        let first_vertex = |doc: &CadDocument, at: [f64; 2]| {
+        let first_vertex = |doc: &Document, at: [f64; 2]| {
             doc.entities()
                 .find_map(|e| match e {
                     EntityType::LwPolyline(p) if near(xy_of(p.vertices[0].location), at) => {
@@ -3050,7 +3050,7 @@ mod tests {
     /// finirebbero sul layer 0). Il nome si legge senza spazi attorno.
     #[test]
     fn new_walls_go_on_the_chosen_layer_created_with_defaults() {
-        let mut src = CadDocument::new();
+        let mut src = Document::new();
         src.header.insertion_units = 6;
         ensure_layers(&mut src);
         add_new_wall(&mut src, [2.0, 0.5], [2.0, 2.5], 0.12);
@@ -3063,7 +3063,7 @@ mod tests {
         let (_, out) = &ex.docs[0];
 
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             let new: Vec<_> = model_lines(out)
                 .into_iter()
                 .filter(|(l, _, _)| l.eq_ignore_ascii_case("MURI-NUOVI"))
@@ -3148,7 +3148,7 @@ mod tests {
         o.new_walls_layer = "MURI_NUOVI".into();
 
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             let layer = out.layers.get("MURI_NUOVI").expect("layer dei muri nuovi");
             assert!(!layer.handle.is_null(), "{what}");
             assert_eq!(layer.color, Color::from_index(3), "{what}");
@@ -3200,7 +3200,7 @@ mod tests {
         o.new_walls_layer = "nuovi".into();
 
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             let layer = out.layers.get("NUOVI").expect("layer dei muri nuovi");
             assert!(!layer.handle.is_null(), "{what}");
             assert_eq!(layer.color, Color::from_index(3), "{what}");
@@ -3318,7 +3318,7 @@ mod tests {
             line.common.layer = layer.into();
             EntityType::Line(line)
         };
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         assert_eq!(propose_new_walls_layer(&doc), None, "disegno vuoto");
         // Ciò che non è muro non conta: testi, layer spenti o congelati, AL-*.
         for k in 0..20 {
@@ -3353,7 +3353,7 @@ mod tests {
         assert_eq!(propose_new_walls_layer(&doc), Some("MURI".into()));
 
         // A parità vince l'ordine alfabetico; il nome è quello della tabella.
-        let mut doc = CadDocument::new();
+        let mut doc = Document::new();
         let mut layer = Layer::new("Bordi");
         layer.handle = doc.allocate_handle();
         doc.layers.add(layer).unwrap();
@@ -3371,7 +3371,7 @@ mod tests {
     /// alla tolleranza dei locali `tol`, con l'altezza di testo del disegno.
     /// Gli handle del contorno e del testo.
     fn write_room(
-        doc: &mut CadDocument,
+        doc: &mut Document,
         unit: DrawingUnit,
         tol: f64,
         name: &str,
@@ -3402,7 +3402,7 @@ mod tests {
 
     /// Il seme di un locale di progetto, come lo scrive `AL_LOCALE` in fase di
     /// progetto.
-    fn write_seed(doc: &mut CadDocument, name: &str, seed: [f64; 2]) -> Handle {
+    fn write_seed(doc: &mut Document, name: &str, seed: [f64; 2]) -> Handle {
         let room = Room {
             phase: Phase::Progetto,
             name: name.into(),
@@ -3413,7 +3413,7 @@ mod tests {
     }
 
     /// Le entità dello spazio modello su `layer`, in ordine di disegno.
-    fn model_on<'a>(doc: &'a CadDocument, layer: &str) -> Vec<&'a EntityType> {
+    fn model_on<'a>(doc: &'a Document, layer: &str) -> Vec<&'a EntityType> {
         doc.block_records
             .iter()
             .filter(|r| r.is_model_space())
@@ -3424,7 +3424,7 @@ mod tests {
     }
 
     /// I testi (`MTEXT`) su `layer`, in ordine di disegno.
-    fn labels_on(doc: &CadDocument, layer: &str) -> Vec<String> {
+    fn labels_on(doc: &Document, layer: &str) -> Vec<String> {
         model_on(doc, layer)
             .into_iter()
             .filter_map(|e| match e {
@@ -3435,7 +3435,7 @@ mod tests {
     }
 
     /// Le polilinee su `layer`, in ordine di disegno.
-    fn outlines_on<'a>(doc: &'a CadDocument, layer: &str) -> Vec<&'a LwPolyline> {
+    fn outlines_on<'a>(doc: &'a Document, layer: &str) -> Vec<&'a LwPolyline> {
         model_on(doc, layer)
             .into_iter()
             .filter_map(|e| match e {
@@ -3458,7 +3458,7 @@ mod tests {
     }
 
     /// Toglie un'entità dal disegno e dallo spazio modello (come CANCELLA).
-    fn erase(doc: &mut CadDocument, handle: Handle) {
+    fn erase(doc: &mut Document, handle: Handle) {
         doc.remove_entity(handle).expect("entità da cancellare");
         for record in doc.block_records.iter_mut() {
             record.entity_handles.retain(|&h| h != handle);
@@ -3468,7 +3468,7 @@ mod tests {
     /// La faccia del tramezzo verso A passa da x = 4,00 a 3,90 (in metri):
     /// A diventa 3,90 × 3,00 = 11,70 m². Una modifica a mano del rilievo,
     /// senza `AL_AGGIORNA`.
-    fn move_tramezzo_face(doc: &mut CadDocument, form: Form, unit: DrawingUnit) {
+    fn move_tramezzo_face(doc: &mut Document, form: Form, unit: DrawingUnit) {
         let (from, to) = (unit.metres(4.0), unit.metres(3.9));
         let on = |x: f64| (x - from).abs() < 1e-9;
         let handle = doc
@@ -3505,7 +3505,7 @@ mod tests {
 
     /// Il tramezzo del caso A a polilinee si ferma 2 mm prima del muro nord: A
     /// e B diventano una regione sola (R54).
-    fn open_tramezzo(doc: &mut CadDocument) {
+    fn open_tramezzo(doc: &mut Document) {
         let handle = doc
             .entities()
             .find(|e| {
@@ -3528,7 +3528,7 @@ mod tests {
 
     /// Il caso A a linee continue con l'angolo (0; 0) di A aperto di 2 mm sulla
     /// faccia ovest (Review Focus 3).
-    fn case_a_with_corner_gap() -> CadDocument {
+    fn case_a_with_corner_gap() -> Document {
         let mut doc = case_a_doc(Form::Continua);
         let west = doc
             .entities()
@@ -3565,7 +3565,7 @@ mod tests {
             );
 
             #[track_caller]
-            fn check(out: &CadDocument, what: &str) {
+            fn check(out: &Document, what: &str) {
                 assert_eq!(labels_on(out, LAYER_LOCALI), ["A\\PS = 11,70 m²"], "{what}");
                 let outlines = outlines_on(out, LAYER_LOCALI);
                 assert_eq!(outlines.len(), 1, "{what}");
@@ -3641,7 +3641,7 @@ mod tests {
             assert!(model_on(comparativa, LAYER_LOCALI).is_empty(), "{form:?}");
 
             #[track_caller]
-            fn check(out: &CadDocument, what: &str) {
+            fn check(out: &Document, what: &str) {
                 assert_eq!(
                     labels_on(out, LAYER_LOCALI),
                     ["A + B (da confermare)\\PS = 24,00 m²"],
@@ -3719,7 +3719,7 @@ mod tests {
         }
 
         #[track_caller]
-        fn check(out: &CadDocument, what: &str) {
+        fn check(out: &Document, what: &str) {
             // A + tramezzo + la parte di B fino al muro nuovo: 5,94 × 3.
             assert_eq!(
                 labels_on(out, LAYER_LOCALI),
@@ -3744,7 +3744,7 @@ mod tests {
     }
 
     /// I testi (`MTEXT`) dello spazio modello, su qualunque layer, in ordine.
-    fn all_labels(doc: &CadDocument) -> Vec<String> {
+    fn all_labels(doc: &Document) -> Vec<String> {
         let mut labels: Vec<String> = doc
             .block_records
             .iter()
@@ -3760,7 +3760,7 @@ mod tests {
     }
 
     /// Le polilinee dello spazio modello, su qualunque layer.
-    fn all_outlines(doc: &CadDocument) -> usize {
+    fn all_outlines(doc: &Document) -> usize {
         doc.block_records
             .iter()
             .filter(|r| r.is_model_space())
@@ -3791,7 +3791,7 @@ mod tests {
         let ex = extract(&src, &opts(&all_three()));
 
         #[track_caller]
-        fn check(docs: [&CadDocument; 3], what: &str) {
+        fn check(docs: [&Document; 3], what: &str) {
             let [fatto, comparativa, progetto] = docs;
             assert_eq!(
                 all_labels(fatto),
@@ -3824,7 +3824,7 @@ mod tests {
         );
         let tmp = TempDir::new("locali-spostati");
         let paths = write(&ex, &tmp.0, "casa", false).unwrap();
-        let loaded: Vec<CadDocument> = paths
+        let loaded: Vec<Document> = paths
             .iter()
             .map(|path| crate::io::load_file(path).unwrap())
             .collect();
@@ -3933,7 +3933,7 @@ mod tests {
         assert_eq!((handles.len(), notices.len()), (3, 0));
 
         // Un layer che la tabella rifiuta (già presente) dà il suo avviso.
-        let mut out = CadDocument::new();
+        let mut out = Document::new();
         let mut zero = Layer::new("0");
         zero.handle = out.allocate_handle();
         assert_eq!(

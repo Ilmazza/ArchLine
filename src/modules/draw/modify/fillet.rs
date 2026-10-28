@@ -1039,6 +1039,7 @@ fn join_poly_fillet(
     seg_idx: usize,
     moved: &LwPolyline,
     other: &EntityType,
+    other_seg: Option<(&LwPolyline, usize)>,
     fillet: Option<&EntityType>,
 ) -> Option<LwPolyline> {
     let n = poly.vertices.len();
@@ -1072,14 +1073,15 @@ fn join_poly_fillet(
         None => (t, None),
     };
 
-    // The other object from T2 to its far end, with the bulge that runs it
-    // in that direction.
-    let (far, far_bulge) = match other {
+    // The other object from T2 to its far end: the bulge of its first
+    // segment and the vertices after T2, each with the bulge of the segment
+    // that leaves it, in that direction.
+    let (first_bulge, chain): (f64, Vec<([f64; 2], f64)>) = match other {
         EntityType::Line(l) => {
             let a = [l.start.x, l.start.y];
             let b = [l.end.x, l.end.y];
             let dist = |p: [f64; 2]| (p[0] - t2[0]).hypot(p[1] - t2[1]);
-            (if dist(a) > dist(b) { a } else { b }, 0.0)
+            (0.0, vec![(if dist(a) > dist(b) { a } else { b }, 0.0)])
         }
         EntityType::Arc(a) if a.normal.z > 0.0 => {
             let (c, r, sa, ea, _) = arc_geom(a);
@@ -1088,9 +1090,42 @@ fn join_poly_fillet(
             let quarter = (arc_span(sa, ea) / 4.0).tan();
             let dist = |p: [f64; 2]| (p[0] - t2[0]).hypot(p[1] - t2[1]);
             if dist(p0) <= dist(p1) {
-                (p1, quarter)
+                (quarter, vec![(p1, 0.0)])
             } else {
-                (p0, -quarter)
+                (-quarter, vec![(p0, 0.0)])
+            }
+        }
+        // Another polyline, `other_seg` being it before the fillet and the
+        // segment the fillet trimmed: it is cut there like this one, keeping
+        // the picked side, and its vertices follow on from the cut (#1422).
+        EntityType::LwPolyline(other) => {
+            let (orig, s) = other_seg?;
+            let m = orig.vertices.len();
+            if m < 2 || other.vertices.len() != m || orig.vertices[s].bulge.abs() > 1e-12 {
+                return None;
+            }
+            // A closed polyline is opened at its closing segment first.
+            let mut v = orig.vertices.clone();
+            if orig.is_closed {
+                let mut last = v[0].clone();
+                last.bulge = 0.0;
+                v.push(last);
+            }
+            let end_moved = !near(
+                xy(&orig.vertices[(s + 1) % m]),
+                xy(&other.vertices[(s + 1) % m]),
+            );
+            if end_moved {
+                let chain = (0..=s)
+                    .rev()
+                    .map(|k| (xy(&v[k]), if k > 0 { -v[k - 1].bulge } else { 0.0 }))
+                    .collect();
+                (0.0, chain)
+            } else {
+                let chain = (s + 1..v.len())
+                    .map(|k| (xy(&v[k]), if k + 1 < v.len() { v[k].bulge } else { 0.0 }))
+                    .collect();
+                (0.0, chain)
             }
         }
         _ => return None,
@@ -1116,16 +1151,21 @@ fn join_poly_fillet(
         let bulge = fillet_center.map_or(0.0, |c| compute_bulge(t, t2, c));
         vertices.push(vertex(t, bulge));
         if fillet_center.is_some() {
-            vertices.push(vertex(t2, far_bulge));
+            vertices.push(vertex(t2, first_bulge));
         } else if let Some(last) = vertices.last_mut() {
-            last.bulge = far_bulge;
+            last.bulge = first_bulge;
         }
-        vertices.push(vertex(far, 0.0));
+        vertices.extend(chain.iter().map(|&(p, b)| vertex(p, b)));
     } else {
-        // Keep the end side: the other object, the fillet, then T and the
-        // vertices after the segment.
-        let other_back = -far_bulge;
-        vertices.push(vertex(far, other_back));
+        // Keep the end side: the other object run backwards, the fillet,
+        // then T and the vertices after the segment. Running backwards, a
+        // vertex takes the negated bulge of the segment that arrived at it.
+        let arriving: Vec<f64> = std::iter::once(first_bulge)
+            .chain(chain.iter().map(|&(_, b)| b))
+            .collect();
+        for (k, &(p, _)) in chain.iter().enumerate().rev() {
+            vertices.push(vertex(p, -arriving[k]));
+        }
         if let Some(c) = fillet_center {
             vertices.push(vertex(t2, compute_bulge(t2, t, c)));
         }
@@ -1600,6 +1640,8 @@ pub struct FilletCommand {
     /// (i.e. "R" pressed after the first object was already picked), so the
     /// command resumes at the second pick instead of restarting selection.
     resume_second: Option<(Handle, FilletEntity, [f64; 2])>,
+    /// Multiple option: keep filleting until Enter / Esc.
+    multiple: bool,
     /// Fillets applied by this command that Undo can still take back.
     made: usize,
 }
@@ -1618,6 +1660,7 @@ impl FilletCommand {
             all_entities,
             entity_index,
             resume_second: None,
+            multiple: false,
             made: 0,
         }
     }
@@ -1658,6 +1701,10 @@ impl FilletCommand {
                 drop_zero_length_segments(poly);
             }
         }
+        // Single mode replaces and ends, like CHAMFER.
+        if !self.multiple {
+            return CmdResult::ReplaceMany(replacements, vec![]);
+        }
         self.all_entities.retain(|entity| {
             !replacements
                 .iter()
@@ -1683,7 +1730,11 @@ impl FilletCommand {
         self.step = FilletStep::First;
         self.resume_second = None;
         self.made += 1;
-        CmdResult::CommitEntities(vec![addition])
+        if self.multiple {
+            CmdResult::CommitEntities(vec![addition])
+        } else {
+            CmdResult::CommitEntitiesAndExit(vec![addition])
+        }
     }
 
     /// Undo option: take back the last fillet of this command. The host
@@ -1760,6 +1811,9 @@ impl CadCommand for FilletCommand {
                 opts.push(CmdOption::new("Polyline", "P"));
                 opts.push(CmdOption::new("Radius", "R"));
                 opts.push(CmdOption::new("Trim", "T"));
+                if !self.multiple {
+                    opts.push(CmdOption::new("Multiple", "M"));
+                }
                 opts
             }
             FilletStep::Second { .. } => {
@@ -1835,6 +1889,11 @@ impl CadCommand for FilletCommand {
                 if upper == "U" || upper == "UNDO" {
                     return self.undo_last();
                 }
+                if matches!(self.step, FilletStep::First) && (upper == "M" || upper == "MULTIPLE")
+                {
+                    self.multiple = true;
+                    return Some(CmdResult::NeedPoint);
+                }
                 if upper == "T" || upper == "TRIM" {
                     self.enter_substep(FilletStep::TrimMode);
                     return Some(CmdResult::NeedPoint);
@@ -1878,7 +1937,7 @@ impl CadCommand for FilletCommand {
         self.undo_last()
     }
 
-    fn on_document_undone(&mut self, document: &codec::CadDocument) {
+    fn on_document_undone(&mut self, document: &codec::Document) {
         self.all_entities = document
             .entities()
             .map(crate::entities::curve::entity_with_lwpolyline_world_xy)
@@ -1985,6 +2044,31 @@ impl CadCommand for FilletCommand {
                                     *seg_idx,
                                     moved,
                                     other,
+                                    None,
+                                    maybe_arc.as_ref(),
+                                )
+                                .map(|poly| {
+                                    vec![
+                                        (h1, vec![EntityType::LwPolyline(poly)]),
+                                        (handle, Vec::new()),
+                                    ]
+                                }),
+                                // Two polylines join into the first one.
+                                (
+                                    FilletEntity::LwPoly { poly, seg_idx, .. },
+                                    FilletEntity::LwPoly {
+                                        poly: poly2,
+                                        seg_idx: seg2,
+                                        ..
+                                    },
+                                    EntityType::LwPolyline(moved),
+                                    other,
+                                ) if !same_entity => join_poly_fillet(
+                                    poly,
+                                    *seg_idx,
+                                    moved,
+                                    other,
+                                    Some((poly2, *seg2)),
                                     maybe_arc.as_ref(),
                                 )
                                 .map(|poly| {
@@ -2003,6 +2087,7 @@ impl CadCommand for FilletCommand {
                                     *seg_idx,
                                     moved,
                                     other,
+                                    None,
                                     maybe_arc.as_ref(),
                                 )
                                 .map(|poly| {
@@ -2608,7 +2693,7 @@ impl CadCommand for ChamferCommand {
         self.undo_last()
     }
 
-    fn on_document_undone(&mut self, document: &codec::CadDocument) {
+    fn on_document_undone(&mut self, document: &codec::Document) {
         self.all_entities = document
             .entities()
             .map(crate::entities::curve::entity_with_lwpolyline_world_xy)
@@ -2910,8 +2995,10 @@ mod tests {
             1.0,
             vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)],
         );
-        assert_eq!(keywords(&command), ["P", "R", "T"]);
+        assert_eq!(keywords(&command), ["P", "R", "T", "M"]);
         assert!(command.on_text_input("U").is_none(), "nothing to undo yet");
+        assert!(matches!(command.on_text_input("M"), Some(CmdResult::NeedPoint)));
+        assert_eq!(keywords(&command), ["P", "R", "T"], "Multiple is not offered twice");
         command.on_entity_pick(Handle::new(1), DVec3::new(5.0, 0.0, 0.0));
         assert!(matches!(
             command.on_entity_pick(Handle::new(2), DVec3::new(0.0, 5.0, 0.0)),
@@ -2924,11 +3011,88 @@ mod tests {
         ));
         assert_eq!(keywords(&command), ["P", "R", "T"]);
         // The host hands the restored document back; the cache follows it.
-        let mut doc = codec::CadDocument::new();
+        let mut doc = codec::Document::new();
         let _ = doc.add_entity(line(0.0, 0.0, 20.0, 0.0, 7));
         command.on_document_undone(&doc);
         assert_eq!(command.all_entities.len(), 1);
         assert_eq!(command.all_entities[0].common().handle, Handle::new(7));
+    }
+
+    /// Filleting two open polylines at their end segments joins them into
+    /// one polyline through the fillet arc, as the reference does (#1422).
+    #[test]
+    fn fillet_joins_two_polylines_into_one() {
+        let polyline = |handle: u64, points: &[[f64; 2]]| {
+            let mut p = LwPolyline::new();
+            for &[x, y] in points {
+                p.add_point(codec::types::Vector2::new(x, y));
+            }
+            p.common.handle = Handle::new(handle);
+            EntityType::LwPolyline(p)
+        };
+        let first = [[0.0, 10.0], [0.0, 3.0]];
+        // The fillet on the second one's end segment, or on a middle one:
+        // the part past the fillet point is dropped.
+        let seconds: [&[[f64; 2]]; 2] = [
+            &[[3.0, 0.0], [10.0, 0.0], [10.0, 5.0]],
+            &[[3.0, -5.0], [3.0, 0.0], [10.0, 0.0], [10.0, 5.0]],
+        ];
+        // Each polyline drawn either way round.
+        for (second, flip_first, flip_second) in seconds.iter().flat_map(|second| {
+            [(false, false), (true, false), (false, true), (true, true)]
+                .map(|(a, b)| (*second, a, b))
+        }) {
+            let mut a = first.to_vec();
+            let mut b = second.to_vec();
+            if flip_first {
+                a.reverse();
+            }
+            if flip_second {
+                b.reverse();
+            }
+            let all = vec![polyline(1, &a), polyline(2, &b)];
+            let mut command = FilletCommand::new(1.0, all);
+            let _ = command.on_entity_pick(Handle::new(1), DVec3::new(0.0, 6.0, 0.0));
+            let CmdResult::ReplaceMany(replacements, _) =
+                command.on_entity_pick(Handle::new(2), DVec3::new(6.0, 0.0, 0.0))
+            else {
+                panic!("FILLET should replace the polylines");
+            };
+            let joined = replacements
+                .iter()
+                .find(|(handle, _)| *handle == Handle::new(1))
+                .expect("the first polyline is replaced");
+            assert!(replacements
+                .iter()
+                .any(|(handle, entities)| *handle == Handle::new(2) && entities.is_empty()));
+            let [EntityType::LwPolyline(p)] = joined.1.as_slice() else {
+                panic!("one polyline");
+            };
+            let points: Vec<[f64; 2]> =
+                p.vertices.iter().map(|v| [v.location.x, v.location.y]).collect();
+            let mut expected = vec![[0.0, 10.0], [0.0, 1.0], [1.0, 0.0], [10.0, 0.0], [10.0, 5.0]];
+            // The polyline runs whichever way the first one ran.
+            let fillet_start = if flip_first {
+                expected.reverse();
+                2
+            } else {
+                1
+            };
+            assert_eq!(points.len(), expected.len(), "{flip_first} {flip_second}: {points:?}");
+            for (got, want) in points.iter().zip(&expected) {
+                assert!(
+                    (got[0] - want[0]).abs() < 1e-9 && (got[1] - want[1]).abs() < 1e-9,
+                    "{flip_first} {flip_second}: {points:?}"
+                );
+            }
+            // Only the fillet segment is curved, turning the same way both ways.
+            for (k, v) in p.vertices.iter().enumerate() {
+                let curved = v.bulge.abs() > 1e-12;
+                assert_eq!(curved, k == fillet_start, "{flip_first} {flip_second}: {k}");
+            }
+            let turn = p.vertices[fillet_start].bulge.signum();
+            assert_eq!(turn, if flip_first { -1.0 } else { 1.0 }, "{flip_first} {flip_second}");
+        }
     }
 
     #[test]
@@ -2938,6 +3102,7 @@ mod tests {
         let original = vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)];
         let mut command = FilletCommand::new(1.0, original);
         command.trim = false;
+        command.on_text_input("M");
         assert!(matches!(
             command.on_entity_pick(first, DVec3::new(5.0, 0.0, 0.0)),
             CmdResult::NeedPoint
@@ -3126,6 +3291,7 @@ mod tests {
             1.0,
             vec![line(0.0, 0.0, 10.0, 0.0, 1), line(0.0, 0.0, 0.0, 10.0, 2)],
         );
+        command.on_text_input("M");
 
         assert!(matches!(
             command.on_entity_pick(first, DVec3::new(5.0, 0.0, 0.0)),

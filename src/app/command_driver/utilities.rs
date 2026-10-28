@@ -195,10 +195,28 @@ impl OpenCADStudio {
 
     pub(in crate::app) fn cancel_active_grip_edit(&mut self) -> bool {
         let i = self.active_tab;
+        // API v11/v12: a custom plugin-grip drag cancels through the same
+        // lifecycle exit every other interruption uses (Esc, another command
+        // starting, tab switches): the owning plugin gets the cancel phase
+        // and drops its preview state with zero writes — the drawing stays
+        // byte-identical. While the drag's SETTLE is streaming (the plugin
+        // write window), the watchdog owns the window instead: a cancel
+        // would race the plugin's authoritative writes.
+        #[cfg(not(target_arch = "wasm32"))]
+        let had_plugin_grip = {
+            let had_plugin_grip = self.tabs[i].active_plugin_grip.is_some();
+            if had_plugin_grip && !self.is_plugin_grip_settling() {
+                let _ = self.cancel_plugin_grip_drag();
+            }
+            had_plugin_grip && !self.is_plugin_grip_settling()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let had_plugin_grip = false;
         // Grip-menu toggles live only as long as the gesture.
         self.tabs[i].grip_copy = false;
         self.tabs[i].grip_base_pending = false;
         let had_grip = self.tabs[i].active_grip.take().is_some()
+            || had_plugin_grip
             || self.grip_add_provisional.is_some()
             || !self.grip_preview_handles.is_empty()
             || !self.grip_history_originals.is_empty();
@@ -410,8 +428,10 @@ impl OpenCADStudio {
             } else {
                 None
             };
-            if let Some(command) = self.tabs[i].active_cmd.as_mut() {
+            let tab = &mut self.tabs[i];
+            if let Some(command) = tab.active_cmd.as_mut() {
                 command.set_point_pick_context(context);
+                command.refresh_point_pick_scene(&tab.scene);
             }
         }
     }
@@ -522,6 +542,10 @@ impl OpenCADStudio {
         else {
             return StepInput::SelectionComplete(handles);
         };
+        let reports = self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .is_some_and(|command| command.selection_entity_filter_reports());
         let (kept, dropped): (Vec<Handle>, Vec<Handle>) = handles
             .into_iter()
             .partition(|h| self.tabs[i].scene.document.get_entity(*h).is_some_and(keep));
@@ -529,6 +553,17 @@ impl OpenCADStudio {
             self.tabs[i].scene.deselect_entity(*handle);
         }
         if !dropped.is_empty() {
+            if reports {
+                let count = dropped.len();
+                self.command_line.push_info(
+                    if count == 1 {
+                        crate::t!("1 was filtered out.")
+                    } else {
+                        crate::tf!("{count} were filtered out.")
+                    }
+                    .as_ref(),
+                );
+            }
             self.refresh_properties();
         }
         StepInput::SelectionComplete(kept)
@@ -569,6 +604,39 @@ impl OpenCADStudio {
                 crate::t!("1 was filtered out.").into_owned()
             } else {
                 crate::tf!("{count} were filtered out.").into_owned()
+            });
+            self.refresh_properties();
+        }
+        StepInput::SelectionComplete(kept)
+    }
+
+    /// Drops entities on locked layers from a completed selection when the active
+    /// command rejects them (e.g. ssget ":L"), deselecting them and reporting
+    /// how many were on a locked layer.
+    pub(in crate::app) fn filter_locked_layer_selection(&mut self, input: StepInput) -> StepInput {
+        let StepInput::SelectionComplete(handles) = input else {
+            return input;
+        };
+        let i = self.active_tab;
+        if !self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .is_some_and(|command| command.selection_rejects_locked_layers())
+        {
+            return StepInput::SelectionComplete(handles);
+        }
+        let (kept, dropped): (Vec<Handle>, Vec<Handle>) = handles.into_iter().partition(|handle| {
+            !self.tabs[i].scene.is_layer_locked(*handle)
+        });
+        for handle in &dropped {
+            self.tabs[i].scene.deselect_entity(*handle);
+        }
+        if !dropped.is_empty() {
+            let count = dropped.len();
+            self.command_line.push_info(&if count == 1 {
+                "1 was on a locked layer.".to_string()
+            } else {
+                format!("{count} were on a locked layer.")
             });
             self.refresh_properties();
         }
@@ -678,6 +746,9 @@ impl OpenCADStudio {
         if matches!(input, StepInput::Point(_)) {
             let _ = self.apply_dynamic_ucs(None);
         }
+        // Whatever reaches the command ends a typed window still waiting
+        // for its opposite corner.
+        self.typed_window_corner = None;
         let gathering = self.report_selection_found(&input);
         // A command that takes associative dimensions only keeps just those:
         // the rest leave the selection and the count of what went is reported,
@@ -685,6 +756,7 @@ impl OpenCADStudio {
         let input = self.filter_associative_dimension_selection(input);
         let input = self.filter_block_reference_selection(input);
         let input = self.filter_locked_point_cloud_selection(input);
+        let input = self.filter_locked_layer_selection(input);
         let input = self.filter_command_entity_selection(input);
         if let (Some(key), StepInput::SelectionComplete(kept)) = (gathering, &input) {
             self.selection_report = Some((key, kept.clone()));
@@ -815,9 +887,7 @@ impl OpenCADStudio {
                 command.inject_selection_entities(entities);
             }
         }
-        if matches!(&input, StepInput::Point(_)) {
-            self.refresh_command_point_pick_context(i);
-        }
+        self.refresh_command_point_pick_context(i);
         let ctrl = self.ctrl_down;
         let shift = self.shift_down;
         let picked_handle = if let StepInput::EntityPick(h, _) = &input {
@@ -827,13 +897,13 @@ impl OpenCADStudio {
         };
         let is_escape = matches!(&input, StepInput::Escape);
         let keyed = matches!(&input, StepInput::Text(_) | StepInput::Enter);
-        let result: Option<CmdResult> = {
+        let (result, panel_updates): (Option<CmdResult>, Vec<_>) = {
             let Some(cmd) = self.tabs[i].active_cmd.as_mut() else {
                 return (Task::none(), false);
             };
             cmd.set_ctrl(ctrl);
             cmd.set_shift(shift);
-            match input {
+            let res = match input {
                 StepInput::Point(p) => Some(cmd.on_point(p)),
                 StepInput::Text(s) => cmd.on_text_input(&s),
                 StepInput::EntityPick(h, p) => Some(cmd.on_entity_pick(h, p)),
@@ -843,8 +913,15 @@ impl OpenCADStudio {
                 StepInput::EditorClosed(c) => Some(cmd.on_editor_closed(c)),
                 StepInput::Enter => Some(cmd.on_enter()),
                 StepInput::Escape => Some(cmd.on_escape()),
-            }
+            };
+            let updates = cmd.take_pending_panel_updates();
+            (res, updates)
         };
+        for (panel_id, values) in panel_updates {
+            if let Some(panel) = self.plugin_panels.get_mut(&panel_id) {
+                panel.update_values(values);
+            }
+        }
         if let Some(handle) = picked_handle {
             self.record_dimension_entity_points(i, None, handle, Vec::new());
         }
@@ -937,6 +1014,9 @@ impl OpenCADStudio {
         if !self.suppress_plugin_dispatch && crate::plugin::try_dispatch(self, i, cmd) {
             self.tabs[i].last_cmd = Some(cmd.to_string());
             self.command_line.record_recent(cmd);
+            if cmd.trim().starts_with('(') {
+                return self.finish_dispatch(cmd);
+            }
             let toks: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
             return self.finish_active_command(&toks, finish);
         }
@@ -948,18 +1028,36 @@ impl OpenCADStudio {
             || tokens[0].eq_ignore_ascii_case("XREF")
             // `VIEW WINDOW <name> <x1,y1> <x2,y2>` takes its arguments in one line.
             || tokens[0].eq_ignore_ascii_case("VIEW")
+            // A path after OPEN / SAVEAS may hold spaces; it is one answer.
+            || tokens[0].eq_ignore_ascii_case("OPEN")
+            || tokens[0].eq_ignore_ascii_case("SAVEAS")
+            // A calculator expression may hold spaces; it is one answer.
+            || tokens[0].eq_ignore_ascii_case("CAL")
+            || tokens[0].eq_ignore_ascii_case("QUICKCALC")
+            || tokens[0].eq_ignore_ascii_case("QC")
         {
             return self.dispatch_command(cmd);
         }
         // Close an earlier step first so only what the probe opens is dropped below.
         self.finish_pending_history(i);
-        let start_task = self.dispatch_command(tokens[0]);
+        let Some(start_task) = self.try_dispatch_command(tokens[0], false) else {
+            // The first word is no command; the whole line may still be one.
+            return self.dispatch_command(cmd);
+        };
+        self.clear_idle_tool_highlight();
         if self.tabs[i].active_cmd.is_none() {
             // Not an interactive tool — an inline-argument command (`PDMODE 3`).
             // The bare word only probed it: a step it kept without changing
             // anything is not an undo step of its own.
             self.drop_unchanged_pending_history(i);
-            return self.dispatch_command(cmd);
+            if let Some(task) = self.try_dispatch_command(cmd, false) {
+                self.clear_idle_tool_highlight();
+                return task;
+            }
+            // The command takes no words after it and has run: the rest of
+            // the line goes on to the next command, as Enter would send it.
+            let rest = tokens[1..].join(" ");
+            return Task::batch([start_task, self.run_command_line_streaming(&rest, finish)]);
         }
         let toks: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
         let finish_task = self.finish_active_command(&toks, finish);
@@ -1159,13 +1257,123 @@ impl OpenCADStudio {
         Some(self.feed_command(StepInput::SelectionComplete(handles)))
     }
 
+    /// A typed coordinate in world space: relative to the last point when it
+    /// starts with `@`, through the active UCS otherwise.
+    fn typed_wcs(&self, i: usize, token: &str) -> Option<glam::DVec3> {
+        let (coord, kind) = crate::app::helpers::parse_coord(token)?;
+        let ucs = &self.tabs[i].active_ucs;
+        Some(
+            match (
+                matches!(kind, crate::app::helpers::CoordKind::Relative),
+                self.last_point,
+            ) {
+                (true, Some(base)) => {
+                    base + match ucs {
+                        Some(value) => crate::app::helpers::ucs_rotate_vec(coord, value),
+                        None => coord,
+                    }
+                }
+                _ => match ucs {
+                    Some(value) => crate::app::helpers::ucs_to_wcs(coord, value),
+                    None => coord,
+                },
+            },
+        )
+    }
+
+    /// A typed coordinate at an object prompt picks the object under it, as
+    /// a click there would: while objects are gathered it adds the object
+    /// found there (or, on empty space, starts a window whose opposite
+    /// corner is the next typed coordinate), and at a single-object prompt
+    /// that takes no points it is the pick itself. `None` when the token is
+    /// no coordinate or the prompt reads it some other way. Shared by the
+    /// command line and the token feeder so both read a typed point the same.
+    pub(in crate::app) fn typed_object_pick(&mut self, token: &str) -> Option<Task<Message>> {
+        let i = self.active_tab;
+        let (gathering, picks_entity, key) = self.tabs[i].active_cmd.as_ref().map(|command| {
+            (
+                command.is_selection_gathering(),
+                command.needs_entity_pick() && command.typed_point_picks_entity(),
+                &**command as *const dyn crate::command::CadCommand as *const () as usize,
+            )
+        })?;
+        if let Some((pending, first)) = self.typed_window_corner.take() {
+            if gathering && pending == key {
+                let Some(second) = self.typed_wcs(i, token) else {
+                    // Enter or a word where the opposite corner belongs: the
+                    // selection prompt comes back with the corner still open.
+                    self.typed_window_corner = Some((pending, first));
+                    self.command_line
+                        .push_error(crate::t!("Invalid window specification.").as_ref());
+                    if let Some(prompt) = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt()) {
+                        self.command_line.push_info(&prompt);
+                    }
+                    self.command_line
+                        .push_info(crate::t!("Specify opposite corner:").as_ref());
+                    return Some(Task::none());
+                };
+                self.last_point = Some(second);
+                return Some(self.select_typed_window(first, second));
+            }
+        }
+        if !gathering && !picks_entity {
+            return None;
+        }
+        let wcs = self.typed_wcs(i, token)?;
+        let owner = self.tabs[i]
+            .current_parametric_scope()
+            .owner_handle(&self.tabs[i].scene.document);
+        let found = entity_at_typed_point(&self.tabs[i].scene.document, owner, wcs);
+        if gathering {
+            self.last_point = Some(wcs);
+            let Some(handle) = found else {
+                self.typed_window_corner = Some((key, wcs));
+                self.command_line
+                    .push_info(crate::t!("Specify opposite corner:").as_ref());
+                return Some(Task::none());
+            };
+            self.last_pick = Some((vec![handle], self.select_remove_mode));
+            if self.select_remove_mode {
+                self.tabs[i].scene.deselect_entity(handle);
+            } else {
+                self.tabs[i].scene.select_entity(handle, false);
+            }
+            self.refresh_properties();
+            let handles: Vec<Handle> = self.tabs[i]
+                .scene
+                .selected_entities()
+                .into_iter()
+                .map(|(h, _)| h)
+                .collect();
+            return Some(self.feed_command(StepInput::SelectionComplete(handles)));
+        }
+        if !self.command_point_allowed(i, wcs) {
+            return Some(Task::none());
+        }
+        self.last_point = Some(wcs);
+        self.push_ucs_to_cmd(i);
+        Some(self.feed_command(StepInput::EntityPick(found.unwrap_or(Handle::NULL), wcs)))
+    }
+
     pub(in crate::app) fn feed_active_cmd(&mut self, token: &str) -> Task<Message> {
         let i = self.active_tab;
+        if self.typed_window_corner.is_some() {
+            if let Some(task) = self.typed_object_pick(token) {
+                return task;
+            }
+        }
+        let trimmed = token.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("ENTER")
+            || trimmed.eq_ignore_ascii_case("RETURN")
+        {
+            return self.feed_command(StepInput::Enter);
+        }
         // Object-pick step: the token is a handle (as returned by `query`).
         if self.tabs[i]
             .active_cmd
             .as_ref()
-            .is_some_and(|c| c.needs_entity_pick())
+            .is_some_and(|c| c.needs_entity_pick() || c.is_selection_gathering())
         {
             // Option keywords take precedence over the handle reading —
             // "F"/"C"/"E" are valid hex, but during TRIM/EXTEND they are the
@@ -1178,46 +1386,21 @@ impl OpenCADStudio {
             if let Some(r) = consumed {
                 return self.apply_cmd_result(r);
             }
+            if let Some(task) = self.try_selection_keyword(token) {
+                return task;
+            }
+            if let Some(task) = self.typed_object_pick(token) {
+                return task;
+            }
             let accepts_points = self.tabs[i]
                 .active_cmd
                 .as_ref()
                 .is_some_and(|command| command.entity_pick_accepts_points());
             if accepts_points {
-                if let Some((coord, kind)) = crate::app::helpers::parse_coord(token) {
-                    let ucs = self.tabs[i].active_ucs.clone();
-                    let wcs = match (
-                        matches!(kind, crate::app::helpers::CoordKind::Relative),
-                        self.last_point,
-                    ) {
-                        (true, Some(base)) => {
-                            base + match &ucs {
-                                Some(value) => crate::app::helpers::ucs_rotate_vec(coord, value),
-                                None => coord,
-                            }
-                        }
-                        _ => match &ucs {
-                            Some(value) => crate::app::helpers::ucs_to_wcs(coord, value),
-                            None => coord,
-                        },
-                    };
+                if let Some(wcs) = self.typed_wcs(i, token) {
                     if self.command_point_allowed(i, wcs) {
                         self.last_point = Some(wcs);
                         self.push_ucs_to_cmd(i);
-                        // A typed coordinate at an object prompt is a pick at
-                        // that point, as in the reference.
-                        let picks_entity = self.tabs[i]
-                            .active_cmd
-                            .as_ref()
-                            .is_some_and(|command| command.typed_point_picks_entity());
-                        if picks_entity {
-                            let owner = self.tabs[i]
-                                .current_parametric_scope()
-                                .owner_handle(&self.tabs[i].scene.document);
-                            let handle =
-                                entity_at_typed_point(&self.tabs[i].scene.document, owner, wcs)
-                                    .unwrap_or(Handle::NULL);
-                            return self.feed_command(StepInput::EntityPick(handle, wcs));
-                        }
                         return self.feed_command(StepInput::Point(wcs));
                     }
                     return Task::none();
@@ -1263,7 +1446,7 @@ impl OpenCADStudio {
             let ucs = self.tabs[i].active_ucs.clone();
             let wcs = match (
                 matches!(kind, crate::app::helpers::CoordKind::Relative),
-                self.last_point,
+                self.relative_input_base(i),
             ) {
                 (true, Some(base)) => {
                     base + match &ucs {

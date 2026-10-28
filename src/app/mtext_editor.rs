@@ -116,6 +116,9 @@ pub struct MTextEditorState {
     /// it is NOT derived from the typed content, so adding characters wraps
     /// to the next line instead of stretching the box into one long line.
     pub rect_width: f64,
+    /// The width was set by the MTEXT command's box (or its Width option):
+    /// the editor keeps it instead of fitting its own size.
+    pub keep_width: bool,
     pub rect_height: String,
     pub annotative: bool,
     pub column_type: i16,
@@ -145,6 +148,10 @@ pub struct MTextEditorState {
     /// character range `[start, end)`.
     pub glyph_boxes: Vec<crate::entities::text_support::GlyphBox>,
     pub sel: Option<(usize, usize)>,
+    /// A height / oblique / width / tracking field typed while text is
+    /// selected: it styles the selection, not the whole text, so it is shown
+    /// from here for as long as that selection stands (#2194).
+    pub span_input: Option<((usize, usize), &'static str, String)>,
     /// Anchor offset for an in-progress drag selection.
     pub sel_anchor: usize,
     /// Text caret as a visible-character offset (0..=count). Used for typing
@@ -185,6 +192,7 @@ impl MTextEditorState {
             color_picker_open: false,
             glyph_boxes: Vec::new(),
             sel: None,
+            span_input: None,
             sel_anchor: 0,
             caret: 0,
             caret_blink_on: true,
@@ -193,6 +201,7 @@ impl MTextEditorState {
             // Default box ~20 characters wide; overwritten with the entity's
             // own width when editing an existing MText.
             rect_width: (height * 20.0).max(1.0),
+            keep_width: false,
             rect_height: "0".to_string(),
             annotative: false,
             column_type: 0,
@@ -213,6 +222,15 @@ impl MTextEditorState {
             editing,
             screen_anchor: iced::Point::new(60.0, 90.0),
             original: None,
+        }
+    }
+
+    /// What the `field` input shows: the value typed for the current
+    /// selection, else the whole text's `base`.
+    pub fn span_field<'a>(&'a self, field: &str, base: &'a str) -> &'a str {
+        match &self.span_input {
+            Some((sel, typed, value)) if Some(*sel) == self.sel && *typed == field => value,
+            _ => base,
         }
     }
 
@@ -538,6 +556,30 @@ fn str_to_cells(
     cells
 }
 
+/// Replace each `%%d` / `%%p` / `%%c` that ends inside the freshly inserted
+/// `start..end` with its symbol (°, ±, ∅), as it is typed; returns the new end.
+/// The cells stay one per visible glyph, so the caret keeps matching the layout.
+fn fold_special_codes(cells: &mut Vec<Cell>, start: usize, mut end: usize) -> usize {
+    let mut i = start.saturating_sub(2);
+    while i + 3 <= end {
+        if let [Cell::Char('%', props), Cell::Char('%', _), Cell::Char(c, _)] = &cells[i..i + 3] {
+            let symbol = match c.to_ascii_lowercase() {
+                'd' => Some('°'),
+                'p' => Some('±'),
+                'c' => Some('∅'),
+                _ => None,
+            };
+            if let Some(symbol) = symbol {
+                let cell = Cell::Char(symbol, props.clone());
+                cells.splice(i..i + 3, [cell]);
+                end -= 2;
+            }
+        }
+        i += 1;
+    }
+    end
+}
+
 /// Properties newly-typed text at `caret` inherits — the cell to its left, or
 /// the default at the start of a paragraph / document.
 fn insert_props(cells: &[Cell], caret: usize) -> SpanProperties {
@@ -763,7 +805,9 @@ impl super::OpenCADStudio {
                 }
                 Some(EntityType::MultiLeader(ml)) => {
                     state.line_spacing = ml.context.line_spacing_factor as f32;
-                    if ml.context.text_width > 0.0 {
+                    // A multileader without a width keeps none until one is set.
+                    state.keep_width = ml.context.text_width > 0.0;
+                    if state.keep_width {
                         state.rect_width = ml.context.text_width;
                     }
                 }
@@ -771,6 +815,7 @@ impl super::OpenCADStudio {
             }
         } else if let Some(m) = template {
             seed_mtext_state(&mut state, &m);
+            state.keep_width = m.rectangle_width > 0.0;
         } else {
             // New MText inherits the document's current text style (STYLE),
             // not the "Standard" default. See #92.
@@ -841,6 +886,11 @@ impl super::OpenCADStudio {
         // catastrophic cancellation. Insertion is a pure translation, so zeroing
         // it keeps the layout's shape, wrapping and alignment identical.
         mt.insertion_point = Vector3::new(0.0, 0.0, 0.0);
+        // The preview reads upright: the glyph boxes the caret and the
+        // selection use are laid out unrotated, so the strokes must be too.
+        mt.rotation = 0.0;
+        mt.dwg_x_direction = None;
+        mt.normal = Vector3::new(0.0, 0.0, 1.0);
         let entity = EntityType::MText(Box::new(mt.clone()));
         let anno = 1.0;
         let bg = self.tabs[i].scene.bg_color;
@@ -910,26 +960,37 @@ impl super::OpenCADStudio {
     }
 
     pub(super) fn mtext_apply_span_number(&mut self, field: &'static str, value: String) {
-        let Some(number) = value.trim().replace(',', ".").parse::<f64>().ok() else {
-            return;
-        };
-        let valid = match field {
-            "height" => number > 0.0,
-            "oblique" => (-85.0..=85.0).contains(&number),
-            "width" => number > 0.0,
-            "tracking" => number.is_finite(),
-            _ => false,
-        };
-        if !valid {
-            return;
-        }
+        let number = value
+            .trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok()
+            .filter(|&number| match field {
+                "height" | "width" => number > 0.0,
+                "oblique" => (-85.0..=85.0).contains(&number),
+                "tracking" => number.is_finite(),
+                _ => false,
+            });
         let has_selection = self
             .mtext_editor
             .as_ref()
             .and_then(|editor| editor.sel)
             .is_some_and(|(start, end)| start < end);
         if let Some(ed) = self.mtext_editor.as_mut() {
+            // The field shows what is typed, an empty or half-typed value
+            // included, with or without a selection (#2194).
             if has_selection {
+                ed.span_input = ed.sel.map(|sel| (sel, field, value));
+            } else {
+                match field {
+                    "height" => ed.height = value,
+                    "oblique" => ed.oblique = value,
+                    "width" => ed.width = value,
+                    "tracking" => ed.char_space = value,
+                    _ => {}
+                }
+            }
+            if let (true, Some(number)) = (has_selection, number) {
                 let (start, end) = ed.sel.unwrap();
                 ed.record_undo();
                 let para0 = doc_para0(&ed.doc);
@@ -951,14 +1012,6 @@ impl super::OpenCADStudio {
                 );
                 ed.sel = Some((start, end));
                 ed.caret = end;
-            } else {
-                match field {
-                    "height" => ed.height = value,
-                    "oblique" => ed.oblique = value,
-                    "width" => ed.width = value,
-                    "tracking" => ed.char_space = value,
-                    _ => {}
-                }
             }
         }
         self.rebuild_mtext_preview();
@@ -1038,7 +1091,11 @@ impl super::OpenCADStudio {
                 denominator: plain[split + separator_len..].to_string(),
                 stacking_type: StackingType::from_char(separator),
             };
-            if data.numerator.is_empty() || data.denominator.is_empty() {
+            // A `^` stack may leave one half empty: "2^" stacks as a
+            // superscript and "^2" as a subscript (#2236).
+            let one_sided = separator == '^'
+                && !(data.numerator.is_empty() && data.denominator.is_empty());
+            if !one_sided && (data.numerator.is_empty() || data.denominator.is_empty()) {
                 return;
             }
             let props = cells[start..end]
@@ -1229,7 +1286,11 @@ impl super::OpenCADStudio {
                     if !ed.font.trim().is_empty() {
                         ed.font.clone()
                     } else {
-                        crate::entities::text_support::resolve_text_style(&ed.style, doc).font_name
+                        // The family, not the style's bold / italic face of it.
+                        let font =
+                            crate::entities::text_support::resolve_text_style(&ed.style, doc)
+                                .font_name;
+                        crate::scene::text::sysfont::split_style(&font).0.to_string()
                     }
                 })
                 .unwrap_or_default()
@@ -1401,7 +1462,7 @@ impl super::OpenCADStudio {
             let ins = str_to_cells(s, &props, &para_props);
             let added = ins.len();
             cells.splice(caret..caret, ins);
-            caret += added;
+            caret = fold_special_codes(&mut cells, caret, caret + added);
             ed.content =
                 text_editor::Content::with_text(&cells_to_doc(&para0, &cells).to_mtext_string());
             ed.caret = caret;
@@ -1530,7 +1591,10 @@ impl super::OpenCADStudio {
             self.mtext_editor
                 .as_ref()
                 .map(|ed| {
-                    crate::entities::text_support::resolve_text_style(&ed.style, doc).font_name
+                    let font =
+                        crate::entities::text_support::resolve_text_style(&ed.style, doc)
+                            .font_name;
+                    crate::scene::text::sysfont::split_style(&font).0.to_string()
                 })
                 .unwrap_or_default()
         } else {
@@ -1668,6 +1732,7 @@ impl super::OpenCADStudio {
             return true;
         }
         let body_empty = ed.content.text().trim().is_empty();
+        let keep_width = ed.keep_width;
         let mut mt = ed.build_mtext();
         let annotative = mt.is_annotative
             || ed.editing.is_none()
@@ -1704,7 +1769,7 @@ impl super::OpenCADStudio {
                     ml.context.text_string = mt.value;
                     ml.context.text_height = mt.height;
                     ml.context.line_spacing_factor = mt.line_spacing_factor;
-                    if mt.rectangle_width > 0.0 {
+                    if keep_width && mt.rectangle_width > 0.0 {
                         ml.context.text_width = mt.rectangle_width;
                     }
                 }
@@ -1754,7 +1819,7 @@ impl super::OpenCADStudio {
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
             let handle =
-                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
+                self.commit_new_text(plane.place_entity(EntityType::MText(Box::new(mt))));
             if annotative {
                 let scale = self.tabs[i].scene.creation_annotation_scale_handle();
                 if let (Some(handle), Some(scale)) = (handle, scale) {
@@ -1782,11 +1847,12 @@ impl super::OpenCADStudio {
             return;
         }
         let i = self.active_tab;
-        let (mut mt, editing, body_empty) = match self.mtext_editor.as_ref() {
+        let (mut mt, editing, body_empty, keep_width) = match self.mtext_editor.as_ref() {
             Some(ed) => (
                 ed.build_mtext(),
                 ed.editing,
                 ed.content.text().trim().is_empty(),
+                ed.keep_width,
             ),
             None => return,
         };
@@ -1822,7 +1888,7 @@ impl super::OpenCADStudio {
                     ml.context.text_string = mt.value;
                     ml.context.text_height = mt.height;
                     ml.context.line_spacing_factor = mt.line_spacing_factor;
-                    if mt.rectangle_width > 0.0 {
+                    if keep_width && mt.rectangle_width > 0.0 {
                         ml.context.text_width = mt.rectangle_width;
                     }
                 }
@@ -1871,7 +1937,7 @@ impl super::OpenCADStudio {
             mt.insertion_point = codec::types::Vector3::new(position.x, position.y, position.z);
             self.push_undo_snapshot(i, "MTEXT");
             let handle =
-                self.commit_entity_handle(plane.place_entity(EntityType::MText(Box::new(mt))));
+                self.commit_new_text(plane.place_entity(EntityType::MText(Box::new(mt))));
             self.tabs[i].dirty = true;
             if annotative {
                 let scale = self.tabs[i].scene.creation_annotation_scale_handle();
@@ -1940,6 +2006,28 @@ mod cell_tests {
                 "not idempotent for {s:?}: {once:?} vs {twice:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_percent_codes_fold_into_symbols() {
+        let props = SpanProperties::default();
+        let mut cells = str_to_cells("x%%c", &props, &ParagraphProperties::default());
+        let end = fold_special_codes(&mut cells, 3, 4);
+        assert_eq!(end, 2);
+        let text = |cells: &[Cell]| -> String {
+            cells
+                .iter()
+                .filter_map(|c| match c {
+                    Cell::Char(ch, _) => Some(*ch),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(text(&cells), "x∅");
+        let mut all = str_to_cells("%%D5 %%p1 %%x", &props, &ParagraphProperties::default());
+        let len = all.len();
+        fold_special_codes(&mut all, 0, len);
+        assert_eq!(text(&all), "°5 ±1 %%x");
     }
 
     #[test]

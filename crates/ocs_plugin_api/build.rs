@@ -263,6 +263,7 @@ fn generate_type_registry(out_dir: &Path) {
             "DimensionType",
             trace_simple::<codec::entities::DimensionType>,
         ),
+        ("DxfVersion", trace_simple::<codec::DxfVersion>),
         (
             "DynamicBlockData",
             trace_simple::<codec::objects::DynamicBlockData>,
@@ -1267,7 +1268,7 @@ fn generate_version_info(out_dir: &Path) {
         "acadrust_version": opencadcodec.version.to_string(),
         "acadrust_source": opencadcodec.source.as_ref().map(|s| s.to_string()),
         "rustc_version": rustc_version,
-        "api_version": 10,
+        "api_version": 13,
         "api_version_min_supported": 3,
         "build_timestamp": build_timestamp,
     });

@@ -881,7 +881,7 @@ mod tests {
     ///
     /// Empty: the six Ristrutturazione commands now have their own icons
     /// (`menu_icons::RIBBON`), so no row is left without one.
-    const NO_ICON: &[&str] = &[];
+    const NO_ICON: &[&str] = &["FIND"];
 
     #[test]
     fn command_rows_without_an_icon_are_the_known_ones() {

@@ -1,6 +1,6 @@
 //! Maintain native adjacency lists while adding/replacing action dependencies.
 use codec::objects::{BlockEvaluationEdge, BlockEvaluationGraph, DynamicBlockData, ObjectType};
-use codec::{CadDocument, Handle};
+use codec::{Document, Handle};
 
 pub(crate) fn valid_lists(g: &BlockEvaluationGraph, node: i32) -> bool {
     let Some(n) = g.nodes.iter().find(|n| n.id == node) else {
@@ -116,7 +116,7 @@ fn add(g: &mut BlockEvaluationGraph, id: i32, source: i32, destination: i32, inv
     });
 }
 pub(crate) fn bind_ids(
-    document: &mut CadDocument,
+    document: &mut Document,
     graph: Handle,
     action: i32,
     parameters: &[i32],
@@ -216,5 +216,33 @@ pub(crate) fn bind_ids(
         unreachable!()
     };
     object.data = DynamicBlockData::EvaluationGraph(g);
+    Ok(())
+}
+
+/// Add a directed native grip dependency without disturbing existing lists.
+pub(crate) fn link(
+    g: &mut BlockEvaluationGraph,
+    source: i32,
+    destination: i32,
+) -> Result<(), &'static str> {
+    if !valid_lists(g, source) || !valid_lists(g, destination) {
+        return Err("The authoring graph has invalid adjacency links.");
+    }
+    if g.edges
+        .iter()
+        .any(|e| e.source_node == source && e.destination_node == destination)
+    {
+        return Ok(());
+    }
+    let id = g
+        .edges
+        .iter()
+        .map(|e| e.id)
+        .max()
+        .unwrap_or(-1)
+        .checked_add(1)
+        .ok_or("The graph has no free edge IDs.")?;
+    add(g, id, source, destination, -1);
+    g.edges.last_mut().unwrap().next_id = 0;
     Ok(())
 }
