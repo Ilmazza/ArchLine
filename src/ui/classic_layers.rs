@@ -61,9 +61,24 @@ pub fn layer_tools() -> &'static LayerTools {
                 }
             }
         }
+        // The ribbon lists them by row; here each action sits next to its
+        // opposite (off/on, freeze/thaw, lock/unlock, isolate/unisolate).
+        // Anything not listed keeps its ribbon order, after these.
+        commands.sort_by_key(|c| {
+            COMMAND_ORDER
+                .iter()
+                .position(|id| *id == c.id)
+                .unwrap_or(COMMAND_ORDER.len())
+        });
         LayerTools { manager, commands }
     })
 }
+
+/// Order of the object-based layer commands in the classic strip.
+const COMMAND_ORDER: [&str; 11] = [
+    "LAYOFF", "LAYON", "LAYFRZ", "LAYTHW", "LAYLCK", "LAYULK", "LAYISO", "LAYUNISO", "LAYMCUR",
+    "LAYMATCH", "LAYWALK",
+];
 
 fn swatch(color: Color) -> Element<'static, Message> {
     container(text(""))
@@ -202,16 +217,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layer_commands_follow_the_ribbon_layers_group() {
+    fn layer_commands_pair_each_action_with_its_opposite() {
         let t = layer_tools();
         assert_eq!(t.manager.as_ref().map(|m| m.id), Some("LAYERS"));
         let ids: Vec<_> = t.commands.iter().map(|c| c.id).collect();
-        assert_eq!(
-            ids,
-            [
-                "LAYOFF", "LAYFRZ", "LAYLCK", "LAYMCUR", "LAYISO", "LAYWALK", "LAYON", "LAYTHW",
-                "LAYULK", "LAYMATCH", "LAYUNISO"
-            ]
-        );
+        assert_eq!(ids, COMMAND_ORDER);
     }
 }
