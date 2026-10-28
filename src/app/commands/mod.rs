@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod attdef;
 mod attman;
 mod bim;
+mod bim_abaco;
 mod block_cmdline;
 mod blocks;
 mod blockvars;

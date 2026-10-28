@@ -1,6 +1,7 @@
 //! Comandi BIM dall'app (spec §3, §4.2, §5.1 e §5.2): `AL_DEMOLISCI`,
-//! `AL_NUOVO`, la scelta dell'unità `AL_UNITA`, `AL_STATO`, `AL_LOCALE` e
-//! `AL_AGGIORNA`, guidati come da uno script o dalla riga di comando. Coprono
+//! `AL_NUOVO`, la scelta dell'unità `AL_UNITA`, `AL_STATO`, `AL_LOCALE`,
+//! `AL_AGGIORNA` e, dalla parte 2, `AL_ALTEZZA`, guidati come da uno script o
+//! dalla riga di comando. Coprono
 //! ciò che i test di `bim::commands` non vedono: l'unità letta dal disegno, i
 //! layer creati in un passo di annullamento a sé, l'istantanea della geometria
 //! e il rilievo che resta intatto.
@@ -3049,4 +3050,394 @@ fn extract_measures_rooms_with_hpgaptol() {
         labels_in(&load_dwg(&paths[0]), LAYER_LOCALI),
         ["A\\PS = 12,00 m²"]
     );
+}
+
+// -------------------------------------------------------------- AL_ALTEZZA
+
+/// Spec parte 2, §5.1: `AL_ALTEZZA L` scrive la predefinita del livello nel
+/// record, in un passo di annullamento a sé, e ripete l'altezza in metri.
+#[test]
+fn altezza_livello_saves_default_and_echoes_metres() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let before = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_ALTEZZA L 2.70");
+
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        Some(2.7),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains("altezza 2,70 m"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps + 1, "un passo di annullamento");
+    assert_eq!(active_command(&app), None);
+    assert_eq!(doc(&app).header.insertion_units, 6);
+    assert_eq!(rilievo_snapshot(&app), before, "il rilievo non si tocca");
+
+    // Lo stesso valore di nuovo: nessun passo vuoto.
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    undo(&mut app);
+    assert_eq!(record::read(doc(&app)).default_height, None);
+
+    // Riga intera data a `dispatch_command`: la virgola decimale arriva intera.
+    dispatch_line(&mut app, "AL_ALTEZZA L 3,20");
+    assert_eq!(record::read(doc(&app)).default_height, Some(3.2));
+    assert!(
+        history(&app).contains("altezza 3,20 m"),
+        "storia: {}",
+        history(&app)
+    );
+}
+
+/// Caso J (spec parte 2, §3 e §7): l'altezza si digita in unità del disegno.
+/// In centimetri «270» è 2,70 m; «2.7» è 2,7 cm, con l'avviso di intervallo e
+/// il valore scritto lo stesso (un avviso, non un blocco).
+#[test]
+fn altezza_livello_in_cm_echoes_and_warns() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Centimetri), 5);
+    let warning = "fuori dall'intervallo 0,50–10 m";
+
+    run(&mut app, "AL_ALTEZZA L 270");
+    let log = history(&app);
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        Some(270.0),
+        "storia: {log}"
+    );
+    assert!(log.contains("altezza 270 cm = 2,70 m"), "storia: {log}");
+    assert!(!log.contains(warning), "storia: {log}");
+
+    forget_history(&mut app);
+    run(&mut app, "AL_ALTEZZA L 2.7");
+    let log = history(&app);
+    assert!(log.contains("altezza 2,7 cm = 0,03 m"), "storia: {log}");
+    assert!(
+        log.contains(&Notice::AltezzaFuoriIntervallo { value_m: 0.027 }.text()),
+        "storia: {log}"
+    );
+    assert_eq!(record::read(doc(&app)).default_height, Some(2.7));
+    assert_eq!(doc(&app).header.insertion_units, 5, "INSUNITS non si scrive");
+
+    // Dalla riga di comando, come la scrive Mauro: il prompt dice l'unità e
+    // «275,5» va al comando prima che il runner lo prenda per un punto.
+    run(&mut app, "AL_ALTEZZA");
+    answer(&mut app, "L");
+    assert!(
+        history(&app).contains("Altezza predefinita del livello (cm):"),
+        "storia: {}",
+        history(&app)
+    );
+    let _ = app.update(Message::CommandInput("275,5".to_string()));
+    let task = app.update(Message::CommandSubmit);
+    app.drive_headless_task(task).expect("nessun dialogo");
+    let i = app.active_tab;
+    app.finish_pending_history(i);
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        Some(275.5),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains("altezza 275,5 cm = "),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(active_command(&app), None);
+}
+
+/// `AL_ALTEZZA S` scrive l'altezza su zone e locali selezionati in un solo
+/// passo di annullamento: di un locale di fatto basta una parte, contorno e
+/// testo cambiano insieme. `AL_ALTEZZA R` la toglie. Solo l'XDATA cambia: il
+/// rilievo, la geometria e il testo dei locali restano.
+#[test]
+fn altezza_selection_writes_zones_and_rooms_in_one_step() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_DEMOLISCI 4.05,0 4.05,3 N");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let zones = zones_in(doc(&app));
+    assert_eq!(zones.len(), 1, "storia: {}", history(&app));
+    let zone = zones[0].handle;
+    let ((outline, _), (text, _)) = room_parts(&app);
+    let before = rilievo_snapshot(&app);
+    let zone_before = entity_of(&app, zone);
+    let outline_before = entity_of(&app, outline);
+    let text_before = entity_of(&app, text);
+    let room_heights = |app: &OpenCADStudio| -> Vec<(RoomPart, Option<f64>)> {
+        rooms_in(doc(app))
+            .into_iter()
+            .map(|(_, room, part)| (part, room.height))
+            .collect()
+    };
+
+    // Senza selezione: un errore e nessun passo.
+    select(&mut app, &[]);
+    let steps = undo_steps(&app);
+    dispatch_line(&mut app, "AL_ALTEZZA S 3");
+    assert_eq!(
+        app.command_line.last_error.as_deref(),
+        Some("AL_ALTEZZA: nessun oggetto selezionato.")
+    );
+    assert_eq!(undo_steps(&app), steps);
+
+    // La zona e il solo contorno del locale.
+    select(&mut app, &[zone, outline]);
+    forget_history(&mut app);
+    run(&mut app, "AL_ALTEZZA S 3.00");
+
+    assert_eq!(
+        zone_of(&app, zone).height,
+        Some(3.0),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(
+        room_heights(&app),
+        [
+            (RoomPart::Contorno, Some(3.0)),
+            (RoomPart::Testo, Some(3.0))
+        ]
+    );
+    assert!(
+        history(&app).contains("1 zone e 1 locali"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps + 1, "un solo passo");
+    assert_eq!(rilievo_snapshot(&app), before, "il rilievo non si tocca");
+    let hatch = entity_of(&app, zone);
+    assert_eq!(hatch.common().layer, LAYER_DEMOLIZIONI);
+    assert_eq!(hatch.common().color, Color::from_index(ACI_GIALLO));
+    assert_eq!(mtext(&entity_of(&app, text)).value, "A\\PS = 12,00 m²");
+    assert_eq!(
+        polyline(&entity_of(&app, outline)).vertices,
+        polyline(&outline_before).vertices
+    );
+
+    // Un annullamento riporta tutto com'era.
+    undo(&mut app);
+    assert_eq!(entity_of(&app, zone), zone_before);
+    assert_eq!(entity_of(&app, outline), outline_before);
+    assert_eq!(entity_of(&app, text), text_before);
+
+    // Di nuovo, poi `R` dal solo testo: tutto torna senza altezza.
+    select(&mut app, &[zone, outline]);
+    run(&mut app, "AL_ALTEZZA S 3.00");
+    select(&mut app, &[zone, text]);
+    let steps = undo_steps(&app);
+    run(&mut app, "AL_ALTEZZA R");
+    assert_eq!(zone_of(&app, zone).height, None, "storia: {}", history(&app));
+    assert_eq!(
+        room_heights(&app),
+        [(RoomPart::Contorno, None), (RoomPart::Testo, None)]
+    );
+    assert_eq!(undo_steps(&app), steps + 1, "un solo passo");
+    assert_eq!(rilievo_snapshot(&app), before);
+
+    // Niente da togliere: nessun passo.
+    run(&mut app, "AL_ALTEZZA R");
+    assert_eq!(undo_steps(&app), steps + 1);
+}
+
+/// Valori ≤ 0, non numerici o con argomenti in più: un errore, il record e i
+/// passi di annullamento restano com'erano.
+#[test]
+fn altezza_rejects_bad_values() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    let rec = record::read(doc(&app));
+    assert_eq!(rec.default_height, Some(2.7), "storia: {}", history(&app));
+    let steps = undo_steps(&app);
+
+    for line in [
+        "AL_ALTEZZA L -1",
+        "AL_ALTEZZA L abc",
+        "AL_ALTEZZA L 0",
+        "AL_ALTEZZA L 1 2",
+        "AL_ALTEZZA L NaN",
+        "AL_ALTEZZA L inf",
+        "AL_ALTEZZA L",
+        "AL_ALTEZZA S",
+        "AL_ALTEZZA S 0,0",
+        "AL_ALTEZZA R 2",
+        "AL_ALTEZZA X",
+    ] {
+        forget_history(&mut app);
+        let revision = app.command_line.error_revision;
+        dispatch_line(&mut app, line);
+        assert_ne!(
+            app.command_line.error_revision,
+            revision,
+            "{line}: un messaggio d'errore, storia: {}",
+            history(&app)
+        );
+        assert!(
+            app.command_line
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("AL_ALTEZZA:")),
+            "{line}: {:?}",
+            app.command_line.last_error
+        );
+        assert_eq!(record::read(doc(&app)), rec, "{line}: record invariato");
+        assert_eq!(undo_steps(&app), steps, "{line}: nessun passo");
+        assert_eq!(active_command(&app), None, "{line}: nessuna domanda");
+    }
+
+    // Anche dal prompt, come da script.
+    forget_history(&mut app);
+    run(&mut app, "AL_ALTEZZA L abc");
+    assert!(
+        history(&app).contains("AL_ALTEZZA: valore non valido"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(record::read(doc(&app)), rec);
+    assert_eq!(undo_steps(&app), steps);
+}
+
+/// Con `INSUNITS` = 0 e nessun record l'altezza non si legge in unità
+/// presunte: `AL_ALTEZZA` chiede l'unità e riparte (come `AL_DEMOLISCI` in
+/// `unit_is_asked_and_insunits_untouched`); `INSUNITS` non si scrive mai.
+#[test]
+fn altezza_asks_the_unit_when_insunits_is_zero() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Centimetri), 0);
+
+    run(&mut app, "AL_ALTEZZA");
+    assert_eq!(active_command(&app), Some("AL_UNITA"));
+    assert!(
+        history(&app).contains(
+            "Unità del disegno non specificata (INSUNITS = 0). [Millimetri/Centimetri/Metri]:"
+        ),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(record::read(doc(&app)), record::ProjectRecord::default());
+
+    answer(&mut app, "CM");
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Centimetri));
+    assert_eq!(
+        doc(&app).header.insertion_units,
+        0,
+        "INSUNITS non si scrive mai"
+    );
+    assert_eq!(
+        active_command(&app),
+        Some("AL_ALTEZZA"),
+        "AL_ALTEZZA riparte"
+    );
+    assert_eq!(app.bim_pending, None);
+
+    answer(&mut app, "L");
+    answer(&mut app, "270");
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        Some(270.0),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains("altezza 270 cm = 2,70 m"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(active_command(&app), None);
+
+    // Altezza e unità: due passi di annullamento.
+    undo(&mut app);
+    assert_eq!(record::read(doc(&app)).default_height, None);
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Centimetri));
+    undo(&mut app);
+    assert_eq!(record::read(doc(&app)).unit, None);
+    assert_eq!(doc(&app).header.insertion_units, 0);
+
+    // La riga intera: prima l'unità, poi il comando riparte con il suo valore.
+    dispatch_line(&mut app, "AL_ALTEZZA L 2.70");
+    assert_eq!(active_command(&app), Some("AL_UNITA"));
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        None,
+        "nessun valore in unità presunte"
+    );
+    answer(&mut app, "M");
+    assert_eq!(record::read(doc(&app)).default_height, Some(2.7));
+    assert!(
+        history(&app).contains("altezza 2,70 m"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(doc(&app).header.insertion_units, 0);
+
+    // Uno script risponde all'unità nella stessa riga.
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Millimetri), 0);
+    run(&mut app, "AL_ALTEZZA MM L 2700");
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Millimetri));
+    assert_eq!(
+        record::read(doc(&app)).default_height,
+        Some(2700.0),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains("altezza 2700 mm = 2,70 m"),
+        "storia: {}",
+        history(&app)
+    );
+}
+
+/// R21 anche per `AL_ALTEZZA`: in un layout senza finestra attiva si rifiuta,
+/// senza domanda dell'unità, record né passi di annullamento.
+#[test]
+fn altezza_refuses_paper_space() {
+    for (command, insunits) in [
+        ("AL_ALTEZZA L 2.70", 6),
+        ("AL_ALTEZZA", 0),
+        ("AL_ALTEZZA S 3.00", 6),
+        ("AL_ALTEZZA R", 6),
+    ] {
+        let mut app = fresh_app();
+        load(
+            &mut app,
+            case_a(Form::Continua, DrawingUnit::Metri),
+            insunits,
+        );
+        let i = app.active_tab;
+        app.tabs[i].scene.set_current_layout("Layout1".to_string());
+        assert!(app.tabs[i].scene.active_viewport.is_none(), "spazio carta");
+        let before = rilievo_snapshot(&app);
+        let steps = undo_steps(&app);
+
+        run(&mut app, command);
+
+        assert!(
+            history(&app).contains(
+                "AL_ALTEZZA: i comandi di ristrutturazione lavorano solo nello spazio modello."
+            ),
+            "{command}: {}",
+            history(&app)
+        );
+        assert_eq!(active_command(&app), None, "{command}: nessuna domanda");
+        assert_eq!(
+            record::read(doc(&app)),
+            record::ProjectRecord::default(),
+            "{command}: nessun record"
+        );
+        assert_eq!(undo_steps(&app), steps, "{command}: nessun passo");
+        assert_eq!(app.bim_pending, None);
+        assert_eq!(rilievo_snapshot(&app), before);
+    }
 }

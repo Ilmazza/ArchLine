@@ -331,6 +331,46 @@ pub fn rooms_in(doc: &Document) -> Vec<(Handle, Room, RoomPart)> {
         .collect()
 }
 
+/// Lo stesso locale: stessa fase e seme entro `tol`. Il contorno e il testo
+/// di un locale di fatto portano lo stesso record, quindi lo stesso seme.
+pub fn same_room(a: &Room, b: &Room, tol: f64) -> bool {
+    a.phase == b.phase && (a.seed[0] - b.seed[0]).hypot(a.seed[1] - b.seed[1]) <= tol
+}
+
+/// Le parti di locale che `AL_ALTEZZA` riscrive (spec parte 2, §5.1): per
+/// ogni parte di locale tra `selected`, tutte le parti dello stesso locale
+/// ([`same_room`]), ognuna col suo `Room` e l'altezza `height` (in unità del
+/// disegno; `None` la toglie). Così basta selezionare il contorno o il testo
+/// di un locale di fatto perché cambino tutti e due. Senza doppioni, in ordine
+/// di disegno; gli handle che non sono parti di locale non contano. Restano
+/// anche le parti che hanno già quell'altezza: scartarle è di chi scrive.
+pub fn room_height_edits(
+    doc: &Document,
+    selected: &[Handle],
+    height: Option<f64>,
+    tol: f64,
+) -> Vec<(Handle, Room, RoomPart)> {
+    let all = rooms_in(doc);
+    let picked: Vec<&Room> = all
+        .iter()
+        .filter(|(handle, _, _)| selected.contains(handle))
+        .map(|(_, room, _)| room)
+        .collect();
+    all.iter()
+        .filter(|(_, room, _)| picked.iter().any(|seen| same_room(seen, room, tol)))
+        .map(|(handle, room, part)| {
+            (
+                *handle,
+                Room {
+                    height,
+                    ..room.clone()
+                },
+                *part,
+            )
+        })
+        .collect()
+}
+
 /// Il testo di un locale: `A\PS = 12,00 m²` (`\P` è l'a capo dell'MTEXT),
 /// con ` (da confermare)` dopo il nome quando `confirm`. Nel nome barre e
 /// graffe hanno la barra davanti, così restano testo.
@@ -2446,6 +2486,81 @@ mod tests {
             .read()
             .unwrap();
         assert_eq!(strip(rooms_in(&read)), want, "DWG (numero vuoto compreso)");
+    }
+
+    /// `AL_ALTEZZA` (spec parte 2, §5.1): di un locale di fatto basta una
+    /// parte selezionata, e contorno e testo cambiano insieme; un locale è la
+    /// fase più il seme, quindi un seme di progetto nello stesso punto resta
+    /// fuori. Niente doppioni, in ordine di disegno.
+    #[test]
+    fn height_edits_cover_both_parts_of_a_fatto_room() {
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let b = computed(&faces, &sources, "B", [6.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts = |doc: &mut Document, room: &Computed| -> Vec<Handle> {
+            room_entities(room, Phase::Fatto, &sources, 0.25, TOL)
+                .into_iter()
+                .map(|entity| doc.add_entity(entity).unwrap())
+                .collect()
+        };
+        let a_parts = parts(&mut doc, &a);
+        let b_parts = parts(&mut doc, &b);
+        let soggiorno = progetto("Soggiorno", [2.0, 1.5]);
+        let seed = doc.add_entity(seed_entity(&soggiorno, 0.25)).unwrap();
+        let line = doc.add_entity(wall_line([0.0, 5.0], [1.0, 5.0])).unwrap();
+
+        let tall_a = Room {
+            height: Some(3.0),
+            ..fatto("A", [2.0, 1.5])
+        };
+        let want = vec![
+            (a_parts[0], tall_a.clone(), RoomPart::Contorno),
+            (a_parts[1], tall_a, RoomPart::Testo),
+        ];
+        // Il solo testo basta.
+        assert_eq!(room_height_edits(&doc, &[a_parts[1]], Some(3.0), TOL), want);
+        // Due parti dello stesso locale, una ripetuta, e una linea: una volta sola.
+        assert_eq!(
+            room_height_edits(
+                &doc,
+                &[a_parts[0], a_parts[1], a_parts[0], line],
+                Some(3.0),
+                TOL
+            ),
+            want
+        );
+        // Togliere: le stesse parti, senza altezza.
+        let removed = room_height_edits(&doc, &[a_parts[0]], None, TOL);
+        assert_eq!(
+            removed
+                .iter()
+                .map(|(handle, room, _)| (*handle, room.height))
+                .collect::<Vec<_>>(),
+            [(a_parts[0], None), (a_parts[1], None)]
+        );
+        // Il seme di progetto nello stesso punto di A è un altro locale.
+        assert_eq!(
+            room_height_edits(&doc, &[seed], Some(2.7), TOL),
+            vec![(
+                seed,
+                Room {
+                    height: Some(2.7),
+                    ..soggiorno
+                },
+                RoomPart::Seme
+            )]
+        );
+        // Due locali: quattro parti, in ordine di disegno.
+        let both = room_height_edits(&doc, &[b_parts[1], a_parts[0]], Some(3.0), TOL);
+        assert_eq!(
+            both.iter().map(|(handle, ..)| *handle).collect::<Vec<_>>(),
+            [a_parts[0], a_parts[1], b_parts[0], b_parts[1]]
+        );
+        // Nessuna parte di locale selezionata: niente.
+        assert!(room_height_edits(&doc, &[line], Some(3.0), TOL).is_empty());
+        assert!(room_height_edits(&doc, &[], Some(3.0), TOL).is_empty());
     }
 
     // -----------------------------------------------------------------------

@@ -8,7 +8,8 @@
 //! [`ZoneCommand`] e di [`RoomCommand`], il cambio di stato delle zone
 //! esistenti (`AL_STATO`), il ricalcolo dei locali di fatto (`AL_AGGIORNA`) e
 //! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
-//! sta in `crate::bim`.
+//! sta in `crate::bim`. I comandi della parte 2 (`AL_ALTEZZA`) stanno in
+//! `bim_abaco.rs` e passano da `dispatch_bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
@@ -43,6 +44,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_AGGIORNA",
         "AL_ESTRAI",
         "AL_UNITA",
+        "AL_ALTEZZA",
     ]
 });
 
@@ -82,6 +84,8 @@ impl OpenCADStudio {
             "AL_LOCALE" => Some(self.bim_start_room(i)),
             "AL_AGGIORNA" => Some(self.bim_update_rooms(i)),
             "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
+            // Parte 2: in `bim_abaco.rs`.
+            "AL_ALTEZZA" => Some(self.bim_altezza(i, cmd)),
             _ => None,
         }
     }
@@ -90,7 +94,7 @@ impl OpenCADStudio {
     /// Altrove (spazio carta, editor di blocchi) lo dicono e non fanno nulla:
     /// né domanda dell'unità, né layer, né passi di annullamento. Va chiamato
     /// per primo.
-    fn bim_in_model_space(&mut self, i: usize, cmd: &str) -> bool {
+    pub(super) fn bim_in_model_space(&mut self, i: usize, cmd: &str) -> bool {
         if commits_to_model_space(&self.tabs[i].scene) {
             return true;
         }
@@ -103,7 +107,7 @@ impl OpenCADStudio {
     /// L'unità del disegno di `i`. Se manca la chiede (`AL_UNITA`) e ricorda
     /// `cmd` da rilanciare dopo la risposta; se non è supportata lo dice. In
     /// entrambi i casi `None`: il comando non parte.
-    fn bim_unit_or_ask(&mut self, i: usize, cmd: &str) -> Option<DrawingUnit> {
+    pub(super) fn bim_unit_or_ask(&mut self, i: usize, cmd: &str) -> Option<DrawingUnit> {
         match units::resolve(&self.tabs[i].scene.document) {
             UnitLookup::Known(unit) => Some(unit),
             UnitLookup::Unsupported(code) => {
@@ -945,7 +949,7 @@ fn stato_value(what: &str, args: &[&str]) -> Result<f64, String> {
 
 /// Un numero maggiore di zero, con la virgola o il punto come separatore
 /// decimale («3,20», «3.20»). Niente separatore delle migliaia.
-fn parse_positive(text: &str) -> Option<f64> {
+pub(super) fn parse_positive(text: &str) -> Option<f64> {
     let value: f64 = text.trim().replace(',', ".").parse().ok()?;
     (value > 0.0 && crate::entities::common::typed_value_in_range(value)).then_some(value)
 }
