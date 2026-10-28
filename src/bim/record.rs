@@ -2,7 +2,9 @@
 //! le impostazioni di ArchLine (unità scelta, layer dei muri nuovi).
 //!
 //! Voci: 90 (Int32) versione; 70 (Int16) codice INSUNITS dell'unità, 0 =
-//! nessuna; 8 (String) layer dei muri nuovi, "" = nessuno.
+//! nessuna; 8 (String) layer dei muri nuovi, "" = nessuno; 40 (Double)
+//! altezza di default dei locali in unità del disegno, scritta solo se c'è.
+//! La lettura va per codice e salta ciò che non conosce.
 //!
 //! Creazione e aggiornamento seguono `HostSession::create_xrecord` /
 //! `update_xrecord` (`src/app/plugin_host.rs`). Niente undo qui: lo apre il
@@ -18,6 +20,7 @@ const VERSION: i32 = 1;
 const CODE_VERSION: i32 = 90;
 const CODE_UNIT: i32 = 70;
 const CODE_NEW_WALLS_LAYER: i32 = 8;
+const CODE_DEFAULT_HEIGHT: i32 = 40;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProjectRecord {
@@ -25,6 +28,8 @@ pub struct ProjectRecord {
     pub unit: Option<DrawingUnit>,
     /// Layer in cui vanno i muri nuovi.
     pub new_walls_layer: Option<String>,
+    /// Altezza di default dei locali, in unità del disegno (parte 2).
+    pub default_height: Option<f64>,
 }
 
 /// Il record del disegno; senza record (o illeggibile) i valori sono vuoti.
@@ -42,6 +47,9 @@ pub fn read(doc: &Document) -> ProjectRecord {
             (CODE_NEW_WALLS_LAYER, XRecordValue::String(name)) => {
                 rec.new_walls_layer = Some(name.clone()).filter(|n| !n.is_empty());
             }
+            (CODE_DEFAULT_HEIGHT, XRecordValue::Double(height)) => {
+                rec.default_height = Some(*height).filter(|h| h.is_finite() && *h > 0.0);
+            }
             _ => {}
         }
     }
@@ -55,7 +63,7 @@ pub fn write(doc: &mut Document, rec: &ProjectRecord) {
     if !matches!(doc.objects.get(&root), Some(ObjectType::Dictionary(_))) {
         return;
     }
-    let entries = vec![
+    let mut entries = vec![
         XRecordEntry::int32(CODE_VERSION, VERSION),
         XRecordEntry::int16(CODE_UNIT, rec.unit.map_or(0, DrawingUnit::insunits)),
         XRecordEntry::string(
@@ -63,6 +71,9 @@ pub fn write(doc: &mut Document, rec: &ProjectRecord) {
             rec.new_walls_layer.clone().unwrap_or_default(),
         ),
     ];
+    if let Some(height) = rec.default_height {
+        entries.push(XRecordEntry::double(CODE_DEFAULT_HEIGHT, height));
+    }
 
     if let Some(handle) = record_handle(doc) {
         if let Some(ObjectType::XRecord(xrecord)) = doc.objects.get_mut(&handle) {
@@ -119,6 +130,7 @@ mod tests {
             &ProjectRecord {
                 unit: Some(DrawingUnit::Metri),
                 new_walls_layer: Some("MURI".into()),
+                default_height: None,
             },
         );
         write(
@@ -126,6 +138,7 @@ mod tests {
             &ProjectRecord {
                 unit: Some(DrawingUnit::Centimetri),
                 new_walls_layer: Some("MURI".into()),
+                default_height: None,
             },
         );
         assert_eq!(
@@ -133,6 +146,55 @@ mod tests {
             ProjectRecord {
                 unit: Some(DrawingUnit::Centimetri),
                 new_walls_layer: Some("MURI".into()),
+                default_height: None,
+            }
+        );
+    }
+
+    #[test]
+    fn record_roundtrips_default_height() {
+        let mut doc = codec::Document::new();
+        let rec = ProjectRecord {
+            unit: Some(DrawingUnit::Metri),
+            new_walls_layer: None,
+            default_height: Some(2.7),
+        };
+        write(&mut doc, &rec);
+        assert_eq!(read(&doc), rec);
+        // Un record riscritto senza altezza la perde: si scrive solo ciò che c'è.
+        write(
+            &mut doc,
+            &ProjectRecord {
+                default_height: None,
+                ..rec
+            },
+        );
+        assert_eq!(read(&doc).default_height, None);
+    }
+
+    #[test]
+    fn record_without_height_entry_still_reads() {
+        let mut doc = codec::Document::new();
+        let root = doc.header.named_objects_dict_handle;
+        let handle = doc.allocate_handle();
+        let mut xrecord = XRecord::named(RECORD_PROGETTO);
+        xrecord.handle = handle;
+        xrecord.owner = root;
+        xrecord.entries = vec![
+            XRecordEntry::int32(CODE_VERSION, VERSION),
+            XRecordEntry::int16(CODE_UNIT, DrawingUnit::Centimetri.insunits()),
+            XRecordEntry::string(CODE_NEW_WALLS_LAYER, "MURI".to_string()),
+        ];
+        doc.objects.insert(handle, ObjectType::XRecord(xrecord));
+        if let Some(ObjectType::Dictionary(dictionary)) = doc.objects.get_mut(&root) {
+            dictionary.add_entry(RECORD_PROGETTO, handle);
+        }
+        assert_eq!(
+            read(&doc),
+            ProjectRecord {
+                unit: Some(DrawingUnit::Centimetri),
+                new_walls_layer: Some("MURI".into()),
+                default_height: None,
             }
         );
     }

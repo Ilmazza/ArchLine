@@ -284,6 +284,7 @@ impl RoomCommand {
                     name,
                     number,
                     seed,
+                    height: None,
                 },
                 self.snap.text_height,
             )],
@@ -712,6 +713,7 @@ mod tests {
             name: "A".into(),
             number: String::new(),
             seed: [2.0, 1.5],
+            height: None,
         };
         for (entity, part) in entities.iter().zip([RoomPart::Contorno, RoomPart::Testo]) {
             let rec = entity
@@ -748,6 +750,7 @@ mod tests {
             name: "Soggiorno".into(),
             number: "12".into(),
             seed: [3.0, 1.0],
+            height: None,
         };
         assert_eq!(decode(rec), Some((want, RoomPart::Seme)));
     }
@@ -892,6 +895,7 @@ mod tests {
             name: "B".into(),
             number: String::new(),
             seed: [6.0, 1.5],
+            height: None,
         };
         assert_eq!(snap.fatto_rooms, [b_room], "uno per locale");
 

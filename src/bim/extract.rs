@@ -1452,6 +1452,7 @@ mod tests {
             &ProjectRecord {
                 unit: None,
                 new_walls_layer: Some(LAYER_MURI.into()),
+                default_height: None,
             },
         );
         doc
@@ -3408,6 +3409,7 @@ mod tests {
             name: name.into(),
             number: String::new(),
             seed,
+            height: None,
         };
         doc.add_entity(seed_entity(&room, 2.5)).unwrap()
     }

@@ -118,6 +118,7 @@ const KEY_NAME: &str = "nome";
 const KEY_NUMBER: &str = "numero";
 const KEY_POINT: &str = "punto";
 const KEY_ORIGIN: &str = "origine";
+const KEY_HEIGHT: &str = "altezza";
 /// L'unica origine di un locale nel primo giro.
 const ORIGIN_POINT: &str = "punto-interno";
 
@@ -228,6 +229,9 @@ pub struct Room {
     pub number: String,
     /// Il punto interno da cui è nato, in unità del disegno.
     pub seed: [f64; 2],
+    /// Altezza propria del locale, in unità del disegno; `None` = nessuna
+    /// (vale quella di default del progetto, parte 2).
+    pub height: Option<f64>,
 }
 
 fn key(text: &str) -> XDataValue {
@@ -236,7 +240,7 @@ fn key(text: &str) -> XDataValue {
 
 /// La sequenza dei valori del record `ARCHLINE_LOCALE`.
 pub fn encode(room: &Room, part: RoomPart) -> Vec<XDataValue> {
-    vec![
+    let mut values = vec![
         XDataValue::Integer16(VERSION),
         key(KEY_PHASE),
         key(room.phase.key()),
@@ -250,7 +254,12 @@ pub fn encode(room: &Room, part: RoomPart) -> Vec<XDataValue> {
         XDataValue::Point3D(Vector3::new(room.seed[0], room.seed[1], 0.0)),
         key(KEY_ORIGIN),
         key(ORIGIN_POINT),
-    ]
+    ];
+    if let Some(height) = room.height {
+        values.push(key(KEY_HEIGHT));
+        values.push(XDataValue::Real(height));
+    }
+    values
 }
 
 /// Legge il record per chiave, saltando ciò che non conosce. `None` senza una
@@ -258,6 +267,7 @@ pub fn encode(room: &Room, part: RoomPart) -> Vec<XDataValue> {
 pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
     let (mut phase, mut part, mut seed) = (None, None, None);
     let (mut name, mut number) = (String::new(), String::new());
+    let mut height = None;
     let values = &rec.values;
     let mut i = 0;
     while i < values.len() {
@@ -286,6 +296,10 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
                 seed = Some([p.x, p.y]);
                 2
             }
+            (KEY_HEIGHT, Some(XDataValue::Real(h))) => {
+                height = Some(*h).filter(|h| h.is_finite() && *h > 0.0);
+                2
+            }
             _ => 1,
         };
         i += used;
@@ -296,6 +310,7 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
             name,
             number,
             seed: seed?,
+            height,
         },
         part?,
     ))
@@ -503,6 +518,7 @@ pub fn room_entities(
         name: c.name.clone(),
         number: c.number.clone(),
         seed: c.seed,
+        height: None,
     };
     let traced = if c.exact {
         boundary_polyline_entities(
@@ -1266,6 +1282,7 @@ mod tests {
             name: name.into(),
             number: String::new(),
             seed,
+            height: None,
         }
     }
 
@@ -1485,6 +1502,7 @@ mod tests {
             name: "A".into(),
             number: "1".into(),
             seed: [2.0, 1.5],
+            height: None,
         };
         assert_eq!(
             encode(&a, RoomPart::Contorno),
@@ -1523,6 +1541,7 @@ mod tests {
                         name: name.into(),
                         number: number.into(),
                         seed: [-1250.5, 4_650_000.25],
+                        height: None,
                     };
                     assert_eq!(
                         decode(&record(encode(&room, part))),
@@ -1531,6 +1550,44 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn room_xdata_roundtrips_height() {
+        let room = Room {
+            height: Some(3.0),
+            ..fatto("A", [2.0, 1.5])
+        };
+        let values = encode(&room, RoomPart::Testo);
+        assert_eq!(
+            values[values.len() - 2..],
+            [text("altezza"), XDataValue::Real(3.0)]
+        );
+        assert_eq!(
+            decode(&record(values)),
+            Some((room, RoomPart::Testo)),
+            "l'altezza torna uguale"
+        );
+    }
+
+    #[test]
+    fn room_xdata_without_height_key_decodes_none() {
+        let room = fatto("A", [2.0, 1.5]);
+        let values = encode(&room, RoomPart::Contorno);
+        assert!(!values.contains(&text("altezza")), "None non si scrive");
+        let (back, _) = decode(&record(values)).unwrap();
+        assert_eq!(back.height, None);
+    }
+
+    #[test]
+    fn room_xdata_ignores_non_positive_height() {
+        for bad in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            let mut values = encode(&fatto("A", [2.0, 1.5]), RoomPart::Testo);
+            values.push(text("altezza"));
+            values.push(XDataValue::Real(bad));
+            let (back, _) = decode(&record(values)).unwrap();
+            assert_eq!(back.height, None, "altezza {bad}");
         }
     }
 
@@ -2178,6 +2235,7 @@ mod tests {
             name: "A".into(),
             number: "1".into(),
             seed: [2.0, 1.5],
+            height: None,
         };
 
         let EntityType::LwPolyline(outline) = &entities[0] else {

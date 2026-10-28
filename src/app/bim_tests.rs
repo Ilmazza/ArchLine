@@ -2071,6 +2071,7 @@ fn locale_fatto_writes_outline_and_label() {
         name: "A".into(),
         number: String::new(),
         seed: [2.0, 1.5],
+        height: None,
     };
     let rooms = rooms_in(doc(&app));
     let parts: Vec<RoomPart> = rooms.iter().map(|(_, _, part)| *part).collect();
@@ -2119,6 +2120,7 @@ fn locale_progetto_stores_only_the_seed() {
         name: "Soggiorno".into(),
         number: String::new(),
         seed: [3.0, 1.0],
+        height: None,
     };
     assert_eq!(
         rooms_in(doc(&app)),
