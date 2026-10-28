@@ -1390,6 +1390,7 @@ mod tests {
                 varco: false,
             },
             rings,
+            curved: false,
         }
     }
 

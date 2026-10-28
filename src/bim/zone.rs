@@ -144,6 +144,9 @@ pub struct ZoneGeom {
     /// `rings[0]` è il contorno esterno, i successivi sono buchi. Anelli chiusi
     /// senza ripetere il primo punto in fondo; i lati curvi sono approssimati.
     pub rings: Vec<Vec<[f64; 2]>>,
+    /// Un percorso della campitura ha un lato curvo (arco, ellisse, spline,
+    /// polilinea con bulge): gli anelli lo approssimano a corde.
+    pub curved: bool,
 }
 
 fn key(text: &str) -> XDataValue {
@@ -317,6 +320,18 @@ pub fn read_zone(handle: Handle, entity: &EntityType) -> Option<ZoneGeom> {
         handle,
         zone,
         rings,
+        curved: hatch.paths.iter().any(has_curved_edge),
+    })
+}
+
+/// Il percorso ha un lato che gli anelli approssimano a corde.
+fn has_curved_edge(path: &BoundaryPath) -> bool {
+    path.edges.iter().any(|edge| match edge {
+        BoundaryEdge::Line(_) => false,
+        BoundaryEdge::Polyline(polyline) => polyline.has_bulge(),
+        BoundaryEdge::CircularArc(_) | BoundaryEdge::EllipticArc(_) | BoundaryEdge::Spline(_) => {
+            true
+        }
     })
 }
 
@@ -622,6 +637,56 @@ mod tests {
         let entity = zone_hatch(&z, &[outer.clone(), hole.clone()]);
         let zg = read_zone(codec::Handle::new(1), &entity).unwrap();
         assert_eq!(zg.rings, vec![outer, hole]);
+    }
+
+    /// Ruling I: un lato curvo nei percorsi (bulge, arco) segna la zona come
+    /// approssimata a corde; i lati dritti no.
+    #[test]
+    fn read_zone_marks_curved_outlines() {
+        use codec::entities::hatch::{CircularArcEdge, LineEdge};
+        use std::f64::consts::FRAC_PI_2;
+        let z = plain(ZoneState::Demolito, ZoneOrigin::Rettangolo);
+        let straight = read_zone(codec::Handle::new(1), &zone_hatch(&z, &[rect()])).unwrap();
+        assert!(!straight.curved);
+
+        // Polilinea con un bulge sul lato verso +x.
+        let vertices = rect().iter().map(|p| Vector2::new(p[0], p[1])).collect();
+        let mut bulged = PolylineEdge::new(vertices, true);
+        bulged.vertices[1].z = 0.05;
+        let mut path = BoundaryPath::external();
+        path.add_edge(BoundaryEdge::Polyline(bulged));
+        let zg = read_zone(
+            codec::Handle::new(2),
+            &zone_hatch_from_paths(&z, vec![path]),
+        )
+        .unwrap();
+        assert!(zg.curved);
+
+        // Lati dritti e un arco: una «D».
+        let line = |a: [f64; 2], b: [f64; 2]| {
+            BoundaryEdge::Line(LineEdge {
+                start: Vector2::new(a[0], a[1]),
+                end: Vector2::new(b[0], b[1]),
+            })
+        };
+        let mut path = BoundaryPath::external();
+        path.add_edge(line([0.0, 0.0], [2.0, 0.0]));
+        path.add_edge(BoundaryEdge::CircularArc(CircularArcEdge {
+            center: Vector2::new(2.0, 0.5),
+            radius: 0.5,
+            start_angle: -FRAC_PI_2,
+            end_angle: FRAC_PI_2,
+            counter_clockwise: true,
+        }));
+        path.add_edge(line([2.0, 1.0], [0.0, 1.0]));
+        path.add_edge(line([0.0, 1.0], [0.0, 0.0]));
+        let zg = read_zone(
+            codec::Handle::new(3),
+            &zone_hatch_from_paths(&z, vec![path]),
+        )
+        .unwrap();
+        assert!(zg.curved);
+        assert!(zg.rings[0].len() > 4, "l'arco è diviso in corde");
     }
 
     #[test]

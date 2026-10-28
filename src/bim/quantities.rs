@@ -13,6 +13,10 @@
 //!   secondario = area × H;
 //! - una zona degenere (area nulla, asse di lunghezza nulla, coordinate non
 //!   finite) dà una riga incompleta con la nota: mai una divisione per zero;
+//! - un contorno non semplice (anello a farfalla, contorni esterni staccati:
+//!   la triangolazione non dà l'area della formula del laccio) non dà
+//!   quantità (Ruling J); un contorno ad arco, misurato sulle corde, dà una
+//!   riga completa ma `approximate` (spec §4.2, Ruling I);
 //! - sovrapposizioni tra zone dello stesso stato (un varco è demolito): avviso
 //!   e nota sulle due righe solo se l'area comune supera il 25% della più
 //!   piccola. Angoli e incroci a T non si correggono e non avvisano.
@@ -28,10 +32,14 @@ use super::zone::{Zone, ZoneGeom, ZoneState};
 /// Oltre questa frazione dell'area della zona più piccola una sovrapposizione
 /// è sostanziale (spec §4.3, soglia scelta).
 const SUBSTANTIAL_OVERLAP: f64 = 0.25;
+/// Scarto relativo ammesso tra l'area dei triangoli e quella del laccio.
+const SIMPLE_OUTLINE: f64 = 1.0e-6;
 
 const NOTE_NO_AXIS: &str = "zona senza asse";
 const NOTE_NULL_AXIS: &str = "asse di lunghezza nulla";
 const NOTE_NULL_AREA: &str = "area in pianta nulla";
+const NOTE_NOT_SIMPLE: &str = "contorno non semplice";
+const NOTE_CURVED: &str = "contorno ad arco approssimato a corde";
 
 /// Il tipo di riga: un varco è una zona demolita con `varco` = sì.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,8 +87,11 @@ pub struct ZoneRow {
     pub volume_m3: Option<f64>,
     /// Nuova: lunghezza × H.
     pub surface_m2: Option<f64>,
+    /// Contorno curvo misurato sulle corde (stato «approssimata»): la riga
+    /// resta completa.
+    pub approximate: bool,
     /// Note di geometria e sovrapposizioni, separate da «; ». Il motivo di
-    /// un'altezza `n.d.` sta in `height.note`.
+    /// una riga incompleta, altezza compresa, lo dà [`ZoneRow::incomplete_reason`].
     pub note: Option<String>,
 }
 
@@ -97,6 +108,38 @@ impl ZoneRow {
     /// Solo le righe complete entrano nei totali e nel CSV.
     pub fn is_complete(&self) -> bool {
         self.main().is_some()
+    }
+
+    /// Perché la riga è incompleta (`None` se è completa): la nota e il
+    /// motivo dell'altezza, senza vuoti né doppioni. Se l'altezza manca senza
+    /// un motivo suo, «altezza n.d.» si aggiunge anche dopo una nota (una
+    /// demolizione senza asse ha comunque il volume); senza nulla da dire,
+    /// «quantità non calcolabile».
+    pub fn incomplete_reason(&self) -> Option<String> {
+        if self.is_complete() {
+            return None;
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        for text in [self.note.as_deref(), self.height.note.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+        {
+            if !text.is_empty() && !parts.contains(&text) {
+                parts.push(text);
+            }
+        }
+        let height_note = self.height.note.as_deref().map(str::trim);
+        if self.height.value_m.is_none()
+            && height_note.map_or(true, str::is_empty)
+            && !parts.contains(&"altezza n.d.")
+        {
+            parts.push("altezza n.d.");
+        }
+        if parts.is_empty() {
+            parts.push("quantità non calcolabile");
+        }
+        Some(parts.join("; "))
     }
 
     fn add_note(&mut self, text: &str) {
@@ -176,7 +219,9 @@ fn zone_row(
     let zone = &geom.zone;
     let per_metre = unit.per_metre();
     let raw_area = plan_area(&geom.rings);
-    let area = (raw_area.is_finite() && raw_area > tol * tol).then_some(raw_area);
+    let usable = raw_area.is_finite() && raw_area > tol * tol;
+    let simple = !usable || outline_is_simple(&geom.rings, raw_area);
+    let area = (usable && simple).then_some(raw_area);
     let length = zone
         .axis
         .map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1]))
@@ -234,17 +279,39 @@ fn zone_row(
         wall_area_m2,
         volume_m3,
         surface_m2,
+        approximate: geom.curved,
         note: None,
     };
-    if area.is_none() {
+    if !usable {
         row.add_note(NOTE_NULL_AREA);
+    } else if !simple {
+        row.add_note(NOTE_NOT_SIMPLE);
     }
     match (zone.axis, length) {
         (None, _) => row.add_note(NOTE_NO_AXIS),
         (Some(_), None) => row.add_note(NOTE_NULL_AXIS),
         (Some(_), Some(_)) => {}
     }
+    if geom.curved {
+        row.add_note(NOTE_CURVED);
+    }
     (row, area.unwrap_or(0.0), notice)
+}
+
+/// Il contorno è semplice: l'area dei triangoli di `triangulate_rings`
+/// (pari-dispari, anelli che si autointersecano scartati) è `area`, quella
+/// del laccio, entro `SIMPLE_OUTLINE`. Un anello a farfalla o due contorni
+/// esterni staccati (il secondo sottratto come un buco) danno due numeri
+/// diversi.
+fn outline_is_simple(rings: &[Vec<[f64; 2]>], area: f64) -> bool {
+    let Some(bounds) = rings.first().and_then(|outer| Bounds::of(outer)) else {
+        return false;
+    };
+    let filled: f64 = triangles(rings, bounds.min)
+        .iter()
+        .map(|(triangle, _)| signed_area(triangle))
+        .sum();
+    area > 0.0 && (filled - area).abs() <= SIMPLE_OUTLINE * area
 }
 
 /// Avviso e nota per ogni coppia di zone dello stesso stato con un'area
@@ -432,7 +499,9 @@ fn clipped_area(subject: &[[f64; 2]; 3], clipper: &[[f64; 2]; 3]) -> f64 {
 mod tests {
     use super::*;
     use crate::bim::height::HeightState;
-    use crate::bim::zone::{read_zone, zone_hatch, ZoneOrigin};
+    use crate::bim::zone::{read_zone, zone_hatch, zone_hatch_from_paths, ZoneOrigin};
+    use codec::entities::{BoundaryEdge, BoundaryPath, PolylineEdge};
+    use codec::Vector2;
     use DrawingUnit::{Centimetri, Metri};
 
     const EPS: f64 = 1e-9;
@@ -690,6 +759,7 @@ mod tests {
                 handle: Handle::new(1),
                 zone: flat.clone(),
                 rings: vec![flat_ring.clone()],
+                curved: false,
             },
             ZoneGeom {
                 handle: Handle::new(2),
@@ -698,6 +768,7 @@ mod tests {
                     ..flat.clone()
                 },
                 rings: vec![flat_ring.clone()],
+                curved: false,
             },
             ZoneGeom {
                 handle: Handle::new(3),
@@ -706,6 +777,7 @@ mod tests {
                     ..flat.clone()
                 },
                 rings: vec![flat_ring],
+                curved: false,
             },
             // Nessun anello, coordinate non finite.
             ZoneGeom {
@@ -715,6 +787,7 @@ mod tests {
                     ..flat.clone()
                 },
                 rings: vec![],
+                curved: false,
             },
             ZoneGeom {
                 handle: Handle::new(5),
@@ -724,6 +797,7 @@ mod tests {
                     ..flat.clone()
                 },
                 rings: vec![vec![[0.0, 0.0], [f64::NAN, 0.0], [1.0, 1.0], [0.0, 1.0]]],
+                curved: false,
             },
         ];
         for default in [None, Some(2.70)] {
@@ -869,6 +943,133 @@ mod tests {
         assert!(close(row.volume_m3, 0.81));
         assert!(close(row.wall_area_m2, 8.10));
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    /// Ruling I: un contorno ad arco è approssimato a corde (spec §4.2, stato
+    /// «approssimata»): la riga resta completa, con la nota.
+    #[test]
+    fn curved_zone_is_approximate_but_complete() {
+        let z = zone(ZoneState::Demolito, Some(([0.05, 0.0], [0.05, 3.0])));
+        let vertices = rect(0.0, 0.0, 0.1, 3.0)
+            .iter()
+            .map(|p| Vector2::new(p[0], p[1]))
+            .collect();
+        let mut edge = PolylineEdge::new(vertices, true);
+        edge.vertices[1].z = 0.05;
+        let mut path = BoundaryPath::external();
+        path.add_edge(BoundaryEdge::Polyline(edge));
+        let curved = read_zone(Handle::new(0x10), &zone_hatch_from_paths(&z, vec![path]))
+            .expect("zona leggibile");
+        assert!(curved.curved);
+        let (rows, _) = zone_rows(&[curved, tramezzo(0x11, None)], Some(2.70), Metri, tol());
+        assert!(rows[0].approximate);
+        assert!(rows[0].is_complete(), "{:?}", rows[0]);
+        assert_eq!(
+            rows[0].note.as_deref(),
+            Some("contorno ad arco approssimato a corde")
+        );
+        assert!(!rows[1].approximate);
+        assert_eq!(rows[1].note, None);
+
+        // La nota si aggiunge a quelle che ci sono già.
+        let bare = Zone { axis: None, ..z };
+        let mut zg = geom(0x12, bare, vec![rect(0.0, 0.0, 0.1, 3.0)]);
+        zg.curved = true;
+        let (rows, _) = zone_rows(&[zg], Some(2.70), Metri, tol());
+        assert_eq!(
+            rows[0].note.as_deref(),
+            Some("zona senza asse; contorno ad arco approssimato a corde")
+        );
+    }
+
+    /// Ruling J: un contorno non semplice non dà numeri dichiarati completi.
+    #[test]
+    fn non_simple_outline_has_no_quantity() {
+        let bare = |handle: u64, rings: Vec<Vec<[f64; 2]>>| ZoneGeom {
+            handle: Handle::new(handle),
+            zone: zone(ZoneState::Demolito, None),
+            rings,
+            curved: false,
+        };
+        // Farfalla asimmetrica: i lobi (8/3 e 2/3) si sottraggono nella
+        // formula del laccio, che dà 2,00.
+        let bow_tie = vec![vec![[0.0, 0.0], [4.0, 2.0], [4.0, 0.0], [0.0, 1.0]]];
+        // Due contorni esterni staccati: il secondo passerebbe per un buco.
+        let apart = vec![rect(10.0, 0.0, 11.0, 1.0), rect(20.0, 0.0, 20.5, 1.0)];
+        let holed = vec![rect(30.0, 0.0, 32.0, 1.0), rect(30.5, 0.25, 31.5, 0.75)];
+        let zones = [
+            bare(1, bow_tie),
+            bare(2, apart),
+            bare(3, vec![rect(40.0, 0.0, 41.0, 1.0)]),
+            bare(4, holed),
+        ];
+        let (rows, _) = zone_rows(&zones, Some(2.70), Metri, tol());
+        for row in &rows[..2] {
+            assert!(!row.is_complete(), "{row:?}");
+            assert_eq!(row.volume_m3, None, "{row:?}");
+            assert!(
+                row.note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("contorno non semplice")),
+                "{row:?}"
+            );
+        }
+        assert!(close(rows[2].volume_m3, 2.70), "{:?}", rows[2]);
+        assert!(close(rows[3].volume_m3, 1.5 * 2.70), "{:?}", rows[3]);
+        for row in &rows[2..] {
+            assert!(row.is_complete(), "{row:?}");
+            assert_eq!(row.note.as_deref(), Some("zona senza asse"), "{row:?}");
+        }
+    }
+
+    /// Ruling K: perché una riga è incompleta.
+    #[test]
+    fn incomplete_reason_explains_missing_data() {
+        let (rows, _) = zone_rows(&[tramezzo(0x10, None)], None, Metri, tol());
+        assert_eq!(rows[0].incomplete_reason().as_deref(), Some("altezza n.d."));
+
+        let (rows, _) = zone_rows(&[varco(0x10, None)], Some(2.70), Metri, tol());
+        let reason = rows[0].incomplete_reason().unwrap();
+        assert!(reason.contains("altezza del varco da inserire"), "{reason}");
+
+        let bare = geom(
+            0x20,
+            zone(ZoneState::Nuovo, None),
+            vec![rect(0.0, 5.0, 2.0, 5.08)],
+        );
+        let (rows, _) = zone_rows(&[bare], Some(2.70), Metri, tol());
+        let reason = rows[0].incomplete_reason().unwrap();
+        assert!(reason.contains("zona senza asse"), "{reason}");
+
+        let (rows, _) = zone_rows(&[tramezzo(0x10, None)], Some(2.70), Metri, tol());
+        assert_eq!(rows[0].incomplete_reason(), None);
+
+        // Una nota che da sola non spiega (una demolizione senza asse ha il
+        // volume): si dice anche che manca l'altezza.
+        let g = geom(
+            0x10,
+            zone(ZoneState::Demolito, None),
+            vec![rect(4.0, 0.0, 4.1, 3.0)],
+        );
+        let (no_height, _) = zone_rows(&[g], None, Metri, tol());
+        assert_eq!(
+            no_height[0].incomplete_reason().as_deref(),
+            Some("zona senza asse; altezza n.d.")
+        );
+
+        // Nulla da dire: il ripiego; testi uguali una volta sola.
+        let mut row = rows[0].clone();
+        row.volume_m3 = None;
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("quantità non calcolabile")
+        );
+        row.note = Some("contorno non semplice".into());
+        row.height.note = Some("contorno non semplice".into());
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("contorno non semplice")
+        );
     }
 
     #[test]
