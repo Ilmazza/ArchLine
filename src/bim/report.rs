@@ -115,6 +115,31 @@ pub enum Notice {
     ContornoApprossimato {
         name: String,
     },
+    /// Un'altezza digitata fuori da 0,50–10 m (in metri): un avviso, non un blocco.
+    AltezzaFuoriIntervallo {
+        value_m: f64,
+    },
+    /// Locali di fatto fusi con altezze diverse (o non tutte note): l'altezza
+    /// del locale di progetto è `n.d.`. Nomi e altezze in metri, nello stesso ordine.
+    AltezzeDiscordi {
+        names: Vec<String>,
+        values_m: Vec<Option<f64>>,
+    },
+    /// Lo spessore dichiarato di una zona non è quello misurato dalla geometria.
+    SpessoreDiverso {
+        code: String,
+        declared_m: f64,
+        measured_m: f64,
+    },
+    /// Zone dello stesso stato sovrapposte in modo sostanziale.
+    ZoneSovrapposteSostanzialmente {
+        codes: Vec<String>,
+    },
+    /// Una riga di abaco a cui manca un dato: il motivo.
+    RigaIncompleta {
+        code: String,
+        reason: String,
+    },
 }
 
 /// `(4,05; 0,00)`: coordinate con due decimali e virgola, come le aree.
@@ -239,6 +264,37 @@ impl Notice {
             Self::Varco { area_m2 } => format!("Varco {} escluso dai locali.", format_m2(*area_m2)),
             Self::ContornoApprossimato { name } => {
                 format!("Locale {name}: contorno curvo approssimato.")
+            }
+            Self::AltezzaFuoriIntervallo { value_m } => format!(
+                "Altezza {} m fuori dall'intervallo 0,50–10 m: da verificare.",
+                format_decimal(*value_m)
+            ),
+            Self::AltezzeDiscordi { names, values_m } => {
+                let values: Vec<String> = values_m
+                    .iter()
+                    .map(|v| v.map_or("n.d.".to_string(), format_decimal))
+                    .collect();
+                format!(
+                    "Altezze discordi nei locali {} ({} m): altezza non disponibile.",
+                    names.join(" + "),
+                    values.join("; ")
+                )
+            }
+            Self::SpessoreDiverso {
+                code,
+                declared_m,
+                measured_m,
+            } => format!(
+                "Zona {code}: spessore dichiarato {} m, misurato {} m.",
+                format_decimal(*declared_m),
+                format_decimal(*measured_m)
+            ),
+            Self::ZoneSovrapposteSostanzialmente { codes } => format!(
+                "Zone {} sovrapposte in modo sostanziale: i totali possono contare due volte.",
+                codes.join(" + ")
+            ),
+            Self::RigaIncompleta { code, reason } => {
+                format!("Riga {code} incompleta: {reason}.")
             }
         }
     }
@@ -445,6 +501,38 @@ mod tests {
                     name: "Bagno".into(),
                 },
                 "Locale Bagno: contorno curvo approssimato.",
+            ),
+            (
+                Notice::AltezzaFuoriIntervallo { value_m: 0.4 },
+                "Altezza 0,40 m fuori dall'intervallo 0,50–10 m: da verificare.",
+            ),
+            (
+                Notice::AltezzeDiscordi {
+                    names: vec!["A".into(), "B".into(), "C".into()],
+                    values_m: vec![Some(2.7), Some(3.0), None],
+                },
+                "Altezze discordi nei locali A + B + C (2,70; 3,00; n.d. m): altezza non disponibile.",
+            ),
+            (
+                Notice::SpessoreDiverso {
+                    code: "D01".into(),
+                    declared_m: 0.12,
+                    measured_m: 0.1,
+                },
+                "Zona D01: spessore dichiarato 0,12 m, misurato 0,10 m.",
+            ),
+            (
+                Notice::ZoneSovrapposteSostanzialmente {
+                    codes: vec!["D01".into(), "D02".into()],
+                },
+                "Zone D01 + D02 sovrapposte in modo sostanziale: i totali possono contare due volte.",
+            ),
+            (
+                Notice::RigaIncompleta {
+                    code: "D01".into(),
+                    reason: "altezza non disponibile".into(),
+                },
+                "Riga D01 incompleta: altezza non disponibile.",
             ),
         ];
         for (notice, text) in cases {

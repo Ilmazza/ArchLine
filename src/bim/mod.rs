@@ -6,6 +6,7 @@
 pub mod clip;
 pub mod commands;
 pub mod extract;
+pub mod height;
 pub mod project;
 pub mod record;
 pub mod refresh;
