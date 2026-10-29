@@ -380,7 +380,7 @@ pub fn label(name: &str, area_m2: f64, confirm: bool) -> String {
 }
 
 /// `\`, `{` e `}` sono codici di formato dell'MTEXT.
-fn mtext_escape(text: &str) -> String {
+pub(super) fn mtext_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         if matches!(ch, '\\' | '{' | '}') {

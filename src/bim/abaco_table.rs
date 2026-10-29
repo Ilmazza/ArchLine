@@ -32,17 +32,23 @@
 //!   d'inserimento, direzione, proprietà comuni (handle, layer, colore, XDATA
 //!   di altre applicazioni), stile tabella e blocco anonimo; un testo uguale
 //!   dà una tabella uguale, così un lancio che non cambia nulla non lascia
-//!   passi di annullamento.
+//!   passi di annullamento;
+//! - nell'estrazione (spec §5.4, `extract.rs`) le tabelle sono quelle che
+//!   `AL_ABACO` scriverebbe adesso ([`refreshed`]) e diventano linee e testi
+//!   ordinari ([`exploded`]): la griglia di [`build`] e il testo delle celle,
+//!   niente XDATA.
 
-use codec::entities::table::{legacy_override_properties, CellRange, CellStyle, Table};
-use codec::entities::{Entity, TableBuilder};
+use codec::entities::table::{
+    legacy_override_properties, CellRange, CellStyle, CellStylePropertyFlags, Table,
+};
+use codec::entities::{AttachmentPoint, Entity, EntityCommon, Line, MText, TableBuilder};
 use codec::objects::ObjectType;
 use codec::tables::{AppId, Layer};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Color, Document, EntityType, Handle, Vector3};
 
 use super::abaco::{Cell, TableKind, TableText};
-use super::rooms::DEFAULT_ROOM_TEXT_M;
+use super::rooms::{mtext_escape, DEFAULT_ROOM_TEXT_M};
 use super::units::DrawingUnit;
 use super::{APP_ABACO, LAYER_ABACO};
 
@@ -67,6 +73,9 @@ const GAP_ROWS: f64 = 2.0;
 const LEGACY_CONTENT_COLOR: i32 = 0x08;
 /// Bit dell'override dell'altezza del testo di una cella, formato 2004–2007.
 const LEGACY_TEXT_HEIGHT: i32 = 0x20;
+/// Scarto relativo entro cui normale e direzione di una tabella stanno nel
+/// piano XY ([`exploded`]).
+const FLAT: f64 = 1.0e-9;
 
 fn kind_key(kind: TableKind) -> &'static str {
     match kind {
@@ -461,6 +470,238 @@ pub fn plan(
         .collect();
     plan.below = lowest.map(|(x, bottom)| [x, bottom - gap(unit)]);
     plan
+}
+
+/// Le tabelle d'abaco come le lascerebbe adesso `AL_ABACO` con i testi
+/// `texts` (spec §5.4, l'estrazione), senza badare ai layer bloccati: ogni
+/// tabella del disegno di un tipo che ha righe, copie comprese, riscritta dove
+/// si trova ([`rebuilt`], con il suo handle), poi i tipi che nel disegno non
+/// hanno tabella impilati sotto la più bassa ([`plan`], [`stack`]), con lo
+/// stile tabella corrente e senza handle. Un tipo senza righe non c'è. Se
+/// nessuna tabella resta (tutte di tipi senza righe), le mancanti partono dal
+/// punto della prima tabella d'abaco del disegno, dove era l'abaco: da
+/// un'estrazione non si clicca. Senza tabelle d'abaco nel disegno, niente.
+pub fn refreshed(
+    doc: &Document,
+    texts: &[TableText],
+    unit: DrawingUnit,
+) -> Vec<(Option<Handle>, TableKind, Table)> {
+    let present = tables_in(doc);
+    let corner = |handle: Handle| match doc.get_entity(handle) {
+        Some(EntityType::Table(table)) => Some([table.insertion_point.x, table.insertion_point.y]),
+        _ => None,
+    };
+    let Some(first) = present.first().and_then(|&(handle, _)| corner(handle)) else {
+        return Vec::new();
+    };
+    let mut tables = Vec::new();
+    for &(handle, kind) in &present {
+        let (Some(EntityType::Table(old)), Some(text)) = (
+            doc.get_entity(handle),
+            texts.iter().find(|text| text.kind == kind),
+        ) else {
+            continue;
+        };
+        tables.push((Some(handle), kind, rebuilt(old, text, unit)));
+    }
+    let plan = plan(doc, texts, unit, |_| false);
+    let missing: Vec<&TableText> = plan
+        .missing
+        .iter()
+        .filter_map(|kind| texts.iter().find(|text| text.kind == *kind))
+        .collect();
+    let style = current_table_style(doc);
+    let created = stack(&missing, plan.below.unwrap_or(first), unit);
+    for (text, entity) in missing.iter().zip(created) {
+        if let EntityType::Table(mut table) = entity {
+            table.table_style_handle = style;
+            tables.push((None, text.kind, *table));
+        }
+    }
+    tables
+}
+
+/// La tabella come linee e testi ordinari (spec §5.4), con i dati della
+/// tabella stessa (colonne, righe, celle unite, testo e override delle
+/// celle, cioè ciò che scrive [`build`]):
+/// - la griglia in `LINE`: bordo e divisioni, una linea per tratto continuo,
+///   interrotte dentro le celle unite;
+/// - un `MTEXT` per cella (unita o no) con testo, centrato nella cella e alto
+///   quanto il suo override (senza, metà della riga, come in [`build`]),
+///   senza a capo, del colore del contenuto se la cella lo dà (il rosso di un
+///   `n.d.`), ruotato come la tabella;
+/// - layer, colore, tipo, scala e spessore di linea, trasparenza e
+///   visibilità della tabella; nessun XDATA, nessun handle.
+///
+/// Le righe scendono dal punto d'inserimento, perpendicolari alla direzione
+/// della tabella; salgono se lo stile tabella di `doc` va verso l'alto, come
+/// la disegna ArchLine (`resolved_flow_up`). Lo stile di testo è quello degli
+/// `MTEXT` nuovi («Standard»), non quello dello stile tabella. `None` se la
+/// tabella non sta nel piano XY del mondo (normale non +Z, direzione fuori
+/// piano) o ha misure non finite: chi chiama lo dice, mai in silenzio.
+pub fn exploded(doc: &Document, table: &Table) -> Option<Vec<EntityType>> {
+    let (n, d, o) = (
+        table.normal,
+        table.horizontal_direction,
+        table.insertion_point,
+    );
+    let (n_len, d_len) = (n.length(), (d.x * d.x + d.y * d.y).sqrt());
+    let flat = n_len > 0.0
+        && n.z > 0.0
+        && n.x.abs() <= FLAT * n_len
+        && n.y.abs() <= FLAT * n_len
+        && d_len > 0.0
+        && d.z.abs() <= FLAT * d.length();
+    let finite = [o.x, o.y, o.z, d.x, d.y].iter().all(|v| v.is_finite())
+        && table
+            .columns
+            .iter()
+            .all(|column| column.width.is_finite() && column.width >= 0.0)
+        && table
+            .rows
+            .iter()
+            .all(|row| row.height.is_finite() && row.height >= 0.0);
+    if !(flat && finite) {
+        return None;
+    }
+    let along = [d.x / d_len, d.y / d_len];
+    let style = table
+        .table_style_handle
+        .and_then(|handle| match doc.objects.get(&handle) {
+            Some(ObjectType::TableStyle(style)) => Some(style),
+            _ => None,
+        });
+    let flow = if crate::entities::table::resolved_flow_up(table, style) {
+        -1.0
+    } else {
+        1.0
+    };
+    // Verso il basso: la direzione ruotata di -90° (normale +Z).
+    let down = [flow * along[1], -flow * along[0]];
+    let at = |u: f64, w: f64| {
+        Vector3::new(
+            o.x + along[0] * u + down[0] * w,
+            o.y + along[1] * u + down[1] * w,
+            o.z,
+        )
+    };
+
+    let (rows, cols) = (table.rows.len(), table.columns.len());
+    let offsets = |sizes: Vec<f64>| -> Vec<f64> {
+        std::iter::once(0.0)
+            .chain(sizes.into_iter().scan(0.0, |sum, size| {
+                *sum += size;
+                Some(*sum)
+            }))
+            .collect()
+    };
+    let xs = offsets(table.columns.iter().map(|column| column.width).collect());
+    let ys = offsets(table.rows.iter().map(|row| row.height).collect());
+    // Ogni cella: la cella in alto a sinistra della sua unione (sé stessa se
+    // non è unita); per quella, l'ultima riga e l'ultima colonna dell'unione.
+    let mut owner: Vec<usize> = (0..rows * cols).collect();
+    let mut last: Vec<(usize, usize)> = (0..rows * cols).map(|k| (k / cols, k % cols)).collect();
+    for range in &table.merged_ranges {
+        if range.top_row >= rows || range.left_col >= cols {
+            continue;
+        }
+        let (bottom, right) = (range.bottom_row.min(rows - 1), range.right_col.min(cols - 1));
+        let first = range.top_row * cols + range.left_col;
+        for row in range.top_row..=bottom {
+            for col in range.left_col..=right {
+                owner[row * cols + col] = first;
+            }
+        }
+        last[first] = (bottom.max(range.top_row), right.max(range.left_col));
+    }
+
+    let mut common = EntityCommon::new();
+    common.layer = table.common.layer.clone();
+    common.color = table.common.color;
+    common.color_name = table.common.color_name.clone();
+    common.line_weight = table.common.line_weight;
+    common.linetype = table.common.linetype.clone();
+    common.linetype_scale = table.common.linetype_scale;
+    common.transparency = table.common.transparency;
+    common.invisible = table.common.invisible;
+
+    let mut pieces = Vec::new();
+    let mut line = |a: Vector3, b: Vector3| {
+        if a != b {
+            let mut line = Line::from_points(a, b);
+            line.common = common.clone();
+            pieces.push(EntityType::Line(line));
+        }
+    };
+    for k in 0..=rows {
+        let edge = |col: usize| k == 0 || k == rows || owner[(k - 1) * cols + col] != owner[k * cols + col];
+        for (from, to) in runs(cols, edge) {
+            line(at(xs[from], ys[k]), at(xs[to], ys[k]));
+        }
+    }
+    for k in 0..=cols {
+        let edge = |row: usize| k == 0 || k == cols || owner[row * cols + k - 1] != owner[row * cols + k];
+        for (from, to) in runs(rows, edge) {
+            line(at(xs[k], ys[from]), at(xs[k], ys[to]));
+        }
+    }
+
+    let rotation = along[1].atan2(along[0]);
+    for row in 0..rows {
+        for col in 0..cols {
+            let k = row * cols + col;
+            let Some(cell) = table.cell(row, col).filter(|_| owner[k] == k) else {
+                continue;
+            };
+            let value = cell.text_value();
+            if value.is_empty() {
+                continue;
+            }
+            let (bottom, right) = last[k];
+            let center = at(
+                (xs[col] + xs[right + 1]) / 2.0,
+                (ys[row] + ys[bottom + 1]) / 2.0,
+            );
+            let cell_style = cell.style.as_ref();
+            let height = cell_style
+                .filter(|s| {
+                    s.sets(CellStylePropertyFlags::TEXT_HEIGHT)
+                        && s.text_height.is_finite()
+                        && s.text_height > 0.0
+                })
+                .map_or(table.rows[row].height / ROW_HEIGHT, |s| s.text_height);
+            let mut text = MText::with_value(mtext_escape(value), center);
+            text.common = common.clone();
+            if let Some(s) = cell_style.filter(|s| s.sets(CellStylePropertyFlags::CONTENT_COLOR)) {
+                text.common.color = s.content_color;
+            }
+            if height > 0.0 {
+                text.height = height;
+            }
+            text.attachment_point = AttachmentPoint::MiddleCenter;
+            text.rectangle_width = 0.0;
+            text.rotation = rotation;
+            pieces.push(EntityType::MText(Box::new(text)));
+        }
+    }
+    Some(pieces)
+}
+
+/// Gli intervalli massimi `[da, a)` di `0..n` in cui `on` è vero.
+fn runs(n: usize, on: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for i in 0..=n {
+        match (start, i < n && on(i)) {
+            (None, true) => start = Some(i),
+            (Some(from), false) => {
+                found.push((from, i));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -950,6 +1191,231 @@ mod tests {
         let below = plan.below.expect("c'è una tabella");
         assert!(below[0].abs() < 1e-12);
         assert!((below[1] - (old.bounding_box().min.y - gap(unit))).abs() < 1e-9);
+    }
+
+    fn near(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9
+    }
+
+    fn segments(pieces: &[EntityType]) -> Vec<([f64; 2], [f64; 2])> {
+        pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                EntityType::Line(l) => Some(([l.start.x, l.start.y], [l.end.x, l.end.y])),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(pieces: &[EntityType]) -> Vec<&MText> {
+        pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                EntityType::MText(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_at<'a>(pieces: &'a [EntityType], value: &str) -> &'a MText {
+        texts(pieces)
+            .into_iter()
+            .find(|t| t.value == value)
+            .unwrap_or_else(|| panic!("manca il testo {value:?}"))
+    }
+
+    fn at(t: &MText) -> [f64; 2] {
+        [t.insertion_point.x, t.insertion_point.y]
+    }
+
+    /// Spec §5.4: la tabella come linee e testi. Bordo di quattro linee
+    /// intere; le divisioni interrotte dentro le celle unite (titolo,
+    /// intestazione dei varchi, etichetta del totale, note); un `MTEXT` per
+    /// cella con testo, centrato nella cella (unita), alto 0,25 m, rosso solo
+    /// il `n.d.`; tutto sul layer della tabella, senza XDATA.
+    #[test]
+    fn exploded_table_is_its_grid_and_its_cell_texts() {
+        let text = sample(TableKind::Demolizioni);
+        let entity = build(&text, [20.0, 5.0], DrawingUnit::Metri);
+        let table = table_of(&entity);
+        let pieces = exploded(&Document::new(), table).expect("nel piano XY");
+        for piece in &pieces {
+            assert!(matches!(piece, EntityType::Line(_) | EntityType::MText(_)));
+            assert_eq!(piece.common().layer, LAYER_ABACO);
+            assert!(piece.common().extended_data.records().is_empty());
+            assert!(piece.common().handle.is_null());
+        }
+        let (rows, cols) = (table.row_count(), table.column_count());
+        let (w, h, rh) = (table.total_width(), table.total_height(), table.rows[0].height);
+        let lines = segments(&pieces);
+        let has = |a: [f64; 2], b: [f64; 2]| {
+            lines
+                .iter()
+                .any(|&(p, q)| (near(p, a) && near(q, b)) || (near(p, b) && near(q, a)))
+        };
+        let (x0, y0) = (20.0, 5.0);
+        assert!(has([x0, y0], [x0 + w, y0]), "bordo alto");
+        assert!(has([x0, y0 - h], [x0 + w, y0 - h]), "bordo basso");
+        assert!(has([x0, y0], [x0, y0 - h]), "bordo sinistro");
+        assert!(has([x0 + w, y0], [x0 + w, y0 - h]), "bordo destro");
+        // Il centro della riga `row`, e se una linea verticale su `x` lo taglia.
+        let mid = |row: usize| y0 - (row as f64 + 0.5) * rh;
+        let crosses = |x: f64, y: f64| {
+            lines.iter().any(|&(p, q)| {
+                (p[0] - x).abs() < 1e-9
+                    && (q[0] - x).abs() < 1e-9
+                    && p[1].min(q[1]) < y
+                    && p[1].max(q[1]) > y
+            })
+        };
+        let x1 = x0 + table.columns[0].width;
+        let x2 = x1 + table.columns[1].width;
+        assert!(!crosses(x1, mid(0)), "titolo unito");
+        assert!(crosses(x1, mid(1)) && crosses(x1, mid(2)) && crosses(x1, mid(5)));
+        assert!(!crosses(x1, mid(4)), "intestazione dei varchi unita");
+        assert!(!crosses(x1, mid(6)) && crosses(x2, mid(6)), "etichetta del totale su due colonne");
+        assert!(!crosses(x1, mid(rows - 1)), "nota unita");
+        // Le linee orizzontali interne: una per riga, intera (nessuna cella
+        // unita su più righe).
+        for row in 1..rows {
+            let y = y0 - row as f64 * rh;
+            assert!(has([x0, y], [x0 + w, y]), "divisione sotto la riga {}", row - 1);
+        }
+
+        let mut got: Vec<&str> = texts(&pieces).iter().map(|t| t.value.as_str()).collect();
+        got.sort();
+        let mut want: Vec<&str> = (0..rows)
+            .flat_map(|row| (0..cols).filter_map(move |col| table.cell_text(row, col)))
+            .filter(|t| !t.is_empty())
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "un testo per cella con testo");
+
+        let title = text_at(&pieces, "Demolizioni (m³)");
+        assert!(near(at(title), [x0 + w / 2.0, mid(0)]), "{:?}", at(title));
+        assert_eq!(title.attachment_point, AttachmentPoint::MiddleCenter);
+        assert_eq!(title.rectangle_width, 0.0);
+        assert!(title.rotation.abs() < 1e-12);
+        let d1 = text_at(&pieces, "D1");
+        assert!(near(at(d1), [x0 + table.columns[0].width / 2.0, mid(2)]));
+        assert!((d1.height - 0.25).abs() < 1e-12);
+        assert_eq!(d1.common.color, table.common.color);
+        let nd = text_at(&pieces, "n.d.");
+        assert_eq!(nd.common.color, Color::from_index(1), "n.d. in rosso");
+        assert!(near(
+            at(nd),
+            [x2 + table.columns[2].width / 2.0, mid(3)]
+        ));
+        let varchi = text_at(&pieces, "Varchi (fuori dal totale delle demolizioni)");
+        assert!(near(at(varchi), [x0 + w / 2.0, mid(4)]));
+        let total = text_at(&pieces, "Totale demolizioni (righe complete)");
+        assert!(near(at(total), [(x0 + x2) / 2.0, mid(6)]));
+    }
+
+    /// La conversione segue la direzione della tabella e lo stile «verso
+    /// l'alto», e rifiuta (`None`) una tabella fuori dal piano XY o con misure
+    /// non finite.
+    #[test]
+    fn exploded_follows_direction_and_flow_and_refuses_other_planes() {
+        let unit = DrawingUnit::Metri;
+        let mut table = table_of(&build(&sample(TableKind::Locali), [0.0, 0.0], unit)).clone();
+        let (w, rh) = (table.total_width(), table.rows[0].height);
+        let title = |doc: &Document, table: &Table| {
+            let pieces = exploded(doc, table).expect("nel piano XY");
+            let t = text_at(&pieces, "Demolizioni (m³)");
+            (at(t), t.rotation)
+        };
+        let plain = Document::new();
+        let (p, r) = title(&plain, &table);
+        assert!(near(p, [w / 2.0, -rh / 2.0]) && r.abs() < 1e-12, "{p:?}");
+        // Ruotata di 90°: colonne verso +Y, righe verso +X.
+        table.horizontal_direction = Vector3::new(0.0, 2.0, 0.0);
+        let (p, r) = title(&plain, &table);
+        assert!(near(p, [rh / 2.0, w / 2.0]), "{p:?}");
+        assert!((r - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        table.horizontal_direction = Vector3::new(1.0, 0.0, 0.0);
+        // Stile tabella verso l'alto: le righe salgono dal punto.
+        let mut doc = Document::new();
+        let handle = doc.allocate_handle();
+        let mut style = codec::objects::TableStyle::standard();
+        style.name = "Su".into();
+        style.handle = handle;
+        style.flow_direction = codec::objects::TableFlowDirection::Up;
+        doc.objects.insert(handle, ObjectType::TableStyle(style));
+        table.table_style_handle = Some(handle);
+        let (p, _) = title(&doc, &table);
+        assert!(near(p, [w / 2.0, rh / 2.0]), "{p:?}");
+
+        for normal in [
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.1, 1.0),
+        ] {
+            let mut other = table.clone();
+            other.normal = normal;
+            assert!(exploded(&doc, &other).is_none(), "normale {normal:?}");
+        }
+        let mut other = table.clone();
+        other.horizontal_direction = Vector3::new(1.0, 0.0, 0.5);
+        assert!(exploded(&doc, &other).is_none(), "direzione fuori piano");
+        let mut other = table.clone();
+        other.insertion_point = Vector3::new(f64::NAN, 0.0, 0.0);
+        assert!(exploded(&doc, &other).is_none(), "punto non finito");
+    }
+
+    /// Le tabelle dell'estrazione: quelle di un `AL_ABACO` fresco che non
+    /// guarda i blocchi. Ogni tabella di un tipo con righe, copie comprese,
+    /// riscritta dove sta; quella di un tipo senza righe via; la mancante
+    /// sotto la più bassa, con lo stile tabella corrente; se non ne resta
+    /// nessuna, dal punto della prima; senza tabelle, niente.
+    #[test]
+    fn refreshed_tables_are_those_of_a_fresh_abaco() {
+        let unit = DrawingUnit::Metri;
+        let mut doc = Document::new();
+        ensure_layer(&mut doc);
+        let demolizioni = sample(TableKind::Demolizioni);
+        let first = doc
+            .add_entity(build(&demolizioni, [0.0, 0.0], unit))
+            .unwrap();
+        let copy = doc
+            .add_entity(build(&demolizioni, [50.0, 0.0], unit))
+            .unwrap();
+        doc.add_entity(build(&sample(TableKind::Nuove), [0.0, -40.0], unit))
+            .unwrap();
+        let mut now = demolizioni.clone();
+        now.rows[0][2] = cell("0,90");
+        let texts = [now, sample(TableKind::Locali)];
+
+        let got = refreshed(&doc, &texts, unit);
+        let kinds: Vec<(Option<Handle>, TableKind)> =
+            got.iter().map(|(handle, kind, _)| (*handle, *kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (Some(first), TableKind::Demolizioni),
+                (Some(copy), TableKind::Demolizioni),
+                (None, TableKind::Locali)
+            ]
+        );
+        assert_eq!(got[0].2.cell_text(2, 2), Some("0,90"));
+        assert_eq!(got[0].2.insertion_point, Vector3::new(0.0, 0.0, 0.0));
+        assert_eq!(got[1].2.insertion_point, Vector3::new(50.0, 0.0, 0.0));
+        let below = plan(&doc, &texts, unit, |_| false)
+            .below
+            .expect("restano tabelle");
+        assert_eq!(
+            got[2].2.insertion_point,
+            Vector3::new(below[0], below[1], 0.0)
+        );
+        assert!(current_table_style(&doc).is_some());
+        assert_eq!(got[2].2.table_style_handle, current_table_style(&doc));
+
+        let alone = refreshed(&doc, &texts[1..], unit);
+        let [(None, TableKind::Locali, table)] = &alone[..] else {
+            panic!("{alone:?}")
+        };
+        assert_eq!(table.insertion_point, Vector3::new(0.0, 0.0, 0.0));
+        assert!(refreshed(&Document::new(), &texts, unit).is_empty());
     }
 
     #[test]

@@ -25,6 +25,17 @@
 //! `Portability`), gli handle che la copia non restituisce e, per layout, lo
 //! spazio carta.
 //!
+//! Le tabelle d'abaco (spec parte 2, §5.4: le `TABLE` dello spazio modello
+//! con il record `ARCHLINE_ABACO`, `abaco_table::tables_in`) non sono una
+//! perdita: non si copiano e non si elencano in nessuno dei tre DWG. Nel solo
+//! DWG di demolizioni e costruzioni, se il disegno ne ha, l'abaco si ricalcola
+//! da capo (`compute_abaco`, alle tolleranze dell'estrazione) e le tabelle
+//! che `AL_ABACO` scriverebbe adesso (`abaco_table::refreshed`) entrano come
+//! linee e testi ordinari (`abaco_table::exploded`), sul layer della tabella
+//! (`AL-ABACO` per quelle che `AL_ABACO` crea) e nello stesso punto: mai una
+//! tabella vecchia ([`abaco_entities`]). Le altre tabelle restano fuori ed
+//! elencate.
+//!
 //! Il disegno di lavoro non si tocca: si lavora su una sua copia. I locali di
 //! fatto ricalcolati cambiano lì, sugli stessi handle, e le entità nuove dello
 //! stato di progetto (pezzi dei muri tagliati, chiusure, muri nuovi, contorni
@@ -44,6 +55,8 @@ use crate::modules::insert::wblock::extract_entities_into;
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::scene::BoundarySource;
 
+use super::abaco::{compute_abaco, render_tables, AbacoOptions};
+use super::abaco_table::{self, kind_name, tables_in};
 use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
@@ -70,6 +83,10 @@ const UNKNOWN_KIND: &str = "Entità";
 
 /// Il colore del layer dei locali quando lo si crea (come `zone::ensure_layers`).
 const ACI_ROOMS: i16 = 7;
+
+/// Il colore del layer di una tabella d'abaco quando lo si crea (come
+/// `abaco_table::ensure_layer` per `AL-ABACO`).
+const ACI_ABACO: i16 = 7;
 
 /// Gli elaborati in pianta che si estraggono.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +138,9 @@ pub struct Extracted {
 ///   con i locali di fatto ricalcolati da capo come in `AL_AGGIORNA`
 ///   ([`refresh_fatto_rooms`]);
 /// - **comparativa**: lo spazio modello senza i layer `AL-LOCALI` e
-///   `AL-LOCALI-PROGETTO`, cioè con le zone;
+///   `AL-LOCALI-PROGETTO`, cioè con le zone, più le tabelle d'abaco
+///   ricalcolate come linee e testi ([`abaco_entities`]), con gli avvisi
+///   dell'abaco prima di quelli della copia;
 /// - **progetto**: la pianta di [`project_geometry`] — i muri non toccati, i
 ///   pezzi di quelli tagliati, le chiusure e i muri nuovi (questi sul layer dei
 ///   muri nuovi, creato se manca: [`ensure_new_walls_layer`]) — più le entità
@@ -131,9 +150,10 @@ pub struct Extracted {
 ///   gli avvisi della geometria, poi [`Notice::FuoriPiano`] per i muri fuori
 ///   piano, che non si tagliano, poi quelli dei locali.
 ///
-/// I tre documenti passano dalla stessa copia ([`copy_out`]). In fondo, se è
-/// uscito almeno un documento, un avviso per ogni layout con entità: lo
-/// spazio carta non si estrae.
+/// Le tabelle d'abaco del disegno (`abaco_table::tables_in`) non entrano in
+/// nessuna copia e non si elencano. I tre documenti passano dalla stessa
+/// copia ([`copy_out`]). In fondo, se è uscito almeno un documento, un avviso
+/// per ogni layout con entità: lo spazio carta non si estrae.
 pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
     let mut ex = Extracted {
         docs: Vec::new(),
@@ -152,6 +172,11 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
         .map(|(handle, _, _)| *handle)
         .collect();
     let room_parts: FxHashSet<Handle> = parts.iter().map(|(handle, _, _)| *handle).collect();
+    // Le tabelle d'abaco non si copiano mai (spec parte 2, §5.4).
+    let abaco: FxHashSet<Handle> = tables_in(src)
+        .into_iter()
+        .map(|(handle, _)| handle)
+        .collect();
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
@@ -165,15 +190,33 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                     !carries_zone_record(entity, zone_app)
                         && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
                         && !seeds.contains(&handle)
+                        && !abaco.contains(&handle)
                 });
                 copy_out(src, &mut work, &handles, None)
             }
             Elaborato::DemolizioniCostruzioni => {
-                let handles = model_space_handles(src, |handle, entity| {
+                let mut handles = model_space_handles(src, |handle, entity| {
                     !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
                         && !room_parts.contains(&handle)
+                        && !abaco.contains(&handle)
                 });
-                copy_out(src, &mut work, &handles, None)
+                let (tables, abaco_notices) = abaco_entities(src, opts);
+                let (drawn, refused) = add_drawn(&mut work, &tables);
+                handles.extend(drawn);
+                push_unique(&mut ex.notices, abaco_notices);
+                push_unique(&mut ex.notices, refused);
+                let (mut out, mut notices) = copy_out(src, &mut work, &handles, None);
+                let mut layers: Vec<&str> = Vec::new();
+                for entity in &tables {
+                    let layer = entity.common().layer.as_str();
+                    if !layers.iter().any(|done| done.eq_ignore_ascii_case(layer)) {
+                        layers.push(layer);
+                    }
+                }
+                for layer in layers {
+                    notices.extend(ensure_layer_like(src, &mut out, layer, ACI_ABACO));
+                }
+                (out, notices)
             }
             Elaborato::StatoDiProgetto => {
                 let layer = new_walls_layer_name(src, &opts.new_walls_layer);
@@ -195,6 +238,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                             && !on_rooms_layer(entity)
                             && !room_parts.contains(&handle)
                             && !excluded.contains(&handle)
+                            && !abaco.contains(&handle)
                     }
                 });
                 let (drawn, mut refused) = add_drawn(&mut work, &pg.drawn);
@@ -408,6 +452,45 @@ pub(crate) fn computed_project_rooms(
     }
 }
 
+/// Le tabelle d'abaco del DWG di demolizioni e costruzioni (spec parte 2,
+/// §5.4), con i loro avvisi. Se `src` ha tabelle d'abaco, l'abaco si
+/// ricalcola da capo (`compute_abaco`, alle tolleranze dell'estrazione, come
+/// `AL_ABACO` adesso: l'estratto non contiene un numero che `AL_ABACO` non
+/// darebbe) e le tabelle che `AL_ABACO` scriverebbe
+/// (`abaco_table::refreshed`: ognuna dove sta nel disegno di lavoro, anche su
+/// un layer bloccato, le mancanti sotto la più bassa) diventano linee e testi
+/// (`abaco_table::exploded`; l'XDATA lo toglie [`add_drawn`]). Gli avvisi
+/// sono quelli dell'abaco (righe incomplete, sovrapposizioni, altezze…), più
+/// un [`Notice::NonCopiata`] «Tabella d'abaco <tipo>» per una tabella che non
+/// si converte (fuori dal piano XY). Senza tabelle d'abaco nel disegno di
+/// lavoro, niente.
+fn abaco_entities(src: &Document, opts: &ExtractOptions) -> (Vec<EntityType>, Vec<Notice>) {
+    if tables_in(src).is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let abaco = compute_abaco(
+        src,
+        &AbacoOptions {
+            unit: opts.unit,
+            tol: opts.tol,
+            room_tol: room_tol(opts),
+        },
+    );
+    let texts = render_tables(&abaco);
+    let mut notices = abaco.notices;
+    let mut entities = Vec::new();
+    for (handle, kind, table) in abaco_table::refreshed(src, &texts, opts.unit) {
+        match abaco_table::exploded(src, &table) {
+            Some(pieces) => entities.extend(pieces),
+            None => notices.push(Notice::NonCopiata {
+                handle: handle.unwrap_or(table.common.handle),
+                kind: format!("Tabella d'abaco {}", kind_name(kind)),
+            }),
+        }
+    }
+    (entities, notices)
+}
+
 /// Il layer dei locali in `out` (stato di progetto). La copia lo porta con le
 /// entità che lo usano quando `src` lo ha; altrimenti (un disegno con i soli
 /// semi, o il layer tolto) lo si crea qui con un handle nuovo, da quello di
@@ -415,11 +498,19 @@ pub(crate) fn computed_project_rooms(
 /// metterebbe i locali sul layer «0»: se la tabella lo rifiutasse, lo dice
 /// l'avviso restituito ([`add_layer`]).
 fn ensure_rooms_layer(src: &Document, out: &mut Document) -> Option<Notice> {
-    if out.layers.contains(LAYER_LOCALI) {
+    ensure_layer_like(src, out, LAYER_LOCALI, ACI_ROOMS)
+}
+
+/// Il layer `name` in `out`, se la copia non lo ha portato: da quello di
+/// `src` (colore, tipo e spessore di linea) se c'è, altrimenti con il colore
+/// ACI `aci`, con un handle nuovo; il tipo di linea, se manca, da `src`. Se
+/// la tabella lo rifiuta, l'avviso di [`add_layer`].
+fn ensure_layer_like(src: &Document, out: &mut Document, name: &str, aci: i16) -> Option<Notice> {
+    if out.layers.contains(name) {
         return None;
     }
-    let mut layer = Layer::new(LAYER_LOCALI);
-    match src.layers.get(LAYER_LOCALI) {
+    let mut layer = Layer::new(name);
+    match src.layers.get(name) {
         Some(from) => {
             layer.color = from.color;
             layer.color_name = from.color_name.clone();
@@ -427,7 +518,7 @@ fn ensure_rooms_layer(src: &Document, out: &mut Document) -> Option<Notice> {
             layer.line_type = from.line_type.clone();
             layer.line_weight = from.line_weight;
         }
-        None => layer.color = codec::Color::from_index(ACI_ROOMS),
+        None => layer.color = codec::Color::from_index(aci),
     }
     let line_type = layer.line_type.clone();
     layer.handle = out.allocate_handle();
@@ -4212,5 +4303,291 @@ mod tests {
             labels_on(&ex.docs[2].1, LAYER_LOCALI),
             ["A\\PS = 11,70 m²", "Studio\\PS = 11,70 m²"]
         );
+    }
+
+    /// Le tabelle d'abaco nell'estrazione (spec parte 2, §5.4).
+    mod abaco {
+        use super::*;
+
+        use codec::entities::Table;
+
+        use crate::bim::abaco::{compute_abaco, render_tables, AbacoOptions, TableText};
+        use crate::bim::abaco_table::{self, rebuilt, tables_in};
+        use crate::bim::{APP_ABACO, LAYER_ABACO};
+
+        const ABACO_OPTS: AbacoOptions = AbacoOptions {
+            unit: M,
+            tol: 1e-6,
+            room_tol: 1e-6,
+        };
+        /// Dove `AL_ABACO <x,y>` ha messo le tabelle.
+        const AT: [f64; 2] = [20.0, 5.0];
+
+        /// Le tabelle che `AL_ABACO` scriverebbe adesso in `doc`, come testo.
+        fn fresh_texts(doc: &Document) -> Vec<TableText> {
+            render_tables(&compute_abaco(doc, &ABACO_OPTS))
+        }
+
+        /// Il caso A con il tramezzo demolito, il muro nuovo da 0,12, i locali
+        /// di fatto A (12,00 m²) e B (11,70 m²), l'altezza del livello 2,70 e
+        /// le tre tabelle d'abaco scritte come `AL_ABACO 20,5` (layer
+        /// `AL-ABACO`, record `ARCHLINE_ABACO`), impilate da `AT`.
+        fn doc_with_abaco() -> Document {
+            let mut doc = doc_with_zones();
+            let rec = ProjectRecord {
+                default_height: Some(2.7),
+                ..record::read(&doc)
+            };
+            record::write(&mut doc, &rec);
+            write_room(&mut doc, M, 1e-6, "A", [2.0, 1.5]);
+            write_room(&mut doc, M, 1e-6, "B", [6.0, 1.5]);
+            let texts = fresh_texts(&doc);
+            assert_eq!(texts.len(), 3, "demolizioni, nuove murature, locali");
+            abaco_table::ensure_layer(&mut doc);
+            let refs: Vec<&TableText> = texts.iter().collect();
+            for table in abaco_table::stack(&refs, AT, M) {
+                doc.add_entity(table).unwrap();
+            }
+            assert_eq!(tables_in(&doc).len(), 3);
+            doc
+        }
+
+        fn table_of(entity: &EntityType) -> &Table {
+            match entity {
+                EntityType::Table(table) => table,
+                other => panic!("non è una TABLE: {other:?}"),
+            }
+        }
+
+        /// I testi non vuoti delle celle delle tabelle, in ordine alfabetico.
+        fn cell_texts<'a>(tables: impl IntoIterator<Item = &'a Table>) -> Vec<String> {
+            let mut texts: Vec<String> = tables
+                .into_iter()
+                .flat_map(|table| {
+                    (0..table.row_count()).flat_map(move |row| {
+                        (0..table.column_count())
+                            .filter_map(move |col| table.cell_text(row, col))
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_string)
+                    })
+                })
+                .collect();
+            texts.sort();
+            texts
+        }
+
+        /// I testi (`MTEXT`) su `AL-ABACO`, in ordine alfabetico.
+        fn abaco_texts(doc: &Document) -> Vec<String> {
+            let mut texts = labels_on(doc, LAYER_ABACO);
+            texts.sort();
+            texts
+        }
+
+        fn tables_count(doc: &Document) -> usize {
+            doc.entities()
+                .filter(|e| matches!(e, EntityType::Table(_)))
+                .count()
+        }
+
+        fn non_copied(notices: &[Notice]) -> Vec<&Notice> {
+            notices
+                .iter()
+                .filter(|n| matches!(n, Notice::NonCopiata { .. }))
+                .collect()
+        }
+
+        /// Le tabelle d'abaco non sono una perdita: nessun `NonCopiata` per
+        /// loro, in nessuno dei tre elaborati, e nessuna `TABLE` negli estratti.
+        #[test]
+        fn abaco_tables_are_not_reported_as_not_copied() {
+            let src = doc_with_abaco();
+            let ex = extract(&src, &opts(&all_three()));
+            assert_eq!(ex.docs.len(), 3);
+            assert!(
+                non_copied(&ex.notices).is_empty(),
+                "avvisi: {:?}",
+                ex.notices
+            );
+            for (elaborato, out) in &ex.docs {
+                assert_eq!(tables_count(out), 0, "{elaborato:?}");
+            }
+        }
+
+        /// Dopo una correzione del rilievo senza rilanciare `AL_ABACO` (A da
+        /// 12,00 a 12,60 m², B da 11,70 a 11,10), il DWG di demolizioni e
+        /// costruzioni ha le tabelle di un `AL_ABACO` fresco come linee e
+        /// testi su `AL-ABACO`, ognuna dove sta nel disegno di lavoro, senza
+        /// XDATA né APPID nostri; i numeri della tabella vecchia non ci sono.
+        /// Fatto e progetto non hanno tabelle né linee e testi d'abaco. Lo
+        /// stesso dopo il DWG.
+        #[test]
+        fn extract_writes_fresh_abaco_as_lines_and_texts_in_demolizioni_only() {
+            let mut src = doc_with_abaco();
+            let old: Vec<Table> = tables_in(&src)
+                .iter()
+                .map(|(handle, _)| table_of(src.get_entity(*handle).unwrap()).clone())
+                .collect();
+            shift_tramezzo(&mut src, M, 0.2);
+            let fresh = fresh_texts(&src);
+            // Le tabelle come le riscriverebbe `AL_ABACO`: dove sono, testo nuovo.
+            let now: Vec<Table> = old
+                .iter()
+                .map(|table| {
+                    let kind = abaco_table::decode(
+                        table.common.extended_data.get_record(APP_ABACO).unwrap(),
+                    )
+                    .unwrap();
+                    let text = fresh.iter().find(|t| t.kind == kind).unwrap();
+                    rebuilt(table, text, M)
+                })
+                .collect();
+            let (want, before) = (cell_texts(&now), cell_texts(&old));
+            let stale: Vec<&String> = before.iter().filter(|t| !want.contains(t)).collect();
+            assert!(
+                stale.iter().any(|t| t.as_str() == "12,00"),
+                "il rilievo cambiato cambia l'abaco: {stale:?}"
+            );
+
+            let ex = extract(&src, &opts(&all_three()));
+            assert!(
+                non_copied(&ex.notices).is_empty(),
+                "avvisi: {:?}",
+                ex.notices
+            );
+            #[track_caller]
+            fn check(
+                docs: [&Document; 3],
+                now: &[Table],
+                want: &[String],
+                stale: &[&String],
+                what: &str,
+            ) {
+                let [fatto, comparativa, progetto] = docs;
+                for (name, out) in [
+                    ("fatto", fatto),
+                    ("comparativa", comparativa),
+                    ("progetto", progetto),
+                ] {
+                    assert_eq!(tables_count(out), 0, "{what}: {name}");
+                    assert_no_archline_data(out);
+                }
+                for (name, out) in [("fatto", fatto), ("progetto", progetto)] {
+                    assert!(model_on(out, LAYER_ABACO).is_empty(), "{what}: {name}");
+                }
+                let texts = abaco_texts(comparativa);
+                assert_eq!(texts, want, "{what}: testi delle tabelle fresche");
+                for old in stale {
+                    assert!(!texts.contains(*old), "{what}: numero vecchio {old}");
+                }
+                let lines = lines_on(comparativa, LAYER_ABACO);
+                for table in now {
+                    // Il bordo alto: dal punto d'inserimento, largo quanto la
+                    // tabella, una linea sola.
+                    let (x, y) = (table.insertion_point.x, table.insertion_point.y);
+                    let top = ([x, y], [x + table.total_width(), y]);
+                    assert!(
+                        lines.iter().any(|l| {
+                            let (a, b) = (xy(l.start), xy(l.end));
+                            (near(a, top.0) && near(b, top.1)) || (near(a, top.1) && near(b, top.0))
+                        }),
+                        "{what}: bordo alto della tabella in ({x}; {y})"
+                    );
+                }
+                assert!(
+                    model_on(comparativa, LAYER_ABACO)
+                        .iter()
+                        .all(|e| matches!(e, EntityType::Line(_) | EntityType::MText(_))),
+                    "{what}: solo linee e testi"
+                );
+            }
+            let docs = [&ex.docs[0].1, &ex.docs[1].1, &ex.docs[2].1];
+            check(docs, &now, &want, &stale, "in memoria");
+            let tmp = TempDir::new("abaco");
+            let loaded: Vec<Document> = write(&ex, &tmp.0, "casa", false)
+                .unwrap()
+                .iter()
+                .map(|path| crate::io::load_file(path).unwrap())
+                .collect();
+            check(
+                [&loaded[0], &loaded[1], &loaded[2]],
+                &now,
+                &want,
+                &stale,
+                "dopo il DWG",
+            );
+        }
+
+        /// Una tabella d'abaco fuori dal piano XY non si converte: un
+        /// `NonCopiata` «Tabella d'abaco <tipo>», mai in silenzio; le altre si
+        /// convertono lo stesso.
+        #[test]
+        fn abaco_table_out_of_the_xy_plane_is_listed() {
+            let mut src = doc_with_abaco();
+            let (handle, kind) = tables_in(&src)[0];
+            let Some(EntityType::Table(table)) = src.get_entity_mut(handle) else {
+                panic!("tabella")
+            };
+            table.normal = Vector3::new(0.0, 0.0, -1.0);
+            let ex = extract(&src, &opts(&[Elaborato::DemolizioniCostruzioni]));
+            let listed = Notice::NonCopiata {
+                handle,
+                kind: format!("Tabella d'abaco {}", abaco_table::kind_name(kind)),
+            };
+            assert_eq!(non_copied(&ex.notices), [&listed]);
+            assert_eq!(
+                listed.text(),
+                format!("Tabella d'abaco Demolizioni {handle:X} non copiata nel DWG estratto.")
+            );
+            let texts = abaco_texts(&ex.docs[0].1);
+            assert!(!texts.iter().any(|t| t == "D1"), "la tabella demolizioni manca");
+            assert!(texts.iter().any(|t| t == "N1"), "le altre due ci sono");
+        }
+
+        /// Le altre tabelle (una qualunque, una con il nostro APPID ma un tipo
+        /// sconosciuto) restano fuori ed elencate, una volta sola; quelle
+        /// d'abaco no.
+        #[test]
+        fn other_tables_are_still_not_copied() {
+            let mut src = doc_with_abaco();
+            let plain = src
+                .add_entity(EntityType::Table(Box::new(Table::new(
+                    Vector3::new(60.0, 0.0, 0.0),
+                    2,
+                    2,
+                ))))
+                .unwrap();
+            let mut unknown = table_of(&abaco_table::build(
+                &fresh_texts(&src)[0],
+                [80.0, 0.0],
+                M,
+            ))
+            .clone();
+            let mut rec = ExtendedDataRecord::new(APP_ABACO);
+            for value in [
+                XDataValue::Integer16(1),
+                XDataValue::String("tabella".into()),
+                XDataValue::String("porte".into()),
+            ] {
+                rec.add_value(value);
+            }
+            unknown.common.extended_data.upsert_record(rec);
+            let unknown = src.add_entity(EntityType::Table(Box::new(unknown))).unwrap();
+
+            let ex = extract(&src, &opts(&all_three()));
+            assert_eq!(
+                non_copied(&ex.notices),
+                [
+                    &non_copiata(plain, "ACAD_TABLE"),
+                    &non_copiata(unknown, "ACAD_TABLE")
+                ]
+            );
+            for (elaborato, out) in &ex.docs {
+                assert_eq!(tables_count(out), 0, "{elaborato:?}");
+            }
+            assert!(
+                !abaco_texts(&ex.docs[1].1).is_empty(),
+                "l'abaco c'è lo stesso"
+            );
+        }
     }
 }
