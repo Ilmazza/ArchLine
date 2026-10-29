@@ -9,6 +9,7 @@ pub mod extract;
 pub mod height;
 pub mod project;
 pub mod quantities;
+pub mod quantities_rooms;
 pub mod record;
 pub mod refresh;
 pub mod report;
