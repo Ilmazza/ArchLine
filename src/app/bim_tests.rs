@@ -3678,6 +3678,38 @@ fn has_text(table: &Table, text: &str) -> bool {
     cell_texts(table).iter().any(|t| t == text)
 }
 
+/// La cella sotto la colonna `header` della riga il cui locale (seconda
+/// colonna della tabella dei locali) è `name`.
+fn room_cell<'a>(table: &'a Table, name: &str, header: &str) -> Option<&'a str> {
+    let col = (0..table.column_count()).find(|&col| {
+        table
+            .cell_text(1, col)
+            .is_some_and(|text| text.starts_with(header))
+    })?;
+    let row = (2..table.row_count()).find(|&row| table.cell_text(row, 1) == Some(name))?;
+    table.cell_text(row, col)
+}
+
+/// I testi (`MTEXT`) del blocco di visualizzazione `*T` della tabella,
+/// cercato per riferimento (una tabella riletta da un DWG ha solo quello) o
+/// per nome (una tabella riscritta): ciò che disegnano ArchLine
+/// (`render_graph`), AutoCAD ed ezdxf.
+fn block_texts(doc: &Document, table: &Table) -> Vec<String> {
+    let record = table
+        .block_record_handle
+        .and_then(|handle| doc.block_records.iter().find(|r| r.handle == handle))
+        .or_else(|| doc.block_records.get(&table.block_name))
+        .unwrap_or_else(|| panic!("manca il blocco {:?}", table.block_name));
+    record
+        .entity_handles
+        .iter()
+        .filter_map(|handle| match doc.get_entity(*handle) {
+            Some(EntityType::MText(text)) => Some(text.value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Nessuna `TABLE`, in nessuno spazio.
 fn no_tables(app: &OpenCADStudio) -> bool {
     !doc(app)
@@ -3801,7 +3833,14 @@ fn abaco_writes_tables_then_replaces_them_in_place() {
         "{:?}",
         cell_texts(&after[1].2)
     );
-    assert!(has_text(&after[1].2, "11,70"));
+    // Il numero di A nella sua riga (B valeva già 11,70).
+    assert_eq!(room_cell(&tables[1].2, "A", "Fatto"), Some("12,00"));
+    assert_eq!(
+        room_cell(&after[1].2, "A", "Fatto"),
+        Some("11,70"),
+        "{:?}",
+        cell_texts(&after[1].2)
+    );
     assert_eq!(undo_steps(&app), steps + 3, "un passo");
     assert!(
         history(&app).contains("AL_ABACO: tabelle create: 0; sostituite: 1."),
@@ -3817,6 +3856,126 @@ fn abaco_writes_tables_then_replaces_them_in_place() {
     assert!(doc(&app).layers.contains(LAYER_ABACO), "il layer resta");
     undo(&mut app);
     assert!(!doc(&app).layers.contains(LAYER_ABACO));
+}
+
+/// `text` è tra i testi del blocco (o in uno di loro).
+fn has(texts: &[String], text: &str) -> bool {
+    texts.iter().any(|t| t.contains(text))
+}
+
+/// Critical della revisione finale: la tabella riscritta da `AL_ABACO` non
+/// mostra più i numeri vecchi. Una `TABLE` col riferimento al suo blocco `*T`
+/// si disegna dal blocco (`render_graph`), e la scena lo ridisegna dalle celle
+/// solo per una tabella senza riferimento (`Scene::bump_entities`). Dopo la
+/// sostituzione i testi del blocco, cercato per nome, sono quelli nuovi (B di
+/// progetto 4,10 × 3,00 = 12,30, variazione +0,60) e non c'è il 12,00 di A di
+/// prima, in memoria e nel DWG salvato. Un altro lancio senza cambi non lascia
+/// passi; annullando, la tabella e il blocco di prima.
+#[test]
+fn abaco_replacement_redraws_the_table_block() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let (handle, before) = abaco_table(&app, TableKind::Locali);
+    assert!(
+        before.block_record_handle.is_some(),
+        "la scena ha disegnato il blocco {:?}",
+        before.block_name
+    );
+    let old_texts = block_texts(doc(&app), &before);
+    assert!(
+        has(&old_texts, "12,00") && !has(&old_texts, "12,30"),
+        "{old_texts:?}"
+    );
+    let table_blocks = |app: &OpenCADStudio| {
+        doc(app)
+            .block_records
+            .iter()
+            .filter(|r| r.name.starts_with("*T"))
+            .count()
+    };
+    let blocks = table_blocks(&app);
+    move_tramezzo_face(&mut app);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO");
+
+    let log = history(&app);
+    assert!(
+        log.contains("AL_ABACO: tabelle create: 0; sostituite: 1."),
+        "storia: {log}"
+    );
+    let (same, after) = abaco_table(&app, TableKind::Locali);
+    assert_eq!(same, handle);
+    assert_eq!(after.block_name, before.block_name, "stesso blocco");
+    assert_eq!(table_blocks(&app), blocks, "nessun blocco in più");
+    assert_eq!(
+        room_cell(&after, "B", "Progetto"),
+        Some("12,30"),
+        "{:?}",
+        cell_texts(&after)
+    );
+    let texts = block_texts(doc(&app), &after);
+    assert!(has(&texts, "12,30") && has(&texts, "+0,60"), "{texts:?}");
+    assert!(
+        !has(&texts, "12,00") && !has(&texts, "A + B"),
+        "numeri vecchi nel blocco: {texts:?}"
+    );
+
+    // Salvato e riletto: il blocco del DWG è quello nuovo.
+    let tmp = TempDir::new("abaco_blocco");
+    let path = tmp.path().join("abaco.dwg");
+    crate::io::save_as_version(doc(&app), &path, doc(&app).version).unwrap();
+    let loaded = crate::io::load_file(&path).unwrap();
+    let Some(EntityType::Table(saved)) = loaded.get_entity(handle) else {
+        panic!("tabella dei locali nel DWG")
+    };
+    let texts = block_texts(&loaded, saved);
+    assert!(
+        has(&texts, "12,30") && !has(&texts, "12,00"),
+        "DWG: {texts:?}"
+    );
+
+    // Di nuovo, nulla è cambiato: nessun passo.
+    run(&mut app, "AL_ABACO");
+    assert_eq!(undo_steps(&app), steps + 1, "storia: {}", history(&app));
+
+    // Annullando, la tabella e il suo blocco di prima.
+    undo(&mut app);
+    let (_, restored) = abaco_table(&app, TableKind::Locali);
+    assert_eq!(restored, before);
+    let texts = block_texts(doc(&app), &restored);
+    assert!(
+        has(&texts, "12,00") && !has(&texts, "12,30"),
+        "dopo l'annullamento: {texts:?}"
+    );
+}
+
+/// Ruling X (revisione finale): in un disegno R2000 la `TABLE` non è
+/// provata (lo spike del Task 7 va dal 2004 in poi): `AL_ABACO` la scrive e
+/// lo dice; dal 2004 nessun avviso.
+#[test]
+fn abaco_warns_that_tables_are_not_proven_in_r2000() {
+    for (version, warned) in [
+        (codec::DxfVersion::AC1015, true),
+        (codec::DxfVersion::AC1018, false),
+        (codec::DxfVersion::AC1032, false),
+    ] {
+        let mut app = app_with_abaco_input();
+        let i = app.active_tab;
+        app.tabs[i].scene.document.version = version;
+        forget_history(&mut app);
+
+        run(&mut app, "AL_ABACO 20,0");
+
+        let log = history(&app);
+        assert_eq!(abaco_tables(&app).len(), 2, "{version:?}: storia: {log}");
+        assert_eq!(
+            log.contains("TABLE non provata in formato R2000: da verificare in AutoCAD."),
+            warned,
+            "{version:?}: storia: {log}"
+        );
+    }
 }
 
 /// Senza zone né locali: un messaggio, nessuna tabella, nessun layer, nessun

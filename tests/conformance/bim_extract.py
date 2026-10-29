@@ -22,6 +22,10 @@ costruzioni le tabelle sono LINE e MTEXT sul layer AL-ABACO con i numeri ricalco
 la griglia parte dal punto d'inserimento di ogni ACAD_TABLE del disegno di lavoro (letto da `abaco-lavoro.dxf`);
 nei tre DWG nessuna ACAD_TABLE, nel fatto e nel progetto niente su AL-ABACO.
 
+La tabella riscritta (revisione finale), in ogni giro dopo la seconda estrazione: `AL_ABACO` di nuovo e il salvataggio
+in `abaco-rifatto.dxf` (righe con il prefisso "abaco riscritto"): ancora due ACAD_TABLE, e nel loro blocco `*T` (cio'
+che disegnano ArchLine, AutoCAD ed ezdxf) i numeri a 3,00 (D1 0,90, N1 6,00), nessuno di quelli a 2,70 (0,81 e 5,40).
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -464,10 +468,12 @@ def read_dxf(path):
 # ---------------------------------------------------------------- il banco
 
 
-def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, table_dxf=None, abaco_dir=None):
+def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, table_dxf=None, abaco_dir=None,
+                   rewritten_dxf=None):
     """Esegue i comandi via --serve (AL_DEMOLISCI sull'asse `axis`) e ne controlla le risposte; con `csv_path`
     poi `AL_ALTEZZA L 2.70` e `AL_ABACO_CSV` (e, con `table_dxf`, `AL_ABACO` e il salvataggio in DXF; con
-    `abaco_dir` anche, dopo, `AL_ALTEZZA L 3.00` e `AL_ESTRAI` in `abaco_dir`)."""
+    `abaco_dir` anche, dopo, `AL_ALTEZZA L 3.00` e `AL_ESTRAI` in `abaco_dir`; con `rewritten_dxf`, per ultimi,
+    `AL_ABACO` di nuovo e il salvataggio in quel DXF)."""
     rep.check(bool(session.ready.get("ok")), "sessione", f"app pronta (versione {session.ready.get('version', '?')})")
     resp = session.request({"op": "open", "path": str(src)})
     by_type = resp.get("by_type", {})
@@ -482,7 +488,7 @@ def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, t
             detail += f"; token non consumati: {resp.get('unconsumed')}"
         rep.check(ok, f"run {cmd.split()[0]}", detail)
     if csv_path is not None:
-        abaco_commands(rep, session, csv_path, table_dxf, abaco_dir)
+        abaco_commands(rep, session, csv_path, table_dxf, abaco_dir, rewritten_dxf)
 
 
 def run_ok(rep, session, cmd):
@@ -494,9 +500,10 @@ def run_ok(rep, session, cmd):
     return resp
 
 
-def abaco_commands(rep, session, csv_path, table_dxf, abaco_dir=None):
+def abaco_commands(rep, session, csv_path, table_dxf, abaco_dir=None, rewritten_dxf=None):
     """Parte 2 (abachi e quantita'): altezza del livello, CSV dell'abaco, tabelle; con `abaco_dir`, l'altezza
-    cambiata senza rilanciare AL_ABACO e una seconda estrazione. I file si leggono dopo."""
+    cambiata senza rilanciare AL_ABACO e una seconda estrazione; con `rewritten_dxf` anche, dopo, AL_ABACO di nuovo e
+    il salvataggio in quel DXF. I file si leggono dopo."""
     run_ok(rep, session, HEIGHT_CMD)
     run_ok(rep, session, f"AL_ABACO_CSV {csv_path}")
     if table_dxf is not None:
@@ -509,6 +516,12 @@ def abaco_commands(rep, session, csv_path, table_dxf, abaco_dir=None):
             # Le tabelle del disegno restano quelle a 2,70: l'estratto deve ricalcolarle a 3,00.
             run_ok(rep, session, HEIGHT_AFTER_CMD)
             run_ok(rep, session, f"AL_ESTRAI {abaco_dir}")
+            if rewritten_dxf is not None:
+                # Poi AL_ABACO di nuovo: le tabelle si riscrivono dove sono, e il loro blocco *T con loro.
+                run_ok(rep, session, "AL_ABACO")
+                resp = session.request({"op": "save", "path": str(rewritten_dxf)})
+                rep.check(bool(resp.get("ok")) and resp.get("target_format") == "dxf", "abaco riscritto: salvataggio DXF",
+                          f"{Path(rewritten_dxf).name} (DXF)" if resp.get("ok") else str(resp))
 
 
 def read_extracts(rep, exe, env, work, out_dir, dxf_dir, base=BASE):
@@ -694,6 +707,33 @@ def check_abaco_tables(rep, table_dxf, rows):
           "visualizzazione *T, non la struttura a celle (da vedere in AutoCAD)")
 
 
+def check_abaco_rewritten(rep, path):
+    """AL_ABACO rilanciato dopo `AL_ALTEZZA L 3.00` (Critical della revisione finale): le due ACAD_TABLE si riscrivono
+    dove sono e il loro blocco di visualizzazione `*T`, cio' che disegnano ArchLine, AutoCAD ed ezdxf, ha i numeri nuovi
+    (ABACO_FRESH: D1 0,90 m3 = 3,00 x 0,10 x 3,00; N1 6,00 m2 = 2,00 x 3,00) e nessuno di quelli a 2,70 (ABACO_STALE).
+    Qui un blocco senza testi e' FALLITO: dopo il primo AL_ABACO i testi c'erano, e sono proprio cio' che si controlla."""
+    if not Path(path).is_file():
+        rep.check(False, "abaco riscritto: file", f"{Path(path).name} non scritto")
+        return
+    doc, err = read_dxf(path)
+    if not rep.check(doc is not None, "abaco riscritto: ezdxf", "letto" if doc is not None else err):
+        return
+    tables = table_texts(doc)
+    rep.check(len(tables) == 2, "abaco riscritto: due ACAD_TABLE",
+              "2 ACAD_TABLE, nessuna copia" if len(tables) == 2 else f"{len(tables)} ACAD_TABLE invece di 2")
+    rep.check(bool(tables) and all(tables), "abaco riscritto: blocchi con testi",
+              "ogni tabella ha il blocco *T con testi" if tables and all(tables)
+              else f"testi per tabella {[len(t) for t in tables]}")
+    for code, value in ABACO_FRESH.items():
+        hit = [t for t in tables if code in t and value in t]
+        rep.check(bool(hit), f"abaco riscritto: riga {code} nel blocco *T",
+                  f"codice {code} e {value} nello stesso blocco" if hit
+                  else f"codice {code} e {value} non trovati nello stesso blocco")
+    stale = sorted({v for t in tables for v in ABACO_STALE if v in t})
+    rep.check(not stale, "abaco riscritto: niente numeri vecchi nel blocco *T",
+              "nessuno di " + ", ".join(ABACO_STALE) if not stale else f"trovati {stale}")
+
+
 def abaco_texts(doc):
     """I testi (MTEXT) dello spazio modello sul layer AL-ABACO: le tabelle d'abaco di un estratto, che sono linee
     e testi ordinari."""
@@ -750,11 +790,12 @@ def run_case(rep, exe, env, work, src, src_doc, before, axis):
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = work / "abaco.csv"
     table_dxf = work / "abaco-lavoro.dxf"
+    rewritten_dxf = work / "abaco-rifatto.dxf"
     abaco_dir = work / ABACO_OUT
     abaco_dir.mkdir(parents=True, exist_ok=True)
     session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
     try:
-        checks_session(rep, session, src, out_dir, axis, csv_path, table_dxf, abaco_dir)
+        checks_session(rep, session, src, out_dir, axis, csv_path, table_dxf, abaco_dir, rewritten_dxf)
     except BaseException:
         session.kill()
         raise
@@ -773,6 +814,7 @@ def run_case(rep, exe, env, work, src, src_doc, before, axis):
     # Dopo il salvataggio il disegno di lavoro si chiama come `abaco-lavoro.dxf`: e' il nome dei DWG estratti.
     docs = read_extracts(abaco_rep, exe, env, work, abaco_dir, abaco_dir, base=Path(table_dxf).stem)
     check_abaco_extract(abaco_rep, docs, table_corners(lavoro) if lavoro is not None else [])
+    check_abaco_rewritten(rep, rewritten_dxf)
 
 
 def run_bim_extract(exe, work, rep):

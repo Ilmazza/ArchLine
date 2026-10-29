@@ -30,9 +30,16 @@
 //!   nel 2004 (vedi `put`), quindi niente `N.D.` maiuscolo;
 //! - una tabella riscritta sul posto ([`rebuilt`]) tiene punto
 //!   d'inserimento, direzione, proprietà comuni (handle, layer, colore, XDATA
-//!   di altre applicazioni), stile tabella e blocco anonimo; un testo uguale
-//!   dà una tabella uguale, così un lancio che non cambia nulla non lascia
-//!   passi di annullamento;
+//!   di altre applicazioni), stile tabella e nome del blocco anonimo `*T`, ma
+//!   non il riferimento al blocco: la scena ridisegna il blocco dalle celle,
+//!   ritrovandolo per nome, solo per una tabella senza riferimento, e il
+//!   blocco è ciò che disegnano ArchLine, AutoCAD ed ezdxf (revisione finale:
+//!   col riferimento restavano i numeri vecchi). Un testo uguale dà una
+//!   tabella uguale salvo quel riferimento, che [`plan`] non guarda, così un
+//!   lancio che non cambia nulla non lascia passi di annullamento;
+//! - la `TABLE` è provata dal DWG 2004 in poi; in un disegno R2000 il codec
+//!   la scrive lo stesso e `AL_ABACO` lo dice (`TabellaNonProvataR2000`,
+//!   Ruling X), senza ripiego a linee e testi;
 //! - nell'estrazione (spec §5.4, `extract.rs`) le tabelle sono quelle che
 //!   `AL_ABACO` scriverebbe adesso ([`refreshed`]) e diventano linee e testi
 //!   ordinari ([`exploded`]): la griglia di [`build`] e il testo delle celle,
@@ -391,7 +398,12 @@ pub fn rebuilt(old: &Table, text: &TableText, unit: DrawingUnit) -> Table {
     table.horizontal_direction = old.horizontal_direction;
     table.normal = old.normal;
     table.table_style_handle = old.table_style_handle;
-    table.block_record_handle = old.block_record_handle;
+    // Il blocco `*T` per nome, senza riferimento (revisione finale): la scena
+    // lo ridisegna dalle celle solo per una tabella senza riferimento
+    // (`Scene::bump_entities`), e una tabella col riferimento si disegna dal
+    // blocco (`render_graph`), cioè con i numeri vecchi. Al salvataggio il
+    // codec ritrova il blocco per nome e rimette il riferimento.
+    table.block_record_handle = None;
     table.block_name = old.block_name.clone();
     table.common = old.common.clone();
     table
@@ -399,6 +411,32 @@ pub fn rebuilt(old: &Table, text: &TableText, unit: DrawingUnit) -> Table {
         .extended_data
         .upsert_record(abaco_record(text.kind));
     table
+}
+
+/// `new` (di [`rebuilt`]) è la tabella `old`: uguali salvo il riferimento al
+/// blocco `*T`, che [`rebuilt`] azzera e la scena rimette dopo il disegno, e
+/// il nome del blocco, che una tabella letta da un DWG non ha ([`plan`] lo
+/// prende dal record). Senza, un lancio che non cambia nulla riscriverebbe
+/// ogni tabella già disegnata.
+fn same_table(new: &Table, old: &Table) -> bool {
+    let mut old = old.clone();
+    old.block_record_handle = new.block_record_handle;
+    old.block_name = new.block_name.clone();
+    *new == old
+}
+
+/// Il nome del blocco `*T` della tabella: il suo, altrimenti quello del
+/// record a cui punta. Una tabella letta da un DWG ha solo il riferimento, e
+/// senza il nome la scena le disegnerebbe un blocco nuovo, lasciando orfano
+/// quello di prima.
+fn block_name_of(doc: &Document, table: &Table) -> String {
+    if !table.block_name.is_empty() {
+        return table.block_name.clone();
+    }
+    table
+        .block_record_handle
+        .and_then(|handle| doc.block_records.iter().find(|record| record.handle == handle))
+        .map_or_else(String::new, |record| record.name.clone())
 }
 
 /// Ciò che `AL_ABACO` fa sulle tabelle del disegno ([`plan`]).
@@ -424,8 +462,9 @@ pub struct AbacoPlan {
 /// Il piano di `AL_ABACO` per le tabelle `texts` (`abaco::render_tables`):
 /// ogni tabella già presente di un tipo da scrivere si riscrive dove si trova
 /// (anche le copie), se cambia e se il suo layer non è bloccato
-/// (`is_locked`); quelle di un tipo senza righe si tolgono; i tipi assenti
-/// mancano e vanno sotto l'ultima tabella che resta.
+/// (`is_locked`), col nome del suo blocco `*T` anche se arriva da un DWG
+/// ([`block_name_of`]); quelle di un tipo senza righe si tolgono; i tipi
+/// assenti mancano e vanno sotto l'ultima tabella che resta.
 pub fn plan(
     doc: &Document,
     texts: &[TableText],
@@ -446,9 +485,10 @@ pub fn plan(
             plan.locked += 1;
             place(old)
         } else if let Some(text) = texts.iter().find(|text| text.kind == kind) {
-            let new = rebuilt(old, text, unit);
+            let mut new = rebuilt(old, text, unit);
+            new.block_name = block_name_of(doc, old);
             let stays = place(&new);
-            if new == **old {
+            if same_table(&new, old) {
                 plan.unchanged += 1;
             } else {
                 plan.replace.push((handle, kind, new));
@@ -1024,7 +1064,10 @@ mod tests {
     }
 
     /// Riscrivere sul posto: stesso punto, handle, layer, XDATA di altre
-    /// applicazioni e blocco anonimo; il testo nuovo.
+    /// applicazioni e nome del blocco anonimo; il testo nuovo. Il riferimento
+    /// al blocco si azzera (revisione finale): la scena ridisegna il blocco
+    /// `*T` dalle celle, trovandolo per nome, solo per una tabella senza
+    /// riferimento; con il riferimento disegnerebbe i numeri vecchi.
     #[test]
     fn rebuilt_table_keeps_its_place_and_properties() {
         let unit = DrawingUnit::Metri;
@@ -1033,6 +1076,7 @@ mod tests {
         old.common.layer = "TABELLE".into();
         old.insertion_point = Vector3::new(30.0, -7.0, 0.0);
         old.block_name = "*T3".into();
+        old.block_record_handle = Some(Handle::new(0x99));
         let mut other = ExtendedDataRecord::new("ALTRA_APP");
         other.add_value(XDataValue::String("x".into()));
         old.common.extended_data.upsert_record(other);
@@ -1044,6 +1088,7 @@ mod tests {
         assert_eq!(new.common.layer, "TABELLE");
         assert_eq!(new.insertion_point, old.insertion_point);
         assert_eq!(new.block_name, "*T3");
+        assert_eq!(new.block_record_handle, None, "il blocco si ridisegna");
         assert!(new.common.extended_data.get_record("ALTRA_APP").is_some());
         assert_eq!(
             decode(new.common.extended_data.get_record(APP_ABACO).unwrap()),
@@ -1051,11 +1096,116 @@ mod tests {
         );
         assert_eq!(new.cell_text(2, 2), Some("0,90"));
         assert_ne!(new, old);
+        let mut same = old.clone();
+        same.block_record_handle = None;
         assert_eq!(
             rebuilt(&old, &sample(TableKind::Locali), unit),
-            old,
-            "stesso testo"
+            same,
+            "stesso testo: la stessa tabella, senza riferimento al blocco"
         );
+    }
+
+    /// Revisione finale: la scena dà alla tabella creata il suo blocco `*T`
+    /// (`refresh_table_block`, come `Scene::bump_entities`); un `AL_ABACO`
+    /// con lo stesso testo non la riscrive per il solo riferimento al blocco,
+    /// che `rebuilt` azzera.
+    #[test]
+    fn plan_ignores_the_block_reference() {
+        let unit = DrawingUnit::Metri;
+        let mut doc = Document::new();
+        ensure_layer(&mut doc);
+        let text = sample(TableKind::Demolizioni);
+        let handle = doc.add_entity(build(&text, [0.0, 0.0], unit)).unwrap();
+        assert!(doc.refresh_table_block(handle), "il blocco della tabella");
+        let table = table_of(doc.get_entity(handle).unwrap());
+        assert!(table.block_record_handle.is_some() && !table.block_name.is_empty());
+
+        let plan = plan(&doc, &[text], unit, |_| false);
+        assert!(plan.replace.is_empty(), "{:?}", plan.replace);
+        assert_eq!(plan.unchanged, 1);
+    }
+
+    /// I testi (`MTEXT`) del blocco `name` di `doc`.
+    fn block_texts(doc: &Document, name: &str) -> Vec<String> {
+        let record = doc
+            .block_records
+            .get(name)
+            .unwrap_or_else(|| panic!("manca il blocco {name:?}"));
+        record
+            .entity_handles
+            .iter()
+            .filter_map(|handle| match doc.get_entity(*handle) {
+                Some(EntityType::MText(text)) => Some(text.value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Revisione finale (il minor del Task 7): una tabella col suo blocco,
+    /// salvata in DWG e riaperta, poi un `AL_ABACO` con lo stesso testo. La
+    /// tabella riletta non è identica a quella scritta (2004: il campo `flags`
+    /// dei valori; 2007: le celle vuote tornano con un contenuto vuoto; dal
+    /// 2010: gli override nel contenuto e non nello stile), e il primo lancio
+    /// la riscrive (limite noto del registro), ma una volta sola: dopo,
+    /// nessun cambiamento. Il lettore DWG dà il riferimento al blocco senza il
+    /// nome: la tabella riscritta prende il nome dal record e ridisegna quel
+    /// blocco, senza crearne un altro.
+    #[test]
+    fn plan_after_reopening_a_dwg() {
+        let unit = DrawingUnit::Metri;
+        let tmp = TempDir::new("reopen");
+        let text = sample(TableKind::Demolizioni);
+        for version in [
+            DxfVersion::AC1018,
+            DxfVersion::AC1021,
+            DxfVersion::AC1024,
+            DxfVersion::AC1032,
+        ] {
+            let mut doc = Document::new();
+            doc.version = version;
+            ensure_layer(&mut doc);
+            let handle = doc.add_entity(build(&text, [0.0, 0.0], unit)).unwrap();
+            assert!(doc.refresh_table_block(handle), "{version:?}");
+            let path = tmp.0.join(format!("{version:?}.dwg"));
+            crate::io::save_as_version(&doc, &path, version)
+                .unwrap_or_else(|e| panic!("{version:?}: {e}"));
+            let mut loaded =
+                crate::io::load_file(&path).unwrap_or_else(|e| panic!("{version:?}: {e}"));
+            assert!(
+                table_of(loaded.get_entity(handle).unwrap())
+                    .block_record_handle
+                    .is_some(),
+                "{version:?}: riferimento al blocco riletto"
+            );
+
+            // Il lettore DWG dà il riferimento al blocco, non il nome.
+            let record = table_of(loaded.get_entity(handle).unwrap())
+                .block_record_handle
+                .and_then(|h| loaded.block_records.iter().find(|r| r.handle == h))
+                .map(|r| r.name.clone())
+                .expect("il blocco della tabella");
+            let blocks = |doc: &Document| {
+                doc.block_records
+                    .iter()
+                    .filter(|r| r.name.starts_with("*T"))
+                    .count()
+            };
+            let before = blocks(&loaded);
+
+            let first = plan(&loaded, std::slice::from_ref(&text), unit, |_| false);
+            assert!(first.replace.len() <= 1, "{version:?}");
+            for (replaced, _, table) in first.replace {
+                assert_eq!(table.block_name, record, "{version:?}: il blocco di prima");
+                *loaded.get_entity_mut(replaced).unwrap() = EntityType::Table(Box::new(table));
+                loaded.refresh_table_block(replaced);
+                let texts = block_texts(&loaded, &record);
+                assert!(texts.iter().any(|t| t == "0,81"), "{version:?}: {texts:?}");
+                assert_eq!(blocks(&loaded), before, "{version:?}: nessun blocco in più");
+            }
+            let again = plan(&loaded, std::slice::from_ref(&text), unit, |_| false);
+            assert!(again.replace.is_empty(), "{version:?}: di nuovo");
+            assert_eq!(again.unchanged, 1, "{version:?}");
+        }
     }
 
     /// Il piano: una tabella che cambia si riscrive, una uguale no, una su un

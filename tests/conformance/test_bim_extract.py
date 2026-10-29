@@ -308,6 +308,45 @@ class AbacoCsvTests(unittest.TestCase):
         be.check_abaco_tables(rep, self.tmp / "manca.dxf", [])
         self.assertEqual(rep.failed, 1)
 
+    def rewritten(self, tables):
+        """`check_abaco_rewritten` su un DXF vero, con i testi dei blocchi `*T` imitati (ezdxf non crea ACAD_TABLE)."""
+        import ezdxf
+
+        path = self.tmp / "rifatto.dxf"
+        ezdxf.new("R2018").saveas(path)
+        rep = self.report()
+        with mock.patch.object(be, "table_texts", return_value=tables):
+            be.check_abaco_rewritten(rep, path)
+        return rep
+
+    @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+    def test_rewritten_blocks_with_the_fresh_numbers_pass(self):
+        rep = self.rewritten([["D1", "0,90", "9,00"], ["N1", "6,00", "0,72"]])
+        self.assertEqual(rep.failed, 0, rep.out.getvalue())
+
+    @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+    def test_a_block_still_showing_the_old_numbers_fails(self):
+        # Le celle cambiate e il blocco *T rimasto quello di prima: il difetto del Critical.
+        rep = self.rewritten([["D1", "0,81", "8,10"], ["N1", "5,40", "0,65"]])
+        out = rep.out.getvalue()
+        self.assertIn("FALLITO  abaco riscritto: riga D1 nel blocco *T", out)
+        self.assertIn("FALLITO  abaco riscritto: riga N1 nel blocco *T", out)
+        self.assertIn("FALLITO  abaco riscritto: niente numeri vecchi nel blocco *T", out)
+        self.assertEqual(rep.failed, 3, out)
+
+    @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+    def test_rewritten_empty_blocks_or_a_copy_fail(self):
+        rep = self.rewritten([[], []])
+        self.assertIn("FALLITO  abaco riscritto: blocchi con testi", rep.out.getvalue())
+        rep = self.rewritten([["D1", "0,90"], ["N1", "6,00"], ["D1", "0,90"]])
+        self.assertIn("FALLITO  abaco riscritto: due ACAD_TABLE", rep.out.getvalue())
+        self.assertEqual(rep.failed, 1, rep.out.getvalue())
+
+    def test_a_missing_rewritten_file_fails(self):
+        rep = self.report()
+        be.check_abaco_rewritten(rep, self.tmp / "manca.dxf")
+        self.assertEqual(rep.failed, 1)
+
 
 class TouchesTests(unittest.TestCase):
     def test_either_end_within_the_tolerance(self):
