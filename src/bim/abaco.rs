@@ -27,7 +27,6 @@
 
 use codec::Document;
 
-use super::abaco_render::{height_unexplained, push_note, HEIGHT_ND, SEP};
 use super::extract::push_unique;
 use super::quantities::{zone_rows, ZoneKind, ZoneRow};
 use super::quantities_rooms::{fatto_room_rows, project_room_rows, ProjectRoomRow, RoomRow};
@@ -38,7 +37,6 @@ use super::zone::zones_in;
 
 pub use super::abaco_render::{render_tables, Cell, TableKind, TableText};
 
-const AREA_ND: &str = "superficie n.d.";
 /// Tra i nomi dei locali uniti, come nei nomi composti dei locali di progetto.
 const JOIN: &str = " + ";
 /// Decimali al massimo in [`format_fixed`]: con di più le unità dell'ultima
@@ -113,7 +111,7 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
     let room_reasons = fatto
         .iter()
         .chain(progetto.iter().map(|project| &project.row))
-        .filter_map(|row| Some((row.code.clone(), room_incomplete_reason(row)?)));
+        .filter_map(|row| Some((row.code.clone(), row.incomplete_reason()?)));
     let incomplete = zone_reasons
         .chain(room_reasons)
         .map(|(code, reason)| Notice::RigaIncompleta { code, reason })
@@ -139,25 +137,6 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
         }
     }
     abaco
-}
-
-/// Perché una riga di locale è incompleta (`None` se ha la superficie): la
-/// nota (o «superficie n.d.»), poi il motivo dell'altezza o, se manca senza
-/// un motivo suo, «altezza n.d.», come `ZoneRow::incomplete_reason`.
-pub(super) fn room_incomplete_reason(row: &RoomRow) -> Option<String> {
-    if row.area_m2.is_some() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    push_note(&mut parts, row.note.as_deref());
-    if parts.is_empty() {
-        parts.push(AREA_ND.to_string());
-    }
-    push_note(&mut parts, row.height.note.as_deref());
-    if height_unexplained(&row.height) {
-        push_note(&mut parts, Some(HEIGHT_ND));
-    }
-    Some(parts.join(SEP))
 }
 
 /// Le righe dei locali (spec §4.3). Un locale di fatto e uno di progetto si
@@ -269,9 +248,11 @@ fn project_line(project: ProjectRoomRow, fatto_names: &[String]) -> LocaleLine {
 
 /// `value` con `decimals` decimali (al massimo 9), virgola decimale, senza
 /// separatore delle migliaia: `11,91`, `0,1890`, `1234567,89`. Si arrotonda
-/// sull'ultima cifra, mezzo via dallo zero (come `units::format_decimal`), e
-/// uno zero arrotondato non ha segno. Un valore non finito non ha testo
-/// sensato: chi chiama mette `n.d.`.
+/// sull'ultima cifra, mezzo via dallo zero, e uno zero arrotondato non ha
+/// segno. Un valore non finito non ha testo sensato: chi chiama mette `n.d.`.
+/// È l'unico arrotondamento dei numeri scritti: `units::format_decimal` (le
+/// etichette dei locali) la usa con due decimali, così etichette e celle
+/// dell'abaco danno lo stesso testo (R61).
 pub fn format_fixed(value: f64, decimals: usize) -> String {
     let decimals = decimals.min(MAX_DECIMALS);
     let scale = 10_u64.pow(decimals as u32);

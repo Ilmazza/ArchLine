@@ -64,6 +64,12 @@ const NOTE_BY_TOLERANCE: &str = "chiuso solo da HPGAPTOL: superficie da verifica
 const NOTE_CURVED: &str = "contorno curvo: superficie approssimata";
 const NOTE_APPROXIMATE: &str = "superficie approssimata (contorno curvo o chiuso solo da HPGAPTOL)";
 const NOTE_CHORDS: &str = "perimetro misurato sulle corde degli archi";
+/// Il motivo di una riga senza superficie che non ne ha uno suo.
+const REASON_AREA_ND: &str = "superficie n.d.";
+/// Il motivo di un'altezza che manca senza un motivo suo.
+const REASON_HEIGHT_ND: &str = "altezza n.d.";
+/// Tra le parti del motivo di una riga incompleta.
+const REASON_SEP: &str = "; ";
 /// Tra i nomi dei locali fusi, come nei nomi composti dei locali di progetto.
 const JOIN: &str = " + ";
 
@@ -106,6 +112,35 @@ pub struct ProjectRoomRow {
 }
 
 impl RoomRow {
+    /// La quantità principale di un locale è la superficie netta (spec §4.2):
+    /// solo con quella la riga entra nei totali e nel CSV. Perimetro e volume
+    /// sono informazione, quindi un locale senza altezza resta completo
+    /// (Ruling O).
+    pub fn is_complete(&self) -> bool {
+        self.area_m2.is_some()
+    }
+
+    /// Perché la riga è incompleta (`None` se ha la superficie): la nota della
+    /// riga (o «superficie n.d.»), poi il motivo dell'altezza o, se manca senza
+    /// un motivo suo, «altezza n.d.», senza vuoti né doppioni, come
+    /// `ZoneRow::incomplete_reason`.
+    pub fn incomplete_reason(&self) -> Option<String> {
+        if self.is_complete() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        push_reason(&mut parts, self.note.as_deref());
+        if parts.is_empty() {
+            parts.push(REASON_AREA_ND);
+        }
+        let height_note = self.height.note.as_deref();
+        push_reason(&mut parts, height_note);
+        if self.height.value_m.is_none() && height_note.map_or(true, |n| n.trim().is_empty()) {
+            push_reason(&mut parts, Some(REASON_HEIGHT_ND));
+        }
+        Some(parts.join(REASON_SEP))
+    }
+
     /// La riga senza grandezze misurate.
     fn unmeasured(
         phase: Phase,
@@ -168,6 +203,16 @@ impl RoomRow {
             Some(note) => format!("{note}; {text}"),
             None => text.to_string(),
         });
+    }
+}
+
+/// Aggiunge a `parts` un testo non vuoto (senza spazi attorno) che non c'è
+/// ancora.
+fn push_reason<'a>(parts: &mut Vec<&'a str>, text: Option<&'a str>) {
+    if let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) {
+        if !parts.contains(&text) {
+            parts.push(text);
+        }
     }
 }
 
@@ -1252,6 +1297,61 @@ mod tests {
                 assert!(row.row.area_m2.is_some(), "{what}");
             }
         }
+    }
+
+    /// Ruling O: la quantità principale di un locale è la superficie, quindi
+    /// la riga è completa anche senza altezza (niente motivo); senza
+    /// superficie il motivo è la nota della riga (o «superficie n.d.»), poi
+    /// quello dell'altezza o, se manca senza un motivo suo, «altezza n.d.»,
+    /// senza vuoti né doppioni.
+    #[test]
+    fn room_row_is_complete_with_the_area() {
+        let mut row = RoomRow::unmeasured(
+            Phase::Fatto,
+            "LF1".into(),
+            "A",
+            "",
+            [2.0, 1.5],
+            Height::missing(None),
+        );
+        assert!(!row.is_complete());
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("superficie n.d.; altezza n.d.")
+        );
+        row.note = Some(" non chiuso ".into());
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("non chiuso; altezza n.d.")
+        );
+        row.height = Height::missing(Some("altezze dei locali di fatto discordi"));
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("non chiuso; altezze dei locali di fatto discordi")
+        );
+        row.note = Some("altezze dei locali di fatto discordi".into());
+        assert_eq!(
+            row.incomplete_reason().as_deref(),
+            Some("altezze dei locali di fatto discordi"),
+            "nessun doppione"
+        );
+        row.note = None;
+        row.height = Height {
+            value_m: Some(2.7),
+            state: HeightState::Ereditata,
+            note: None,
+        };
+        assert_eq!(row.incomplete_reason().as_deref(), Some("superficie n.d."));
+
+        // Con la superficie: completa, con o senza altezza.
+        row.area_m2 = Some(12.0);
+        assert!(row.is_complete());
+        assert_eq!(row.incomplete_reason(), None);
+        row.height = Height::missing(None);
+        row.volume_m3 = None;
+        row.note = Some("nome da confermare".into());
+        assert!(row.is_complete());
+        assert_eq!(row.incomplete_reason(), None);
     }
 
     #[test]

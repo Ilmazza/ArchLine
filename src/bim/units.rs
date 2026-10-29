@@ -96,12 +96,11 @@ pub fn area_m2(area: f64, unit: DrawingUnit) -> f64 {
 
 /// `12,00`: due decimali, virgola. L'arrotondamento va sui centesimi (mezzo
 /// via dallo zero), non sulla rappresentazione binaria di `{:.2}`. Serve alle
-/// aree (`format_m2`) e alle coordinate degli avvisi.
+/// aree (`format_m2`) e alle coordinate degli avvisi. È `abaco::format_fixed`
+/// con due decimali: le etichette dei locali e le celle dell'abaco
+/// arrotondano allo stesso modo (R61).
 pub fn format_decimal(value: f64) -> String {
-    let cents = (value * 100.0).round() as i64;
-    let sign = if cents < 0 { "-" } else { "" };
-    let abs = cents.unsigned_abs();
-    format!("{sign}{},{:02}", abs / 100, abs % 100)
+    super::abaco::format_fixed(value, 2)
 }
 
 /// `12,00 m²`.

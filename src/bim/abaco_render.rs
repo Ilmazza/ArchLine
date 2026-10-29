@@ -12,7 +12,7 @@
 //!   tabelle niente frecce né lineette tipografiche: i font SHX dello stile
 //!   tabella non le hanno.
 
-use super::abaco::{format_fixed, room_incomplete_reason, Abaco, LocaleLine};
+use super::abaco::{format_fixed, Abaco, LocaleLine};
 use super::height::{Height, HeightState};
 use super::quantities::{group_new_by_thickness, ZoneKind, ZoneRow};
 use super::quantities_rooms::RoomRow;
@@ -24,9 +24,9 @@ const NOT_APPLICABLE: &str = "-";
 const NOT_COMPUTED: &str = "non calcolata";
 const INCOMPLETE: &str = "da completare";
 const APPROXIMATE: &str = "approssimata";
-pub(super) const HEIGHT_ND: &str = "altezza n.d.";
+const HEIGHT_ND: &str = "altezza n.d.";
 /// Tra le note di una cella.
-pub(super) const SEP: &str = "; ";
+const SEP: &str = "; ";
 /// Tra il valore di fatto e quello di progetto di una riga accoppiata.
 const SIDES: &str = " / ";
 /// Decimali nelle tabelle (spec §3).
@@ -156,7 +156,7 @@ impl Cell {
 }
 
 /// L'altezza manca senza un motivo suo.
-pub(super) fn height_unexplained(height: &Height) -> bool {
+fn height_unexplained(height: &Height) -> bool {
     height.value_m.is_none() && height.note.as_deref().map_or(true, |n| n.trim().is_empty())
 }
 
@@ -475,7 +475,7 @@ fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
     let complete: Vec<&RoomRow> = rows
         .iter()
         .copied()
-        .filter(|row| row.area_m2.is_some())
+        .filter(|row| row.is_complete())
         .collect();
     let sum = |value: fn(&RoomRow) -> Option<f64>| -> f64 {
         complete.iter().filter_map(|row| value(row)).sum()
@@ -524,7 +524,7 @@ fn height_cell(height: &Height) -> Cell {
 }
 
 /// Aggiunge una nota non vuota che non c'è ancora.
-pub(super) fn push_note(notes: &mut Vec<String>, text: Option<&str>) {
+fn push_note(notes: &mut Vec<String>, text: Option<&str>) {
     let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
         return;
     };
@@ -554,7 +554,9 @@ fn zone_notes(row: &ZoneRow) -> Vec<String> {
 /// superficie anche perimetro e volume; il perimetro anche da solo, sulle
 /// corde degli archi.
 fn room_state(row: &RoomRow) -> Option<String> {
-    row.area_m2?;
+    if !row.is_complete() {
+        return None;
+    }
     let mut quantities = Vec::new();
     if row.approximate {
         quantities.push("superficie");
@@ -574,7 +576,7 @@ fn room_state(row: &RoomRow) -> Option<String> {
 fn room_notes(row: &RoomRow) -> Vec<String> {
     let mut notes = Vec::new();
     push_note(&mut notes, room_state(row).as_deref());
-    match room_incomplete_reason(row) {
+    match row.incomplete_reason() {
         Some(reason) => push_note(&mut notes, Some(format!("{INCOMPLETE}: {reason}").as_str())),
         None => {
             push_note(&mut notes, row.note.as_deref());
@@ -1120,6 +1122,86 @@ mod tests {
                 "{form:?}: nessuna somma in riga"
             );
         }
+    }
+
+    /// Ruling O: senza altezza (nessuna predefinita, nessuna sui locali) un
+    /// locale con la superficie è una riga completa: nessun
+    /// [`Notice::RigaIncompleta`], la superficie nel totale, il volume `n.d.`
+    /// con «altezza n.d.» nelle note, e il totale dice quante righe non hanno
+    /// il volume. In una riga accoppiata il volume che manca da un lato solo
+    /// sta accanto all'altro: «32,40 / n.d.», evidenziato.
+    #[test]
+    fn room_without_height_is_complete_without_volume() {
+        for form in FORMS {
+            let mut scene = scene_of(form);
+            write_room(&mut scene, "A", [2.0, 1.5]);
+            write_room(&mut scene, "B", [6.0, 1.5]);
+            let abaco = compute_abaco(&scene.document, &OPTS);
+            assert!(incomplete(&abaco).is_empty(), "{form:?}: {:?}", abaco.notices);
+            assert_eq!(abaco.locali.len(), 2, "{form:?}: {:?}", abaco.locali);
+            for line in &abaco.locali {
+                let (Some(f), Some(p)) = (&line.fatto, &line.progetto) else {
+                    panic!("{form:?}: riga non accoppiata {line:?}")
+                };
+                for row in [f, p] {
+                    let what = format!("{form:?} {}", row.code);
+                    assert!(row.is_complete(), "{what}");
+                    assert_eq!(row.incomplete_reason(), None, "{what}");
+                    assert_eq!(row.volume_m3, None, "{what}");
+                }
+            }
+
+            let tables = render_tables(&abaco);
+            let t = table_of(&tables, TableKind::Locali);
+            check_shape(t);
+            let row = row_of(t, "LF1 / LP1");
+            assert_eq!(cell(t, row, "Fatto").text, "12,00", "{form:?}");
+            assert_eq!(cell(t, row, "Progetto").text, "12,00", "{form:?}");
+            nd(cell(t, row, "Volume"), &format!("{form:?}"));
+            nd(cell(t, row, "Altezza"), &format!("{form:?}"));
+            let note = &cell(t, row, "Note").text;
+            assert!(note.contains("fatto: altezza n.d."), "{form:?}: {note}");
+            assert!(!note.contains("da completare"), "{form:?}: {note}");
+            let [fatto, progetto] = &t.totals[..] else {
+                panic!("{form:?}: {:?}", t.totals)
+            };
+            assert_eq!(cell(t, fatto, "Fatto").text, "23,70", "{form:?}");
+            assert_eq!(cell(t, progetto, "Progetto").text, "23,70", "{form:?}");
+            for total in [fatto, progetto] {
+                assert_eq!(
+                    cell(t, total, "Note").text,
+                    "nessuna riga esclusa; 2 righe senza volume (altezza n.d.)",
+                    "{form:?}"
+                );
+            }
+        }
+
+        // Il volume manca solo nel progetto della prima riga accoppiata.
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        write_room(&mut scene, "B", [6.0, 1.5]);
+        let mut abaco = compute_abaco(&scene.document, &OPTS);
+        let progetto = abaco.locali[0].progetto.as_mut().expect("accoppiato");
+        progetto.height = Height::missing(None);
+        progetto.volume_m3 = None;
+        let tables = render_tables(&abaco);
+        let t = table_of(&tables, TableKind::Locali);
+        let row = row_of(t, "LF1 / LP1");
+        let volume = cell(t, row, "Volume");
+        assert_eq!(volume.text, "32,40 / n.d.");
+        assert!(volume.missing, "n.d. evidenziato");
+        assert_eq!(cell(t, row, "Altezza").text, "2,70 (ereditata) / n.d.");
+        let [fatto, progetto] = &t.totals[..] else {
+            panic!("{:?}", t.totals)
+        };
+        assert_eq!(cell(t, fatto, "Volume").text, "63,99");
+        assert_eq!(cell(t, fatto, "Note").text, "nessuna riga esclusa");
+        assert_eq!(cell(t, progetto, "Volume").text, "31,59");
+        assert_eq!(
+            cell(t, progetto, "Note").text,
+            "nessuna riga esclusa; 1 riga senza volume (altezza n.d.)"
+        );
     }
 
     /// Un locale di fatto aperto (la faccia ovest di A tolta) resta in tabella
