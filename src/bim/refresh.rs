@@ -170,6 +170,46 @@ pub(crate) struct FattoMeasures<'a> {
     pub notices: Vec<Notice>,
 }
 
+impl FattoMeasures<'_> {
+    /// I nomi di tutti i locali del gruppo di fusi (R54, R55) del locale
+    /// `index`, in ordine di disegno, se `index` è il primo del gruppo: così
+    /// il gruppo si dice una volta sola. `None` per un locale solo e per gli
+    /// altri locali del gruppo.
+    pub fn fused_group_names(&self, index: usize) -> Option<Vec<String>> {
+        let room = self.rooms.get(index)?;
+        let first = self
+            .rooms
+            .iter()
+            .position(|other| other.group == room.group);
+        if room.fused_with.is_empty() || first != Some(index) {
+            return None;
+        }
+        Some(
+            self.rooms
+                .iter()
+                .filter(|other| other.group == room.group)
+                .map(|other| other.room.name.clone())
+                .collect(),
+        )
+    }
+
+    /// R55: l'avviso di un gruppo di locali fusi, sul primo del gruppo
+    /// ([`Self::fused_group_names`]): [`Notice::LocaleFuso`] con i nomi di
+    /// tutti e l'area del primo misurato, cioè della regione unita. `None`
+    /// dove [`Self::fused_group_names`] lo è, o se nessuno del gruppo è
+    /// misurato (non succede: un gruppo nasce da una regione misurata).
+    pub fn fused_notice(&self, index: usize) -> Option<Notice> {
+        let names = self.fused_group_names(index)?;
+        let group = self.rooms[index].group;
+        let area_m2 = self
+            .rooms
+            .iter()
+            .filter(|other| other.group == group)
+            .find_map(|other| other.measured.as_ref().map(|m| m.area_m2))?;
+        Some(Notice::LocaleFuso { names, area_m2 })
+    }
+}
+
 /// La misura dei locali di fatto, comune ad `AL_AGGIORNA` ([`refresh_rooms`])
 /// e alle quantità dei locali: contorno e testo accoppiati per seme entro
 /// `tol` (la tolleranza dei locali), i muri senza le parti dei locali (R67),
@@ -277,18 +317,14 @@ pub(crate) fn measure_fatto(doc: &Document, unit: DrawingUnit, tol: f64) -> Fatt
 /// applica chi chiama ([`RoomEdit::apply_to`]). La misura è quella di
 /// [`measure_fatto`].
 pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefresh {
-    let FattoMeasures {
-        rooms,
-        walls,
-        notices,
-    } = measure_fatto(doc, unit, tol);
+    let mut measures = measure_fatto(doc, unit, tol);
     let mut out = RoomsRefresh {
         changed: Vec::new(),
-        notices,
+        notices: std::mem::take(&mut measures.notices),
     };
+    let walls = &measures.walls;
     let base = unit.tolerance();
-    let mut reported: Vec<usize> = Vec::new();
-    for parts in &rooms {
+    for (index, parts) in measures.rooms.iter().enumerate() {
         let name = &parts.room.name;
         if parts.outline.is_none() {
             out.notices
@@ -298,28 +334,11 @@ pub fn refresh_rooms(doc: &Document, unit: DrawingUnit, tol: f64) -> RoomsRefres
             out.notices
                 .push(Notice::TestoMancante { name: name.clone() });
         }
-        let members: Vec<&FattoRoom> = rooms
-            .iter()
-            .filter(|other| other.group == parts.group)
-            .collect();
-        if members.len() > 1 {
+        if !parts.fused_with.is_empty() {
             // Un vuoto ha unito due locali: l'area unita sostituirebbe dati
             // giusti. Niente cambia, e lo si dice una volta per gruppo.
-            if !reported.contains(&parts.group) {
-                reported.push(parts.group);
-                let names: Vec<String> = members
-                    .iter()
-                    .map(|member| member.room.name.clone())
-                    .collect();
-                if let Some(area_m2) = members
-                    .iter()
-                    .find_map(|member| member.measured.as_ref().map(|m| m.area_m2))
-                {
-                    out.notices.push(Notice::LocaleFuso {
-                        names: names.clone(),
-                        area_m2,
-                    });
-                }
+            if let Some(names) = measures.fused_group_names(index) {
+                out.notices.extend(measures.fused_notice(index));
                 out.notices.push(Notice::LocaliFusiLasciati { names });
             }
             continue;

@@ -42,6 +42,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::app::{copy_to_clipboard_kernel, paste_entities_kernel, ClipboardDeps, PasteSpace};
 use crate::modules::insert::wblock::extract_entities_into;
 use crate::scene::view::dispatch::set_entity_xdata;
+use crate::scene::BoundarySource;
 
 use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
@@ -230,7 +231,8 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
     ex
 }
 
-fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
+/// Aggiunge gli avvisi che non ci sono ancora.
+pub(crate) fn push_unique(notices: &mut Vec<Notice>, more: Vec<Notice>) {
     for notice in more {
         if !notices.contains(&notice) {
             notices.push(notice);
@@ -298,31 +300,43 @@ fn project_room_entities(
     opts: &ExtractOptions,
 ) -> (Vec<EntityType>, Vec<Notice>) {
     let (unit, tol) = (opts.unit, room_tol(opts));
-    let (computed, notices, _, _) =
-        computed_project_rooms(src, walls, pg_room_entities, zones, unit, opts.tol, tol);
-    if computed.is_empty() {
-        return (Vec::new(), notices);
-    }
-    // Le stesse sorgenti su cui `computed_project_rooms` ha misurato.
-    let (pg_sources, _) = sources_of(pg_room_entities, opts.tol);
+    let rooms = computed_project_rooms(src, walls, pg_room_entities, zones, unit, opts.tol, tol);
     let text_height = room_text_height(src, unit).0;
-    let entities = computed
+    let entities = rooms
+        .computed
         .iter()
-        .flat_map(|room| room_entities(room, Phase::Progetto, &pg_sources, text_height, tol))
+        .flat_map(|room| room_entities(room, Phase::Progetto, &rooms.sources, text_height, tol))
         .collect();
-    (entities, notices)
+    (entities, rooms.notices)
+}
+
+/// I locali di progetto calcolati da [`computed_project_rooms`], con ciò da
+/// cui vengono.
+pub(crate) struct ProjectRooms {
+    pub computed: Vec<Computed>,
+    pub notices: Vec<Notice>,
+    /// Un `Room` per locale di fatto, in ordine di disegno.
+    pub fatto: Vec<Room>,
+    /// I semi di progetto, in ordine di disegno.
+    pub progetto: Vec<Room>,
+    /// Le sorgenti della geometria di progetto su cui si è misurato (vuote
+    /// senza semi).
+    pub sources: FxHashMap<Handle, BoundarySource>,
+    /// Le facce di progetto alla tolleranza dei locali (vuote senza semi).
+    pub faces: Vec<Vec<[f64; 2]>>,
 }
 
 /// I locali di progetto calcolati (spec §5.4), con i loro avvisi, i locali di
-/// fatto e i semi di progetto da cui vengono. Si calcolano con
-/// `rooms::project_rooms` sulla geometria di progetto (`pg_room_entities`,
-/// con le soglie dei varchi: sorgenti a `tol`, facce alla tolleranza dei
-/// locali `room_tol`), dai semi del disegno: un `Room` per locale di fatto
-/// (contorno e testo accoppiati per seme, [`fatto_rooms`]) e i semi di
-/// progetto, in ordine di disegno. Le regioni di fatto si misurano sul
-/// rilievo (`walls`), alla stessa tolleranza. Senza semi niente, nemmeno gli
-/// avvisi (un varco senza locali non ha nulla da dire). La usano lo stato di
-/// progetto ([`project_room_entities`]) e le quantità dei locali.
+/// fatto e i semi di progetto da cui vengono, e la geometria su cui si sono
+/// misurati. Si calcolano con `rooms::project_rooms` sulla geometria di
+/// progetto (`pg_room_entities`, con le soglie dei varchi: sorgenti a `tol`,
+/// facce alla tolleranza dei locali `room_tol`), dai semi del disegno: un
+/// `Room` per locale di fatto (contorno e testo accoppiati per seme,
+/// [`fatto_rooms`]) e i semi di progetto, in ordine di disegno. Le regioni di
+/// fatto si misurano sul rilievo (`walls`), alla stessa tolleranza. Senza semi
+/// niente, nemmeno gli avvisi (un varco senza locali non ha nulla da dire).
+/// La usano lo stato di progetto ([`project_room_entities`]) e le quantità dei
+/// locali.
 pub(crate) fn computed_project_rooms(
     src: &Document,
     walls: &WallSet,
@@ -331,7 +345,7 @@ pub(crate) fn computed_project_rooms(
     unit: DrawingUnit,
     tol: f64,
     room_tol: f64,
-) -> (Vec<Computed>, Vec<Notice>, Vec<Room>, Vec<Room>) {
+) -> ProjectRooms {
     let fatto = fatto_rooms(src, room_tol);
     let progetto: Vec<Room> = rooms_in(src)
         .into_iter()
@@ -339,7 +353,14 @@ pub(crate) fn computed_project_rooms(
         .map(|(_, room, _)| room)
         .collect();
     if fatto.is_empty() && progetto.is_empty() {
-        return (Vec::new(), Vec::new(), fatto, progetto);
+        return ProjectRooms {
+            computed: Vec::new(),
+            notices: Vec::new(),
+            fatto,
+            progetto,
+            sources: FxHashMap::default(),
+            faces: Vec::new(),
+        };
     }
     let fatto_regions: Vec<Region> = if fatto.is_empty() {
         Vec::new()
@@ -377,7 +398,14 @@ pub(crate) fn computed_project_rooms(
         unit,
         room_tol,
     );
-    (computed, notices, fatto, progetto)
+    ProjectRooms {
+        computed,
+        notices,
+        fatto,
+        progetto,
+        sources: pg_sources,
+        faces: pg_faces,
+    }
 }
 
 /// Il layer dei locali in `out` (stato di progetto). La copia lo porta con le

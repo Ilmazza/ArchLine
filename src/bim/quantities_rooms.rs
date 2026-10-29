@@ -9,29 +9,43 @@
 //!
 //! Regole:
 //! - superficie netta della parte 1 (isole sottratte); perimetro = lunghezza
-//!   dell'anello esterno della regione, isole escluse, misurato sulle corde
-//!   del contorno (con un arco l'errore resta sotto 0,1 mm per corda: lo si
-//!   dichiara solo quando anche la superficie non è esatta); volume =
-//!   superficie × altezza, `n.d.` se manca l'altezza;
-//! - superficie e perimetro non esatti (contorno curvo, o chiuso solo da
-//!   `HPGAPTOL`, R47) → `approximate` e la nota;
+//!   dell'anello esterno della regione, isole escluse; volume = superficie ×
+//!   altezza, `n.d.` se manca l'altezza;
+//! - ogni grandezza ha il suo stato (spec §4.2). La superficie non è esatta
+//!   con un contorno curvo che la parte 1 non sa misurare sulle curve vere, o
+//!   con un locale chiuso solo da `HPGAPTOL` (R47): `approximate` e la nota.
+//!   Il perimetro si misura sempre sull'anello delle facce, dove gli archi
+//!   sono corde: con un arco nell'anello esterno è più corto del vero (circa
+//!   7·10⁻⁴ della lunghezza dell'arco; 9 mm su un cerchio di raggio 2 m), e
+//!   allora `perimeter_approximate` e la nota, anche se la superficie è
+//!   esatta (Ruling L);
 //! - un locale di fatto non chiuso resta con superficie, perimetro e volume
 //!   `n.d.`, la nota e [`Notice::LocaleNonChiuso`]; due locali di fatto fusi
 //!   da un vuoto (R54, R55) lo stesso, con la nota «fuso con …» e un
 //!   [`Notice::LocaleFuso`] per gruppo: l'area unita non è di nessuno dei due;
+//!   un seme (di fatto o di progetto) senza locale chiuso nella geometria di
+//!   progetto dà una riga di progetto «non chiuso», non sparisce (Ruling M);
 //! - altezza di un locale di fatto: la sua, poi la predefinita
 //!   (`height::resolve`); di un locale di progetto: quella del suo seme, poi
 //!   quella dei locali di fatto i cui semi cadono nella sua regione, se
-//!   concordi, poi la predefinita (`height::resolve_project_room`).
+//!   concordi, poi la predefinita (`height::resolve_project_room`);
+//! - gli avvisi della geometria di progetto (`project::project_geometry`)
+//!   escono con le righe di progetto, come in `AL_ESTRAI`.
 
-use codec::Document;
+use codec::{Document, Handle};
+use kernel::geom2d::{distance_to, Curve};
+use rustc_hash::FxHashMap;
 
-use super::extract::{computed_project_rooms, rooms_tolerance};
+use crate::scene::BoundarySource;
+
+use super::extract::{computed_project_rooms, push_unique, rooms_tolerance};
 use super::height::{resolve, resolve_project_room, Height};
 use super::project::project_geometry;
-use super::refresh::{measure_fatto, FattoMeasures};
+use super::refresh::measure_fatto;
 use super::report::Notice;
-use super::rooms::{quality_notices, region_holds, rooms_in, Phase, RoomPart};
+use super::rooms::{
+    closed_region, distinct, in_new_zone, quality_notices, region_holds, rooms_in, Phase, RoomPart,
+};
 use super::units::DrawingUnit;
 use super::walls::{wall_set_without_rooms, Region};
 use super::zone::zones_in;
@@ -40,12 +54,16 @@ use super::zone::zones_in;
 /// dei locali, solo il layer delle linee nuove, che qui non si disegnano.
 const NEW_WALLS_LAYER: &str = "0";
 
+/// Quante tolleranze può distare dal suo muro dritto un punto di un lato
+/// dell'anello esterno (la saldatura delle facce, come in `walls`).
+const ON_WALL_SLACK: f64 = 4.0;
+
 const NOTE_OPEN: &str = "non chiuso";
 const NOTE_CONFIRM: &str = "nome da confermare";
-const NOTE_BY_TOLERANCE: &str = "chiuso solo da HPGAPTOL: superficie e perimetro approssimati";
-const NOTE_CURVED: &str = "contorno curvo: superficie e perimetro approssimati";
-const NOTE_APPROXIMATE: &str =
-    "superficie e perimetro approssimati (contorno curvo o chiuso solo da HPGAPTOL)";
+const NOTE_BY_TOLERANCE: &str = "chiuso solo da HPGAPTOL: superficie da verificare";
+const NOTE_CURVED: &str = "contorno curvo: superficie approssimata";
+const NOTE_APPROXIMATE: &str = "superficie approssimata (contorno curvo o chiuso solo da HPGAPTOL)";
+const NOTE_CHORDS: &str = "perimetro misurato sulle corde degli archi";
 /// Tra i nomi dei locali fusi, come nei nomi composti dei locali di progetto.
 const JOIN: &str = " + ";
 
@@ -68,9 +86,12 @@ pub struct RoomRow {
     pub height: Height,
     /// Superficie netta × altezza.
     pub volume_m3: Option<f64>,
-    /// Superficie e perimetro non esatti (contorno curvo, o chiuso solo da
-    /// `HPGAPTOL`): stato «approssimata».
+    /// Superficie non esatta (contorno curvo, o chiuso solo da `HPGAPTOL`):
+    /// stato «approssimata».
     pub approximate: bool,
+    /// Perimetro misurato sulle corde degli archi (stato «approssimata»),
+    /// separato dalla superficie, che può essere esatta anche con gli archi.
+    pub perimeter_approximate: bool,
     /// Note separate da «; ».
     pub note: Option<String>,
 }
@@ -105,17 +126,41 @@ impl RoomRow {
             height,
             volume_m3: None,
             approximate: false,
+            perimeter_approximate: false,
             note: None,
         }
     }
 
     /// Superficie, perimetro e volume dalla misura (superficie in m², regione
-    /// in unità del disegno).
-    fn measured(&mut self, area: f64, region: &Region, exact: bool, unit: DrawingUnit) {
+    /// in unità del disegno), ognuno col suo stato: la superficie da `exact`,
+    /// il perimetro da [`outer_on_chords`] sulle sorgenti della misura, alla
+    /// sua tolleranza `tol`. La nota del perimetro la aggiunge
+    /// [`Self::note_quality`].
+    fn measured(
+        &mut self,
+        area: f64,
+        region: &Region,
+        exact: bool,
+        sources: &FxHashMap<Handle, BoundarySource>,
+        tol: f64,
+        unit: DrawingUnit,
+    ) {
         self.area_m2 = Some(area);
         self.perimeter_m = Some(ring_length(&region.outer) / unit.per_metre());
         self.volume_m3 = self.height.value_m.map(|height| area * height);
         self.approximate = !exact;
+        self.perimeter_approximate = outer_on_chords(region, sources, tol);
+    }
+
+    /// Le note degli stati: quella della superficie (`area_note`, se non è
+    /// esatta), poi quella del perimetro sulle corde.
+    fn note_quality(&mut self, area_note: Option<&str>) {
+        if let Some(text) = area_note {
+            self.add_note(text);
+        }
+        if self.perimeter_approximate {
+            self.add_note(NOTE_CHORDS);
+        }
     }
 
     fn add_note(&mut self, text: &str) {
@@ -140,12 +185,10 @@ pub fn fatto_room_rows(
     default_height: Option<f64>,
 ) -> (Vec<RoomRow>, Vec<Notice>) {
     let room_tol = rooms_tolerance(unit.tolerance(), room_tol);
-    let FattoMeasures {
-        rooms, mut notices, ..
-    } = measure_fatto(doc, unit, room_tol);
-    let mut rows = Vec::with_capacity(rooms.len());
-    let mut reported: Vec<usize> = Vec::new();
-    for (index, fatto) in rooms.iter().enumerate() {
+    let mut measures = measure_fatto(doc, unit, room_tol);
+    let mut notices = std::mem::take(&mut measures.notices);
+    let mut rows = Vec::with_capacity(measures.rooms.len());
+    for (index, fatto) in measures.rooms.iter().enumerate() {
         let room = &fatto.room;
         let mut row = RoomRow::unmeasured(
             Phase::Fatto,
@@ -158,29 +201,23 @@ pub fn fatto_room_rows(
         if !fatto.fused_with.is_empty() {
             // R55: la regione unita non è di nessuno dei due.
             row.add_note(&format!("fuso con {}", fatto.fused_with.join(JOIN)));
-            if !reported.contains(&fatto.group) {
-                reported.push(fatto.group);
-                let members: Vec<_> = rooms
-                    .iter()
-                    .filter(|other| other.group == fatto.group)
-                    .collect();
-                if let Some(area_m2) = members
-                    .iter()
-                    .find_map(|member| member.measured.as_ref().map(|m| m.area_m2))
-                {
-                    notices.push(Notice::LocaleFuso {
-                        names: members.iter().map(|m| m.room.name.clone()).collect(),
-                        area_m2,
-                    });
-                }
-            }
+            notices.extend(measures.fused_notice(index));
         } else if let Some(measured) = &fatto.measured {
-            row.measured(measured.area_m2, &measured.region, measured.exact, unit);
-            if measured.by_tolerance {
-                row.add_note(NOTE_BY_TOLERANCE);
+            row.measured(
+                measured.area_m2,
+                &measured.region,
+                measured.exact,
+                &measures.walls.sources,
+                room_tol,
+                unit,
+            );
+            row.note_quality(if measured.by_tolerance {
+                Some(NOTE_BY_TOLERANCE)
             } else if !measured.exact {
-                row.add_note(NOTE_CURVED);
-            }
+                Some(NOTE_CURVED)
+            } else {
+                None
+            });
             notices.extend(quality_notices(
                 &room.name,
                 measured.exact,
@@ -206,11 +243,23 @@ pub fn fatto_room_rows(
 /// [`fatto_room_rows`]) il cui seme cade nella sua regione, e la sua altezza
 /// (`height::resolve_project_room`): il primo seme di progetto nella
 /// regione, se ne ha una propria, altrimenti quei locali di fatto. Un nome
-/// composto da semi di fatto ha la nota «nome da confermare». Gli avvisi:
-/// [`Notice::FuoriPiano`] (lo stesso di [`fatto_room_rows`] sugli stessi
-/// muri: chi li unisce toglie i doppioni), quelli dei locali di progetto, poi
-/// [`Notice::AltezzeDiscordi`] per riga. Senza locali di fatto né semi di
-/// progetto nel disegno, niente.
+/// composto da semi di fatto ha la nota «nome da confermare».
+///
+/// Dopo i locali chiusi, una riga «non chiuso» (superficie, perimetro e
+/// volume `n.d.`, nessun locale di fatto, altezza propria o predefinita) per
+/// ogni seme che `rooms::project_rooms` scarta perché non ha un locale chiuso
+/// attorno ([`Notice::LocaleNonChiuso`]): prima i locali di fatto, poi i semi
+/// di progetto, senza doppioni, con la stessa condizione (`rooms::distinct`,
+/// `rooms::in_new_zone` per i semi di progetto, `rooms::closed_region` sulle
+/// stesse facce di progetto). Le facce senza seme non chiuse restano solo
+/// nell'avviso «(senza nome)».
+///
+/// Gli avvisi, senza doppioni come in `AL_ESTRAI`: quelli della geometria di
+/// progetto, [`Notice::FuoriPiano`] (lo stesso di [`fatto_room_rows`] sugli
+/// stessi muri: chi li unisce toglie i doppioni), quelli dei locali di
+/// progetto, poi [`Notice::AltezzeDiscordi`] per riga. Senza zone, senza
+/// locali di fatto e senza semi di progetto nel disegno, niente; con le sole
+/// zone, nessuna riga e gli avvisi della geometria.
 pub fn project_room_rows(
     doc: &Document,
     unit: DrawingUnit,
@@ -225,31 +274,35 @@ pub fn project_room_rows(
             Phase::Fatto => *part != RoomPart::Seme,
             Phase::Progetto => *part == RoomPart::Seme,
         });
-    if !has_seeds {
+    let zones = zones_in(doc);
+    if !has_seeds && zones.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let room_tol = rooms_tolerance(tol, room_tol);
     let walls = wall_set_without_rooms(doc, tol);
-    let zones = zones_in(doc);
     let pg = project_geometry(doc, &walls, &zones, NEW_WALLS_LAYER, tol);
-    let (computed, room_notices, _, seeds) =
-        computed_project_rooms(doc, &walls, &pg.room_entities, &zones, unit, tol, room_tol);
+    let rooms = computed_project_rooms(doc, &walls, &pg.room_entities, &zones, unit, tol, room_tol);
     let mut notices = Vec::new();
+    push_unique(&mut notices, pg.notices);
     if walls.off_plane > 0 {
-        notices.push(Notice::FuoriPiano {
-            count: walls.off_plane,
-        });
+        push_unique(
+            &mut notices,
+            vec![Notice::FuoriPiano {
+                count: walls.off_plane,
+            }],
+        );
     }
-    notices.extend(room_notices);
-    let mut rows = Vec::with_capacity(computed.len());
-    for (index, room) in computed.iter().enumerate() {
+    push_unique(&mut notices, rooms.notices);
+    let mut rows = Vec::with_capacity(rooms.computed.len());
+    for room in &rooms.computed {
         let fatto_members: Vec<usize> = fatto
             .iter()
             .enumerate()
             .filter(|(_, row)| region_holds(&room.region, row.seed, tol))
             .map(|(member, _)| member)
             .collect();
-        let own = seeds
+        let own = rooms
+            .progetto
             .iter()
             .find(|seed| region_holds(&room.region, seed.seed, tol))
             .and_then(|seed| seed.height);
@@ -258,25 +311,100 @@ pub fn project_room_rows(
             .map(|&member| (fatto[member].name.clone(), fatto[member].height.clone()))
             .collect();
         let (height, notice) = resolve_project_room(own, &members, default_height, unit);
-        notices.extend(notice);
+        push_unique(&mut notices, notice.into_iter().collect());
         let mut row = RoomRow::unmeasured(
             Phase::Progetto,
-            format!("LP{}", index + 1),
+            format!("LP{}", rows.len() + 1),
             &room.name,
             &room.number,
             room.seed,
             height,
         );
-        row.measured(room.area_m2, &room.region, room.exact, unit);
+        row.measured(
+            room.area_m2,
+            &room.region,
+            room.exact,
+            &rooms.sources,
+            room_tol,
+            unit,
+        );
         if room.confirm {
             row.add_note(NOTE_CONFIRM);
         }
-        if !room.exact {
-            row.add_note(NOTE_APPROXIMATE);
-        }
+        row.note_quality((!room.exact).then_some(NOTE_APPROXIMATE));
         rows.push(ProjectRoomRow { row, fatto_members });
     }
+    // Ruling M: i semi senza locale chiuso restano tra le righe.
+    let seeds = distinct(&rooms.fatto, room_tol)
+        .into_iter()
+        .map(|room| (room, false))
+        .chain(
+            distinct(&rooms.progetto, room_tol)
+                .into_iter()
+                .map(|room| (room, true)),
+        );
+    for (room, of_project) in seeds {
+        if of_project && in_new_zone(&zones, room.seed, room_tol) {
+            continue;
+        }
+        if closed_region(&rooms.faces, &rooms.sources, room.seed, unit, room_tol).is_some() {
+            continue;
+        }
+        let mut row = RoomRow::unmeasured(
+            Phase::Progetto,
+            format!("LP{}", rows.len() + 1),
+            &room.name,
+            &room.number,
+            room.seed,
+            resolve(room.height, default_height, unit),
+        );
+        row.add_note(NOTE_OPEN);
+        rows.push(ProjectRoomRow {
+            row,
+            fatto_members: Vec::new(),
+        });
+    }
     (rows, notices)
+}
+
+/// L'anello esterno della regione ha un lato che non sta su un tratto dritto
+/// dei muri: una corda di un arco (o di un'ellisse, di una spline), più corta
+/// della curva vera. Un lato sta su un tratto dritto se i suoi estremi e il
+/// suo punto medio stanno, ognuno, entro [`ON_WALL_SLACK`] tolleranze da una
+/// `Curve::Line` delle sorgenti (anche due rette in fila per un lato solo);
+/// il punto medio di una corda dista dall'arco la sua freccia e dalle rette
+/// dei muri molto di più. Le rette lontane dal riquadro dell'anello non si
+/// guardano.
+fn outer_on_chords(region: &Region, sources: &FxHashMap<Handle, BoundarySource>, tol: f64) -> bool {
+    let reach = ON_WALL_SLACK * tol;
+    let ring = &region.outer;
+    let (lo, hi) = ring.iter().fold(
+        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+        |(lo, hi), p| {
+            (
+                [lo[0].min(p[0]), lo[1].min(p[1])],
+                [hi[0].max(p[0]), hi[1].max(p[1])],
+            )
+        },
+    );
+    let lines: Vec<&Curve> = sources
+        .values()
+        .flat_map(|source| source.curves.iter())
+        .filter(|curve| match curve {
+            Curve::Line(line) => (0..2).all(|axis| {
+                line.start[axis].min(line.end[axis]) <= hi[axis] + reach
+                    && line.start[axis].max(line.end[axis]) >= lo[axis] - reach
+            }),
+            _ => false,
+        })
+        .collect();
+    let on_line = |p: [f64; 2]| lines.iter().any(|line| distance_to(line, p) <= reach);
+    ring.iter()
+        .zip(ring.iter().cycle().skip(1))
+        .any(|(&a, &b)| {
+            let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+            !(on_line(a) && on_line(mid) && on_line(b))
+        })
 }
 
 /// La lunghezza dell'anello chiuso, in unità del disegno.
@@ -292,10 +420,13 @@ mod tests {
     //! I casi della spec parte 2, §7 (A, D, I, L), metri, altezza predefinita
     //! 2,70, nelle due forme del rilievo.
     use super::*;
-    use codec::xdata::ExtendedDataRecord;
-    use codec::{EntityType, Handle, Vector3};
+    use std::f64::consts::{FRAC_PI_2, PI};
 
-    use crate::bim::fixtures::{case_a, disturbi, pilastro, scene_with, Form};
+    use codec::entities::{Arc, Line, LwPolyline};
+    use codec::xdata::ExtendedDataRecord;
+    use codec::{EntityType, Handle, Vector2, Vector3};
+
+    use crate::bim::fixtures::{case_a, disturbi, pilastro, scene_with, Form, LAYER_MURI};
     use crate::bim::height::HeightState;
     use crate::bim::room_command::test_support::{is_tramezzo, open_tramezzo};
     use crate::bim::rooms::{
@@ -398,15 +529,14 @@ mod tests {
     /// Il tramezzo del caso A demolito per intero (asse (4,05; 0)-(4,05; 3)),
     /// zona «muro tra due punti».
     fn demolish_tramezzo(scene: &mut Scene) {
+        demolish(scene, [4.05, 0.0], [4.05, 3.0]);
+    }
+
+    /// Una zona demolita «muro tra due punti» sull'asse `p1`-`p2`.
+    fn demolish(scene: &mut Scene, p1: [f64; 2], p2: [f64; 2]) {
         let walls = wall_set_without_rooms(&scene.document, TOL);
-        let rect = rect_from_axis(
-            &walls.sources,
-            [4.05, 0.0],
-            [4.05, 3.0],
-            MAX_WALL_THICKNESS_M,
-            TOL,
-        )
-        .expect("muro sull'asse");
+        let rect = rect_from_axis(&walls.sources, p1, p2, MAX_WALL_THICKNESS_M, TOL)
+            .expect("muro sull'asse");
         let zone = Zone {
             state: ZoneState::Demolito,
             origin: ZoneOrigin::MuroDuePunti,
@@ -416,6 +546,58 @@ mod tests {
             varco: false,
         };
         scene.add_entity(zone_hatch(&zone, &[rect.ring()]));
+    }
+
+    /// Una zona demolita senza asse (rettangolo) sull'anello `ring`.
+    fn demolish_without_axis(scene: &mut Scene, ring: Vec<[f64; 2]>) {
+        let zone = Zone {
+            state: ZoneState::Demolito,
+            origin: ZoneOrigin::Rettangolo,
+            axis: None,
+            thickness: None,
+            height: None,
+            varco: false,
+        };
+        scene.add_entity(zone_hatch(&zone, &[ring]));
+    }
+
+    /// Un locale 4,00 × 3,00 con un'abside semicircolare di raggio 1,50 sul
+    /// lato est (centro (4; 1,5)), muri a una linea sul layer `MURI`: tre
+    /// `LINE` e un `ARC`, oppure una `LWPOLYLINE` chiusa con il lato est a
+    /// bulge 1. Superficie 12 + π · 1,5² / 2, perimetro vero 11 + π · 1,5.
+    fn apse(polyline: bool) -> Vec<EntityType> {
+        let wall = |mut entity: EntityType| {
+            entity.common_mut().layer = LAYER_MURI.to_string();
+            entity
+        };
+        if polyline {
+            let mut outline = LwPolyline::from_points(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(4.0, 0.0),
+                Vector2::new(4.0, 3.0),
+                Vector2::new(0.0, 3.0),
+            ]);
+            outline.vertices[1].bulge = 1.0;
+            outline.is_closed = true;
+            return vec![wall(EntityType::LwPolyline(outline))];
+        }
+        let line = |a: [f64; 2], b: [f64; 2]| {
+            wall(EntityType::Line(Line::from_points(
+                Vector3::new(a[0], a[1], 0.0),
+                Vector3::new(b[0], b[1], 0.0),
+            )))
+        };
+        vec![
+            line([0.0, 0.0], [4.0, 0.0]),
+            line([4.0, 3.0], [0.0, 3.0]),
+            line([0.0, 3.0], [0.0, 0.0]),
+            wall(EntityType::Arc(Arc::from_center_radius_angles(
+                Vector3::new(4.0, 1.5, 0.0),
+                1.5,
+                3.0 * FRAC_PI_2,
+                FRAC_PI_2,
+            ))),
+        ]
     }
 
     fn near(p: Vector3, q: [f64; 2]) -> bool {
@@ -507,6 +689,7 @@ mod tests {
                     approx(row.height.value_m, 2.7, &format!("{what}: altezza"));
                     assert_eq!(row.height.state, HeightState::Ereditata, "{what}");
                     assert!(!row.approximate, "{what}");
+                    assert!(!row.perimeter_approximate, "{what}: lati dritti");
                     assert_eq!(row.note, None, "{what}");
                 }
             }
@@ -720,6 +903,7 @@ mod tests {
             assert_eq!(row.height.state, HeightState::NonDisponibile, "{form:?}");
             assert_eq!(row.volume_m3, None, "{form:?}");
             assert!(!row.approximate, "{form:?}");
+            assert!(!row.perimeter_approximate, "{form:?}");
             assert!(
                 notices.contains(&Notice::AltezzeDiscordi {
                     names: vec!["A".into(), "B".into()],
@@ -844,8 +1028,9 @@ mod tests {
     }
 
     /// Caso I: un vuoto d'angolo di 2 mm chiuso dalla tolleranza dei locali
-    /// (`HPGAPTOL` 5 mm) dà superficie e perimetro «approssimati», nel fatto e
-    /// nel progetto, con la nota; alla tolleranza di base A non è chiuso. Solo
+    /// (`HPGAPTOL` 5 mm) dà la superficie «approssimata», nel fatto e nel
+    /// progetto, con la nota (il perimetro, senza archi, no: Ruling L); alla
+    /// tolleranza di base A non è chiuso. Solo
     /// nel caso a linee, come nella parte 1: nel caso a polilinee un vuoto di
     /// 2 mm tra lo spigolo di un muro e il lato di un altro (tramezzo fermato
     /// prima del muro nord) resta aperto anche a 5 mm, e A e B escono fusi,
@@ -878,6 +1063,7 @@ mod tests {
             a.perimeter_m
         );
         note_has(a, "HPGAPTOL", "fatto");
+        assert!(!a.perimeter_approximate, "nessun arco");
         assert!(!b.approximate);
         assert_eq!(b.note, None);
 
@@ -895,6 +1081,177 @@ mod tests {
         note_has(&a.row, "approssimat", "progetto");
         assert_eq!(a.fatto_members, [0]);
         assert!(!b.row.approximate, "progetto");
+    }
+
+    /// Ruling L: in un locale con un arco il perimetro si misura sulle corde:
+    /// `perimeter_approximate`, la nota, un poco meno del vero (11 + 1,5 π);
+    /// la superficie resta esatta (curve vere, parte 1), con il suo stato.
+    /// Fatto e progetto, arco come `ARC` o come lato a bulge.
+    #[test]
+    fn curved_room_perimeter_is_on_chords() {
+        let area = 12.0 + PI * 1.5 * 1.5 / 2.0;
+        let perimeter = 11.0 + PI * 1.5;
+        #[track_caller]
+        fn check(row: &RoomRow, area: f64, perimeter: f64, what: &str) {
+            assert!(row.perimeter_approximate, "{what}");
+            note_has(row, "perimetro misurato sulle corde degli archi", what);
+            assert!(!row.approximate, "{what}: superficie esatta");
+            assert!(
+                row.area_m2.is_some_and(|a| (a - area).abs() < 1e-6),
+                "{what}: {:?} invece di {area}",
+                row.area_m2
+            );
+            assert!(
+                row.perimeter_m
+                    .is_some_and(|p| p < perimeter && p > perimeter - 0.01),
+                "{what}: {:?} contro {perimeter}",
+                row.perimeter_m
+            );
+        }
+        for polyline in [false, true] {
+            let what = if polyline { "bulge" } else { "ARC" };
+            let mut scene = scene_with(apse(polyline), 6);
+            ensure_layers(&mut scene.document);
+            write_room(&mut scene, "Abside", [2.0, 1.5]);
+            let (fatto, notices) = fatto_room_rows(&scene.document, M, TOL, DEFAULT);
+            assert!(notices.is_empty(), "{what}: {notices:?}");
+            let [row] = &fatto[..] else {
+                panic!("{what}: {fatto:?}")
+            };
+            check(row, area, perimeter, &format!("{what}: fatto"));
+            let (rows, _) = project_room_rows(&scene.document, M, TOL, TOL, DEFAULT, &fatto);
+            let [row] = &rows[..] else {
+                panic!("{what}: {rows:?}")
+            };
+            check(&row.row, area, perimeter, &format!("{what}: progetto"));
+        }
+    }
+
+    /// Ruling M (spec §4.3): un locale di progetto non chiuso resta tra le
+    /// righe con superficie, perimetro e volume `n.d.` e la nota, non sparisce.
+    /// Un tratto del muro esterno di A demolito (asse (1; −0,15)-(2; −0,15))
+    /// apre A verso l'esterno; un seme di progetto fuori dall'edificio non ha
+    /// locale attorno. B resta com'era.
+    #[test]
+    fn unclosed_project_rooms_are_rows() {
+        for form in FORMS {
+            let mut scene = scene_of(form, Vec::new());
+            write_room(&mut scene, "A", [2.0, 1.5]);
+            write_room(&mut scene, "B", [6.0, 1.5]);
+            demolish(&mut scene, [1.0, -0.15], [2.0, -0.15]);
+            write_seed(&mut scene, "Giardino", [10.0, 1.5]);
+            let (fatto, _) = fatto_room_rows(&scene.document, M, TOL, DEFAULT);
+            approx(fatto[0].area_m2, 12.0, &format!("{form:?}: A di fatto"));
+
+            let (rows, notices) = project_room_rows(&scene.document, M, TOL, TOL, DEFAULT, &fatto);
+            let [b, a, garden] = &rows[..] else {
+                panic!("{form:?}: {rows:?}")
+            };
+            assert_eq!(
+                (b.row.code.as_str(), b.row.name.as_str()),
+                ("LP1", "B"),
+                "{form:?}"
+            );
+            approx(b.row.area_m2, 11.7, &format!("{form:?}: B"));
+            assert_eq!(b.fatto_members, [1], "{form:?}");
+            assert_eq!(b.row.note, None, "{form:?}");
+            for (row, code, name, seed) in [
+                (a, "LP2", "A", [2.0, 1.5]),
+                (garden, "LP3", "Giardino", [10.0, 1.5]),
+            ] {
+                let what = format!("{form:?} {name}");
+                assert_eq!(row.row.phase, Phase::Progetto, "{what}");
+                assert_eq!(
+                    (row.row.code.as_str(), row.row.name.as_str()),
+                    (code, name),
+                    "{what}"
+                );
+                assert_eq!(row.row.seed, seed, "{what}");
+                assert_eq!(
+                    (row.row.area_m2, row.row.perimeter_m, row.row.volume_m3),
+                    (None, None, None),
+                    "{what}"
+                );
+                assert_eq!(row.row.note.as_deref(), Some("non chiuso"), "{what}");
+                assert!(row.fatto_members.is_empty(), "{what}");
+                assert!(
+                    !row.row.approximate && !row.row.perimeter_approximate,
+                    "{what}"
+                );
+                approx(row.row.height.value_m, 2.7, &what);
+            }
+            for name in ["A", "Giardino"] {
+                assert!(
+                    notices.contains(&Notice::LocaleNonChiuso { name: name.into() }),
+                    "{form:?}: {notices:?}"
+                );
+            }
+        }
+    }
+
+    /// I problemi della geometria di progetto (qui una zona demolita senza
+    /// asse sul tramezzo: `ConfiniNonRimossi`) escono tra gli avvisi delle
+    /// righe di progetto, una volta sola, come in `AL_ESTRAI`; anche senza
+    /// locali. Con il tramezzo che resta, A e B restano due locali.
+    #[test]
+    fn project_geometry_notices_are_returned() {
+        let borders = |notices: &[Notice]| {
+            notices
+                .iter()
+                .filter(|n| {
+                    matches!(n, Notice::ConfiniNonRimossi { at }
+                        if (at[0] - 4.05).abs() < 1e-9 && (at[1] - 1.5).abs() < 1e-9)
+                })
+                .count()
+        };
+        for form in FORMS {
+            let mut scene = scene_of(form, Vec::new());
+            demolish_without_axis(
+                &mut scene,
+                vec![[4.0, 0.0], [4.1, 0.0], [4.1, 3.0], [4.0, 3.0]],
+            );
+            let (rows, notices) = project_room_rows(&scene.document, M, TOL, TOL, DEFAULT, &[]);
+            assert!(rows.is_empty(), "{form:?}: {rows:?}");
+            assert_eq!(borders(&notices), 1, "{form:?}: {notices:?}");
+
+            write_room(&mut scene, "A", [2.0, 1.5]);
+            write_room(&mut scene, "B", [6.0, 1.5]);
+            let (fatto, _) = fatto_room_rows(&scene.document, M, TOL, DEFAULT);
+            let (rows, notices) = project_room_rows(&scene.document, M, TOL, TOL, DEFAULT, &fatto);
+            assert_eq!(borders(&notices), 1, "{form:?}: {notices:?}");
+            let [a, b] = &rows[..] else {
+                panic!("{form:?}: {rows:?}")
+            };
+            approx(a.row.area_m2, 12.0, &format!("{form:?}: A"));
+            approx(b.row.area_m2, 11.7, &format!("{form:?}: B"));
+        }
+    }
+
+    /// Ruling N: senza predefinita, un locale di progetto i cui locali di
+    /// fatto non hanno altezza è `n.d.` con la nota «altezza mancante nei
+    /// locali di fatto», senza l'avviso delle altezze discordi.
+    #[test]
+    fn project_rows_without_any_fatto_height_have_no_discord_notice() {
+        for form in FORMS {
+            let mut scene = scene_of(form, Vec::new());
+            write_room(&mut scene, "A", [2.0, 1.5]);
+            write_room(&mut scene, "B", [6.0, 1.5]);
+            let (fatto, _) = fatto_room_rows(&scene.document, M, TOL, None);
+            let (rows, notices) = project_room_rows(&scene.document, M, TOL, TOL, None, &fatto);
+            assert!(notices.is_empty(), "{form:?}: {notices:?}");
+            assert_eq!(rows.len(), 2, "{form:?}");
+            for row in &rows {
+                let what = format!("{form:?} {}", row.row.name);
+                assert_eq!(row.row.height.state, HeightState::NonDisponibile, "{what}");
+                assert_eq!(
+                    row.row.height.note.as_deref(),
+                    Some("altezza mancante nei locali di fatto"),
+                    "{what}"
+                );
+                assert_eq!(row.row.volume_m3, None, "{what}");
+                assert!(row.row.area_m2.is_some(), "{what}");
+            }
+        }
     }
 
     #[test]

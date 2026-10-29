@@ -509,13 +509,24 @@ fn measure(
     unit: DrawingUnit,
     tol: f64,
 ) -> Option<(Region, f64, bool, usize)> {
-    let region = without_spurs(region_at(faces, seed, tol)?, tol);
-    if has_walls_inside(&region, sources, unit.metres(OPEN_WALLS_M), tol) {
-        return None;
-    }
+    let region = closed_region(faces, sources, seed, unit, tol)?;
     let (area, exact) = net_area(&region, sources, tol);
     let islands = region.holes.len();
     Some((region, area_m2(area, unit), exact, islands))
+}
+
+/// La regione chiusa attorno a `seed` alla tolleranza `tol`, senza punte e
+/// senza muri dentro (R50): la prima metà della misura, senza l'area.
+/// [`measure_at`] dà `Some` se e solo se questa lo dà.
+pub(crate) fn closed_region(
+    faces: &[Vec<[f64; 2]>],
+    sources: &FxHashMap<Handle, BoundarySource>,
+    seed: [f64; 2],
+    unit: DrawingUnit,
+    tol: f64,
+) -> Option<Region> {
+    let region = without_spurs(region_at(faces, seed, tol)?, tol);
+    (!has_walls_inside(&region, sources, unit.metres(OPEN_WALLS_M), tol)).then_some(region)
 }
 
 /// Gli avvisi di qualità di un locale misurato: isole → [`Notice::Isole`];
@@ -821,10 +832,21 @@ pub fn project_rooms(
     (rooms, notices)
 }
 
+/// Il punto sta in una zona nuova (bordo compreso), come per
+/// [`project_rooms`], che di un seme di progetto lì non fa un locale
+/// ([`Notice::SemeInMuroNuovo`]).
+pub(crate) fn in_new_zone(zones: &[ZoneGeom], p: [f64; 2], tol: f64) -> bool {
+    let tolerance = Tolerance::new(tol);
+    zones
+        .iter()
+        .filter_map(ZoneShape::new)
+        .any(|zone| zone.state == ZoneState::Nuovo && zone.holds(p, tolerance))
+}
+
 /// I locali senza doppioni: lo stesso nome con il seme entro `tol` vale una
 /// volta (il primo). Così il contorno e il testo dello stesso locale di fatto,
 /// passati tutti e due, non danno «A + A».
-fn distinct(rooms: &[Room], tol: f64) -> Vec<&Room> {
+pub(crate) fn distinct(rooms: &[Room], tol: f64) -> Vec<&Room> {
     let mut kept: Vec<&Room> = Vec::new();
     for room in rooms {
         let twin = kept.iter().any(|seen| {
