@@ -3,6 +3,7 @@
 //!
 //! Spec: `docs/superpowers/specs/2026-10-23-bim-stato-piante-design.md`.
 
+pub mod abaco;
 pub mod clip;
 pub mod commands;
 pub mod extract;
@@ -39,6 +40,10 @@ pub const APP_ZONA: &str = "ARCHLINE_ZONA";
 pub const APP_LOCALE: &str = "ARCHLINE_LOCALE";
 /// Chiave dell'XRecord con le impostazioni del disegno (dizionario radice).
 pub const RECORD_PROGETTO: &str = "ARCHLINE_PROGETTO";
+/// Layer delle tabelle d'abaco (`AL_ABACO`).
+pub const LAYER_ABACO: &str = "AL-ABACO";
+/// APPID dell'XDATA delle tabelle d'abaco.
+pub const APP_ABACO: &str = "ARCHLINE_ABACO";
 
 /// Colore ACI delle zone demolite.
 pub const ACI_GIALLO: i16 = 2;
