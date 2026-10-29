@@ -12,7 +12,8 @@ partenza). Il CSV si legge come lo legge Excel italiano (UTF-8 con BOM, `;`, CRL
 `quantita` = parti x lunghezza x larghezza x altezza dei fattori scritti (entro 5e-5), altezza mai vuota. Le tabelle
 (ACAD_TABLE) ezdxf le vede ma non ne legge le celle (n_rows = 0): si controlla il loro blocco di visualizzazione `*T`
 (codice e quantita' a due decimali di ogni riga del CSV). E' un limite dichiarato (riga NOTA), non un controllo
-fallito; se il blocco mancasse o fosse senza testi, la riga NOTA dice "TABLE non verificata (ezdxf): solo CSV".
+fallito; se le due tabelle ci sono ma il blocco e' senza testi, la riga NOTA dice "TABLE non verificata (ezdxf):
+solo CSV". Nessuna ACAD_TABLE (o diverse da due) e' invece FALLITO.
 
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
@@ -69,7 +70,7 @@ CSV_HEADER = ["tipo", "codice", "descrizione", "parti", "lunghezza", "larghezza"
 CSV_QUANTITY_TOL = 5e-5 + 1e-9  # `quantita` e il prodotto dei fattori scritti: sempre entro 5e-5 (to_csv)
 TABLE_NOT_VERIFIED = "TABLE non verificata (ezdxf): solo CSV"
 
-READY_TIMEOUT = 180 # s: avvio a freddo dell'app
+READY_TIMEOUT = 180  # s: avvio a freddo dell'app
 REQUEST_TIMEOUT = 300  # s: una singola richiesta
 EXPORT_TIMEOUT = 180  # s: una conversione
 
@@ -625,7 +626,8 @@ def check_abaco_csv(rep, csv_path):
 def check_abaco_tables(rep, table_dxf, rows):
     """Le tabelle `AL_ABACO` riconvertite in DXF: ezdxf vede le due ACAD_TABLE e, nel loro blocco di
     visualizzazione, il codice e la quantita' di ogni riga del CSV (a due decimali). Le celle AcDbTable vere e proprie
-    ezdxf non le interpreta: e' un limite dichiarato (riga NOTA), non un controllo fallito."""
+    ezdxf non le interpreta: e' un limite dichiarato (riga NOTA), non un controllo fallito. Una tabella che manca
+    (zero ACAD_TABLE, o diverse da due) invece e' FALLITO: l'app non ha scritto quello che doveva."""
     if not Path(table_dxf).is_file():
         rep.check(False, "abaco TABLE: file", f"{Path(table_dxf).name} non scritto")
         return
@@ -633,12 +635,18 @@ def check_abaco_tables(rep, table_dxf, rows):
     if not rep.check(doc is not None, "abaco TABLE: ezdxf", "letto" if doc is not None else err):
         return
     tables = table_texts(doc)
-    if not tables or not any(tables):
+    # Nessuna tabella (o diversa da due) e' una regressione dell'app: AL_ABACO e' "completato" ma non ha scritto
+    # cio' che doveva. Il limite dichiarato di ezdxf vale solo se le tabelle ci sono ma il loro blocco e' senza testi.
+    rep.check(len(tables) == 2, "abaco TABLE: due ACAD_TABLE",
+              "2 ACAD_TABLE nello spazio modello" if len(tables) == 2 else f"{len(tables)} ACAD_TABLE invece di 2")
+    if not tables:
+        return
+    if not any(tables):
         print(f"NOTA     {TABLE_NOT_VERIFIED}")
         return
-    rep.check(len(tables) == 2 and all(tables), "abaco TABLE: due tabelle con testi",
-              "2 ACAD_TABLE, blocchi con testi" if len(tables) == 2 and all(tables)
-              else f"{len(tables)} ACAD_TABLE, testi per tabella {[len(t) for t in tables]}")
+    rep.check(all(tables), "abaco TABLE: blocchi con testi",
+              "ogni tabella ha il blocco di visualizzazione con testi" if all(tables)
+              else f"testi per tabella {[len(t) for t in tables]}")
     for code in ("D1", "N1"):
         row = next((r for r in rows or [] if r["codice"] == code), None)
         if row is None:

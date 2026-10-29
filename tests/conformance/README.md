@@ -127,8 +127,9 @@ italiano (`csv` con `delimiter=";"`, `utf-8-sig`) e si controlla:
 Le tabelle: ezdxf legge le due `ACAD_TABLE` del DXF salvato ma **non le celle** (`n_rows` = 0, i dati `AcDbTable` non
 si interpretano). Il banco controlla quindi il blocco di visualizzazione `*T1`/`*T2` di ogni tabella, l'immagine che
 AutoCAD disegna: i testi `MTEXT` del blocco devono contenere il codice e la quantita' a due decimali (come nelle celle,
-`0,81`, `5,40`) di ogni riga del CSV. Se il blocco mancasse o fosse senza testi, il banco stampa «TABLE non verificata
-(ezdxf): solo CSV» come limite dichiarato, non come controllo fallito. In ogni caso la riga `NOTA` ricorda che la
+`0,81`, `5,40`) di ogni riga del CSV. Se le due tabelle ci sono ma il blocco e' senza testi, il banco stampa «TABLE non verificata
+(ezdxf): solo CSV» come limite dichiarato, non come controllo fallito. Nessuna `ACAD_TABLE` nel DXF (o un numero diverso da
+due) e' invece **FALLITO**: `AL_ABACO` risulterebbe completato senza aver scritto le tabelle. In ogni caso la riga `NOTA` ricorda che la
 struttura a celle va vista in AutoCAD.
 
 **Isolamento.** L'app parte con `APPDATA` e `LOCALAPPDATA` puntati a una cartella temporanea (`config\Roaming` e

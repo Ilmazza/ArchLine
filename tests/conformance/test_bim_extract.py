@@ -278,7 +278,7 @@ class AbacoCsvTests(unittest.TestCase):
         self.assertEqual(be.two_decimals("5,4000"), "5,40")
 
     @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
-    def test_a_dxf_without_tables_is_a_declared_limit_not_a_failure(self):
+    def test_a_dxf_without_tables_fails(self):
         import ezdxf
 
         path = self.tmp / "senza.dxf"
@@ -286,9 +286,22 @@ class AbacoCsvTests(unittest.TestCase):
         rep = self.report()
         with contextlib.redirect_stdout(io.StringIO()) as out:
             be.check_abaco_tables(rep, path, [])
-        self.assertEqual(rep.failed, 0)
-        self.assertIn(be.TABLE_NOT_VERIFIED, out.getvalue())
+        self.assertEqual(rep.failed, 1, rep.out.getvalue())
+        self.assertIn("0 ACAD_TABLE invece di 2", rep.out.getvalue())
+        self.assertNotIn(be.TABLE_NOT_VERIFIED, out.getvalue())
         self.assertEqual(be.table_texts(ezdxf.readfile(path)), [])
+
+    @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+    def test_two_tables_with_an_empty_block_are_a_declared_limit_not_a_failure(self):
+        import ezdxf
+
+        path = self.tmp / "vuote.dxf"
+        ezdxf.new("R2018").saveas(path)  # ezdxf non crea ACAD_TABLE: le due tabelle senza testi sono imitate
+        rep = self.report()
+        with mock.patch.object(be, "table_texts", return_value=[[], []]),                 contextlib.redirect_stdout(io.StringIO()) as out:
+            be.check_abaco_tables(rep, path, [])
+        self.assertEqual(rep.failed, 0, rep.out.getvalue())
+        self.assertIn(be.TABLE_NOT_VERIFIED, out.getvalue())
 
     def test_a_missing_table_file_fails(self):
         rep = self.report()
