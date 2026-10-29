@@ -9,7 +9,8 @@
 //! esistenti (`AL_STATO`), il ricalcolo dei locali di fatto (`AL_AGGIORNA`) e
 //! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
 //! sta in `crate::bim`. I comandi della parte 2 stanno in file propri
-//! (`AL_ALTEZZA` in `bim_altezza.rs`) e passano da `dispatch_bim`.
+//! (`AL_ALTEZZA` in `bim_altezza.rs`, `AL_ABACO` in `bim_abaco.rs`) e passano
+//! da `dispatch_bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
@@ -46,6 +47,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_ESTRAI",
         "AL_UNITA",
         "AL_ALTEZZA",
+        "AL_ABACO",
     ]
 });
 
@@ -85,8 +87,9 @@ impl OpenCADStudio {
             "AL_LOCALE" => Some(self.bim_start_room(i)),
             "AL_AGGIORNA" => Some(self.bim_update_rooms(i)),
             "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
-            // Parte 2: in `bim_altezza.rs`.
+            // Parte 2: in `bim_altezza.rs` e `bim_abaco.rs`.
             "AL_ALTEZZA" => Some(self.bim_altezza(i, cmd)),
+            "AL_ABACO" => Some(self.bim_abaco(i, cmd)),
             _ => None,
         }
     }
@@ -721,8 +724,8 @@ impl OpenCADStudio {
         result
     }
 
-    /// Una riga per avviso (dell'estrazione, di `AL_AGGIORNA`).
-    fn bim_push_notices(&mut self, notices: &[Notice]) {
+    /// Una riga per avviso (dell'estrazione, di `AL_AGGIORNA`, di `AL_ABACO`).
+    pub(super) fn bim_push_notices(&mut self, notices: &[Notice]) {
         for notice in notices {
             self.command_line.push_info(&notice.text());
         }
@@ -1099,8 +1102,8 @@ fn zone_snapshot(doc: &Document, unit: DrawingUnit) -> (ZoneSnapshot, usize) {
 }
 
 /// La tolleranza dei locali (spec §3): quella dell'unità, o `HPGAPTOL` se è
-/// più larga.
-fn room_tolerance(unit: DrawingUnit) -> f64 {
+/// più larga. Anche per `AL_ABACO`.
+pub(super) fn room_tolerance(unit: DrawingUnit) -> f64 {
     unit.tolerance().max(super::hatchvars::gap_tolerance())
 }
 

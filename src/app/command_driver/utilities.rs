@@ -1035,6 +1035,9 @@ impl OpenCADStudio {
             || tokens[0].eq_ignore_ascii_case("CAL")
             || tokens[0].eq_ignore_ascii_case("QUICKCALC")
             || tokens[0].eq_ignore_ascii_case("QC")
+            // ArchLine: `AL_ABACO <x,y>` takes its point in one line; bare, in a
+            // script, it writes the tables at once, so it must not be probed.
+            || tokens[0].eq_ignore_ascii_case("AL_ABACO")
         {
             return self.dispatch_command(cmd);
         }

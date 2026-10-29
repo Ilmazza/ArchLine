@@ -1,7 +1,7 @@
 //! Comandi BIM dall'app (spec §3, §4.2, §5.1 e §5.2): `AL_DEMOLISCI`,
 //! `AL_NUOVO`, la scelta dell'unità `AL_UNITA`, `AL_STATO`, `AL_LOCALE`,
-//! `AL_AGGIORNA` e, dalla parte 2, `AL_ALTEZZA`, guidati come da uno script o
-//! dalla riga di comando. Coprono
+//! `AL_AGGIORNA` e, dalla parte 2, `AL_ALTEZZA` e `AL_ABACO`, guidati come da
+//! uno script o dalla riga di comando. Coprono
 //! ciò che i test di `bim::commands` non vedono: l'unità letta dal disegno, i
 //! layer creati in un passo di annullamento a sé, l'istantanea della geometria
 //! e il rilievo che resta intatto.
@@ -15,6 +15,8 @@
 //! fine test: mai file o impostazioni dell'utente.
 
 use super::{Message, ModalKind, OpenCADStudio};
+use crate::bim::abaco::TableKind;
+use crate::bim::abaco_table::tables_in;
 use crate::bim::extract::{file_name, Elaborato};
 use crate::bim::fixtures::{case_a, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
 use crate::bim::record;
@@ -23,11 +25,12 @@ use crate::bim::rooms::{rooms_in, Phase, Room, RoomPart};
 use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{missing_layers, read_zone, zones_in, Zone, ZoneState};
 use crate::bim::{
-    ACI_GIALLO, ACI_ROSSO, APP_LOCALE, APP_ZONA, LAYER_DEMOLIZIONI, LAYER_LOCALI,
-    LAYER_LOCALI_PROGETTO, LAYER_NUOVE,
+    ACI_GIALLO, ACI_ROSSO, APP_ABACO, APP_LOCALE, APP_ZONA, LAYER_ABACO, LAYER_DEMOLIZIONI,
+    LAYER_LOCALI, LAYER_LOCALI_PROGETTO, LAYER_NUOVE,
 };
 use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_BUTTON, OVERWRITE_NOTE};
+use codec::entities::table::Table;
 use codec::entities::{Arc, Line, LwPolyline, MText};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Document, Color, EntityType, Handle, Vector3};
@@ -3554,6 +3557,487 @@ fn altezza_refuses_paper_space() {
             history(&app)
         );
         assert_eq!(active_command(&app), None, "{command}: nessuna domanda");
+        assert_eq!(
+            record::read(doc(&app)),
+            record::ProjectRecord::default(),
+            "{command}: nessun record"
+        );
+        assert_eq!(undo_steps(&app), steps, "{command}: nessun passo");
+        assert_eq!(app.bim_pending, None);
+        assert_eq!(rilievo_snapshot(&app), before);
+    }
+}
+
+// ---------------------------------------------------------------- AL_ABACO
+
+/// Le tabelle d'abaco dello spazio modello, in ordine di handle, con il loro
+/// tipo e una copia della `TABLE`.
+fn abaco_tables(app: &OpenCADStudio) -> Vec<(Handle, TableKind, Table)> {
+    let mut tables: Vec<(Handle, TableKind, Table)> = tables_in(doc(app))
+        .into_iter()
+        .map(|(handle, kind)| match doc(app).get_entity(handle) {
+            Some(EntityType::Table(table)) => (handle, kind, table.as_ref().clone()),
+            other => panic!("non è una TABLE: {other:?}"),
+        })
+        .collect();
+    tables.sort_by_key(|(handle, _, _)| handle.value());
+    tables
+}
+
+/// La tabella d'abaco del tipo `kind` (una sola).
+fn abaco_table(app: &OpenCADStudio, kind: TableKind) -> (Handle, Table) {
+    let found: Vec<(Handle, Table)> = abaco_tables(app)
+        .into_iter()
+        .filter(|(_, k, _)| *k == kind)
+        .map(|(handle, _, table)| (handle, table))
+        .collect();
+    let [one] = &found[..] else {
+        panic!("{kind:?}: {} tabelle", found.len())
+    };
+    one.clone()
+}
+
+/// I testi non vuoti delle celle, riga per riga.
+fn cell_texts(table: &Table) -> Vec<String> {
+    (0..table.row_count())
+        .flat_map(|row| (0..table.column_count()).map(move |col| (row, col)))
+        .filter_map(|(row, col)| table.cell_text(row, col))
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_text(table: &Table, text: &str) -> bool {
+    cell_texts(table).iter().any(|t| t == text)
+}
+
+/// Nessuna `TABLE`, in nessuno spazio.
+fn no_tables(app: &OpenCADStudio) -> bool {
+    !doc(app)
+        .entities()
+        .any(|entity| matches!(entity, EntityType::Table(_)))
+}
+
+/// Il caso A in metri con il tramezzo demolito, i locali di fatto A (12,00
+/// m²) e B (11,70 m²) e l'altezza predefinita 2,70: ciò che `AL_ABACO`
+/// legge (spec parte 2, §7, caso A).
+fn app_with_abaco_input() -> OpenCADStudio {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_DEMOLISCI 4.05,0 4.05,3 N");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    assert_eq!(zones_in(doc(&app)).len(), 1, "storia: {}", history(&app));
+    assert_eq!(
+        rooms_in(doc(&app)).len(),
+        4,
+        "contorno e testo di A e B, storia: {}",
+        history(&app)
+    );
+    assert_eq!(record::read(doc(&app)).default_height, Some(2.7));
+    app
+}
+
+/// Spec parte 2, §5.2 (Ruling D): `AL_ABACO 20,0` scrive le tabelle
+/// Demolizioni e Locali (niente zone nuove: nessuna tabella Nuove), la prima
+/// in (20; 0) e la seconda sotto; il layer `AL-ABACO` è un passo a sé. Un
+/// secondo lancio senza cambi non crea copie né passi; dopo una modifica del
+/// rilievo la tabella cambiata si sostituisce dove si trova, stesso handle, in
+/// un passo. Annullando: la tabella di prima, poi via le tabelle, poi via il
+/// layer.
+#[test]
+fn abaco_writes_tables_then_replaces_them_in_place() {
+    let mut app = app_with_abaco_input();
+    let survey = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO 20,0");
+
+    let log = history(&app);
+    let tables = abaco_tables(&app);
+    let kinds: Vec<TableKind> = tables.iter().map(|(_, kind, _)| *kind).collect();
+    assert_eq!(
+        kinds,
+        [TableKind::Demolizioni, TableKind::Locali],
+        "storia: {log}"
+    );
+    let (demolizioni, locali) = (&tables[0].2, &tables[1].2);
+    assert!(near(demolizioni.insertion_point, [20.0, 0.0]));
+    assert!((locali.insertion_point.x - 20.0).abs() < 1e-9, "allineata");
+    assert!(
+        locali.insertion_point.y < -demolizioni.total_height(),
+        "sotto la prima: {:?}",
+        locali.insertion_point
+    );
+    for value in ["D1", "3,00", "0,10", "0,30", "2,70 (ereditata)", "8,10", "0,81"] {
+        assert!(
+            has_text(demolizioni, value),
+            "{value}: {:?}",
+            cell_texts(demolizioni)
+        );
+    }
+    // Con il tramezzo demolito A e B diventano un locale di progetto solo,
+    // «A + B» da confermare (spec parte 2, §7, caso A): quattro righe.
+    for value in ["A", "B", "12,00", "11,70", "32,40", "31,59", "A + B", "24,00"] {
+        assert!(has_text(locali, value), "{value}: {:?}", cell_texts(locali));
+    }
+    assert!(tables.iter().all(|(_, _, t)| t.common.layer == LAYER_ABACO));
+    assert_eq!(layer_color(&app, LAYER_ABACO), Some(Color::from_index(7)));
+    assert!(doc(&app).app_ids.contains(APP_ABACO));
+    assert_eq!(undo_steps(&app), steps + 2, "il layer, poi le tabelle");
+    assert!(
+        log.contains("AL_ABACO: tabelle create: 2; sostituite: 0."),
+        "storia: {log}"
+    );
+    assert!(
+        log.contains("AL_ABACO: righe: 4; incomplete: 0."),
+        "storia: {log}"
+    );
+    assert!(
+        comes_after(
+            &log,
+            "AL_ABACO: righe: 4; incomplete: 0.",
+            "Locali A + B fusi in uno (24,00 m²): nome da confermare."
+        ),
+        "gli avvisi dell'abaco dopo il conteggio, storia: {log}"
+    );
+    assert_eq!(active_command(&app), None);
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+
+    // Di nuovo, nulla è cambiato: nessuna copia, nessun passo.
+    forget_history(&mut app);
+    run(&mut app, "AL_ABACO 20,0");
+    assert_eq!(abaco_tables(&app), tables, "storia: {}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 2);
+    assert!(
+        history(&app).contains("AL_ABACO: le tabelle sono già aggiornate."),
+        "storia: {}",
+        history(&app)
+    );
+
+    // Il rilievo cambia (A da 12,00 a 11,70 m²): la tabella dei locali si
+    // riscrive dove si trova, con lo stesso handle, in un passo.
+    move_tramezzo_face(&mut app);
+    forget_history(&mut app);
+    run(&mut app, "AL_ABACO");
+    let after = abaco_tables(&app);
+    assert_eq!(after.len(), 2, "nessuna copia, storia: {}", history(&app));
+    for ((handle, kind, old), (new_handle, new_kind, new)) in tables.iter().zip(&after) {
+        assert_eq!((handle, kind), (new_handle, new_kind));
+        assert_eq!(new.insertion_point, old.insertion_point, "{kind:?}");
+    }
+    assert_eq!(after[0].2, tables[0].2, "le demolizioni non cambiano");
+    assert!(
+        !has_text(&after[1].2, "12,00"),
+        "{:?}",
+        cell_texts(&after[1].2)
+    );
+    assert!(has_text(&after[1].2, "11,70"));
+    assert_eq!(undo_steps(&app), steps + 3, "un passo");
+    assert!(
+        history(&app).contains("AL_ABACO: tabelle create: 0; sostituite: 1."),
+        "storia: {}",
+        history(&app)
+    );
+
+    // Annullando: la tabella di prima, poi via le tabelle, poi via il layer.
+    undo(&mut app);
+    assert_eq!(abaco_tables(&app), tables);
+    undo(&mut app);
+    assert!(abaco_tables(&app).is_empty());
+    assert!(doc(&app).layers.contains(LAYER_ABACO), "il layer resta");
+    undo(&mut app);
+    assert!(!doc(&app).layers.contains(LAYER_ABACO));
+}
+
+/// Senza zone né locali: un messaggio, nessuna tabella, nessun layer, nessun
+/// passo, e l'unità non si chiede.
+#[test]
+fn abaco_without_zones_or_rooms_creates_nothing() {
+    for insunits in [6, 0] {
+        let mut app = fresh_app();
+        load(
+            &mut app,
+            case_a(Form::Continua, DrawingUnit::Metri),
+            insunits,
+        );
+        let steps = undo_steps(&app);
+
+        run(&mut app, "AL_ABACO 20,0");
+
+        assert!(
+            history(&app)
+                .contains("AL_ABACO: nessuna zona né locale nel disegno: nessuna tabella."),
+            "{insunits}: {}",
+            history(&app)
+        );
+        assert!(no_tables(&app), "{insunits}");
+        assert!(!doc(&app).layers.contains(LAYER_ABACO), "{insunits}");
+        assert_eq!(undo_steps(&app), steps, "{insunits}");
+        assert_eq!(active_command(&app), None, "{insunits}");
+        assert_eq!(record::read(doc(&app)), record::ProjectRecord::default());
+    }
+}
+
+/// L'abaco legge e basta: rilievo, zone, locali, record e `INSUNITS` restano
+/// com'erano (stessi handle, geometria e attributi).
+#[test]
+fn abaco_does_not_touch_the_survey() {
+    let mut app = app_with_abaco_input();
+    let survey = rilievo_snapshot(&app);
+    let zones = on_layer(&app, LAYER_DEMOLIZIONI);
+    let rooms = on_layer(&app, LAYER_LOCALI);
+    let rec = record::read(doc(&app));
+
+    run(&mut app, "AL_ABACO 20,0");
+
+    assert_eq!(abaco_tables(&app).len(), 2, "storia: {}", history(&app));
+    assert_eq!(rilievo_snapshot(&app), survey);
+    assert_eq!(on_layer(&app, LAYER_DEMOLIZIONI), zones);
+    assert_eq!(on_layer(&app, LAYER_LOCALI), rooms);
+    assert_eq!(record::read(doc(&app)), rec);
+    assert_eq!(doc(&app).header.insertion_units, 6);
+}
+
+/// Due copie della tabella dei locali (un COPY fatto a mano): dopo una
+/// modifica del rilievo si riscrivono tutte e due, ognuna dove si trova;
+/// nessuna tabella nuova, un passo.
+#[test]
+fn abaco_replaces_every_duplicate_copy() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let (original, table) = abaco_table(&app, TableKind::Locali);
+    let mut copy = table.clone();
+    copy.insertion_point.x += 40.0;
+    let i = app.active_tab;
+    let copy = app.tabs[i]
+        .scene
+        .add_entity_clone(EntityType::Table(Box::new(copy)));
+    assert_eq!(abaco_tables(&app).len(), 3);
+    move_tramezzo_face(&mut app);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_ABACO");
+
+    let tables = abaco_tables(&app);
+    assert_eq!(tables.len(), 3, "storia: {}", history(&app));
+    for (handle, x) in [(original, 20.0), (copy, 60.0)] {
+        let (_, _, table) = tables.iter().find(|(h, _, _)| *h == handle).unwrap();
+        assert!((table.insertion_point.x - x).abs() < 1e-9, "{handle:?}");
+        assert!(
+            !has_text(table, "12,00"),
+            "{handle:?}: {:?}",
+            cell_texts(table)
+        );
+        assert!(has_text(table, "11,70"), "{handle:?}");
+    }
+    assert_eq!(undo_steps(&app), steps + 1);
+}
+
+/// Una tabella su un layer bloccato non si tocca e si conta; non se ne crea
+/// un'altra al suo posto.
+#[test]
+fn abaco_skips_a_table_on_a_locked_layer_and_counts_it() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let (locali, _) = abaco_table(&app, TableKind::Locali);
+    let i = app.active_tab;
+    move_to_layer(&mut app.tabs[i].scene.document, locali, "BLOCCATO");
+    app.tabs[i]
+        .scene
+        .document
+        .layers
+        .get_mut("BLOCCATO")
+        .expect("layer")
+        .lock();
+    let locked = entity_of(&app, locali);
+    move_tramezzo_face(&mut app);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO");
+
+    let log = history(&app);
+    assert_eq!(entity_of(&app, locali), locked, "storia: {log}");
+    assert_eq!(abaco_tables(&app).len(), 2, "nessuna copia, storia: {log}");
+    assert!(
+        log.contains("Tabelle d'abaco su layer bloccati non aggiornate: 1."),
+        "storia: {log}"
+    );
+    assert_eq!(undo_steps(&app), steps, "le demolizioni non cambiano");
+}
+
+/// Cancellata la tabella delle demolizioni, `AL_ABACO` ricrea solo quella,
+/// sotto l'ultima esistente (i locali), e lascia l'altra dov'è.
+#[test]
+fn abaco_recreates_only_the_missing_table_below_the_last() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let (demolizioni, _) = abaco_table(&app, TableKind::Demolizioni);
+    let (locali, locali_table) = abaco_table(&app, TableKind::Locali);
+    let i = app.active_tab;
+    app.tabs[i].scene.erase_entities(&[demolizioni]);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO");
+
+    let log = history(&app);
+    let (new, table) = abaco_table(&app, TableKind::Demolizioni);
+    assert_ne!(new, demolizioni, "storia: {log}");
+    assert_eq!(
+        abaco_table(&app, TableKind::Locali),
+        (locali, locali_table.clone())
+    );
+    assert!((table.insertion_point.x - locali_table.insertion_point.x).abs() < 1e-9);
+    assert!(
+        table.insertion_point.y < locali_table.insertion_point.y - locali_table.total_height(),
+        "sotto i locali: {:?}",
+        table.insertion_point
+    );
+    assert!(
+        log.contains("AL_ABACO: tabelle create: 1; sostituite: 0."),
+        "storia: {log}"
+    );
+    assert_eq!(undo_steps(&app), steps + 1);
+}
+
+/// Da script, senza punto e senza tabelle, a destra dell'estensione dello
+/// spazio modello con un margine pari alla larghezza della tabella più larga,
+/// in alto; da una persona lo stesso comando chiede il punto.
+#[test]
+fn abaco_script_without_point_goes_right_of_the_extents() {
+    let mut app = app_with_abaco_input();
+    let i = app.active_tab;
+    let (_, max) = app.tabs[i].scene.model_space_extents().expect("estensione");
+    assert!(max.x > 8.0, "{max:?}");
+
+    app.scripted_dispatch = true;
+    dispatch_line(&mut app, "AL_ABACO");
+    app.scripted_dispatch = false;
+
+    let tables = abaco_tables(&app);
+    assert_eq!(tables.len(), 2, "storia: {}", history(&app));
+    let width = tables
+        .iter()
+        .map(|(_, _, table)| table.total_width())
+        .fold(0.0, f64::max);
+    let first = &tables[0].2;
+    assert!(
+        (first.insertion_point.x - (f64::from(max.x) + width)).abs() < 1e-6,
+        "{:?}, estensione {max:?}, larghezza {width}",
+        first.insertion_point
+    );
+    assert!((first.insertion_point.y - f64::from(max.y)).abs() < 1e-6);
+    assert_eq!(active_command(&app), None);
+
+    // Da una persona: il punto si chiede, e il clic scrive le tabelle lì.
+    let mut app = app_with_abaco_input();
+    forget_history(&mut app);
+    dispatch_line(&mut app, "AL_ABACO");
+    assert_eq!(active_command(&app), Some("AL_ABACO"));
+    assert!(
+        history(&app).contains("AL_ABACO  Punto di inserimento delle tabelle:"),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(abaco_tables(&app).is_empty());
+    answer(&mut app, "30,5");
+    let tables = abaco_tables(&app);
+    assert_eq!(tables.len(), 2, "storia: {}", history(&app));
+    assert!(near(tables[0].2.insertion_point, [30.0, 5.0]));
+    assert_eq!(active_command(&app), None);
+}
+
+/// Con `INSUNITS` = 0 e nessuna unità nel record l'abaco chiede l'unità e
+/// riparte con il suo punto; `INSUNITS` non si scrive. Senza altezza la riga
+/// della demolizione è incompleta, e la riga di comando dice perché.
+#[test]
+fn abaco_asks_the_unit_when_insunits_is_zero() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 0);
+    run(&mut app, "AL_DEMOLISCI M 4.05,0 4.05,3 N");
+    assert_eq!(zones_in(doc(&app)).len(), 1, "storia: {}", history(&app));
+    let i = app.active_tab;
+    let rec = record::ProjectRecord {
+        unit: None,
+        ..record::read(doc(&app))
+    };
+    record::write(&mut app.tabs[i].scene.document, &rec);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO 20,0");
+    assert_eq!(
+        active_command(&app),
+        Some("AL_UNITA"),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains(
+            "Unità del disegno non specificata (INSUNITS = 0). [Millimetri/Centimetri/Metri]:"
+        ),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(no_tables(&app));
+    assert!(!doc(&app).layers.contains(LAYER_ABACO));
+    assert_eq!(undo_steps(&app), steps);
+
+    answer(&mut app, "M");
+    let log = history(&app);
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Metri));
+    assert_eq!(doc(&app).header.insertion_units, 0, "INSUNITS non si scrive");
+    let tables = abaco_tables(&app);
+    let [(_, TableKind::Demolizioni, table)] = &tables[..] else {
+        panic!("storia: {log}")
+    };
+    assert!(near(table.insertion_point, [20.0, 0.0]));
+    assert!(has_text(table, "n.d."), "{:?}", cell_texts(table));
+    assert!(
+        log.contains("AL_ABACO: righe: 1; incomplete: 1."),
+        "storia: {log}"
+    );
+    assert!(
+        log.contains("Riga D1 incompleta: altezza n.d."),
+        "storia: {log}"
+    );
+    assert_eq!(app.bim_pending, None);
+    assert_eq!(active_command(&app), None);
+}
+
+/// R21 anche per `AL_ABACO`: in un layout senza finestra attiva si rifiuta,
+/// senza domanda dell'unità, layer, tabelle né passi di annullamento.
+#[test]
+fn abaco_refuses_paper_space() {
+    for (command, insunits) in [("AL_ABACO 20,0", 6), ("AL_ABACO", 0), ("AL_ABACO", 6)] {
+        let mut app = fresh_app();
+        load(
+            &mut app,
+            case_a(Form::Continua, DrawingUnit::Metri),
+            insunits,
+        );
+        let i = app.active_tab;
+        app.tabs[i].scene.set_current_layout("Layout1".to_string());
+        assert!(app.tabs[i].scene.active_viewport.is_none(), "spazio carta");
+        let before = rilievo_snapshot(&app);
+        let steps = undo_steps(&app);
+
+        run(&mut app, command);
+
+        assert!(
+            history(&app).contains(
+                "AL_ABACO: i comandi di ristrutturazione lavorano solo nello spazio modello."
+            ),
+            "{command}: {}",
+            history(&app)
+        );
+        assert_eq!(active_command(&app), None, "{command}: nessuna domanda");
+        assert!(no_tables(&app), "{command}");
+        assert!(!doc(&app).layers.contains(LAYER_ABACO), "{command}");
         assert_eq!(
             record::read(doc(&app)),
             record::ProjectRecord::default(),
