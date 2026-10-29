@@ -32,6 +32,7 @@ use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_BUTTON, OVERWRITE_NOTE};
 use codec::entities::table::Table;
 use codec::entities::{Arc, Line, LwPolyline, MText};
+use codec::objects::{ObjectType, TableStyle};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Document, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
@@ -4007,6 +4008,107 @@ fn abaco_asks_the_unit_when_insunits_is_zero() {
     );
     assert_eq!(app.bim_pending, None);
     assert_eq!(active_command(&app), None);
+}
+
+/// L'handle dell'oggetto stile tabella di nome `name` (senza badare alle
+/// maiuscole).
+fn table_style(doc: &Document, name: &str) -> Option<Handle> {
+    doc.objects
+        .iter()
+        .find_map(|(handle, object)| match object {
+            ObjectType::TableStyle(style) if style.name.eq_ignore_ascii_case(name) => {
+                Some(*handle)
+            }
+            _ => None,
+        })
+}
+
+/// Ruling Q (spec parte 2, §5.2): le tabelle create hanno lo stile tabella
+/// corrente del disegno già in memoria, e dopo un DWG l'handle porta ancora
+/// a quello stile; una tabella riscritta tiene lo stile che ha (scelto a
+/// mano).
+#[test]
+fn abaco_tables_take_the_current_table_style() {
+    let mut app = app_with_abaco_input();
+    let current = doc(&app).header.current_table_style_name.clone();
+    let style = table_style(doc(&app), &current).expect("stile tabella corrente");
+
+    run(&mut app, "AL_ABACO 20,0");
+
+    let tables = abaco_tables(&app);
+    assert_eq!(tables.len(), 2, "storia: {}", history(&app));
+    for (handle, kind, table) in &tables {
+        assert_eq!(table.table_style_handle, Some(style), "{kind:?} {handle:?}");
+    }
+
+    let tmp = TempDir::new("abaco_style");
+    let path = tmp.path().join("abaco.dwg");
+    crate::io::save_as_version(doc(&app), &path, doc(&app).version).unwrap();
+    let loaded = crate::io::load_file(&path).unwrap();
+    let reloaded = tables_in(&loaded);
+    assert_eq!(reloaded.len(), 2);
+    for (handle, kind) in reloaded {
+        let Some(EntityType::Table(table)) = loaded.get_entity(handle) else {
+            panic!("{kind:?}")
+        };
+        let object = table
+            .table_style_handle
+            .and_then(|handle| loaded.objects.get(&handle));
+        assert!(
+            matches!(object, Some(ObjectType::TableStyle(s)) if s.name.eq_ignore_ascii_case(&current)),
+            "{kind:?}: {object:?}"
+        );
+    }
+
+    // Uno stile scelto a mano sulla tabella dei locali resta quando la
+    // tabella si riscrive.
+    let (locali, _) = abaco_table(&app, TableKind::Locali);
+    let i = app.active_tab;
+    let document = &mut app.tabs[i].scene.document;
+    let mine = document.allocate_handle();
+    let mut own = TableStyle::standard();
+    own.name = "Mio".into();
+    own.handle = mine;
+    document.objects.insert(mine, ObjectType::TableStyle(own));
+    let Some(EntityType::Table(table)) = document.get_entity_mut(locali) else {
+        panic!("tabella dei locali")
+    };
+    table.table_style_handle = Some(mine);
+    move_tramezzo_face(&mut app);
+
+    run(&mut app, "AL_ABACO");
+
+    let (handle, table) = abaco_table(&app, TableKind::Locali);
+    assert_eq!(handle, locali);
+    assert!(
+        has_text(&table, "11,70") && !has_text(&table, "12,00"),
+        "riscritta: {:?}",
+        cell_texts(&table)
+    );
+    assert_eq!(table.table_style_handle, Some(mine));
+}
+
+/// Ruling Q: senza uno stile tabella corrente risolvibile le tabelle nascono
+/// senza stile, senza errori né messaggi in più.
+#[test]
+fn abaco_without_a_current_table_style_leaves_none() {
+    let mut app = app_with_abaco_input();
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.current_table_style_name = "NESSUNO".into();
+    let revision = app.command_line.error_revision;
+    forget_history(&mut app);
+
+    run(&mut app, "AL_ABACO 20,0");
+
+    let tables = abaco_tables(&app);
+    assert_eq!(tables.len(), 2, "storia: {}", history(&app));
+    assert!(tables.iter().all(|(_, _, t)| t.table_style_handle.is_none()));
+    assert_eq!(app.command_line.error_revision, revision);
+    assert!(
+        !history(&app).to_lowercase().contains("stile"),
+        "storia: {}",
+        history(&app)
+    );
 }
 
 /// R21 anche per `AL_ABACO`: in un layout senza finestra attiva si rifiuta,

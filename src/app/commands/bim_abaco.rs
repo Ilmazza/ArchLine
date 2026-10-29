@@ -15,7 +15,10 @@
 //!   resta; se non ce n'è nessuna, nel punto dato, oppure al clic
 //!   ([`AbacoPointCommand`], che rilancia `AL_ABACO <x>,<y>`), oppure, da uno
 //!   script senza punto, a destra dell'estensione dello spazio modello con un
-//!   margine pari alla larghezza della tabella più larga;
+//!   margine pari alla larghezza della tabella più larga. Le tabelle create
+//!   prendono lo stile tabella corrente del disegno
+//!   (`abaco_table::current_table_style`, nessuno se non si trova); quelle
+//!   riscritte tengono lo stile che hanno (Ruling Q);
 //! - il layer `AL-ABACO` e l'APPID, se mancano, in un passo di annullamento a
 //!   sé (`AL_LAYER`, come `bim_ensure_layers`); sostituzioni, creazioni e
 //!   rimozioni in un solo passo `AL_ABACO`, e nessun passo se nulla cambia;
@@ -129,7 +132,15 @@ impl OpenCADStudio {
                 return self.finish_dispatch(CMD);
             }
         };
-        let created = at.map_or_else(Vec::new, |at| abaco_table::stack(&missing, at, unit));
+        let mut created = at.map_or_else(Vec::new, |at| abaco_table::stack(&missing, at, unit));
+        // Ruling Q: le tabelle nuove con lo stile tabella corrente del
+        // disegno (nessuno se non si trova); le riscritte tengono il loro.
+        let style = abaco_table::current_table_style(&self.tabs[i].scene.document);
+        for entity in &mut created {
+            if let EntityType::Table(table) = entity {
+                table.table_style_handle = style;
+            }
+        }
         self.bim_write_abaco(i, &plan, created);
 
         if point.is_some() && (missing.is_empty() || plan.below.is_some()) {

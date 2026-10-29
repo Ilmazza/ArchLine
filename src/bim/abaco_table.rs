@@ -36,6 +36,7 @@
 
 use codec::entities::table::{legacy_override_properties, CellRange, CellStyle, Table};
 use codec::entities::{Entity, TableBuilder};
+use codec::objects::ObjectType;
 use codec::tables::{AppId, Layer};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Color, Document, EntityType, Handle, Vector3};
@@ -162,6 +163,23 @@ pub fn ensure_layer(doc: &mut Document) {
     }
 }
 
+/// L'handle dello stile tabella corrente del disegno (`CTABLESTYLE`,
+/// `header.current_table_style_name`), cercato per nome tra gli oggetti
+/// stile tabella senza badare alle maiuscole, come i comandi tabella di
+/// upstream; `None` se il nome manca o lo stile non c'è.
+pub fn current_table_style(doc: &Document) -> Option<Handle> {
+    let name = doc.header.current_table_style_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    doc.objects
+        .iter()
+        .find_map(|(handle, object)| match object {
+            ObjectType::TableStyle(style) if style.name.eq_ignore_ascii_case(name) => Some(*handle),
+            _ => None,
+        })
+}
+
 /// L'altezza del testo delle tabelle, in unità del disegno.
 fn text_height(unit: DrawingUnit) -> f64 {
     unit.metres(DEFAULT_ROOM_TEXT_M)
@@ -174,8 +192,8 @@ pub fn gap(unit: DrawingUnit) -> f64 {
 
 /// La tabella `text` come `TABLE` sul layer `AL-ABACO`, con l'angolo in alto a
 /// sinistra in `at` e il record `ARCHLINE_ABACO`. Lo stile tabella resta da
-/// assegnare (`table_style_handle` vuoto: quello corrente del disegno, che il
-/// salvataggio DWG mette se manca).
+/// assegnare: chi crea la tabella nel disegno ci mette
+/// [`current_table_style`] (Ruling Q, `AL_ABACO`).
 pub fn build(text: &TableText, at: [f64; 2], unit: DrawingUnit) -> EntityType {
     EntityType::Table(Box::new(build_table(text, at, unit)))
 }
@@ -389,7 +407,8 @@ pub struct AbacoPlan {
     /// I tipi da creare (nessuna tabella di quel tipo nel disegno), in ordine.
     pub missing: Vec<TableKind>,
     /// Dove vanno le mancanti se resta almeno una tabella d'abaco: sotto la
-    /// più bassa, allineate a sinistra con lei. `None`: serve un punto.
+    /// più bassa com'è dopo il comando (riscritta o lasciata com'era),
+    /// allineate a sinistra con lei. `None`: serve un punto.
     pub below: Option<[f64; 2]>,
 }
 
@@ -410,25 +429,28 @@ pub fn plan(
         let Some(EntityType::Table(old)) = doc.get_entity(handle) else {
             continue;
         };
-        let text = texts.iter().find(|text| text.kind == kind);
-        if is_locked(handle) {
+        // Il bordo sinistro e quello inferiore della tabella com'è dopo il
+        // comando (Ruling R): una riscritta può crescere, e la mancante va
+        // sotto le sue ultime righe nuove, non sotto quelle di prima.
+        let place = |table: &Table| (table.insertion_point.x, table.bounding_box().min.y);
+        let stays = if is_locked(handle) {
             plan.locked += 1;
-        } else if let Some(text) = text {
+            place(old)
+        } else if let Some(text) = texts.iter().find(|text| text.kind == kind) {
             let new = rebuilt(old, text, unit);
+            let stays = place(&new);
             if new == **old {
                 plan.unchanged += 1;
             } else {
                 plan.replace.push((handle, kind, new));
             }
+            stays
         } else {
             plan.remove.push((handle, kind));
             continue;
-        }
-        if text.is_some() || is_locked(handle) {
-            let bottom = old.bounding_box().min.y;
-            if lowest.map_or(true, |(_, y)| bottom < y) {
-                lowest = Some((old.insertion_point.x, bottom));
-            }
+        };
+        if lowest.map_or(true, |(_, y)| stays.1 < y) {
+            lowest = Some(stays);
         }
     }
     let present: Vec<TableKind> = tables_in(doc).into_iter().map(|(_, kind)| kind).collect();
@@ -846,6 +868,88 @@ mod tests {
         let plan = super::plan(&empty, &all, unit, |_| false);
         assert_eq!(plan.missing, [TableKind::Demolizioni, TableKind::Nuove]);
         assert_eq!(plan.below, None);
+    }
+
+    /// Ruling Q: lo stile tabella corrente si trova per nome (`CTABLESTYLE`),
+    /// senza badare alle maiuscole; senza nome o senza l'oggetto stile,
+    /// nessuno.
+    #[test]
+    fn current_table_style_is_found_by_name() {
+        let mut doc = Document::new();
+        assert_eq!(doc.header.current_table_style_name, "Standard");
+        let standard = doc
+            .objects
+            .iter()
+            .find_map(|(handle, object)| {
+                matches!(object, ObjectType::TableStyle(s) if s.name == "Standard")
+                    .then_some(*handle)
+            })
+            .expect("stile Standard di un disegno nuovo");
+        assert_eq!(current_table_style(&doc), Some(standard));
+
+        let mine = doc.allocate_handle();
+        let mut style = codec::objects::TableStyle::standard();
+        style.name = "Abaco".into();
+        style.handle = mine;
+        doc.objects.insert(mine, ObjectType::TableStyle(style));
+        doc.header.current_table_style_name = "ABACO".into();
+        assert_eq!(current_table_style(&doc), Some(mine));
+
+        for missing in ["Nessuno", "", "  "] {
+            doc.header.current_table_style_name = missing.into();
+            assert_eq!(current_table_style(&doc), None, "{missing:?}");
+        }
+        doc.header.current_table_style_name = "Standard".into();
+        doc.objects.remove(&standard);
+        assert_eq!(current_table_style(&doc), None, "oggetto stile assente");
+    }
+
+    /// Ruling R: una tabella riscritta che cresce di parecchie righe non fa
+    /// finire la tabella mancante sopra le sue ultime righe: «sotto l'ultima»
+    /// si misura sulla tabella nuova. Una tabella invariata dà il punto di
+    /// prima, sotto la tabella com'è.
+    #[test]
+    fn missing_table_goes_below_the_grown_replacement() {
+        let unit = DrawingUnit::Metri;
+        let mut doc = Document::new();
+        ensure_layer(&mut doc);
+        let old_text = sample(TableKind::Demolizioni);
+        let handle = doc.add_entity(build(&old_text, [0.0, 0.0], unit)).unwrap();
+        let EntityType::Table(old) = doc.get_entity(handle).unwrap().clone() else {
+            panic!()
+        };
+        let mut grown = old_text.clone();
+        for k in 0..8 {
+            grown.rows.push(vec![
+                cell(&format!("D{}", k + 3)),
+                cell("3,00"),
+                cell("0,81"),
+                cell(""),
+            ]);
+        }
+        let missing = sample(TableKind::Locali);
+
+        let plan = plan(&doc, &[grown, missing.clone()], unit, |_| false);
+        let [(replaced, _, new)] = &plan.replace[..] else {
+            panic!("{:?}", plan.replace)
+        };
+        assert_eq!(*replaced, handle);
+        assert!(new.row_count() >= old.row_count() + 8);
+        assert_eq!(plan.missing, [TableKind::Locali]);
+        let below = plan.below.expect("c'è una tabella");
+        let created = stack(&[&missing], below, unit);
+        let (created_box, new_box) = (table_of(&created[0]).bounding_box(), new.bounding_box());
+        assert!(
+            created_box.max.y < new_box.min.y,
+            "la tabella creata ({created_box:?}) si sovrappone alla riscritta ({new_box:?})"
+        );
+        assert!((below[1] - (new_box.min.y - gap(unit))).abs() < 1e-9);
+
+        let plan = super::plan(&doc, &[old_text, missing], unit, |_| false);
+        assert_eq!(plan.unchanged, 1);
+        let below = plan.below.expect("c'è una tabella");
+        assert!(below[0].abs() < 1e-12);
+        assert!((below[1] - (old.bounding_box().min.y - gap(unit))).abs() < 1e-9);
     }
 
     #[test]
