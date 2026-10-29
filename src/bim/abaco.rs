@@ -320,8 +320,14 @@ pub fn format_fixed(value: f64, decimals: usize) -> String {
 /// - locale: la superficie netta come `lunghezza`, un fattore solo (m²), con
 ///   il nome come descrizione.
 ///
-/// Il prodotto dei fattori scritti dà `quantita` a meno dell'arrotondamento
-/// di ciascun numero alla quarta cifra.
+/// `quantita` è il prodotto dei fattori come sono scritti nella riga (già a
+/// quattro decimali, `parti` = 1,0000, i vuoti saltati come nella `Misura` di
+/// ArchCme), arrotondato a quattro decimali (Ruling S): chi rifà il prodotto
+/// dalle colonne trova `quantita` a meno di 5·10⁻⁵, sempre. Dalla quantità
+/// delle tabelle, calcolata sui valori non arrotondati, può differire per
+/// l'arrotondamento dei fattori: al più mezzo decimillesimo per ogni fattore
+/// moltiplicato per il prodotto degli altri, più 5·10⁻⁵ (per una nuova
+/// muratura di 7,12 × 3,05 m circa 4·10⁻⁴ m², per un locale al più 5·10⁻⁵).
 pub fn to_csv(abaco: &Abaco) -> String {
     let mut out = String::new();
     out.push(CSV_BOM);
@@ -345,8 +351,9 @@ pub fn csv_row_count(abaco: &Abaco) -> usize {
 }
 
 /// Una riga del CSV: una misura del libretto di ArchCme con `parti` = 1, mai
-/// a detrarre. `None` = un fattore che non si applica: campo vuoto, saltato
-/// nel prodotto.
+/// a detrarre. I fattori sono quelli non arrotondati; `None` = un fattore che
+/// non si applica: campo vuoto, saltato nel prodotto. La quantità non si
+/// tiene: è il prodotto dei fattori scritti ([`CsvRecord::fields`]).
 struct CsvRecord {
     tipo: &'static str,
     code: String,
@@ -354,7 +361,6 @@ struct CsvRecord {
     length: f64,
     width: Option<f64>,
     height: Option<f64>,
-    quantity: f64,
     unit: &'static str,
     height_state: &'static str,
     source: String,
@@ -362,25 +368,38 @@ struct CsvRecord {
 }
 
 impl CsvRecord {
-    /// I campi nell'ordine di [`CSV_HEADER`], senza virgolette.
+    /// I campi nell'ordine di [`CSV_HEADER`], senza virgolette. I fattori si
+    /// scrivono arrotondati a quattro decimali e `quantita` è il loro prodotto
+    /// così come sono scritti (i vuoti saltati), arrotondato a sua volta
+    /// (Ruling S).
     fn fields(&self) -> [String; 13] {
+        let [parti, length, width, height] =
+            [Some(1.0), Some(self.length), self.width, self.height].map(|f| f.map(csv_round));
+        let quantity: f64 = [parti, length, width, height].iter().flatten().product();
         let factor = |value: Option<f64>| value.map_or_else(String::new, csv_number);
         [
             self.tipo.to_string(),
             self.code.clone(),
             self.description.clone(),
-            csv_number(1.0),
-            csv_number(self.length),
-            factor(self.width),
-            factor(self.height),
+            factor(parti),
+            factor(length),
+            factor(width),
+            factor(height),
             CSV_NO_DEDUCTION.to_string(),
-            csv_number(self.quantity),
+            csv_number(quantity),
             self.unit.to_string(),
             self.height_state.to_string(),
             self.source.clone(),
             self.notes.join(CSV_NOTE_SEP),
         ]
     }
+}
+
+/// `value` come lo scrive [`csv_number`], letto di nuovo come numero: lo
+/// stesso arrotondamento di `format_fixed` a quattro decimali.
+fn csv_round(value: f64) -> f64 {
+    let scale = 10_f64.powi(CSV_DECIMALS as i32);
+    (value * scale).round() / scale
 }
 
 fn csv_number(value: f64) -> String {
@@ -415,10 +434,12 @@ fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
 /// La misura di una zona completa (`None` se incompleta: la quantità
 /// principale o un suo fattore manca o non è finito). Con l'asse, lo spessore
 /// effettivo (area ÷ lunghezza) fa sì che lunghezza × spessore × altezza sia
-/// il volume anche con buchi o con l'asse accorciato.
+/// il volume anche con buchi o con l'asse accorciato, a meno
+/// dell'arrotondamento dei fattori scritti.
 fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
     let finite = |value: Option<f64>| value.filter(|v| v.is_finite());
-    let quantity = finite(row.main())?;
+    // Solo le righe complete; la quantità si riscrive dai fattori (Ruling S).
+    finite(row.main())?;
     let height = finite(row.height.value_m)?;
     let axis = finite(row.length_m).zip(finite(row.thickness_m));
     let thickness =
@@ -459,7 +480,6 @@ fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
         length,
         width,
         height: Some(height),
-        quantity,
         unit,
         height_state: height_state(&row.height),
         source: format!("zona {:X}", row.handle),
@@ -489,7 +509,6 @@ fn room_record(row: &RoomRow, line_note: Option<&str>) -> Option<CsvRecord> {
         length: area,
         width: None,
         height: None,
-        quantity: area,
         unit: UNIT_M2,
         height_state: height_state(&row.height),
         source: format!("locale {}", row.name),
@@ -634,8 +653,9 @@ mod tests {
     use crate::bim::refresh::refresh_rooms;
     use crate::bim::room_command::test_support::write_room;
     use crate::bim::rooms::label;
-    use crate::bim::zone::ZoneState;
+    use crate::bim::zone::{zone_hatch, Zone, ZoneOrigin, ZoneState};
     use crate::bim::LAYER_LOCALI;
+    use crate::scene::Scene;
 
     /// I testi (`MTEXT`) su `layer`, in ordine alfabetico.
     fn labels_on(doc: &Document, layer: &str) -> Vec<String> {
@@ -856,11 +876,43 @@ mod tests {
         assert_eq!(csv_row_count(&abaco), records.len() - 1);
     }
 
-    /// Spec §7: per ogni riga `parti × lunghezza × larghezza × altezza`, con i
-    /// fattori vuoti saltati come nel libretto di ArchCme, è `quantita`. Casi
-    /// A (0,81 m³), A' (altezza inserita 3,00: 0,90 m³), demolizione senza
-    /// asse (0,81 m³), B (varco con 2,10: 0,189 m³), G (nuova 2,00 × 2,70:
-    /// 5,40 m²) e i locali (A 12,00, B 11,70, progetto A + B 24,00 m²).
+    /// Arrotondato a quattro decimali come `format_fixed(value, 4)`.
+    fn round4(value: f64) -> f64 {
+        (value * 10_000.0).round() / 10_000.0
+    }
+
+    /// Una zona demolita con l'asse e un buco: l'anello esterno `outer` meno
+    /// `hole`.
+    fn add_demolition_with_hole(
+        scene: &mut Scene,
+        axis: ([f64; 2], [f64; 2]),
+        outer: Vec<[f64; 2]>,
+        hole: Vec<[f64; 2]>,
+    ) {
+        let zone = Zone {
+            state: ZoneState::Demolito,
+            origin: ZoneOrigin::MuroDuePunti,
+            axis: Some(axis),
+            thickness: None,
+            height: None,
+            varco: false,
+        };
+        scene.add_entity(zone_hatch(&zone, &[outer, hole]));
+    }
+
+    /// Spec §7 e Ruling S: per ogni riga `quantita` è il prodotto
+    /// `parti × lunghezza × larghezza × altezza` dei fattori come sono scritti
+    /// (i vuoti saltati come nel libretto di ArchCme), arrotondato a quattro
+    /// decimali: ricalcolato dai campi letti torna identico (entro 1e-9) e
+    /// dista dal prodotto non arrotondato al più 5e-5, anche su misure non
+    /// tonde; dalla quantità delle tabelle (valori non arrotondati) meno di
+    /// 1e-3 in questi casi. Casi A (0,81 m³), A' (altezza inserita 3,00: 0,90
+    /// m³), demolizione senza asse (0,81 m³), una zona con un buco (L 3,00,
+    /// area 0,29: 3,0000 × 0,0967 × 2,7000 = 0,7833 contro 0,783 della
+    /// tabella), un muro da rilievo non tondo (L 4,56789, spessore
+    /// 0,12345678), B (varco con 2,10: 0,189 m³), G (nuova 2,00 × 2,70: 5,40
+    /// m²), due nuove lunghe 7,12345 (altezza inserita 3,04567, ed ereditata
+    /// 2,70) e i locali (A 12,00, B 11,70, progetto A + B 24,00 m²).
     #[test]
     fn csv_product_equals_quantity() {
         let mut scene = scene_of(Form::Continua);
@@ -872,41 +924,95 @@ mod tests {
         let axis = Some(([12.05, 0.0], [12.05, 3.0]));
         add_zone(&mut scene, demolito, axis, Some(3.0), false, rect(12.0, 0.0, 12.1, 3.0));
         add_zone(&mut scene, demolito, None, None, false, rect(14.0, 0.0, 14.1, 3.0));
+        add_demolition_with_hole(
+            &mut scene,
+            ([30.05, 0.0], [30.05, 3.0]),
+            rect(30.0, 0.0, 30.1, 3.0),
+            rect(30.025, 1.0, 30.075, 1.2),
+        );
+        let (length, width) = (4.56789, 0.12345678);
+        let axis = Some(([40.0, 5.0], [40.0 + length, 5.0]));
+        let ring = rect(40.0, 5.0 - width / 2.0, 40.0 + length, 5.0 + width / 2.0);
+        add_zone(&mut scene, demolito, axis, None, false, ring);
         let axis = Some(([20.05, 1.0], [20.05, 1.9]));
         add_zone(&mut scene, demolito, axis, Some(2.1), true, rect(20.0, 1.0, 20.1, 1.9));
         let axis = Some(([0.0, 10.04], [2.0, 10.04]));
         let ring = rect(0.0, 10.0, 2.0, 10.08);
         add_zone(&mut scene, ZoneState::Nuovo, axis, None, false, ring);
+        for (y, height) in [(20.0, Some(3.04567)), (22.0, None)] {
+            let axis = Some(([0.0, y + 0.04], [7.12345, y + 0.04]));
+            let ring = rect(0.0, y, 7.12345, y + 0.08);
+            add_zone(&mut scene, ZoneState::Nuovo, axis, height, false, ring);
+        }
         let abaco = compute_abaco(&scene.document, &OPTS);
         assert!(incomplete(&abaco).is_empty(), "{:?}", abaco.notices);
+        // La quantità principale non arrotondata di ogni riga, per codice.
+        let mut unrounded: Vec<(String, f64)> = abaco
+            .demolizioni
+            .iter()
+            .chain(&abaco.varchi)
+            .chain(&abaco.nuove)
+            .map(|row| (row.code.clone(), row.main().expect("completa")))
+            .collect();
+        for line in &abaco.locali {
+            for row in [&line.fatto, &line.progetto].into_iter().flatten() {
+                unrounded.push((row.code.clone(), row.area_m2.expect("superficie")));
+            }
+        }
 
         let records = parse_csv(&to_csv(&abaco));
+        assert_eq!(records.len() - 1, unrounded.len(), "{records:?}");
         for record in &records[1..] {
+            let code = &record[1];
             let factors: f64 = record[3..7].iter().filter_map(|f| csv_number(f)).product();
             let quantity = csv_number(&record[8]).expect("quantità");
             assert!(
-                (factors - quantity).abs() < 1e-4,
-                "{}: {factors} invece di {quantity}",
-                record[1]
+                (round4(factors) - quantity).abs() <= 1e-9,
+                "{code}: prodotto dei fattori scritti {factors}, quantita {quantity}"
+            );
+            assert!((factors - quantity).abs() <= 5e-5 + 1e-12, "{code}");
+            let (_, table) = unrounded
+                .iter()
+                .find(|(c, _)| c == code)
+                .unwrap_or_else(|| panic!("{code} non nell'abaco"));
+            assert!(
+                (quantity - table).abs() < 1e-3,
+                "{code}: {quantity} contro {table} delle tabelle"
             );
         }
         let rows: Vec<(&str, &str, &str, &str)> = records[1..]
             .iter()
             .map(|r| (r[0].as_str(), r[1].as_str(), r[8].as_str(), r[9].as_str()))
             .collect();
+        assert_eq!(rows.len(), 12, "{rows:?}");
         assert_eq!(
-            rows,
+            rows[..4],
             [
                 ("demolizione", "D1", "0,8100", "m³"),
                 ("demolizione", "D2", "0,9000", "m³"),
                 ("demolizione", "D3", "0,8100", "m³"),
+                ("demolizione", "D4", "0,7833", "m³"),
+            ]
+        );
+        assert_eq!(
+            rows[5..],
+            [
                 ("varco", "V1", "0,1890", "m³"),
                 ("nuova muratura", "N1", "5,4000", "m²"),
+                ("nuova muratura", "N2", "21,6960", "m²"),
+                ("nuova muratura", "N3", rows[8].2, "m²"),
                 ("locale di fatto", "LF1", "12,0000", "m²"),
                 ("locale di fatto", "LF2", "11,7000", "m²"),
                 ("locale di progetto", "LP1", "24,0000", "m²"),
             ]
         );
+        let d4 = record_of(&records, "D4");
+        assert_eq!(&d4[3..9], ["1,0000", "3,0000", "0,0967", "2,7000", "no", "0,7833"]);
+        let d5 = record_of(&records, "D5");
+        assert_eq!(&d5[3..9], ["1,0000", "4,5679", "0,1235", "2,7000", "no", "1,5232"]);
+        let n2 = record_of(&records, "N2");
+        assert_eq!(&n2[3..9], ["1,0000", "7,1235", "", "3,0457", "no", "21,6960"]);
+        assert_eq!(&record_of(&records, "N3")[3..7], ["1,0000", "7,1235", "", "2,7000"]);
         let d2 = record_of(&records, "D2");
         assert_eq!((d2[6].as_str(), d2[10].as_str()), ("3,0000", "inserita"));
         let v1 = record_of(&records, "V1");
@@ -984,6 +1090,83 @@ mod tests {
                 "zona senza asse",
             ]
         );
+    }
+
+    /// Ruling O: un locale con la superficie e senza altezza (nessuna
+    /// predefinita, nessuna sul locale) entra nel CSV: 1 × superficie in m²,
+    /// `altezza` vuota (non è un fattore del locale), `stato_altezza` n.d. e il
+    /// motivo nelle note. Un locale non chiuso (la faccia ovest di A tolta),
+    /// che non ha superficie, non entra, né di fatto né di progetto.
+    #[test]
+    fn csv_room_without_height_is_exported_with_nd() {
+        let mut scene = scene_of(Form::Continua);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        write_room(&mut scene, "B", [6.0, 1.5]);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert!(incomplete(&abaco).is_empty(), "{:?}", abaco.notices);
+        let records = parse_csv(&to_csv(&abaco));
+        let codes: Vec<&str> = records[1..].iter().map(|r| r[1].as_str()).collect();
+        assert_eq!(codes, ["LF1", "LF2", "LP1", "LP2"]);
+        let lf1 = record_of(&records, "LF1");
+        assert_eq!(
+            lf1,
+            [
+                "locale di fatto",
+                "LF1",
+                "A",
+                "1,0000",
+                "12,0000",
+                "",
+                "",
+                "no",
+                "12,0000",
+                "m²",
+                "n.d.",
+                "locale A",
+                "altezza n.d.",
+            ]
+        );
+        let lp1 = record_of(&records, "LP1");
+        assert_eq!(
+            &lp1[3..11],
+            ["1,0000", "12,0000", "", "", "no", "12,0000", "m²", "n.d."]
+        );
+        assert!(
+            lp1[12].contains("altezza mancante nei locali di fatto"),
+            "{lp1:?}"
+        );
+        assert_eq!(csv_row_count(&abaco), 4);
+
+        // A non chiuso: nessuna superficie, nessuna riga di A.
+        let west = scene
+            .document
+            .entities()
+            .find(|entity| match entity {
+                EntityType::Line(l) => {
+                    l.start.x.abs() < 1e-9
+                        && (l.start.y - 3.0).abs() < 1e-9
+                        && l.end.x.abs() < 1e-9
+                        && l.end.y.abs() < 1e-9
+                }
+                _ => false,
+            })
+            .map(|entity| entity.common().handle)
+            .expect("faccia ovest di A");
+        scene.erase_entities(&[west]);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        let reasons = incomplete(&abaco);
+        assert!(
+            reasons
+                .iter()
+                .any(|(code, reason)| code == "LF1" && reason.contains("non chiuso")),
+            "{reasons:?}"
+        );
+        let records = parse_csv(&to_csv(&abaco));
+        let codes: Vec<&str> = records[1..].iter().map(|r| r[1].as_str()).collect();
+        assert!(codes.contains(&"LF2"), "{codes:?}");
+        assert!(!codes.contains(&"LF1"), "{codes:?}");
+        assert!(records[1..].iter().all(|r| r[2] != "A"), "{records:?}");
+        assert!(records[1..].iter().all(|r| r[10] == "n.d."), "{records:?}");
     }
 
     #[test]
