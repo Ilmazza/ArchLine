@@ -4,6 +4,7 @@
 //! Spec: `docs/superpowers/specs/2026-10-23-bim-stato-piante-design.md`.
 
 pub mod abaco;
+pub mod abaco_render;
 pub mod abaco_table;
 pub mod clip;
 pub mod commands;
