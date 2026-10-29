@@ -23,15 +23,25 @@
 //!   restano righe separate con la nota («da A + B», «unito in C»), senza
 //!   somme. Nelle righe accoppiate codice, nome, perimetro, volume e altezza
 //!   sono «fatto / progetto» quando differiscono;
-//! - la resa nelle tabelle: vedi le regole di [`super::abaco_render`].
+//! - la resa nelle tabelle: vedi le regole di [`super::abaco_render`];
+//! - il CSV ([`to_csv`], spec §5.3): solo le righe complete, una per misura,
+//!   nella forma della `Misura` di ArchCme (`parti × lunghezza × larghezza ×
+//!   altezza`, un fattore vuoto non si applica ed è saltato nel prodotto), con
+//!   le note delle tabelle. Un locale senza altezza è completo (la superficie
+//!   è un fattore solo) ed entra con lo stato dell'altezza `n.d.` (Ruling O);
+//!   per demolizioni, varchi e nuove murature l'altezza è un fattore, quindi
+//!   senza altezza la riga è incompleta e non entra: un'altezza che manca non
+//!   diventa mai un campo vuoto.
 
 use codec::Document;
 
+use super::abaco_render::{height_state, room_notes, zone_notes, ND};
 use super::extract::push_unique;
 use super::quantities::{zone_rows, ZoneKind, ZoneRow};
 use super::quantities_rooms::{fatto_room_rows, project_room_rows, ProjectRoomRow, RoomRow};
 use super::record;
 use super::report::Notice;
+use super::rooms::Phase;
 use super::units::DrawingUnit;
 use super::zone::zones_in;
 
@@ -42,6 +52,26 @@ const JOIN: &str = " + ";
 /// Decimali al massimo in [`format_fixed`]: con di più le unità dell'ultima
 /// cifra di un numero di qualche miliardo uscirebbero da un `i64`.
 const MAX_DECIMALS: usize = 9;
+
+/// L'intestazione del CSV (spec §5.3): le colonne della `Misura` del libretto
+/// di ArchCme (`parti`, `lunghezza`, `larghezza`, `altezza`, `detrai`) con
+/// tipo, codice, descrizione, quantità, unità, stato dell'altezza, fonte e
+/// note.
+pub const CSV_HEADER: &str = "tipo;codice;descrizione;parti;lunghezza;larghezza;altezza;detrai;\
+    quantita;um;stato_altezza;fonte;note";
+/// BOM UTF-8: Excel italiano riconosce la codifica e legge «m³».
+const CSV_BOM: char = '\u{FEFF}';
+const CSV_SEPARATOR: char = ';';
+const CSV_EOL: &str = "\r\n";
+/// Decimali nel CSV (spec §3).
+const CSV_DECIMALS: usize = 4;
+/// Tra le note di un campo, come nelle tabelle.
+const CSV_NOTE_SEP: &str = "; ";
+/// Nessuna riga è «a detrarre» finché porte e finestre non ci sono (spec §4.4).
+const CSV_NO_DEDUCTION: &str = "no";
+const UNIT_M3: &str = "m³";
+const UNIT_M2: &str = "m²";
+const DEMOLITION_WITHOUT_AXIS: &str = "Demolizione area in pianta (zona senza asse)";
 
 /// Unità e tolleranze del calcolo, come per `AL_ESTRAI` (`ExtractOptions`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -272,6 +302,213 @@ pub fn format_fixed(value: f64, decimals: usize) -> String {
     }
 }
 
+/// L'abaco come CSV per Excel italiano (spec §5.3): BOM UTF-8, [`CSV_HEADER`],
+/// poi una riga per misura delle sole righe complete, ognuna con il codice
+/// delle tabelle: demolizioni, varchi, nuove murature, locali di fatto,
+/// locali di progetto. `;` tra i campi, quattro decimali con la virgola, CRLF
+/// in fondo a ogni riga; un campo con `;`, virgolette o un a capo va tra
+/// virgolette, con le virgolette raddoppiate (RFC 4180).
+///
+/// Le misure, sempre `parti` = 1 e mai a detrarre:
+/// - demolizione con asse: lunghezza × spessore effettivo × altezza (m³),
+///   «Demolizione muro spessore 0,100»;
+/// - demolizione senza asse: area in pianta × altezza (m³), con l'area nella
+///   colonna `lunghezza` e la larghezza vuota, detto nella descrizione;
+/// - varco: lunghezza × spessore effettivo × altezza (m³), «Varco»;
+/// - nuova muratura: lunghezza × altezza (m², larghezza vuota), «Nuova
+///   muratura spessore 0,080»;
+/// - locale: la superficie netta come `lunghezza`, un fattore solo (m²), con
+///   il nome come descrizione.
+///
+/// Il prodotto dei fattori scritti dà `quantita` a meno dell'arrotondamento
+/// di ciascun numero alla quarta cifra.
+pub fn to_csv(abaco: &Abaco) -> String {
+    let mut out = String::new();
+    out.push(CSV_BOM);
+    out.push_str(CSV_HEADER);
+    out.push_str(CSV_EOL);
+    for record in csv_records(abaco) {
+        for (n, field) in record.fields().iter().enumerate() {
+            if n > 0 {
+                out.push(CSV_SEPARATOR);
+            }
+            push_csv_field(&mut out, field);
+        }
+        out.push_str(CSV_EOL);
+    }
+    out
+}
+
+/// Quante righe di misura ha il CSV di [`to_csv`].
+pub fn csv_row_count(abaco: &Abaco) -> usize {
+    csv_records(abaco).len()
+}
+
+/// Una riga del CSV: una misura del libretto di ArchCme con `parti` = 1, mai
+/// a detrarre. `None` = un fattore che non si applica: campo vuoto, saltato
+/// nel prodotto.
+struct CsvRecord {
+    tipo: &'static str,
+    code: String,
+    description: String,
+    length: f64,
+    width: Option<f64>,
+    height: Option<f64>,
+    quantity: f64,
+    unit: &'static str,
+    height_state: &'static str,
+    source: String,
+    notes: Vec<String>,
+}
+
+impl CsvRecord {
+    /// I campi nell'ordine di [`CSV_HEADER`], senza virgolette.
+    fn fields(&self) -> [String; 13] {
+        let factor = |value: Option<f64>| value.map_or_else(String::new, csv_number);
+        [
+            self.tipo.to_string(),
+            self.code.clone(),
+            self.description.clone(),
+            csv_number(1.0),
+            csv_number(self.length),
+            factor(self.width),
+            factor(self.height),
+            CSV_NO_DEDUCTION.to_string(),
+            csv_number(self.quantity),
+            self.unit.to_string(),
+            self.height_state.to_string(),
+            self.source.clone(),
+            self.notes.join(CSV_NOTE_SEP),
+        ]
+    }
+}
+
+fn csv_number(value: f64) -> String {
+    format_fixed(value, CSV_DECIMALS)
+}
+
+/// Le misure delle righe complete, nell'ordine di [`to_csv`]. Le note di
+/// accoppiamento di una riga di locali («unito in C», «da A + B») vanno al
+/// locale che la riga ha da solo.
+fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
+    let zones = abaco
+        .demolizioni
+        .iter()
+        .chain(&abaco.varchi)
+        .chain(&abaco.nuove)
+        .filter_map(zone_record);
+    let rooms = |phase: Phase| {
+        abaco.locali.iter().filter_map(move |line| {
+            let row = match phase {
+                Phase::Fatto => line.fatto.as_ref(),
+                Phase::Progetto => line.progetto.as_ref(),
+            }?;
+            room_record(row, line.note.as_deref())
+        })
+    };
+    zones
+        .chain(rooms(Phase::Fatto))
+        .chain(rooms(Phase::Progetto))
+        .collect()
+}
+
+/// La misura di una zona completa (`None` se incompleta: la quantità
+/// principale o un suo fattore manca o non è finito). Con l'asse, lo spessore
+/// effettivo (area ÷ lunghezza) fa sì che lunghezza × spessore × altezza sia
+/// il volume anche con buchi o con l'asse accorciato.
+fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
+    let finite = |value: Option<f64>| value.filter(|v| v.is_finite());
+    let quantity = finite(row.main())?;
+    let height = finite(row.height.value_m)?;
+    let axis = finite(row.length_m).zip(finite(row.thickness_m));
+    let thickness =
+        |value: Option<f64>| finite(value).map_or_else(|| ND.to_string(), |t| format_fixed(t, 3));
+    let (tipo, description, length, width, unit) = match row.kind {
+        ZoneKind::Demolizione => match axis {
+            Some((length, width)) => (
+                "demolizione",
+                format!("Demolizione muro spessore {}", thickness(Some(width))),
+                length,
+                Some(width),
+                UNIT_M3,
+            ),
+            None => (
+                "demolizione",
+                DEMOLITION_WITHOUT_AXIS.to_string(),
+                finite(Some(row.plan_area_m2))?,
+                None,
+                UNIT_M3,
+            ),
+        },
+        ZoneKind::Varco => {
+            let (length, width) = axis?;
+            ("varco", "Varco".to_string(), length, Some(width), UNIT_M3)
+        }
+        ZoneKind::Nuova => (
+            "nuova muratura",
+            format!("Nuova muratura spessore {}", thickness(row.thickness_m)),
+            finite(row.length_m)?,
+            None,
+            UNIT_M2,
+        ),
+    };
+    Some(CsvRecord {
+        tipo,
+        code: row.code.clone(),
+        description,
+        length,
+        width,
+        height: Some(height),
+        quantity,
+        unit,
+        height_state: height_state(&row.height),
+        source: format!("zona {:X}", row.handle),
+        notes: zone_notes(row),
+    })
+}
+
+/// La misura di un locale con la superficie (`None` senza): la superficie
+/// netta, un fattore solo. L'altezza non è un fattore, ma il suo stato resta:
+/// `n.d.` per un locale senza altezza, che è completo (Ruling O), con il
+/// motivo nelle note.
+fn room_record(row: &RoomRow, line_note: Option<&str>) -> Option<CsvRecord> {
+    if !row.is_complete() {
+        return None;
+    }
+    let area = row.area_m2.filter(|area| area.is_finite())?;
+    let tipo = match row.phase {
+        Phase::Fatto => "locale di fatto",
+        Phase::Progetto => "locale di progetto",
+    };
+    let mut notes: Vec<String> = line_note.map(str::to_string).into_iter().collect();
+    notes.extend(room_notes(row));
+    Some(CsvRecord {
+        tipo,
+        code: row.code.clone(),
+        description: row.name.clone(),
+        length: area,
+        width: None,
+        height: None,
+        quantity: area,
+        unit: UNIT_M2,
+        height_state: height_state(&row.height),
+        source: format!("locale {}", row.name),
+        notes,
+    })
+}
+
+/// Un campo del CSV: tra virgolette, con le virgolette raddoppiate, se ha
+/// `;`, virgolette o un a capo (RFC 4180); altrimenti com'è.
+fn push_csv_field(out: &mut String, field: &str) {
+    if field.contains(|c: char| c == CSV_SEPARATOR || matches!(c, '"' | '\n' | '\r')) {
+        out.push('"');
+        out.push_str(&field.replace('"', "\"\""));
+        out.push('"');
+    } else {
+        out.push_str(field);
+    }
+}
+
 /// Aiuti dei test dell'abaco, comuni a questo modulo e a
 /// [`super::abaco_render`]: il caso A della spec parte 2, §7, in metri, e le
 /// zone scritte a mano.
@@ -384,18 +621,20 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    //! Il calcolo dell'abaco contro `AL_AGGIORNA` e `AL_ESTRAI` (R61) e il
-    //! formato dei numeri; la resa si prova in `abaco_render`.
+    //! Il calcolo dell'abaco contro `AL_AGGIORNA` e `AL_ESTRAI` (R61), il CSV
+    //! (spec §5.3) e il formato dei numeri; la resa delle tabelle si prova in
+    //! `abaco_render`.
     use super::test_support::*;
     use super::*;
 
     use codec::EntityType;
 
     use crate::bim::extract::{extract, Elaborato, ExtractOptions};
-    use crate::bim::fixtures::{shift_tramezzo, LAYER_MURI};
+    use crate::bim::fixtures::{shift_tramezzo, Form, LAYER_MURI};
     use crate::bim::refresh::refresh_rooms;
     use crate::bim::room_command::test_support::write_room;
     use crate::bim::rooms::label;
+    use crate::bim::zone::ZoneState;
     use crate::bim::LAYER_LOCALI;
 
     /// I testi (`MTEXT`) su `layer`, in ordine alfabetico.
@@ -485,6 +724,266 @@ mod tests {
                 "{form:?}: stato di progetto"
             );
         }
+    }
+
+    const CSV_HEADER_LINE: &str = "\u{FEFF}tipo;codice;descrizione;parti;lunghezza;larghezza;\
+        altezza;detrai;quantita;um;stato_altezza;fonte;note\r\n";
+
+    /// Le righe del CSV, campo per campo, come le legge un foglio di calcolo
+    /// (RFC 4180 con `;`): un campo tra virgolette può avere `;`, virgolette
+    /// raddoppiate e a capo. Ogni riga finisce con CRLF; un a capo senza CR
+    /// fuori dalle virgolette è un errore.
+    fn parse_csv(text: &str) -> Vec<Vec<String>> {
+        let text = text.strip_prefix('\u{FEFF}').expect("BOM in testa");
+        let mut records = Vec::new();
+        let mut record = Vec::new();
+        let mut field = String::new();
+        let mut quoted = false;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (quoted, c) {
+                (true, '"') if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    field.push('"');
+                }
+                (true, '"') => quoted = false,
+                (true, _) => field.push(c),
+                (false, '"') if field.is_empty() => quoted = true,
+                (false, ';') => record.push(std::mem::take(&mut field)),
+                (false, '\r') => {
+                    assert_eq!(chars.next(), Some('\n'), "CR senza LF");
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                }
+                (false, '\n') => panic!("a capo senza CR fuori dalle virgolette: {text:?}"),
+                (false, _) => field.push(c),
+            }
+        }
+        assert!(
+            !quoted && field.is_empty() && record.is_empty(),
+            "ultima riga senza CRLF: {text:?}"
+        );
+        records
+    }
+
+    /// Un numero del CSV: vuoto = fattore che non si applica; altrimenti
+    /// quattro decimali con la virgola.
+    #[track_caller]
+    fn csv_number(field: &str) -> Option<f64> {
+        if field.is_empty() {
+            return None;
+        }
+        let (_, decimals) = field.split_once(',').expect("virgola decimale");
+        assert_eq!(decimals.len(), 4, "quattro decimali: {field}");
+        Some(field.replace(',', ".").parse().expect("numero"))
+    }
+
+    /// I campi della riga con il codice `code`.
+    #[track_caller]
+    fn record_of<'a>(records: &'a [Vec<String>], code: &str) -> &'a [String] {
+        records
+            .iter()
+            .find(|record| record[1] == code)
+            .unwrap_or_else(|| panic!("nessuna riga {code}: {records:?}"))
+    }
+
+    /// Spec §5.3: BOM UTF-8, intestazione, `;`, virgola decimale, quattro
+    /// decimali, CRLF; la demolizione del caso A (0,10 × 3,00, altezza
+    /// ereditata 2,70) è 1 × 3,0000 × 0,1000 × 2,7000 = 0,8100 m³.
+    #[test]
+    fn csv_has_bom_crlf_and_semicolons() {
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        demolish(&mut scene, [4.05, 0.0], [4.05, 3.0]);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        let handle = abaco.demolizioni[0].handle;
+        let csv = to_csv(&abaco);
+        assert_eq!(
+            csv,
+            format!(
+                "{CSV_HEADER_LINE}demolizione;D1;Demolizione muro spessore 0,100;1,0000;3,0000;\
+                 0,1000;2,7000;no;0,8100;m³;ereditata;zona {handle:X};\r\n"
+            )
+        );
+        let records = parse_csv(&csv);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.len() == 13), "{records:?}");
+        for field in &records[1][3..7] {
+            csv_number(field);
+        }
+        assert_eq!(csv_row_count(&abaco), 1);
+    }
+
+    /// Spec §7, caso H: senza altezza la demolizione è incompleta e il CSV ha
+    /// solo l'intestazione; lo stesso per un varco senza altezza propria e una
+    /// zona nuova senza asse, anche con la predefinita. Due locali di fatto
+    /// fusi (nessuna superficie) restano fuori, il terzo entra.
+    #[test]
+    fn csv_omits_incomplete_rows() {
+        for form in FORMS {
+            let mut scene = scene_of(form);
+            demolish(&mut scene, [4.05, 0.0], [4.05, 3.0]);
+            let abaco = compute_abaco(&scene.document, &OPTS);
+            assert_eq!(incomplete(&abaco).len(), 1, "{form:?}");
+            assert_eq!(to_csv(&abaco), CSV_HEADER_LINE, "{form:?}");
+            assert_eq!(csv_row_count(&abaco), 0, "{form:?}");
+        }
+
+        let mut scene = empty_scene();
+        set_default_height(&mut scene, 2.7);
+        let varco = Some(([20.05, 1.0], [20.05, 1.9]));
+        let ring = rect(20.0, 1.0, 20.1, 1.9);
+        add_zone(&mut scene, ZoneState::Demolito, varco, None, true, ring);
+        let ring = rect(0.0, 5.0, 2.0, 5.08);
+        add_zone(&mut scene, ZoneState::Nuovo, None, None, false, ring);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert_eq!(incomplete(&abaco).len(), 2, "{:?}", abaco.notices);
+        assert_eq!(to_csv(&abaco), CSV_HEADER_LINE);
+
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        write_room(&mut scene, "Cucina", [3.0, 1.0]);
+        write_room(&mut scene, "B", [6.0, 1.5]);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        let reasons = incomplete(&abaco);
+        let codes: Vec<&str> = reasons.iter().map(|(code, _)| code.as_str()).collect();
+        assert_eq!(codes, ["LF1", "LF2"], "{reasons:?}");
+        let records = parse_csv(&to_csv(&abaco));
+        let codes: Vec<&str> = records[1..].iter().map(|r| r[1].as_str()).collect();
+        assert!(codes.contains(&"LF3"), "{codes:?}");
+        assert!(!codes.contains(&"LF1") && !codes.contains(&"LF2"), "{codes:?}");
+        assert_eq!(csv_row_count(&abaco), records.len() - 1);
+    }
+
+    /// Spec §7: per ogni riga `parti × lunghezza × larghezza × altezza`, con i
+    /// fattori vuoti saltati come nel libretto di ArchCme, è `quantita`. Casi
+    /// A (0,81 m³), A' (altezza inserita 3,00: 0,90 m³), demolizione senza
+    /// asse (0,81 m³), B (varco con 2,10: 0,189 m³), G (nuova 2,00 × 2,70:
+    /// 5,40 m²) e i locali (A 12,00, B 11,70, progetto A + B 24,00 m²).
+    #[test]
+    fn csv_product_equals_quantity() {
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        write_room(&mut scene, "B", [6.0, 1.5]);
+        let demolito = ZoneState::Demolito;
+        demolish(&mut scene, [4.05, 0.0], [4.05, 3.0]);
+        let axis = Some(([12.05, 0.0], [12.05, 3.0]));
+        add_zone(&mut scene, demolito, axis, Some(3.0), false, rect(12.0, 0.0, 12.1, 3.0));
+        add_zone(&mut scene, demolito, None, None, false, rect(14.0, 0.0, 14.1, 3.0));
+        let axis = Some(([20.05, 1.0], [20.05, 1.9]));
+        add_zone(&mut scene, demolito, axis, Some(2.1), true, rect(20.0, 1.0, 20.1, 1.9));
+        let axis = Some(([0.0, 10.04], [2.0, 10.04]));
+        let ring = rect(0.0, 10.0, 2.0, 10.08);
+        add_zone(&mut scene, ZoneState::Nuovo, axis, None, false, ring);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert!(incomplete(&abaco).is_empty(), "{:?}", abaco.notices);
+
+        let records = parse_csv(&to_csv(&abaco));
+        for record in &records[1..] {
+            let factors: f64 = record[3..7].iter().filter_map(|f| csv_number(f)).product();
+            let quantity = csv_number(&record[8]).expect("quantità");
+            assert!(
+                (factors - quantity).abs() < 1e-4,
+                "{}: {factors} invece di {quantity}",
+                record[1]
+            );
+        }
+        let rows: Vec<(&str, &str, &str, &str)> = records[1..]
+            .iter()
+            .map(|r| (r[0].as_str(), r[1].as_str(), r[8].as_str(), r[9].as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("demolizione", "D1", "0,8100", "m³"),
+                ("demolizione", "D2", "0,9000", "m³"),
+                ("demolizione", "D3", "0,8100", "m³"),
+                ("varco", "V1", "0,1890", "m³"),
+                ("nuova muratura", "N1", "5,4000", "m²"),
+                ("locale di fatto", "LF1", "12,0000", "m²"),
+                ("locale di fatto", "LF2", "11,7000", "m²"),
+                ("locale di progetto", "LP1", "24,0000", "m²"),
+            ]
+        );
+        let d2 = record_of(&records, "D2");
+        assert_eq!((d2[6].as_str(), d2[10].as_str()), ("3,0000", "inserita"));
+        let v1 = record_of(&records, "V1");
+        assert_eq!(&v1[2..7], ["Varco", "1,0000", "0,9000", "0,1000", "2,1000"]);
+        let n1 = record_of(&records, "N1");
+        assert_eq!(
+            &n1[2..7],
+            ["Nuova muratura spessore 0,080", "1,0000", "2,0000", "", "2,7000"]
+        );
+        let lf1 = record_of(&records, "LF1");
+        assert_eq!(&lf1[2..7], ["A", "1,0000", "12,0000", "", ""]);
+        assert_eq!((lf1[10].as_str(), lf1[11].as_str()), ("ereditata", "locale A"));
+        assert!(lf1[12].contains("unito in A + B"), "{lf1:?}");
+        let lp1 = record_of(&records, "LP1");
+        assert_eq!(lp1[2], "A + B");
+        assert!(lp1[12].contains("da A + B"), "{lp1:?}");
+        assert!(lp1[12].contains("da confermare"), "{lp1:?}");
+        assert!(records[1..].iter().all(|r| r[7] == "no"), "nessuna detrazione");
+    }
+
+    /// Un nome di locale con `;`, virgolette e un a capo resta un campo solo,
+    /// tra virgolette con le virgolette raddoppiate (RFC 4180): il file ha
+    /// ancora una riga logica per misura.
+    #[test]
+    fn csv_quotes_special_characters() {
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        write_room(&mut scene, "B", [6.0, 1.5]);
+        let mut abaco = compute_abaco(&scene.document, &OPTS);
+        let name = "Bagno; \"WC\"\nsecondo";
+        abaco.locali[0].fatto.as_mut().expect("A di fatto").name = name.into();
+        let csv = to_csv(&abaco);
+        assert!(
+            csv.contains("LF1;\"Bagno; \"\"WC\"\"\nsecondo\";1,0000;"),
+            "{csv:?}"
+        );
+        let records = parse_csv(&csv);
+        let codes: Vec<&str> = records.iter().map(|r| r[1].as_str()).collect();
+        assert_eq!(codes, ["codice", "LF1", "LF2", "LP1", "LP2"]);
+        assert!(records.iter().all(|record| record.len() == 13), "{records:?}");
+        let lf1 = record_of(&records, "LF1");
+        assert_eq!(lf1[2], name);
+        assert_eq!(lf1[11], format!("locale {name}"));
+    }
+
+    /// Spec §5.3: una demolizione senza asse ha l'area in pianta come
+    /// lunghezza, la larghezza vuota e la descrizione che lo dice; il prodotto
+    /// resta area × altezza.
+    #[test]
+    fn csv_demolition_without_axis_uses_area_as_length() {
+        let mut scene = empty_scene();
+        set_default_height(&mut scene, 2.7);
+        let ring = rect(10.0, 0.0, 10.1, 3.0);
+        add_zone(&mut scene, ZoneState::Demolito, None, None, false, ring);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        let handle = abaco.demolizioni[0].handle;
+        let records = parse_csv(&to_csv(&abaco));
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[1],
+            [
+                "demolizione",
+                "D1",
+                "Demolizione area in pianta (zona senza asse)",
+                "1,0000",
+                "0,3000",
+                "",
+                "2,7000",
+                "no",
+                "0,8100",
+                "m³",
+                "ereditata",
+                &format!("zona {handle:X}"),
+                "zona senza asse",
+            ]
+        );
     }
 
     #[test]

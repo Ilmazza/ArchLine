@@ -1,5 +1,5 @@
-//! Il comando BIM `AL_ABACO` della parte 2 (spec
-//! `2026-10-28-bim-abachi-quantita-design.md`, §5.2), lato app.
+//! I comandi BIM `AL_ABACO` e `AL_ABACO_CSV` della parte 2 (spec
+//! `2026-10-28-bim-abachi-quantita-design.md`, §5.2 e §5.3), lato app.
 //!
 //! `AL_ABACO [x,y]` calcola l'abaco (`abaco::compute_abaco`, con le
 //! tolleranze di `AL_AGGIORNA` e `AL_ESTRAI`) e lo scrive come tabelle `TABLE`
@@ -29,9 +29,30 @@
 //! La riga `AL_ABACO <x,y>` va al comando intera (elenco del runner in
 //! `command_driver/utilities.rs`): da solo, in uno script, il comando scrive
 //! subito, e il runner non deve provarlo senza il punto.
+//!
+//! `AL_ABACO_CSV [percorso]` scrive lo stesso abaco come CSV
+//! (`abaco::to_csv`: solo le righe complete). Regole:
+//! - il percorso è il resto della riga, spazi compresi, anche tra virgolette
+//!   (anche questa riga va intera al comando, elenco del runner); legge il
+//!   disegno e basta, quindi vale anche da un layout, come `AL_ESTRAI`;
+//! - con il percorso un file che c'è già non si riscrive mai: niente è
+//!   scritto e lo si dice (così anche una cartella che non c'è); senza
+//!   percorso, da uno script (`scripted_dispatch`) è un errore, da una persona
+//!   si apre la finestra «Salva con nome» del sistema, che chiede lei se
+//!   sovrascrivere, e la risposta torna come `BimMsg::AbacoCsvPath` con il
+//!   testo già calcolato;
+//! - senza zone né locali un messaggio e basta, senza chiedere l'unità; poi
+//!   l'unità del disegno (`AL_UNITA`, che rilancia la riga intera);
+//! - il file si scrive in un file temporaneo nella stessa cartella e poi si
+//!   rinomina: un errore non lascia un file a metà né quello vecchio rovinato;
+//! - in riga di comando il file scritto, le righe scritte e quelle incomplete
+//!   rimaste fuori, poi gli avvisi dell'abaco (un `RigaIncompleta` per riga
+//!   incompleta, con il motivo). Il disegno non cambia.
 
 use crate::app::{Message, OpenCADStudio};
-use crate::bim::abaco::{compute_abaco, render_tables, AbacoOptions, TableText};
+use crate::bim::abaco::{
+    compute_abaco, csv_row_count, render_tables, to_csv, Abaco, AbacoOptions, TableText,
+};
 use crate::bim::abaco_table::{self, kind_name, AbacoPlan};
 use crate::bim::report::Notice;
 use crate::bim::rooms::rooms_in;
@@ -40,13 +61,16 @@ use crate::bim::zone::zones_in;
 use crate::bim::APP_ABACO;
 use crate::command::{CadCommand, CmdResult};
 use crate::scene::view::dispatch::set_entity_xdata;
+use crate::ui::window::bim_extract::BimMsg;
 use codec::{EntityType, Handle};
 use glam::DVec3;
 use iced::Task;
+use std::path::{Path, PathBuf};
 
-use super::bim::room_tolerance;
+use super::bim::{base_name, room_tolerance, unquote};
 
 const CMD: &str = "AL_ABACO";
+const CSV_CMD: &str = "AL_ABACO_CSV";
 
 const POINT_PROMPT: &str = "AL_ABACO  Punto di inserimento delle tabelle:";
 
@@ -97,14 +121,8 @@ impl OpenCADStudio {
             return self.finish_dispatch(CMD);
         };
         self.bim_pending = None;
-        let opts = AbacoOptions {
-            unit,
-            tol: unit.tolerance(),
-            // R61: i locali alla tolleranza di `AL_LOCALE` e `AL_AGGIORNA`.
-            room_tol: room_tolerance(unit),
-        };
         let scene = &self.tabs[i].scene;
-        let abaco = compute_abaco(&scene.document, &opts);
+        let abaco = compute_abaco(&scene.document, &abaco_options(unit));
         let texts = render_tables(&abaco);
         let plan = abaco_table::plan(&scene.document, &texts, unit, |handle| {
             scene.is_layer_locked(handle)
@@ -175,15 +193,120 @@ impl OpenCADStudio {
         }
         let rows =
             abaco.demolizioni.len() + abaco.varchi.len() + abaco.nuove.len() + abaco.locali.len();
-        let incomplete = abaco
-            .notices
-            .iter()
-            .filter(|notice| matches!(notice, Notice::RigaIncompleta { .. }))
-            .count();
         self.command_line.push_info(&format!(
-            "AL_ABACO: righe: {rows}; incomplete: {incomplete}."
+            "AL_ABACO: righe: {rows}; incomplete: {}.",
+            incomplete_rows(&abaco)
         ));
         self.bim_push_notices(&abaco.notices);
+        Task::none()
+    }
+
+    /// `AL_ABACO_CSV [percorso]` (spec parte 2, §5.3): vedi le regole del
+    /// modulo.
+    pub(super) fn bim_abaco_csv(&mut self, i: usize, cmd: &str) -> Task<Message> {
+        let line = cmd.trim();
+        let rest = line
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, rest)| rest);
+        let target = unquote(rest.trim());
+        if target.is_empty() && self.scripted_dispatch {
+            // Nessuno risponderebbe alla finestra.
+            self.bim_pending = None;
+            self.command_line.push_error(
+                "AL_ABACO_CSV: serve il percorso del file (AL_ABACO_CSV <percorso>). \
+                 Niente è stato scritto.",
+            );
+            return Task::none();
+        }
+        let path = (!target.is_empty()).then(|| PathBuf::from(target));
+        if let Some(error) = path.as_deref().and_then(csv_path_error) {
+            self.bim_pending = None;
+            self.command_line.push_error(&format!("{CSV_CMD}: {error}"));
+            return Task::none();
+        }
+        let doc = &self.tabs[i].scene.document;
+        if zones_in(doc).is_empty() && rooms_in(doc).is_empty() {
+            // Un rilancio lasciato a metà (AL_UNITA annullato) non vale più.
+            self.bim_pending = None;
+            self.command_line
+                .push_info("AL_ABACO_CSV: nessuna zona né locale nel disegno: nessun file.");
+            return Task::none();
+        }
+        let Some(unit) = self.bim_unit_or_ask(i, line) else {
+            return self.finish_dispatch(CSV_CMD);
+        };
+        self.bim_pending = None;
+        let abaco = compute_abaco(&self.tabs[i].scene.document, &abaco_options(unit));
+        let text = to_csv(&abaco);
+        let summary = format!(
+            "{CSV_CMD}: righe: {}; incomplete escluse: {}.",
+            csv_row_count(&abaco),
+            incomplete_rows(&abaco)
+        );
+        let Some(path) = path else {
+            // Da una persona: righe e avvisi subito, poi la finestra, che
+            // chiede lei se sovrascrivere un file esistente.
+            self.command_line.push_info(&summary);
+            self.bim_push_notices(&abaco.notices);
+            let tab = &self.tabs[i];
+            let file_name = format!(
+                "{}_abaco.csv",
+                base_name(tab.current_path.as_deref(), &tab.tab_title)
+            );
+            let start = tab
+                .current_path
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|dir| dir.is_dir())
+                .map(Path::to_path_buf);
+            return Task::perform(
+                async move {
+                    let mut dialog = crate::sys::file_dialog()
+                        .set_title("Salva l'abaco CSV")
+                        .set_file_name(file_name)
+                        .add_filter("CSV (separato da punto e virgola)", &["csv"]);
+                    if let Some(dir) = start {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    dialog
+                        .save_file()
+                        .await
+                        .map(|file| crate::sys::handle_path(&file))
+                },
+                move |path| Message::Bim(BimMsg::AbacoCsvPath(path, text)),
+            );
+        };
+        match write_csv(&path, &text, false) {
+            Ok(()) => {
+                self.command_line
+                    .push_info(&format!("{CSV_CMD}: scritto {}.", path.display()));
+                self.command_line.push_info(&summary);
+                self.bim_push_notices(&abaco.notices);
+            }
+            Err(error) => self.command_line.push_error(&error.text(&path)),
+        }
+        Task::none()
+    }
+
+    /// La risposta della finestra «Salva con nome» di `AL_ABACO_CSV`: scrive
+    /// `text` nel file scelto, che la finestra del sistema ha già chiesto se
+    /// sovrascrivere; annullata, niente è scritto.
+    pub(super) fn bim_abaco_csv_answer(
+        &mut self,
+        path: Option<PathBuf>,
+        text: String,
+    ) -> Task<Message> {
+        let Some(path) = path else {
+            self.command_line
+                .push_info("AL_ABACO_CSV: annullato. Niente è stato scritto.");
+            return Task::none();
+        };
+        match write_csv(&path, &text, true) {
+            Ok(()) => self
+                .command_line
+                .push_info(&format!("{CSV_CMD}: scritto {}.", path.display())),
+            Err(error) => self.command_line.push_error(&error.text(&path)),
+        }
         Task::none()
     }
 
@@ -225,6 +348,111 @@ impl OpenCADStudio {
         self.finish_pending_history(i);
         self.refresh_properties();
     }
+}
+
+/// Le opzioni dell'abaco nell'unità del disegno, con le tolleranze di
+/// `AL_ESTRAI`: i locali a quella di `AL_LOCALE` e `AL_AGGIORNA` (R61).
+fn abaco_options(unit: DrawingUnit) -> AbacoOptions {
+    AbacoOptions {
+        unit,
+        tol: unit.tolerance(),
+        room_tol: room_tolerance(unit),
+    }
+}
+
+/// Le righe incomplete dell'abaco: una per [`Notice::RigaIncompleta`].
+fn incomplete_rows(abaco: &Abaco) -> usize {
+    abaco
+        .notices
+        .iter()
+        .filter(|notice| matches!(notice, Notice::RigaIncompleta { .. }))
+        .count()
+}
+
+/// Perché il CSV non si è scritto.
+#[derive(Debug, PartialEq)]
+enum CsvWriteError {
+    /// Il file c'è già e senza la conferma della finestra non si riscrive.
+    Exists,
+    Io(String),
+}
+
+impl CsvWriteError {
+    /// Il messaggio per la riga di comando: niente è stato scritto.
+    fn text(&self, path: &Path) -> String {
+        match self {
+            CsvWriteError::Exists => format!("{CSV_CMD}: {}", exists_text(path)),
+            CsvWriteError::Io(message) => format!(
+                "{CSV_CMD}: scrittura di {} non riuscita: {message}. Niente è stato scritto.",
+                path.display()
+            ),
+        }
+    }
+}
+
+fn exists_text(path: &Path) -> String {
+    format!(
+        "il file {} esiste già: non si sovrascrive. Niente è stato scritto.",
+        path.display()
+    )
+}
+
+/// Perché `path`, dato in riga di comando, non va bene per il CSV, prima di
+/// calcolare: una cartella, un file che c'è già (senza la finestra non si
+/// sovrascrive mai), una cartella di destinazione che non c'è (non si crea).
+fn csv_path_error(path: &Path) -> Option<String> {
+    if path.is_dir() {
+        return Some(format!(
+            "{} è una cartella. Niente è stato scritto.",
+            path.display()
+        ));
+    }
+    if path.exists() {
+        return Some(exists_text(path));
+    }
+    let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty())?;
+    (!dir.is_dir()).then(|| {
+        format!(
+            "la cartella {} non esiste. Niente è stato scritto.",
+            dir.display()
+        )
+    })
+}
+
+/// Scrive `text` in `path` senza lasciare un file a metà: prima in un file
+/// temporaneo nella stessa cartella (la rinomina resta sullo stesso disco),
+/// poi lo rinomina sopra `path`; se qualcosa non va il temporaneo si toglie e
+/// `path` resta com'era. Con `overwrite` falso un file esistente non si
+/// tocca, anche se compare mentre si scrive; vero solo dopo la conferma della
+/// finestra «Salva con nome» del sistema.
+fn write_csv(path: &Path, text: &str, overwrite: bool) -> Result<(), CsvWriteError> {
+    if !overwrite && path.exists() {
+        return Err(CsvWriteError::Exists);
+    }
+    let temp = temp_path(path);
+    let fail = |error: CsvWriteError| {
+        let _ = std::fs::remove_file(&temp);
+        Err(error)
+    };
+    if let Err(error) = std::fs::write(&temp, text) {
+        return fail(CsvWriteError::Io(error.to_string()));
+    }
+    if !overwrite && path.exists() {
+        return fail(CsvWriteError::Exists);
+    }
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => fail(CsvWriteError::Io(error.to_string())),
+    }
+}
+
+/// Il file temporaneo accanto a `path`: stessa cartella, nome che comincia
+/// con un punto e porta il numero del processo.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "abaco.csv".into(), |name| name.to_string_lossy());
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 /// Il punto delle tabelle di uno script senza punto: a destra dell'angolo in
@@ -277,7 +505,82 @@ fn point_argument(cmd: &str) -> Result<Option<[f64; 2]>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::point_argument;
+    use super::{csv_path_error, point_argument, write_csv, CsvWriteError};
+    use std::path::{Path, PathBuf};
+
+    /// Una cartella nuova sotto la cartella temporanea, tolta a fine test.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let dir = std::env::temp_dir().join(format!(
+                "archline_abaco_csv_{tag}_{}_{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Il CSV si scrive senza lasciare il file temporaneo; un file che c'è già
+    /// resta com'è senza la conferma e si riscrive con quella; in una
+    /// cartella che non c'è non si scrive nulla, né lì né altrove.
+    #[test]
+    fn write_csv_never_leaves_a_half_file() {
+        let scratch = Scratch::new("scrittura");
+        let path = scratch.0.join("abaco.csv");
+        assert_eq!(write_csv(&path, "uno\r\n", false), Ok(()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "uno\r\n");
+        assert_eq!(entries(&scratch.0), ["abaco.csv"]);
+
+        assert_eq!(
+            write_csv(&path, "due\r\n", false),
+            Err(CsvWriteError::Exists)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "uno\r\n");
+        assert_eq!(write_csv(&path, "tre\r\n", true), Ok(()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tre\r\n");
+        assert_eq!(entries(&scratch.0), ["abaco.csv"]);
+
+        let missing = scratch.0.join("manca").join("abaco.csv");
+        assert!(matches!(
+            write_csv(&missing, "quattro\r\n", true),
+            Err(CsvWriteError::Io(_))
+        ));
+        assert_eq!(entries(&scratch.0), ["abaco.csv"]);
+    }
+
+    #[test]
+    fn csv_path_error_refuses_folders_existing_files_and_missing_folders() {
+        let scratch = Scratch::new("percorso");
+        let file = scratch.0.join("abaco.csv");
+        assert_eq!(csv_path_error(&file), None);
+        assert_eq!(csv_path_error(Path::new("abaco.csv")), None, "relativo");
+        std::fs::write(&file, "x").unwrap();
+        assert!(csv_path_error(&file).is_some_and(|e| e.contains("esiste già")));
+        assert!(csv_path_error(&scratch.0).is_some_and(|e| e.contains("è una cartella")));
+        let missing = scratch.0.join("manca").join("abaco.csv");
+        assert!(csv_path_error(&missing).is_some_and(|e| e.contains("non esiste")));
+    }
 
     #[test]
     fn point_argument_takes_x_y_with_the_decimal_point() {

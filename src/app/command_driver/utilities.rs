@@ -1038,6 +1038,9 @@ impl OpenCADStudio {
             // ArchLine: `AL_ABACO <x,y>` takes its point in one line; bare, in a
             // script, it writes the tables at once, so it must not be probed.
             || tokens[0].eq_ignore_ascii_case("AL_ABACO")
+            // ArchLine: the path after `AL_ABACO_CSV` may hold spaces and is
+            // one answer; bare, in a script, the command refuses at once.
+            || tokens[0].eq_ignore_ascii_case("AL_ABACO_CSV")
         {
             return self.dispatch_command(cmd);
         }

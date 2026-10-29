@@ -18,7 +18,7 @@ use super::quantities::{group_new_by_thickness, ZoneKind, ZoneRow};
 use super::quantities_rooms::RoomRow;
 use super::rooms::Phase;
 
-const ND: &str = "n.d.";
+pub(super) const ND: &str = "n.d.";
 /// Ciò che in una cella non si applica: non è un dato che manca.
 const NOT_APPLICABLE: &str = "-";
 const NOT_COMPUTED: &str = "non calcolata";
@@ -512,14 +512,26 @@ fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
 
 /// «2,70 (ereditata)», «3,00 (inserita)» o `n.d.`.
 fn height_cell(height: &Height) -> Cell {
-    let state = match height.state {
+    if height.state == HeightState::NonDisponibile {
+        return Cell::nd();
+    }
+    match height.value_m.filter(|v| v.is_finite()) {
+        Some(v) => Cell::plain(format!(
+            "{} ({})",
+            format_fixed(v, DECIMALS),
+            height_state(height)
+        )),
+        None => Cell::nd(),
+    }
+}
+
+/// Lo stato di un'altezza come lo dicono tabelle e CSV: «inserita»,
+/// «ereditata» o `n.d.`.
+pub(super) fn height_state(height: &Height) -> &'static str {
+    match height.state {
         HeightState::Inserita => "inserita",
         HeightState::Ereditata => "ereditata",
-        HeightState::NonDisponibile => return Cell::nd(),
-    };
-    match height.value_m.filter(|v| v.is_finite()) {
-        Some(v) => Cell::plain(format!("{} ({state})", format_fixed(v, DECIMALS))),
-        None => Cell::nd(),
+        HeightState::NonDisponibile => ND,
     }
 }
 
@@ -534,8 +546,8 @@ fn push_note(notes: &mut Vec<String>, text: Option<&str>) {
 }
 
 /// Le note di una zona: lo stato «approssimata», poi il motivo di una riga
-/// incompleta («da completare: …») o le note della riga.
-fn zone_notes(row: &ZoneRow) -> Vec<String> {
+/// incompleta («da completare: …») o le note della riga. Le stesse nel CSV.
+pub(super) fn zone_notes(row: &ZoneRow) -> Vec<String> {
     let mut notes = Vec::new();
     if row.approximate {
         push_note(&mut notes, Some(APPROXIMATE));
@@ -572,8 +584,8 @@ fn room_state(row: &RoomRow) -> Option<String> {
 
 /// Le note di un locale: lo stato «approssimata», poi il motivo di una riga
 /// incompleta («da completare: …») o le note della riga e dell'altezza
-/// («altezza n.d.» se il volume manca senza un motivo).
-fn room_notes(row: &RoomRow) -> Vec<String> {
+/// («altezza n.d.» se il volume manca senza un motivo). Le stesse nel CSV.
+pub(super) fn room_notes(row: &RoomRow) -> Vec<String> {
     let mut notes = Vec::new();
     push_note(&mut notes, room_state(row).as_deref());
     match row.incomplete_reason() {

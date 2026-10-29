@@ -147,6 +147,10 @@ pub enum BimMsg {
     /// «OK», o «Sovrascrivi» dopo l'avviso.
     Ok,
     Cancel,
+    /// Non di questa finestra: la risposta della finestra «Salva con nome» di
+    /// `AL_ABACO_CSV`, cioè il file scelto (`None` se annullata) e il testo
+    /// del CSV, calcolato quando il comando è partito.
+    AbacoCsvPath(Option<PathBuf>, String),
 }
 
 fn msg(m: BimMsg) -> Message {

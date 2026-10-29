@@ -9,8 +9,8 @@
 //! esistenti (`AL_STATO`), il ricalcolo dei locali di fatto (`AL_AGGIORNA`) e
 //! l'estrazione degli elaborati con la sua finestra (`AL_ESTRAI`). La logica
 //! sta in `crate::bim`. I comandi della parte 2 stanno in file propri
-//! (`AL_ALTEZZA` in `bim_altezza.rs`, `AL_ABACO` in `bim_abaco.rs`) e passano
-//! da `dispatch_bim`.
+//! (`AL_ALTEZZA` in `bim_altezza.rs`, `AL_ABACO` e `AL_ABACO_CSV` in
+//! `bim_abaco.rs`) e passano da `dispatch_bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
@@ -48,6 +48,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_UNITA",
         "AL_ALTEZZA",
         "AL_ABACO",
+        "AL_ABACO_CSV",
     ]
 });
 
@@ -87,9 +88,10 @@ impl OpenCADStudio {
             "AL_LOCALE" => Some(self.bim_start_room(i)),
             "AL_AGGIORNA" => Some(self.bim_update_rooms(i)),
             "AL_ESTRAI" => Some(self.bim_start_extract(i, cmd)),
-            // Parte 2: in `bim_altezza.rs` e `bim_abaco.rs`.
+            // Parte 2: in `bim_altezza.rs` e `bim_abaco.rs` (anche il CSV).
             "AL_ALTEZZA" => Some(self.bim_altezza(i, cmd)),
             "AL_ABACO" => Some(self.bim_abaco(i, cmd)),
+            "AL_ABACO_CSV" => Some(self.bim_abaco_csv(i, cmd)),
             _ => None,
         }
     }
@@ -528,8 +530,13 @@ impl OpenCADStudio {
     }
 
     /// I messaggi della finestra di `AL_ESTRAI`. A finestra chiusa (una
-    /// cartella scelta che arriva dopo Annulla) non fanno nulla.
+    /// cartella scelta che arriva dopo Annulla) non fanno nulla. La risposta
+    /// della finestra «Salva con nome» di `AL_ABACO_CSV` non riguarda quella
+    /// finestra e va sempre a `bim_abaco_csv_answer`.
     pub(in crate::app) fn on_bim(&mut self, m: BimMsg) -> Task<Message> {
+        if let BimMsg::AbacoCsvPath(path, text) = m {
+            return self.bim_abaco_csv_answer(path, text);
+        }
         let Some(dialog) = self.bim_extract.as_mut() else {
             return Task::none();
         };
@@ -562,6 +569,8 @@ impl OpenCADStudio {
             BimMsg::Overwrite(on) => dialog.set_overwrite(on),
             BimMsg::Ok => return self.bim_extract_ok(),
             BimMsg::Cancel => self.bim_close_extract(),
+            // Già passato a `bim_abaco_csv_answer` qui sopra.
+            BimMsg::AbacoCsvPath(..) => {}
         }
         Task::none()
     }
@@ -828,8 +837,9 @@ fn folder_error(dir: &Path) -> Option<String> {
 }
 
 /// Il testo senza le virgolette doppie attorno, se ci sono: un percorso con
-/// spazi scritto come in Windows, `"C:\Progetti\Casa Rossi"`.
-fn unquote(text: &str) -> &str {
+/// spazi scritto come in Windows, `"C:\Progetti\Casa Rossi"`. Anche per
+/// `AL_ABACO_CSV`.
+pub(super) fn unquote(text: &str) -> &str {
     text.strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
         .unwrap_or(text)
@@ -882,8 +892,8 @@ fn new_walls_layer_error(
 
 /// Il nome di base dei file estratti: il file del disegno senza estensione
 /// oppure, per un disegno mai salvato, il titolo del tab; sempre un nome di
-/// file valido per Windows.
-fn base_name(path: Option<&Path>, title: &str) -> String {
+/// file valido per Windows. Anche per il nome proposto da `AL_ABACO_CSV`.
+pub(super) fn base_name(path: Option<&Path>, title: &str) -> String {
     let raw = path.and_then(Path::file_stem).map_or_else(
         || title.to_string(),
         |stem| stem.to_string_lossy().into_owned(),

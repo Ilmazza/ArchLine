@@ -1,7 +1,7 @@
 //! Comandi BIM dall'app (spec §3, §4.2, §5.1 e §5.2): `AL_DEMOLISCI`,
 //! `AL_NUOVO`, la scelta dell'unità `AL_UNITA`, `AL_STATO`, `AL_LOCALE`,
-//! `AL_AGGIORNA` e, dalla parte 2, `AL_ALTEZZA` e `AL_ABACO`, guidati come da
-//! uno script o dalla riga di comando. Coprono
+//! `AL_AGGIORNA` e, dalla parte 2, `AL_ALTEZZA`, `AL_ABACO` e `AL_ABACO_CSV`,
+//! guidati come da uno script o dalla riga di comando. Coprono
 //! ciò che i test di `bim::commands` non vedono: l'unità letta dal disegno, i
 //! layer creati in un passo di annullamento a sé, l'istantanea della geometria
 //! e il rilievo che resta intatto.
@@ -11,8 +11,8 @@
 //! l'Invio con cui il runner chiude la riga: `AL_LOCALE 2,1.5 A` dà il punto,
 //! il nome e il numero vuoto.
 //!
-//! `AL_ESTRAI` scrive in cartelle nuove sotto la cartella temporanea, tolte a
-//! fine test: mai file o impostazioni dell'utente.
+//! `AL_ESTRAI` e `AL_ABACO_CSV` scrivono in cartelle nuove sotto la cartella
+//! temporanea, tolte a fine test: mai file o impostazioni dell'utente.
 
 use super::{Message, ModalKind, OpenCADStudio};
 use crate::bim::abaco::TableKind;
@@ -4109,6 +4109,274 @@ fn abaco_without_a_current_table_style_leaves_none() {
         "storia: {}",
         history(&app)
     );
+}
+
+// ------------------------------------------------------------ AL_ABACO_CSV
+
+const CSV_HEADER: &str = "tipo;codice;descrizione;parti;lunghezza;larghezza;altezza;detrai;\
+    quantita;um;stato_altezza;fonte;note";
+
+/// La riga D1 del caso A demolito con l'altezza 2,70, fino alla fonte esclusa.
+const CSV_D1: &str = "demolizione;D1;Demolizione muro spessore 0,100;1,0000;3,0000;0,1000;\
+    2,7000;no;0,8100;m³;ereditata;zona ";
+
+/// Le righe del CSV `path`, dopo il BOM (nei casi di prova nessun campo ha un
+/// a capo).
+fn csv_lines(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = text.strip_prefix('\u{FEFF}').expect("BOM UTF-8 in testa");
+    let body = text.strip_suffix("\r\n").expect("ultima riga con CRLF");
+    body.split("\r\n").map(str::to_string).collect()
+}
+
+/// I nomi dei file nella cartella, in ordine: nessun file temporaneo resta.
+fn dir_entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Spec parte 2, §5.3: da script `AL_ABACO_CSV <percorso>` scrive il CSV in
+/// una cartella nuova: le righe complete del caso A (la demolizione e i
+/// locali), senza file temporanei accanto; la riga di comando dice il file, le
+/// righe e gli avvisi. Il disegno non cambia.
+#[test]
+fn abaco_csv_writes_file_in_a_new_folder() {
+    let tmp = TempDir::new("abaco_csv");
+    let path = tmp.path().join("abaco.csv");
+    let mut app = app_with_abaco_input();
+    let survey = rilievo_snapshot(&app);
+    let rec = record::read(doc(&app));
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ABACO_CSV {}", path.display()));
+
+    let log = history(&app);
+    let lines = csv_lines(&path);
+    assert_eq!(lines[0], CSV_HEADER, "storia: {log}");
+    let codes: Vec<&str> = lines[1..]
+        .iter()
+        .map(|line| line.split(';').nth(1).unwrap())
+        .collect();
+    assert_eq!(codes, ["D1", "LF1", "LF2", "LP1"], "storia: {log}");
+    assert!(lines[1].starts_with(CSV_D1), "{}", lines[1]);
+    assert!(
+        lines[2].starts_with("locale di fatto;LF1;A;1,0000;12,0000;;;no;12,0000;m²;ereditata;locale A;"),
+        "{}",
+        lines[2]
+    );
+    assert_eq!(dir_entries(tmp.path()), ["abaco.csv"], "nessun file temporaneo");
+    assert!(
+        log.contains(&format!("AL_ABACO_CSV: scritto {}.", path.display())),
+        "storia: {log}"
+    );
+    assert!(
+        log.contains("AL_ABACO_CSV: righe: 4; incomplete escluse: 0."),
+        "storia: {log}"
+    );
+    assert!(
+        comes_after(
+            &log,
+            "AL_ABACO_CSV: righe: 4; incomplete escluse: 0.",
+            "Locali A + B fusi in uno (24,00 m²): nome da confermare."
+        ),
+        "gli avvisi dopo il conteggio, storia: {log}"
+    );
+    assert_eq!(active_command(&app), None);
+    assert_eq!(app.active_modal, None);
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+    assert_eq!(record::read(doc(&app)), rec);
+    assert_eq!(undo_steps(&app), steps, "nessun passo");
+    assert!(no_tables(&app));
+}
+
+/// Da script un file esistente non si riscrive mai: niente è scritto, né lì
+/// né accanto, e la riga di comando lo dice.
+#[test]
+fn abaco_csv_never_overwrites_from_script() {
+    let tmp = TempDir::new("abaco_csv_rifiuto");
+    let path = tmp.path().join("abaco.csv");
+    std::fs::write(&path, MARKER).unwrap();
+    let before = mtimes(&[path.clone()]);
+    let mut app = app_with_abaco_input();
+    forget_history(&mut app);
+    let revision = app.command_line.error_revision;
+
+    run(&mut app, &format!("AL_ABACO_CSV {}", path.display()));
+
+    let log = history(&app);
+    assert!(marked(&path), "file non riscritto, storia: {log}");
+    assert_eq!(mtimes(&[path.clone()]), before);
+    assert_eq!(dir_entries(tmp.path()), ["abaco.csv"], "niente accanto");
+    assert!(
+        log.contains(&format!(
+            "AL_ABACO_CSV: il file {} esiste già: non si sovrascrive. Niente è stato scritto.",
+            path.display()
+        )),
+        "storia: {log}"
+    );
+    assert!(!log.contains("AL_ABACO_CSV: scritto"), "storia: {log}");
+    assert_ne!(app.command_line.error_revision, revision, "è un errore");
+}
+
+/// Da script il percorso è obbligatorio: senza (o vuoto tra virgolette) un
+/// errore, nessuna finestra, nessuna domanda.
+#[test]
+fn abaco_csv_script_needs_a_path() {
+    for line in ["AL_ABACO_CSV", "AL_ABACO_CSV \"\""] {
+        let mut app = app_with_abaco_input();
+        forget_history(&mut app);
+
+        run(&mut app, line);
+
+        let log = history(&app);
+        assert!(
+            log.contains(
+                "AL_ABACO_CSV: serve il percorso del file (AL_ABACO_CSV <percorso>). \
+                 Niente è stato scritto."
+            ),
+            "{line}: storia: {log}"
+        );
+        assert!(!log.contains("righe:"), "{line}: niente calcolato, storia: {log}");
+        assert_eq!(active_command(&app), None, "{line}");
+        assert_eq!(app.active_modal, None, "{line}");
+        assert_eq!(app.bim_pending, None, "{line}");
+    }
+}
+
+/// Con `INSUNITS` = 0 e nessuna unità nel record si chiede l'unità e si
+/// riparte con lo stesso percorso; `INSUNITS` non si scrive. Senza altezza la
+/// demolizione è incompleta: il CSV ha solo l'intestazione e la riga di
+/// comando dice quante righe restano fuori e perché.
+#[test]
+fn abaco_csv_asks_the_unit_when_insunits_is_zero() {
+    let tmp = TempDir::new("abaco_csv_unita");
+    let path = tmp.path().join("abaco.csv");
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 0);
+    run(&mut app, "AL_DEMOLISCI M 4.05,0 4.05,3 N");
+    assert_eq!(zones_in(doc(&app)).len(), 1, "storia: {}", history(&app));
+    let i = app.active_tab;
+    let rec = record::ProjectRecord {
+        unit: None,
+        ..record::read(doc(&app))
+    };
+    record::write(&mut app.tabs[i].scene.document, &rec);
+    forget_history(&mut app);
+
+    run(&mut app, &format!("AL_ABACO_CSV {}", path.display()));
+    assert_eq!(
+        active_command(&app),
+        Some("AL_UNITA"),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(
+        history(&app).contains(
+            "Unità del disegno non specificata (INSUNITS = 0). [Millimetri/Centimetri/Metri]:"
+        ),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(!path.exists(), "niente prima dell'unità");
+
+    answer(&mut app, "M");
+    let log = history(&app);
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Metri));
+    assert_eq!(doc(&app).header.insertion_units, 0, "INSUNITS non si scrive");
+    assert_eq!(csv_lines(&path), [CSV_HEADER], "storia: {log}");
+    assert!(
+        log.contains("AL_ABACO_CSV: righe: 0; incomplete escluse: 1."),
+        "storia: {log}"
+    );
+    assert!(
+        log.contains("Riga D1 incompleta: altezza n.d."),
+        "storia: {log}"
+    );
+    assert_eq!(app.bim_pending, None);
+    assert_eq!(active_command(&app), None);
+}
+
+/// Il percorso dopo `AL_ABACO_CSV` è il resto della riga, spazi compresi, anche
+/// tra virgolette; il runner degli script non prova il comando da solo
+/// (`command_driver/utilities.rs`), quindi nessun «serve il percorso» prima
+/// della scrittura.
+#[test]
+fn abaco_csv_path_with_spaces_from_a_script() {
+    let tmp = TempDir::new("abaco_csv_spazi");
+    let dir = tmp.path().join("Casa Rossi");
+    std::fs::create_dir(&dir).unwrap();
+    for (n, quoted) in [(1, false), (2, true)] {
+        let path = dir.join(format!("abaco {n}.csv"));
+        let arg = if quoted {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string()
+        };
+        let mut app = app_with_abaco_input();
+        forget_history(&mut app);
+        let revision = app.command_line.error_revision;
+
+        run(&mut app, &format!("AL_ABACO_CSV {arg}"));
+
+        let log = history(&app);
+        assert!(path.is_file(), "{arg}: storia: {log}");
+        assert!(csv_lines(&path)[1].starts_with(CSV_D1), "{arg}");
+        assert!(!log.contains("serve il percorso"), "{arg}: storia: {log}");
+        assert_eq!(
+            app.command_line.error_revision, revision,
+            "{arg}: nessun errore, storia: {log}"
+        );
+    }
+}
+
+/// Da una persona, senza percorso: righe e avvisi in riga di comando, poi la
+/// finestra «Salva con nome» del sistema (il compito qui non si esegue: la
+/// sua risposta arriva come messaggio). Annullata, niente è scritto; un file
+/// esistente scelto nella finestra (che ha già chiesto se sovrascriverlo) si
+/// riscrive, senza file temporanei accanto.
+#[test]
+fn abaco_csv_dialog_answer_writes_or_cancels() {
+    let tmp = TempDir::new("abaco_csv_finestra");
+    let path = tmp.path().join("abaco.csv");
+    std::fs::write(&path, MARKER).unwrap();
+    let mut app = app_with_abaco_input();
+    forget_history(&mut app);
+
+    let task = app.dispatch_command("AL_ABACO_CSV");
+    drop(task);
+    let log = history(&app);
+    assert!(
+        log.contains("AL_ABACO_CSV: righe: 4; incomplete escluse: 0."),
+        "storia: {log}"
+    );
+    assert!(!log.contains("serve il percorso"), "storia: {log}");
+    assert_eq!(active_command(&app), None);
+    assert!(marked(&path));
+
+    bim(&mut app, BimMsg::AbacoCsvPath(None, "non scritto".into()));
+    assert!(
+        history(&app).contains("AL_ABACO_CSV: annullato. Niente è stato scritto."),
+        "storia: {}",
+        history(&app)
+    );
+    assert!(marked(&path));
+
+    let text = format!("\u{FEFF}{CSV_HEADER}\r\n");
+    bim(&mut app, BimMsg::AbacoCsvPath(Some(path.clone()), text.clone()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert!(
+        history(&app).contains(&format!("AL_ABACO_CSV: scritto {}.", path.display())),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(dir_entries(tmp.path()), ["abaco.csv"], "nessun file temporaneo");
 }
 
 /// R21 anche per `AL_ABACO`: in un layout senza finestra attiva si rifiuta,
