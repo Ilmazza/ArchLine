@@ -278,6 +278,20 @@ fn demolition_cells(row: &ZoneRow) -> Vec<Cell> {
     cells
 }
 
+/// Il totale di una grandezza sulle righe complete date: `n.d.` se nessuna la
+/// ha (revisione finale), così un dato che manca non sembra uno zero; la nota
+/// del totale dice quante righe restano fuori o ne sono prive. Lo usano la
+/// parete delle demolizioni e superficie, perimetro e volume dei locali; il
+/// volume delle demolizioni e i totali delle nuove murature restano «0,00»
+/// senza righe complete (piano, caso H).
+fn total(values: impl Iterator<Item = Option<f64>>) -> Cell {
+    Cell::number(
+        values
+            .flatten()
+            .fold(None, |sum: Option<f64>, value| Some(sum.unwrap_or(0.0) + value)),
+    )
+}
+
 /// Il totale di volume (e, con `with_wall`, di parete) delle righe complete:
 /// quante righe restano fuori e quante righe complete non hanno la parete.
 fn demolition_total(label: &str, rows: &[ZoneRow], with_wall: bool) -> Vec<Cell> {
@@ -295,9 +309,7 @@ fn demolition_total(label: &str, rows: &[ZoneRow], with_wall: bool) -> Vec<Cell>
                 "righe complete senza parete",
             ));
         }
-        Cell::number(Some(
-            complete.iter().filter_map(|row| row.wall_area_m2).sum(),
-        ))
+        total(complete.iter().map(|row| row.wall_area_m2))
     } else {
         Cell::not_applicable()
     };
@@ -470,16 +482,14 @@ fn signed(value: Option<f64>) -> Cell {
 
 /// Il totale di uno stato (superficie nella sua colonna, perimetro e volume)
 /// sulle righe con la superficie: quante restano fuori e quante non hanno il
-/// volume.
+/// volume; `n.d.` dove nessuna riga dà la grandezza ([`total`]).
 fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
     let complete: Vec<&RoomRow> = rows
         .iter()
         .copied()
         .filter(|row| row.is_complete())
         .collect();
-    let sum = |value: fn(&RoomRow) -> Option<f64>| -> f64 {
-        complete.iter().filter_map(|row| value(row)).sum()
-    };
+    let sum = |value: fn(&RoomRow) -> Option<f64>| total(complete.iter().map(|row| value(row)));
     let mut notes = vec![excluded(rows.len() - complete.len())];
     let without = complete
         .iter()
@@ -492,7 +502,7 @@ fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
             "righe senza volume (altezza n.d.)",
         ));
     }
-    let area = Cell::number(Some(sum(|row| row.area_m2)));
+    let area = sum(|row| row.area_m2);
     let (fatto, progetto) = match phase {
         Phase::Fatto => (area, Cell::empty()),
         Phase::Progetto => (Cell::empty(), area),
@@ -503,8 +513,8 @@ fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
         fatto,
         progetto,
         Cell::empty(),
-        Cell::number(Some(sum(|row| row.perimeter_m))),
-        Cell::number(Some(sum(|row| row.volume_m3))),
+        sum(|row| row.perimeter_m),
+        sum(|row| row.volume_m3),
         Cell::empty(),
         Cell::plain(notes.join(SEP)),
     ]
@@ -759,7 +769,8 @@ mod tests {
 
     /// Spec §7, caso H: senza altezza la riga resta con `n.d.` evidenziato,
     /// la nota «da completare» e il suo avviso, fuori dal totale (0,00, «1
-    /// riga esclusa»); la geometria resta.
+    /// riga esclusa»); la geometria resta. La parete del totale è `n.d.`:
+    /// nessuna riga completa la ha (revisione finale).
     #[test]
     fn incomplete_rows_are_flagged_and_excluded_from_totals() {
         for form in FORMS {
@@ -787,7 +798,7 @@ mod tests {
             );
             let total = &t.totals[0];
             assert_eq!(cell(t, total, "Volume").text, "0,00", "{form:?}");
-            assert_eq!(cell(t, total, "Parete").text, "0,00", "{form:?}");
+            nd(cell(t, total, "Parete"), &format!("{form:?}: parete"));
             assert!(
                 cell(t, total, "Note").text.contains("1 riga esclusa"),
                 "{form:?}: {total:?}"
@@ -1322,6 +1333,81 @@ mod tests {
             "{notes:?}"
         );
         assert!(notes[1].contains("approssimata (perimetro)"), "{notes:?}");
+    }
+
+    /// Revisione finale: un totale a cui nessuna riga completa dà la
+    /// grandezza è `n.d.` evidenziato, mai uno zero (regole di `abaco`): la
+    /// parete con le demolizioni tutte senza asse; il volume con i locali
+    /// tutti senza altezza; superficie, perimetro e volume senza nessun locale
+    /// chiuso. La nota del totale dice perché.
+    #[test]
+    fn totals_without_contributing_rows_are_nd() {
+        // Due demolizioni senza asse: complete (volume), senza parete.
+        let mut scene = empty_scene();
+        set_default_height(&mut scene, 2.7);
+        for x in [4.0, 10.0] {
+            let ring = rect(x, 0.0, x + 0.1, 3.0);
+            add_zone(&mut scene, ZoneState::Demolito, None, None, false, ring);
+        }
+        let tables = render_tables(&compute_abaco(&scene.document, &OPTS));
+        let t = table_of(&tables, TableKind::Demolizioni);
+        let total = &t.totals[0];
+        assert_eq!(cell(t, total, "Volume").text, "1,62");
+        nd(cell(t, total, "Parete"), "parete");
+        assert_eq!(
+            cell(t, total, "Note").text,
+            "nessuna riga esclusa; 2 righe complete senza parete"
+        );
+
+        // A e B senza altezza: superficie e perimetro, volume n.d.
+        for form in FORMS {
+            let mut scene = scene_of(form);
+            write_room(&mut scene, "A", [2.0, 1.5]);
+            write_room(&mut scene, "B", [6.0, 1.5]);
+            let tables = render_tables(&compute_abaco(&scene.document, &OPTS));
+            let t = table_of(&tables, TableKind::Locali);
+            let [fatto, progetto] = &t.totals[..] else {
+                panic!("{form:?}: {:?}", t.totals)
+            };
+            assert_eq!(cell(t, fatto, "Fatto").text, "23,70", "{form:?}");
+            // A 2 × (4,00 + 3,00) + B 2 × (3,90 + 3,00).
+            assert_eq!(cell(t, fatto, "Perimetro").text, "27,80", "{form:?}");
+            for total in [fatto, progetto] {
+                nd(cell(t, total, "Volume"), &format!("{form:?}: volume"));
+            }
+        }
+
+        // A solo, aperto (la faccia ovest tolta): nessun locale chiuso, né di
+        // fatto né di progetto.
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        write_room(&mut scene, "A", [2.0, 1.5]);
+        let west = scene
+            .document
+            .entities()
+            .find(|entity| match entity {
+                EntityType::Line(l) => {
+                    l.start.x.abs() < 1e-9
+                        && (l.start.y - 3.0).abs() < 1e-9
+                        && l.end.x.abs() < 1e-9
+                        && l.end.y.abs() < 1e-9
+                }
+                _ => false,
+            })
+            .map(|entity| entity.common().handle)
+            .expect("faccia ovest di A");
+        scene.erase_entities(&[west]);
+        let tables = render_tables(&compute_abaco(&scene.document, &OPTS));
+        let t = table_of(&tables, TableKind::Locali);
+        let [fatto, progetto] = &t.totals[..] else {
+            panic!("{:?}", t.totals)
+        };
+        for (total, side) in [(fatto, "Fatto"), (progetto, "Progetto")] {
+            for header in [side, "Perimetro", "Volume"] {
+                nd(cell(t, total, header), &format!("{side}: {header}"));
+            }
+            assert_eq!(cell(t, total, "Note").text, "1 riga esclusa", "{side}");
+        }
     }
 
     #[test]

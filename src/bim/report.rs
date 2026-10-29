@@ -140,6 +140,9 @@ pub enum Notice {
         code: String,
         reason: String,
     },
+    /// Tabelle d'abaco scritte in un disegno R2000 o precedente: la `TABLE` è
+    /// provata solo dal DWG 2004 in poi (spike del Task 7, Ruling X).
+    TabellaNonProvataR2000,
 }
 
 /// `(4,05; 0,00)`: coordinate con due decimali e virgola, come le aree.
@@ -293,8 +296,15 @@ impl Notice {
                 "Zone {} sovrapposte in modo sostanziale: i totali possono contare due volte.",
                 codes.join(" + ")
             ),
+            // Un motivo che finisce con `n.d.` ha già il suo punto.
+            Self::RigaIncompleta { code, reason } if reason.ends_with('.') => {
+                format!("Riga {code} incompleta: {reason}")
+            }
             Self::RigaIncompleta { code, reason } => {
                 format!("Riga {code} incompleta: {reason}.")
+            }
+            Self::TabellaNonProvataR2000 => {
+                "TABLE non provata in formato R2000: da verificare in AutoCAD.".into()
             }
         }
     }
@@ -534,9 +544,24 @@ mod tests {
                 },
                 "Riga D01 incompleta: altezza non disponibile.",
             ),
+            (
+                Notice::TabellaNonProvataR2000,
+                "TABLE non provata in formato R2000: da verificare in AutoCAD.",
+            ),
         ];
         for (notice, text) in cases {
             assert_eq!(notice.text(), text);
+        }
+        // Un motivo che finisce con un punto (`n.d.`) non ne prende un altro.
+        for reason in ["altezza n.d.", "superficie n.d."] {
+            assert_eq!(
+                Notice::RigaIncompleta {
+                    code: "D1".into(),
+                    reason: reason.into(),
+                }
+                .text(),
+                format!("Riga D1 incompleta: {reason}")
+            );
         }
         // Virgola decimale anche per le coordinate; negative e arrotondate.
         assert_eq!(

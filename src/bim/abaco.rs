@@ -14,9 +14,15 @@
 //!   Solo le righe complete entrano nei totali, che dicono quante righe
 //!   restano fuori e quante righe complete non hanno una grandezza secondaria
 //!   (la parete di una demolizione senza asse, il volume di un locale senza
-//!   altezza), così un dato che manca non sembra mai uno zero. Per ogni riga
+//!   altezza), così un dato che manca non sembra mai uno zero; la parete e le
+//!   grandezze dei locali a cui nessuna riga completa dà un valore hanno il
+//!   totale `n.d.` (revisione finale). Per ogni riga
 //!   incompleta un [`Notice::RigaIncompleta`] con il motivo, in testa agli
 //!   avvisi (Ruling C);
+//! - degli avvisi della geometria di progetto restano solo quelli che
+//!   spiegano i locali: quelli del solo disegno (sovrapposizioni ai lati,
+//!   giunzioni, entità escluse o lasciate intere) li dice `AL_ESTRAI`
+//!   ([`drawing_only`], revisione finale);
 //! - locali (spec §4.3): un locale di progetto con un solo locale di fatto
 //!   nella sua regione, che non sta in nessun altro locale di progetto, fa una
 //!   riga accoppiata con la variazione (progetto meno fatto); gli altri
@@ -113,7 +119,8 @@ pub struct Abaco {
     pub locali: Vec<LocaleLine>,
     /// Un [`Notice::RigaIncompleta`] per riga incompleta (zone, poi locali di
     /// fatto, poi di progetto), poi gli avvisi delle zone, dei locali di fatto
-    /// e di quelli di progetto, senza doppioni.
+    /// e di quelli di progetto (senza quelli del solo disegno,
+    /// [`drawing_only`]), senza doppioni.
     pub notices: Vec<Notice>,
 }
 
@@ -146,6 +153,10 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
         .chain(room_reasons)
         .map(|(code, reason)| Notice::RigaIncompleta { code, reason })
         .collect();
+    let project_notices = project_notices
+        .into_iter()
+        .filter(|notice| !drawing_only(notice))
+        .collect();
     // `FuoriPiano` lo trovano sia i locali di fatto sia quelli di progetto.
     let mut notices = Vec::new();
     for more in [incomplete, zone_notices, fatto_notices, project_notices] {
@@ -167,6 +178,29 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
         }
     }
     abaco
+}
+
+/// Un avviso della geometria di progetto che riguarda solo il DWG dello stato
+/// di progetto, non i numeri dell'abaco (revisione finale): lo elenca
+/// `AL_ESTRAI`, l'abaco non lo ripete a ogni lancio.
+/// - `NuoveSovrapposte` vede ogni angolo asse su asse di `AL_NUOVO`, dove la
+///   spec (§4.3, §7 caso K) non vuole avvisi; la sovrapposizione vera la dice
+///   già `ZoneSovrapposteSostanzialmente` delle quantità, una volta per coppia;
+/// - `GiunzioneDaVerificare` è una linea da pulire a mano nel disegno;
+/// - `Esclusa` e `NonTagliata` sono entità non muro lasciate fuori o intere
+///   nell'estratto (anche una tabella d'abaco posata in una zona demolita).
+///
+/// Restano gli avvisi che cambiano i locali di progetto (`TaglioNonChiuso`,
+/// `ConfiniNonRimossi`, `FacciaNonTolta`, `VarcoNonSupportato`) e tutti gli
+/// altri.
+fn drawing_only(notice: &Notice) -> bool {
+    matches!(
+        notice,
+        Notice::NuoveSovrapposte { .. }
+            | Notice::GiunzioneDaVerificare { .. }
+            | Notice::Esclusa { .. }
+            | Notice::NonTagliata { .. }
+    )
 }
 
 /// Le righe dei locali (spec §4.3). Un locale di fatto e uno di progetto si
@@ -653,6 +687,7 @@ mod tests {
     use crate::bim::refresh::refresh_rooms;
     use crate::bim::room_command::test_support::write_room;
     use crate::bim::rooms::label;
+    use crate::bim::walls::rect_from_axis_thickness;
     use crate::bim::zone::{zone_hatch, Zone, ZoneOrigin, ZoneState};
     use crate::bim::LAYER_LOCALI;
     use crate::scene::Scene;
@@ -1167,6 +1202,142 @@ mod tests {
         assert!(!codes.contains(&"LF1"), "{codes:?}");
         assert!(records[1..].iter().all(|r| r[2] != "A"), "{records:?}");
         assert!(records[1..].iter().all(|r| r[10] == "n.d."), "{records:?}");
+    }
+
+    /// Un muro nuovo come `AL_NUOVO`: il rettangolo di spessore `t` centrato
+    /// sull'asse `p1`-`p2` (`rect_from_axis_thickness`), asse e spessore nel
+    /// record.
+    fn add_new_wall(scene: &mut Scene, p1: [f64; 2], p2: [f64; 2], t: f64) {
+        let rect = rect_from_axis_thickness(p1, p2, t).expect("asse");
+        let zone = Zone {
+            state: ZoneState::Nuovo,
+            origin: ZoneOrigin::LineaSpessore,
+            axis: Some(rect.axis),
+            thickness: Some(rect.thickness),
+            height: None,
+            varco: false,
+        };
+        scene.add_entity(zone_hatch(&zone, &[rect.ring()]));
+    }
+
+    /// Gli avvisi di sovrapposizione dell'abaco.
+    fn overlaps(abaco: &Abaco) -> Vec<Notice> {
+        abaco
+            .notices
+            .iter()
+            .filter(|notice| {
+                matches!(
+                    notice,
+                    Notice::NuoveSovrapposte { .. }
+                        | Notice::ZoneSovrapposteSostanzialmente { .. }
+                        | Notice::StessoStatoSovrapposte
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Revisione finale (spec §4.3, §7 caso K): due muri nuovi di `AL_NUOVO`
+    /// ad angolo, asse su asse, si coprono per t/2 × t/2 e due loro lati si
+    /// incrociano in (t/2; t/2): la geometria di progetto lo segnala
+    /// (`NuoveSovrapposte`), l'abaco no. Una sovrapposizione vera (metà del
+    /// muro più piccolo) dà un avviso solo per la coppia, quello delle
+    /// quantità (`ZoneSovrapposteSostanzialmente`).
+    #[test]
+    fn overlap_notice_only_for_a_real_overlap_and_once() {
+        let mut scene = empty_scene();
+        set_default_height(&mut scene, 2.7);
+        add_new_wall(&mut scene, [0.0, 0.0], [2.0, 0.0], 0.10);
+        add_new_wall(&mut scene, [0.0, 0.0], [0.0, 2.0], 0.10);
+        let (_, geometry) = project_room_rows(&scene.document, M, TOL, TOL, Some(2.7), &[]);
+        assert!(
+            geometry
+                .iter()
+                .any(|n| matches!(n, Notice::NuoveSovrapposte { .. })),
+            "la geometria lo vede: {geometry:?}"
+        );
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert_eq!(abaco.nuove.len(), 2);
+        assert!(overlaps(&abaco).is_empty(), "angolo: {:?}", abaco.notices);
+
+        let mut scene = empty_scene();
+        set_default_height(&mut scene, 2.7);
+        add_new_wall(&mut scene, [0.0, 0.0], [2.0, 0.0], 0.10);
+        add_new_wall(&mut scene, [1.0, 0.0], [3.0, 0.0], 0.10);
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert_eq!(
+            overlaps(&abaco),
+            [Notice::ZoneSovrapposteSostanzialmente {
+                codes: vec!["N1".into(), "N2".into()],
+            }],
+            "{:?}",
+            abaco.notices
+        );
+    }
+
+    /// Revisione finale: gli avvisi del solo disegno di progetto, che non
+    /// dicono nulla dei numeri dell'abaco (giunzioni da verificare, entità
+    /// escluse dall'estratto o lasciate intere), restano di `AL_ESTRAI` e
+    /// l'abaco non li ripete a ogni lancio. Restano quelli che spiegano i
+    /// locali di progetto, come i confini di una zona senza asse non tolti.
+    #[test]
+    fn abaco_leaves_drawing_only_notices_to_the_extraction() {
+        let drawing_only = |notice: &Notice| {
+            matches!(
+                notice,
+                Notice::GiunzioneDaVerificare { .. }
+                    | Notice::Esclusa { .. }
+                    | Notice::NonTagliata { .. }
+                    | Notice::NuoveSovrapposte { .. }
+            )
+        };
+        let mut scene = scene_of(Form::ChiusaPerMuro);
+        set_default_height(&mut scene, 2.7);
+        demolish(&mut scene, [4.05, 0.0], [4.05, 3.0]);
+        let mut text = codec::entities::MText::with_value("x", codec::Vector3::new(4.05, 1.5, 0.0));
+        text.common.layer = "TESTI".into();
+        scene.add_entity(EntityType::MText(Box::new(text)));
+        let (_, geometry) = project_room_rows(&scene.document, M, TOL, TOL, Some(2.7), &[]);
+        for (what, found) in [
+            (
+                "giunzione",
+                geometry
+                    .iter()
+                    .any(|n| matches!(n, Notice::GiunzioneDaVerificare { .. })),
+            ),
+            (
+                "esclusa",
+                geometry.iter().any(|n| matches!(n, Notice::Esclusa { .. })),
+            ),
+        ] {
+            assert!(found, "{what}: {geometry:?}");
+        }
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert!(
+            !abaco.notices.iter().any(drawing_only),
+            "{:?}",
+            abaco.notices
+        );
+
+        let mut scene = scene_of(Form::Continua);
+        set_default_height(&mut scene, 2.7);
+        add_zone(
+            &mut scene,
+            ZoneState::Demolito,
+            None,
+            None,
+            false,
+            rect(4.0, 0.0, 4.1, 3.0),
+        );
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        assert!(
+            abaco
+                .notices
+                .iter()
+                .any(|n| matches!(n, Notice::ConfiniNonRimossi { .. })),
+            "{:?}",
+            abaco.notices
+        );
     }
 
     #[test]

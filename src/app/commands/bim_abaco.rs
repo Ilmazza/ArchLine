@@ -24,7 +24,9 @@
 //!   rimozioni in un solo passo `AL_ABACO`, e nessun passo se nulla cambia;
 //! - in riga di comando: tabelle create e sostituite, righe e righe
 //!   incomplete, poi gli avvisi dell'abaco (prima un `RigaIncompleta` per riga
-//!   incompleta, con il motivo). Rilievo, zone, locali e record non cambiano.
+//!   incompleta, con il motivo) e, se si scrive una tabella in un disegno
+//!   R2000 o precedente, `TabellaNonProvataR2000` (Ruling X: la `TABLE` è
+//!   provata dal 2004 in poi). Rilievo, zone, locali e record non cambiano.
 //!
 //! La riga `AL_ABACO <x,y>` va al comando intera (elenco del runner in
 //! `command_driver/utilities.rs`): da solo, in uno script, il comando scrive
@@ -62,7 +64,7 @@ use crate::bim::APP_ABACO;
 use crate::command::{CadCommand, CmdResult};
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::ui::window::bim_extract::BimMsg;
-use codec::{EntityType, Handle};
+use codec::{DxfVersion, EntityType, Handle};
 use glam::DVec3;
 use iced::Task;
 use std::path::{Path, PathBuf};
@@ -197,7 +199,18 @@ impl OpenCADStudio {
             "AL_ABACO: righe: {rows}; incomplete: {}.",
             incomplete_rows(&abaco)
         ));
-        self.bim_push_notices(&abaco.notices);
+        let mut notices = abaco.notices;
+        // Ruling X: la `TABLE` è provata dal DWG 2004 in poi; in un disegno
+        // R2000 il codec la scrive lo stesso, e lo si dice quando se ne scrive
+        // una. Una versione sconosciuta non si giudica.
+        let version = self.tabs[i].scene.document.version;
+        if missing.len() + plan.replace.len() > 0
+            && version != DxfVersion::Unknown
+            && version < DxfVersion::AC1018
+        {
+            notices.push(Notice::TabellaNonProvataR2000);
+        }
+        self.bim_push_notices(&notices);
         Task::none()
     }
 

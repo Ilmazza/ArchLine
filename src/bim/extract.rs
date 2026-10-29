@@ -4442,6 +4442,12 @@ mod tests {
                 })
                 .collect();
             let (want, before) = (cell_texts(&now), cell_texts(&old));
+            for area in ["12,60", "11,10"] {
+                assert!(
+                    want.iter().any(|t| t == area),
+                    "A e B dopo lo spostamento: {area} in {want:?}"
+                );
+            }
             let stale: Vec<&String> = before.iter().filter(|t| !want.contains(t)).collect();
             assert!(
                 stale.iter().any(|t| t.as_str() == "12,00"),
