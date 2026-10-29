@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Abaco CSV">
+  <rect x="0.75" y="0.75" width="10.5" height="4.5" fill="#6DB7ED"/>
+  <rect x="0.75" y="0.75" width="10.5" height="13.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <path d="M0.75 5.25H11.25M0.75 9.75H11.25M5.25 0.75V14.25" stroke="#B4B6B9" stroke-width="1.5" stroke-linecap="butt"/>
+  <path d="M14.25 9.75H18.75L23.25 14.25V23.25H14.25Z" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <path d="M18.75 9.75V14.25H23.25" stroke="#B4B6B9" stroke-width="1.5"/>
+  <path d="M16.5 17.25H21M16.5 20.25H19.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linecap="butt"/>
+  <path d="M3.75 17.25V20.25H11.25M9 18L11.25 20.25L9 22.5" stroke="#6DB7ED" stroke-width="2"/>
+</svg>

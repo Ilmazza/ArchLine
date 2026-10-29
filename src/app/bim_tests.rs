@@ -3354,6 +3354,72 @@ fn altezza_selection_writes_zones_and_rooms_in_one_step() {
     assert_eq!(undo_steps(&app), steps + 1);
 }
 
+/// Dal pulsante della barra (`AL_ALTEZZA` da solo): scelti `S` o `R` senza
+/// nulla di selezionato, la selezione mancante si dice subito, prima di
+/// chiedere il valore, e il comando finisce senza passi. Con una selezione
+/// `S` chiede il valore e lo scrive come la riga intera.
+#[test]
+fn altezza_from_the_button_reports_the_empty_selection_at_once() {
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_DEMOLISCI 4.05,0 4.05,3 N");
+    let zones = zones_in(doc(&app));
+    assert_eq!(zones.len(), 1, "storia: {}", history(&app));
+    let zone = zones[0].handle;
+    let steps = undo_steps(&app);
+
+    for keyword in ["S", "R"] {
+        select(&mut app, &[]);
+        forget_history(&mut app);
+        run(&mut app, "AL_ALTEZZA");
+        assert_eq!(active_command(&app), Some("AL_ALTEZZA"));
+        let revision = app.command_line.error_revision;
+        answer(&mut app, keyword);
+        assert_ne!(
+            app.command_line.error_revision,
+            revision,
+            "{keyword}: un errore subito, storia: {}",
+            history(&app)
+        );
+        assert_eq!(
+            app.command_line.last_error.as_deref(),
+            Some("AL_ALTEZZA: nessun oggetto selezionato."),
+            "{keyword}"
+        );
+        assert!(
+            !history(&app).contains("Altezza (m):"),
+            "{keyword}: il valore non si chiede, storia: {}",
+            history(&app)
+        );
+        assert_eq!(active_command(&app), None, "{keyword}: nessuna domanda");
+        assert_eq!(undo_steps(&app), steps, "{keyword}: nessun passo");
+        assert_eq!(zone_of(&app, zone).height, None);
+    }
+
+    // Con la zona selezionata `S` chiede il valore, poi lo scrive.
+    select(&mut app, &[zone]);
+    forget_history(&mut app);
+    run(&mut app, "AL_ALTEZZA");
+    answer(&mut app, "S");
+    assert!(
+        history(&app).contains("Altezza (m):"),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(active_command(&app), Some("AL_ALTEZZA"));
+    answer(&mut app, "3");
+    let i = app.active_tab;
+    app.finish_pending_history(i);
+    assert_eq!(
+        zone_of(&app, zone).height,
+        Some(3.0),
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps + 1, "un solo passo");
+    assert_eq!(active_command(&app), None);
+}
+
 /// Valori ≤ 0, non numerici o con argomenti in più: un errore, il record e i
 /// passi di annullamento restano com'erano.
 #[test]

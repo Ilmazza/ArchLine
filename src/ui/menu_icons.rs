@@ -22,7 +22,7 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("SHEETSET", asset!("sheetset.svg")),
     ("TABLESTYLE", asset!("table_style.svg")),
     ("MLEADERSTYLE", asset!("mleader_style.svg")),
-    // The six Tools > Ristrutturazione commands, drawn for ArchLine: yellow is
+    // The nine Tools > Ristrutturazione commands, drawn for ArchLine: yellow is
     // a demolished zone (ACI 2), red a new one (ACI 1). Both are written as
     // CSS keywords because the recolouring in `icons.rs` turns `#FF0000` into
     // the theme's danger colour.
@@ -32,6 +32,12 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("AL_LOCALE", asset!("ristr_locale.svg")),
     ("AL_AGGIORNA", asset!("ristr_aggiorna.svg")),
     ("AL_ESTRAI", asset!("ristr_estrai.svg")),
+    // Part 2: a brick wall in elevation with its height dimension, the
+    // schedule (header row, a demolished and a new row) and the schedule
+    // going into a CSV file.
+    ("AL_ALTEZZA", asset!("ristr_altezza.svg")),
+    ("AL_ABACO", asset!("ristr_abaco.svg")),
+    ("AL_ABACO_CSV", asset!("ristr_abaco_csv.svg")),
 ];
 
 /// Black-stroke glyphs: some from the quick-access strip, the rest drawn for
@@ -104,13 +110,16 @@ mod tests {
         assert_eq!(all.len(), n, "a command has two icons");
     }
 
-    const RISTRUTTURAZIONE: [&str; 6] = [
+    const RISTRUTTURAZIONE: [&str; 9] = [
         "AL_DEMOLISCI",
         "AL_NUOVO",
         "AL_STATO",
         "AL_LOCALE",
         "AL_AGGIORNA",
         "AL_ESTRAI",
+        "AL_ALTEZZA",
+        "AL_ABACO",
+        "AL_ABACO_CSV",
     ];
 
     fn text(bytes: &[u8]) -> String {
@@ -147,14 +156,36 @@ mod tests {
         }
     }
 
-    /// RGBA of one pixel of `bytes` drawn on a 24x24 canvas.
-    fn pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+    /// `bytes` drawn on a 24x24 canvas.
+    fn render(bytes: &[u8]) -> resvg::tiny_skia::Pixmap {
         let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
             .expect("the icon parses");
         let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).expect("24x24 pixmap");
         resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
-        let p = pixmap.pixel(x, y).expect("pixel inside the canvas");
+        pixmap
+    }
+
+    /// RGBA of one pixel of `bytes` drawn on a 24x24 canvas.
+    fn pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let p = render(bytes).pixel(x, y).expect("pixel inside the canvas");
         [p.red(), p.green(), p.blue(), p.alpha()]
+    }
+
+    #[test]
+    fn the_part_two_icons_show_the_accent() {
+        // Altezza (the dimension line), Abaco and Abaco CSV (the header row):
+        // at least one pixel is the accent itself, fully covered, so the
+        // drawing really carries the colour the theme will follow.
+        const ACCENT: [u8; 4] = [0x6D, 0xB7, 0xED, 255];
+        for command in ["AL_ALTEZZA", "AL_ABACO", "AL_ABACO_CSV"] {
+            let pixmap = render(ribbon(command).unwrap_or_else(|| panic!("{command}: no icon")));
+            let accent = pixmap
+                .pixels()
+                .iter()
+                .filter(|p| [p.red(), p.green(), p.blue(), p.alpha()] == ACCENT)
+                .count();
+            assert!(accent > 0, "{command}: no pixel in the accent #6DB7ED");
+        }
     }
 
     #[test]
@@ -168,6 +199,9 @@ mod tests {
         // Stato: demolished square on the left, new one on the right.
         assert_eq!(at("AL_STATO", 5, 5), YELLOW);
         assert_eq!(at("AL_STATO", 17, 5), RED);
+        // Abaco: the demolished row, then the new one, in the first column.
+        assert_eq!(at("AL_ABACO", 5, 10), YELLOW);
+        assert_eq!(at("AL_ABACO", 5, 14), RED);
     }
 
     #[test]

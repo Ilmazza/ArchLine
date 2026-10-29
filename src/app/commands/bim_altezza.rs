@@ -32,12 +32,15 @@ const CMD: &str = "AL_ALTEZZA";
 
 const ALTEZZA_PROMPT: &str = "AL_ALTEZZA  [Livello/Selezione/Rimuovi]:";
 
+const NO_SELECTION: &str = "AL_ALTEZZA: nessun oggetto selezionato.";
+
 impl OpenCADStudio {
     /// `AL_ALTEZZA [L|S <valore> | R]` (spec parte 2, §5.1). Da solo chiede la
     /// parola chiave e il valore, che tornano qui come riga intera. Prima di
     /// tutto lo spazio modello; poi la riga, la selezione per `S` e `R`, e
     /// l'unità del disegno: un valore sbagliato o una selezione vuota non fanno
-    /// chiedere l'unità.
+    /// chiedere l'unità. Solo `S` senza valore e senza selezione dice prima la
+    /// selezione: è la riga che arriva dalla domanda di `bim_start_altezza`.
     pub(super) fn bim_altezza(&mut self, i: usize, cmd: &str) -> Task<Message> {
         if !self.bim_in_model_space(i, CMD) {
             return Task::none();
@@ -48,6 +51,13 @@ impl OpenCADStudio {
             return self.bim_start_altezza(i);
         };
         let args: Vec<&str> = words.collect();
+        if args.is_empty()
+            && matches!(keyword.to_ascii_uppercase().as_str(), "S" | "SELEZIONE")
+            && self.tabs[i].scene.selected_entities().is_empty()
+        {
+            self.command_line.push_error(NO_SELECTION);
+            return Task::none();
+        }
         let change = match AltezzaChange::parse(keyword, &args) {
             Ok(change) => change,
             Err(message) => {
@@ -58,8 +68,7 @@ impl OpenCADStudio {
         if matches!(change, AltezzaChange::Selezione(_))
             && self.tabs[i].scene.selected_entities().is_empty()
         {
-            self.command_line
-                .push_error("AL_ALTEZZA: nessun oggetto selezionato.");
+            self.command_line.push_error(NO_SELECTION);
             return Task::none();
         }
         let Some(unit) = self.bim_unit_or_ask(i, cmd.trim()) else {
@@ -74,20 +83,25 @@ impl OpenCADStudio {
         Task::none()
     }
 
-    /// `AL_ALTEZZA` da solo: l'unità (il valore che segue è in unità del
-    /// disegno, e il prompt la dice), poi `[Livello/Selezione/Rimuovi]`.
+    /// `AL_ALTEZZA` da solo (anche dal pulsante della barra): l'unità (il
+    /// valore che segue è in unità del disegno, e il prompt la dice), poi
+    /// `[Livello/Selezione/Rimuovi]`. Senza nulla di selezionato `Selezione`
+    /// non chiede il valore: torna subito in `bim_altezza` come `S` da sola,
+    /// che dice la selezione mancante (come `R`, che un valore non ce l'ha).
     fn bim_start_altezza(&mut self, i: usize) -> Task<Message> {
         let Some(unit) = self.bim_unit_or_ask(i, CMD) else {
             return self.finish_dispatch(CMD);
         };
         self.bim_pending = None;
         let (livello, selezione) = value_prompts(unit);
+        let selezione =
+            (!self.tabs[i].scene.selected_entities().is_empty()).then_some(selezione);
         let ask = KeywordCommand::new(
             CMD,
             ALTEZZA_PROMPT,
             vec![
                 ("Livello", "L", Some(livello)),
-                ("Selezione", "S", Some(selezione)),
+                ("Selezione", "S", selezione),
                 ("Rimuovi", "R", None),
             ],
         );

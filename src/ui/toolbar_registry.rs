@@ -705,14 +705,26 @@ mod tests {
     }
 
     #[test]
-    fn ristrutturazione_bar_has_the_six_commands() {
-        // ArchLine BIM: Tools > Ristrutturazione is a submenu with six commands,
-        // so the registry makes the bar of the same name, one button each.
+    fn ristrutturazione_bar_has_the_nine_commands() {
+        // ArchLine BIM: Tools > Ristrutturazione is a submenu with nine commands
+        // (the six of part 1, then Altezza, Abaco and Abaco CSV of part 2), so
+        // the registry makes the bar of the same name, one button each, in the
+        // order of the menu.
         let id = bar_named("Ristrutturazione");
         assert_eq!(id.key(), "menu:Ristrutturazione");
         assert_eq!(
             bar_commands(id),
-            ["AL_DEMOLISCI", "AL_NUOVO", "AL_STATO", "AL_LOCALE", "AL_AGGIORNA", "AL_ESTRAI"]
+            [
+                "AL_DEMOLISCI",
+                "AL_NUOVO",
+                "AL_STATO",
+                "AL_LOCALE",
+                "AL_AGGIORNA",
+                "AL_ESTRAI",
+                "AL_ALTEZZA",
+                "AL_ABACO",
+                "AL_ABACO_CSV",
+            ]
         );
         // One plain button per command, no dropdown variants.
         for i in items_for(id) {
@@ -731,7 +743,7 @@ mod tests {
             }
             assert!(!b.tinted, "{} is coloured art, it must not be tinted", b.main.id);
         }
-        assert_eq!(icons.len(), 6, "one icon per command");
+        assert_eq!(icons.len(), 9, "one icon per command");
         for (n, a) in icons.iter().enumerate() {
             assert!(icons[n + 1..].iter().all(|b| a != b), "two buttons share an icon");
         }
