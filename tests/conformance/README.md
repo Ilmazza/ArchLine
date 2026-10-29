@@ -72,8 +72,8 @@ spazi, protocollo `--serve` con un server imitato da uno script Python); non lan
 
 ## Estrazione BIM
 
-`bim_extract.py` prova i comandi BIM di ArchLine (`AL_DEMOLISCI`, `AL_NUOVO`, `AL_ESTRAI`) su un disegno sintetico e
-legge i tre DWG estratti con ezdxf come oracolo. Non usa `run.py` ne' `expected.json`: non misura una fedelta' in
+`bim_extract.py` prova i comandi BIM di ArchLine (`AL_DEMOLISCI`, `AL_NUOVO`, `AL_ESTRAI` e, della parte 2, `AL_ALTEZZA`,
+`AL_ABACO_CSV`, `AL_ABACO`) su un disegno sintetico e legge i tre DWG estratti, il CSV e le tabelle con ezdxf come oracolo. Non usa `run.py` ne' `expected.json`: non misura una fedelta' in
 percentuale ma verifica fatti precisi, e ogni controllo e' `OK` o `FALLITO` (niente `ATTESO`).
 
 ```
@@ -110,6 +110,27 @@ le facce del tramezzo (y da 0 a 3), quindi lo stato di progetto e' lo stesso del
 - nei tre file nessuna entita' (oggetti e voci di tabella compresi) con XDATA il cui APPID inizia con `ARCHLINE` e
   nessun APPID `ARCHLINE*` in tabella; nessuna entita' fuori dallo spazio modello.
 
+**Abachi e quantita' (BIM parte 2).** In ogni giro, dopo `AL_ESTRAI` e sullo stesso disegno di lavoro (le zone D1 e
+N1 sono gia' li'): `AL_ALTEZZA L 2.70` (altezza predefinita del livello), `AL_ABACO_CSV abaco.csv`, `AL_ABACO` (senza
+punto, da script: tabelle a destra dell'estensione) e il salvataggio del disegno di lavoro in `abaco-lavoro.dxf`
+(un file a parte: il DXF di partenza non si tocca, resta il controllo SHA-256). Il CSV si legge come lo legge Excel
+italiano (`csv` con `delimiter=";"`, `utf-8-sig`) e si controlla:
+
+- BOM UTF-8 e righe CRLF; intestazione `tipo;codice;descrizione;parti;lunghezza;larghezza;altezza;detrai;quantita;um;stato_altezza;fonte;note`;
+- esattamente due righe, D1 e N1 (niente locali: il caso non ha semi di locale);
+- D1, la demolizione del tramezzo: `quantita` `0,8100` e `um` `m³` (3,00 x 0,10 x 2,70, calcolato a mano dalla geometria
+  del caso A e dall'altezza data; non ricavato dall'app); N1, il muro nuovo: `5,4000` `m²` (2,00 x 2,70), larghezza vuota;
+- per ogni riga `parti x lunghezza x larghezza x altezza` dei fattori scritti (i vuoti saltati) uguale a `quantita`
+  entro 5e-5 (la regola di `to_csv`), numeri sempre nella forma `N,NNNN`, altezza mai vuota (un locale sarebbe l'unica
+  eccezione: e' completo con la sola superficie, l'altezza `n.d.` sta in `stato_altezza`).
+
+Le tabelle: ezdxf legge le due `ACAD_TABLE` del DXF salvato ma **non le celle** (`n_rows` = 0, i dati `AcDbTable` non
+si interpretano). Il banco controlla quindi il blocco di visualizzazione `*T1`/`*T2` di ogni tabella, l'immagine che
+AutoCAD disegna: i testi `MTEXT` del blocco devono contenere il codice e la quantita' a due decimali (come nelle celle,
+`0,81`, `5,40`) di ogni riga del CSV. Se il blocco mancasse o fosse senza testi, il banco stampa «TABLE non verificata
+(ezdxf): solo CSV» come limite dichiarato, non come controllo fallito. In ogni caso la riga `NOTA` ricorda che la
+struttura a celle va vista in AutoCAD.
+
 **Isolamento.** L'app parte con `APPDATA` e `LOCALAPPDATA` puntati a una cartella temporanea (`config\Roaming` e
 `config\Local` nella cartella di lavoro), cosi' il vero `settings.json` in `%APPDATA%\OpenCADStudio` non si legge e
 non si riscrive (elenco dei recenti, dialoghi "una tantum"). Il disegno di prova e' sintetico: non usare mai un
@@ -126,3 +147,6 @@ cartella temporanea resta, con i DXF riconvertiti e `serve.stderr.txt`.
 entita': il caso non ha contenuto nello spazio carta, quindi quel controllo non distingue un'estrazione che
 copiasse anche i layout. I DWG si verificano in modo indiretto (riletti da ArchLine stesso). Aree, nomi e testi dei
 locali non si controllano qui: stanno nei test Rust (`cargo test --locked --lib bim::`, `app::bim_tests`).
+Abaco: il caso ha solo D1 e N1, quindi niente righe di locali, varchi, righe incomplete o `n.d.` (sono nei test Rust di
+`bim::abaco`); le tabelle si leggono dal DXF che ArchLine scrive, non da un DWG, e la loro struttura a celle (e come
+le apre AutoCAD) non e' verificabile con ezdxf: da vedere in AutoCAD.

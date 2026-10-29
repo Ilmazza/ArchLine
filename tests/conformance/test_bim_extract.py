@@ -182,6 +182,120 @@ class DrawingTests(unittest.TestCase):
         self.assertEqual(be.arch_xdata_appids(doc), ([], []))
 
 
+GOOD_CSV = (
+    "﻿" + ";".join(be.CSV_HEADER) + "\r\n"
+    "demolizione;D1;Demolizione muro spessore 0,100;1,0000;3,0000;0,1000;2,7000;no;0,8100;m³;ereditata;zona 4A;\r\n"
+    "nuova muratura;N1;Nuova muratura spessore 0,120;1,0000;2,0000;;2,7000;no;5,4000;m²;ereditata;zona 4B;\r\n"
+)
+
+
+class AbacoCsvTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="bim_test_"))
+
+    def write(self, text, name="abaco.csv"):
+        path = self.tmp / name
+        path.write_bytes(text.encode("utf-8"))
+        return path
+
+    def report(self):
+        return be.Report(io.StringIO())
+
+    def test_italian_numbers(self):
+        self.assertEqual(be.parse_it_number("0,8100"), 0.81)
+        self.assertEqual(be.parse_it_number("-1,5000"), -1.5)
+        self.assertIsNone(be.parse_it_number(""))
+        for bad in ("0.8100", "0,81", "1.234,5000", "0,81000", "n.d.", "1e3"):
+            with self.assertRaises(ValueError, msg=bad):
+                be.parse_it_number(bad)
+
+    def test_reads_bom_crlf_header_and_rows(self):
+        bom, crlf, header, rows = be.read_abaco_csv(self.write(GOOD_CSV))
+        self.assertTrue(bom and crlf)
+        self.assertEqual(header, be.CSV_HEADER)
+        self.assertEqual([r["codice"] for r in rows], ["D1", "N1"])
+        self.assertEqual(rows[0]["um"], "m³")
+        self.assertEqual(rows[1]["larghezza"], "")
+
+    def test_without_bom_or_with_bare_lf_is_noticed(self):
+        bom, crlf, _, _ = be.read_abaco_csv(self.write(GOOD_CSV.replace("﻿", "")))
+        self.assertFalse(bom)
+        self.assertTrue(crlf)
+        bom, crlf, _, _ = be.read_abaco_csv(self.write(GOOD_CSV.replace("\r\n", "\n")))
+        self.assertTrue(bom)
+        self.assertFalse(crlf)
+
+    def test_a_row_with_the_wrong_field_count_is_an_error(self):
+        with self.assertRaises(ValueError):
+            be.read_abaco_csv(self.write(GOOD_CSV + "demolizione;D2;x\r\n"))
+
+    def test_product_skips_empty_factors(self):
+        _, _, _, rows = be.read_abaco_csv(self.write(GOOD_CSV))
+        self.assertAlmostEqual(be.csv_product(rows[0]), 0.81)
+        self.assertAlmostEqual(be.csv_product(rows[1]), 5.4)  # larghezza vuota: non si applica
+        self.assertEqual(be.csv_problems(rows), [])
+
+    def test_quantity_off_by_more_than_the_tolerance_is_a_problem(self):
+        _, _, _, rows = be.read_abaco_csv(self.write(GOOD_CSV.replace("0,8100;m³", "0,8200;m³")))
+        problems = be.csv_problems(rows)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("D1", problems[0])
+        # il prodotto dei fattori scritti, 2,99967, e' scritto 2,9997: scarto 3e-5, entro la regola di to_csv
+        row = dict(rows[0], lunghezza="3,3333", larghezza="0,3333", altezza="2,7000", quantita="2,9997")
+        self.assertEqual(be.csv_problems([row]), [])
+
+    def test_empty_height_is_a_problem_except_for_rooms(self):
+        _, _, _, rows = be.read_abaco_csv(self.write(GOOD_CSV.replace("2,7000;no;5,4000", ";no;2,0000")))
+        self.assertTrue(any("altezza vuota" in p for p in be.csv_problems(rows)))
+        room = dict(rows[1], tipo="locale di fatto", codice="LF1", quantita="2,0000", altezza="")
+        self.assertEqual(be.csv_problems([room]), [])
+
+    def test_a_malformed_number_is_a_problem_not_a_crash(self):
+        _, _, _, rows = be.read_abaco_csv(self.write(GOOD_CSV.replace("0,8100;m³", "0.81;m³")))
+        self.assertTrue(any("D1" in p for p in be.csv_problems(rows)))
+
+    def test_check_abaco_csv_passes_the_good_file(self):
+        rep = self.report()
+        rows = be.check_abaco_csv(rep, self.write(GOOD_CSV))
+        self.assertEqual(rep.failed, 0, rep.out.getvalue())
+        self.assertEqual(len(rows), 2)
+
+    def test_check_abaco_csv_fails_on_a_wrong_quantity_and_a_missing_file(self):
+        rep = self.report()
+        be.check_abaco_csv(rep, self.write(GOOD_CSV.replace("0,8100;m³", "0,9000;m³")))
+        self.assertGreaterEqual(rep.failed, 2, rep.out.getvalue())  # il valore atteso e il prodotto dei fattori
+        rep = self.report()
+        self.assertIsNone(be.check_abaco_csv(rep, self.tmp / "manca.csv"))
+        self.assertEqual(rep.failed, 1)
+
+    def test_check_abaco_csv_fails_on_a_wrong_header(self):
+        rep = self.report()
+        be.check_abaco_csv(rep, self.write(GOOD_CSV.replace("stato_altezza", "stato")))
+        self.assertIn("FALLITO  abaco CSV: intestazione", rep.out.getvalue())
+
+    def test_two_decimals_is_the_table_cell_text(self):
+        self.assertEqual(be.two_decimals("0,8100"), "0,81")
+        self.assertEqual(be.two_decimals("5,4000"), "5,40")
+
+    @unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+    def test_a_dxf_without_tables_is_a_declared_limit_not_a_failure(self):
+        import ezdxf
+
+        path = self.tmp / "senza.dxf"
+        ezdxf.new("R2018").saveas(path)
+        rep = self.report()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            be.check_abaco_tables(rep, path, [])
+        self.assertEqual(rep.failed, 0)
+        self.assertIn(be.TABLE_NOT_VERIFIED, out.getvalue())
+        self.assertEqual(be.table_texts(ezdxf.readfile(path)), [])
+
+    def test_a_missing_table_file_fails(self):
+        rep = self.report()
+        be.check_abaco_tables(rep, self.tmp / "manca.dxf", [])
+        self.assertEqual(rep.failed, 1)
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="bim_test_"))

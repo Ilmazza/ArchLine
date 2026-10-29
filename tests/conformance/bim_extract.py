@@ -5,6 +5,15 @@ tramezzo da 0,10 m) AL_DEMOLISCI, AL_NUOVO e AL_ESTRAI, poi legge i tre DWG estr
 controlli: l'asse del tramezzo dato esatto (4.05,0 4.05,3) e dato a occhio, oltre le facce (4.05,-0.1 4.05,3.1;
 righe con il prefisso "asse oltre le facce,"): la zona deve fermarsi dove finiscono le facce.
 
+Abachi e quantita' (BIM parte 2), in ogni giro dopo AL_ESTRAI: `AL_ALTEZZA L 2.70`, `AL_ABACO_CSV abaco.csv`,
+`AL_ABACO` e il salvataggio del disegno di lavoro in un DXF a parte (`abaco-lavoro.dxf`, mai sul disegno di
+partenza). Il CSV si legge come lo legge Excel italiano (UTF-8 con BOM, `;`, CRLF): intestazione, righe D1
+(demolizione, 0,8100 m3 = 3,00 x 0,10 x 2,70) e N1 (nuova muratura, 5,4000 m2 = 2,00 x 2,70, larghezza vuota),
+`quantita` = parti x lunghezza x larghezza x altezza dei fattori scritti (entro 5e-5), altezza mai vuota. Le tabelle
+(ACAD_TABLE) ezdxf le vede ma non ne legge le celle (n_rows = 0): si controlla il loro blocco di visualizzazione `*T`
+(codice e quantita' a due decimali di ogni riga del CSV). E' un limite dichiarato (riga NOTA), non un controllo
+fallito; se il blocco mancasse o fosse senza testi, la riga NOTA dice "TABLE non verificata (ezdxf): solo CSV".
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -15,11 +24,14 @@ settings.json dell'utente non si legge e non si riscrive. Il disegno di prova e'
 dell'utente) e la sua copia su disco non deve cambiare nemmeno di un byte (SHA-256 prima e dopo).
 """
 import argparse
+import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -50,7 +62,14 @@ AXIS_EXACT = "4.05,0 4.05,3"
 AXIS_PAST = "4.05,-0.1 4.05,3.1"
 PAST_PREFIX = "asse oltre le facce, "
 
-READY_TIMEOUT = 180  # s: avvio a freddo dell'app
+# Abaco (parte 2): altezza predefinita del livello, intestazione e tolleranza del CSV di `AL_ABACO_CSV`.
+HEIGHT_CMD = "AL_ALTEZZA L 2.70"
+CSV_HEADER = ["tipo", "codice", "descrizione", "parti", "lunghezza", "larghezza", "altezza", "detrai", "quantita",
+              "um", "stato_altezza", "fonte", "note"]
+CSV_QUANTITY_TOL = 5e-5 + 1e-9  # `quantita` e il prodotto dei fattori scritti: sempre entro 5e-5 (to_csv)
+TABLE_NOT_VERIFIED = "TABLE non verificata (ezdxf): solo CSV"
+
+READY_TIMEOUT = 180 # s: avvio a freddo dell'app
 REQUEST_TIMEOUT = 300  # s: una singola richiesta
 EXPORT_TIMEOUT = 180  # s: una conversione
 
@@ -102,6 +121,66 @@ def vertical_overlaps(segments, x, y0, y1, tol=TOL):
         if min(high, y1) - max(low, y0) > tol:
             found.append(seg)
     return found
+
+
+def parse_it_number(text):
+    """Un numero del CSV dell'abaco: vuoto = fattore che non si applica (None); altrimenti quattro decimali con la
+    virgola (`0,8100`), eventualmente negativo. Altro (punto decimale, migliaia, decimali diversi) e' ValueError."""
+    if text == "":
+        return None
+    if not re.fullmatch(r"-?\d+,\d{4}", text):
+        raise ValueError(f"numero non nella forma N,NNNN: {text!r}")
+    return float(text.replace(",", "."))
+
+
+def read_abaco_csv(path):
+    """Legge il CSV di `AL_ABACO_CSV` come lo legge Excel italiano: UTF-8 con BOM, `;`, righe CRLF. Ritorna
+    (bom, crlf, intestazione, righe): `righe` = lista di dict per colonna. Una riga con un numero di campi diverso
+    dall'intestazione e' ValueError."""
+    raw = Path(path).read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    crlf = "\r\n" in text and "\n" not in text.replace("\r\n", "")
+    parsed = list(csv.reader(io.StringIO(text, newline=""), delimiter=";"))
+    if not parsed:
+        raise ValueError("file vuoto")
+    header, rows = parsed[0], []
+    for n, fields in enumerate(parsed[1:], start=2):
+        if len(fields) != len(header):
+            raise ValueError(f"riga {n}: {len(fields)} campi contro {len(header)} dell'intestazione")
+        rows.append(dict(zip(header, fields)))
+    return bom, crlf, header, rows
+
+
+def csv_product(row):
+    """`parti x lunghezza x larghezza x altezza` dei fattori scritti, i vuoti saltati (come la `Misura` di ArchCme)."""
+    product = 1.0
+    for column in ("parti", "lunghezza", "larghezza", "altezza"):
+        value = parse_it_number(row[column])
+        if value is not None:
+            product *= value
+    return product
+
+
+def csv_problems(rows):
+    """Cio' che non torna nelle righe del CSV: `quantita` diversa dal prodotto dei fattori scritti oltre
+    CSV_QUANTITY_TOL (la regola di `to_csv`: sempre entro 5e-5), numeri non nella forma N,NNNN, altezza vuota (un
+    locale no: e' completo con la sola superficie e l'altezza `n.d.` sta in `stato_altezza`). Elenco vuoto = tutto
+    torna."""
+    problems = []
+    for n, row in enumerate(rows, start=1):
+        who = f"riga {n} ({row.get('tipo', '?')} {row.get('codice', '?')})"
+        try:
+            quantity = parse_it_number(row["quantita"])
+            product = csv_product(row)
+        except (KeyError, ValueError) as ex:
+            problems.append(f"{who}: {ex}")
+            continue
+        if quantity is None or abs(quantity - product) > CSV_QUANTITY_TOL:
+            problems.append(f"{who}: quantita {row['quantita']} contro il prodotto dei fattori {product:.6f}")
+        if not row["tipo"].startswith("locale") and row["altezza"] == "":
+            problems.append(f"{who}: altezza vuota")
+    return problems
 
 
 def fmt_seg(seg):
@@ -363,8 +442,9 @@ def read_dxf(path):
 # ---------------------------------------------------------------- il banco
 
 
-def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT):
-    """Esegue i comandi via --serve (AL_DEMOLISCI sull'asse `axis`) e ne controlla le risposte."""
+def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, table_dxf=None):
+    """Esegue i comandi via --serve (AL_DEMOLISCI sull'asse `axis`) e ne controlla le risposte; con `csv_path`
+    poi `AL_ALTEZZA L 2.70` e `AL_ABACO_CSV` (e, con `table_dxf`, `AL_ABACO` e il salvataggio in DXF)."""
     rep.check(bool(session.ready.get("ok")), "sessione", f"app pronta (versione {session.ready.get('version', '?')})")
     resp = session.request({"op": "open", "path": str(src)})
     by_type = resp.get("by_type", {})
@@ -378,6 +458,29 @@ def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT):
         if resp.get("ok") and resp.get("unconsumed"):
             detail += f"; token non consumati: {resp.get('unconsumed')}"
         rep.check(ok, f"run {cmd.split()[0]}", detail)
+    if csv_path is not None:
+        abaco_commands(rep, session, csv_path, table_dxf)
+
+
+def run_ok(rep, session, cmd):
+    """Un comando via `run`: completato, senza errori ne' token non consumati. Ritorna la risposta."""
+    resp = session.request({"op": "run", "cmd": cmd})
+    ok = bool(resp.get("ok")) and resp.get("status") == "completed" and not resp.get("unconsumed")
+    detail = "completato" if ok else str(resp)
+    rep.check(ok, f"run {cmd.split()[0]}", detail)
+    return resp
+
+
+def abaco_commands(rep, session, csv_path, table_dxf):
+    """Parte 2 (abachi e quantita'): altezza del livello, CSV dell'abaco, tabelle. I file si leggono dopo."""
+    run_ok(rep, session, HEIGHT_CMD)
+    run_ok(rep, session, f"AL_ABACO_CSV {csv_path}")
+    if table_dxf is not None:
+        run_ok(rep, session, "AL_ABACO")  # senza punto, da script: le tabelle a destra dell'estensione
+        # Salvataggio in DXF in un altro file (mai sul disegno di partenza): ezdxf legge il DXF, non il DWG.
+        resp = session.request({"op": "save", "path": str(table_dxf)})
+        rep.check(bool(resp.get("ok")) and resp.get("target_format") == "dxf", "abaco: salvataggio DXF",
+                  f"{Path(table_dxf).name} (DXF)" if resp.get("ok") else str(resp))
 
 
 def checks_files(rep, exe, env, work, out_dir, src_doc):
@@ -464,15 +567,102 @@ def check_progetto(rep, doc):
                       f"layer {hit[0].dxf.layer}" + ("" if hit[0].dxf.layer == LAYER_MURI else f", atteso {LAYER_MURI}"))
 
 
+def table_texts(doc):
+    """Per ogni ACAD_TABLE dello spazio modello, i testi (MTEXT) del suo blocco di visualizzazione `*T…`: ezdxf non
+    legge le celle della TABLE (`n_rows` = 0, i dati AcDbTable non si interpretano), ma legge il blocco che
+    AutoCAD disegna. Ritorna la lista dei testi per tabella (vuota se il blocco manca o non ha testi)."""
+    out = []
+    for table in doc.modelspace().query("ACAD_TABLE"):
+        name = getattr(table.dxf, "geometry", None)
+        try:
+            block = doc.blocks.get(name)
+        except Exception:  # blocco mancante: nessun testo
+            block = None
+        out.append([e.plain_text() for e in block if e.dxftype() == "MTEXT"] if block is not None else [])
+    return out
+
+
+def two_decimals(text):
+    """`0,8100` -> `0,81`: come una cella dell'abaco scrive la stessa quantita' (due decimali, virgola)."""
+    return f"{parse_it_number(text):.2f}".replace(".", ",")
+
+
+def check_abaco_csv(rep, csv_path):
+    """Il CSV dell'abaco del caso (D1 demolizione ad asse esatto, N1 muro nuovo, altezza 2,70 m) e le sue regole.
+    Ritorna le righe lette (o None se il file non c'e' o non si legge), per il controllo delle tabelle."""
+    if not Path(csv_path).is_file():
+        rep.check(False, "abaco CSV: file", f"{Path(csv_path).name} non scritto")
+        return None
+    try:
+        bom, crlf, header, rows = read_abaco_csv(csv_path)
+    except (OSError, ValueError, UnicodeDecodeError) as ex:
+        rep.check(False, "abaco CSV: lettura", f"{type(ex).__name__}: {ex}")
+        return None
+    rep.check(bom and crlf, "abaco CSV: BOM UTF-8 e CRLF", "BOM e CRLF" if bom and crlf else f"BOM {bom}, CRLF {crlf}")
+    rep.check(header == CSV_HEADER, "abaco CSV: intestazione",
+              ";".join(header) if header == CSV_HEADER else f"{header} invece di {CSV_HEADER}")
+    codes = [r["codice"] for r in rows]
+    rep.check(codes == ["D1", "N1"], "abaco CSV: righe", f"righe {codes}" if codes != ["D1", "N1"] else "D1 e N1")
+    by_code = {r["codice"]: r for r in rows}
+    dem, new = by_code.get("D1"), by_code.get("N1")
+    # 3,00 x 0,10 x 2,70 = 0,81 m3 (tramezzo del caso A, altezza del livello); 2,00 x 2,70 = 5,40 m2 (muro nuovo)
+    if dem is not None:
+        got = (dem["tipo"], dem["quantita"], dem["um"])
+        rep.check(got == ("demolizione", "0,8100", "m³"), "abaco CSV: demolizione D1",
+                  "demolizione, 0,8100 m³" if got == ("demolizione", "0,8100", "m³")
+                  else f"{got} invece di ('demolizione', '0,8100', 'm³')")
+    if new is not None:
+        got = (new["tipo"], new["quantita"], new["um"], new["larghezza"])
+        want = ("nuova muratura", "5,4000", "m²", "")
+        rep.check(got == want, "abaco CSV: nuova muratura N1",
+                  "nuova muratura, 5,4000 m², larghezza vuota" if got == want else f"{got} invece di {want}")
+    problems = csv_problems(rows)
+    rep.check(not problems, "abaco CSV: quantita = parti x lunghezza x larghezza x altezza, altezza sempre scritta",
+              f"{len(rows)} righe" if not problems else "; ".join(problems))
+    return rows
+
+
+def check_abaco_tables(rep, table_dxf, rows):
+    """Le tabelle `AL_ABACO` riconvertite in DXF: ezdxf vede le due ACAD_TABLE e, nel loro blocco di
+    visualizzazione, il codice e la quantita' di ogni riga del CSV (a due decimali). Le celle AcDbTable vere e proprie
+    ezdxf non le interpreta: e' un limite dichiarato (riga NOTA), non un controllo fallito."""
+    if not Path(table_dxf).is_file():
+        rep.check(False, "abaco TABLE: file", f"{Path(table_dxf).name} non scritto")
+        return
+    doc, err = read_dxf(table_dxf)
+    if not rep.check(doc is not None, "abaco TABLE: ezdxf", "letto" if doc is not None else err):
+        return
+    tables = table_texts(doc)
+    if not tables or not any(tables):
+        print(f"NOTA     {TABLE_NOT_VERIFIED}")
+        return
+    rep.check(len(tables) == 2 and all(tables), "abaco TABLE: due tabelle con testi",
+              "2 ACAD_TABLE, blocchi con testi" if len(tables) == 2 and all(tables)
+              else f"{len(tables)} ACAD_TABLE, testi per tabella {[len(t) for t in tables]}")
+    for code in ("D1", "N1"):
+        row = next((r for r in rows or [] if r["codice"] == code), None)
+        if row is None:
+            continue
+        want = two_decimals(row["quantita"])
+        hit = [t for t in tables if code in t and want in t]
+        rep.check(bool(hit), f"abaco TABLE: riga {code}",
+                  f"codice {code} e quantita' {want} nella stessa tabella" if hit
+                  else f"codice {code} e quantita' {want} non trovati nello stesso blocco")
+    print("NOTA     le celle AcDbTable non si leggono con ezdxf (n_rows = 0): controllato il blocco di "
+          "visualizzazione *T, non la struttura a celle (da vedere in AutoCAD)")
+
+
 def run_case(rep, exe, env, work, src, src_doc, before, axis):
     """Un giro: sessione --serve con AL_DEMOLISCI sull'asse `axis`, estratti in `work/out`, DXF riconvertiti in
     `work`, controlli su `rep`."""
     work = Path(work)
     out_dir = work / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = work / "abaco.csv"
+    table_dxf = work / "abaco-lavoro.dxf"
     session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
     try:
-        checks_session(rep, session, src, out_dir, axis)
+        checks_session(rep, session, src, out_dir, axis, csv_path, table_dxf)
     except BaseException:
         session.kill()
         raise
@@ -484,6 +674,8 @@ def run_case(rep, exe, env, work, src, src_doc, before, axis):
               "DXF di partenza identico byte per byte (SHA-256)" if after == before
               else f"il DXF di partenza e' cambiato (SHA-256 {before[:12]} -> {after[:12]})")
     checks_files(rep, exe, env, work, out_dir, src_doc)
+    rows = check_abaco_csv(rep, csv_path)
+    check_abaco_tables(rep, table_dxf, rows)
 
 
 def run_bim_extract(exe, work, rep):
