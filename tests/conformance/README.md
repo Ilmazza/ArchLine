@@ -132,6 +132,20 @@ AutoCAD disegna: i testi `MTEXT` del blocco devono contenere il codice e la quan
 due) e' invece **FALLITO**: `AL_ABACO` risulterebbe completato senza aver scritto le tabelle. In ogni caso la riga `NOTA` ricorda che la
 struttura a celle va vista in AutoCAD.
 
+**L'abaco nell'estrazione** (parte 2, spec 5.4; righe con il prefisso "abaco estratto,"). Sempre nella stessa sessione,
+dopo il salvataggio di `abaco-lavoro.dxf`: `AL_ALTEZZA L 3.00` senza rilanciare `AL_ABACO` (le tabelle del disegno di
+lavoro restano a 2,70) e `AL_ESTRAI out-abaco`. I tre DWG (`abaco-lavoro_*.dwg`: dopo il salvataggio il disegno
+di lavoro ha quel nome) si riconvertono in DXF accanto a loro e si controlla:
+
+- in nessuno dei tre una `ACAD_TABLE`, ne' XDATA o APPID `ARCHLINE*`; nel fatto e nel progetto niente sul layer `AL-ABACO`;
+- nella comparativa `LINE` e `MTEXT` su `AL-ABACO`, con i numeri ricalcolati all'estrazione: D1 `0,90` (3,00 x 0,10 x
+  3,00) e N1 `6,00` (2,00 x 3,00), calcolati a mano; nessuno di `0,81` e `5,40`, i numeri delle tabelle del disegno di
+  lavoro;
+- la griglia parte dal punto d'inserimento di ogni `ACAD_TABLE` di `abaco-lavoro.dxf` (una `LINE` con un estremo li').
+
+Qui il dato cambiato e' l'altezza, non il rilievo (uno script non sposta muri); il rilievo cambiato senza `AL_ABACO` e'
+nei test Rust (`bim::extract::tests::abaco`).
+
 **Isolamento.** L'app parte con `APPDATA` e `LOCALAPPDATA` puntati a una cartella temporanea (`config\Roaming` e
 `config\Local` nella cartella di lavoro), cosi' il vero `settings.json` in `%APPDATA%\OpenCADStudio` non si legge e
 non si riscrive (elenco dei recenti, dialoghi "una tantum"). Il disegno di prova e' sintetico: non usare mai un
@@ -150,4 +164,5 @@ copiasse anche i layout. I DWG si verificano in modo indiretto (riletti da ArchL
 locali non si controllano qui: stanno nei test Rust (`cargo test --locked --lib bim::`, `app::bim_tests`).
 Abaco: il caso ha solo D1 e N1, quindi niente righe di locali, varchi, righe incomplete o `n.d.` (sono nei test Rust di
 `bim::abaco`); le tabelle si leggono dal DXF che ArchLine scrive, non da un DWG, e la loro struttura a celle (e come
-le apre AutoCAD) non e' verificabile con ezdxf: da vedere in AutoCAD.
+le apre AutoCAD) non e' verificabile con ezdxf: da vedere in AutoCAD. Nell'estratto l'abaco si controlla per testi e
+per l'angolo della griglia, non cella per cella (la forma della griglia e' nei test Rust di `bim::abaco_table`).

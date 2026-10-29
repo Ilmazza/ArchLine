@@ -309,6 +309,68 @@ class AbacoCsvTests(unittest.TestCase):
         self.assertEqual(rep.failed, 1)
 
 
+class TouchesTests(unittest.TestCase):
+    def test_either_end_within_the_tolerance(self):
+        seg = ((20.0, 5.0), (30.0, 5.0))
+        self.assertTrue(be.touches((20.0, 5.0), seg))
+        self.assertTrue(be.touches((30.0 + 0.9e-6, 5.0), seg))
+        self.assertFalse(be.touches((25.0, 5.0), seg))  # dentro il segmento, non un estremo
+        self.assertFalse(be.touches((20.0, 5.0 + 2e-6), seg))
+
+
+@unittest.skipUnless(HAVE_EZDXF, "ezdxf non installato")
+class AbacoExtractTests(unittest.TestCase):
+    """L'abaco nell'estrazione: i documenti sono fatti con ezdxf (che non scrive ACAD_TABLE)."""
+
+    CORNER = (20.0, 5.0)
+
+    def docs(self, texts=("D1", "0,90", "N1", "6,00"), corner=CORNER):
+        import ezdxf
+
+        docs = {key: ezdxf.new("R2018") for key in be.SUFFIX}
+        msp = docs["comparativa"].modelspace()
+        msp.add_line(corner, (corner[0] + 10.0, corner[1]), dxfattribs={"layer": be.LAYER_ABACO})
+        for text in texts:
+            msp.add_mtext(text, dxfattribs={"layer": be.LAYER_ABACO})
+        msp.add_mtext("0,81", dxfattribs={"layer": "ALTRO"})  # un numero vecchio su un altro layer non conta
+        return docs
+
+    def run_check(self, docs, corners=(CORNER,)):
+        rep = be.Report(io.StringIO())
+        be.check_abaco_extract(rep, docs, list(corners))
+        return rep
+
+    def test_abaco_texts_are_the_mtext_on_al_abaco(self):
+        docs = self.docs()
+        self.assertEqual(sorted(be.abaco_texts(docs["comparativa"])), ["0,90", "6,00", "D1", "N1"])
+        self.assertEqual(be.abaco_texts(docs["fatto"]), [])
+        self.assertEqual(be.table_corners(docs["comparativa"]), [])
+
+    def test_fresh_numbers_at_the_table_corner_pass(self):
+        rep = self.run_check(self.docs())
+        self.assertEqual(rep.failed, 0, rep.out.getvalue())
+
+    def test_a_stale_number_or_a_missing_fresh_one_fails(self):
+        rep = self.run_check(self.docs(texts=("D1", "0,81", "N1", "6,00")))
+        out = rep.out.getvalue()
+        self.assertIn("FALLITO  comparativa: riga D1 ricalcolata", out)
+        self.assertIn("FALLITO  comparativa: niente numeri della tabella del disegno di lavoro", out)
+        self.assertEqual(rep.failed, 2, out)
+
+    def test_a_grid_away_from_the_table_or_no_table_fails(self):
+        rep = self.run_check(self.docs(corner=(21.0, 5.0)))
+        self.assertIn("FALLITO  comparativa: tabelle nel punto del disegno di lavoro", rep.out.getvalue())
+        rep = self.run_check(self.docs(), corners=())
+        self.assertEqual(rep.failed, 1, rep.out.getvalue())
+
+    def test_abaco_in_fatto_or_progetto_fails(self):
+        docs = self.docs()
+        docs["progetto"].modelspace().add_mtext("D1", dxfattribs={"layer": be.LAYER_ABACO})
+        rep = self.run_check(docs)
+        self.assertIn("FALLITO  progetto: niente abaco", rep.out.getvalue())
+        self.assertEqual(rep.failed, 1, rep.out.getvalue())
+
+
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="bim_test_"))

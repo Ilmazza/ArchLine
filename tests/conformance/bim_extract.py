@@ -15,6 +15,13 @@ partenza). Il CSV si legge come lo legge Excel italiano (UTF-8 con BOM, `;`, CRL
 fallito; se le due tabelle ci sono ma il blocco e' senza testi, la riga NOTA dice "TABLE non verificata (ezdxf):
 solo CSV". Nessuna ACAD_TABLE (o diverse da due) e' invece FALLITO.
 
+L'abaco nell'estrazione (parte 2, spec 5.4), in ogni giro dopo AL_ABACO: `AL_ALTEZZA L 3.00` senza rilanciare
+AL_ABACO, poi `AL_ESTRAI` in `out-abaco` (righe con il prefisso "abaco estratto, "). Nel DWG di demolizioni e
+costruzioni le tabelle sono LINE e MTEXT sul layer AL-ABACO con i numeri ricalcolati (D1 0,90 m3 = 3,00 x 0,10 x
+3,00; N1 6,00 m2 = 2,00 x 3,00), nessuno dei numeri della tabella del disegno di lavoro (0,81 e 5,40, con 2,70), e
+la griglia parte dal punto d'inserimento di ogni ACAD_TABLE del disegno di lavoro (letto da `abaco-lavoro.dxf`);
+nei tre DWG nessuna ACAD_TABLE, nel fatto e nel progetto niente su AL-ABACO.
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -70,6 +77,15 @@ CSV_HEADER = ["tipo", "codice", "descrizione", "parti", "lunghezza", "larghezza"
 CSV_QUANTITY_TOL = 5e-5 + 1e-9  # `quantita` e il prodotto dei fattori scritti: sempre entro 5e-5 (to_csv)
 TABLE_NOT_VERIFIED = "TABLE non verificata (ezdxf): solo CSV"
 
+# L'abaco nell'estrazione: l'altezza cambiata dopo AL_ABACO, la cartella del secondo AL_ESTRAI, il layer, i numeri
+# attesi nell'estratto (altezza 3,00) e quelli della tabella del disegno di lavoro (altezza 2,70) che non ci devono essere.
+HEIGHT_AFTER_CMD = "AL_ALTEZZA L 3.00"
+ABACO_OUT = "out-abaco"
+ABACO_PREFIX = "abaco estratto, "
+LAYER_ABACO = "AL-ABACO"
+ABACO_FRESH = {"D1": "0,90", "N1": "6,00"}
+ABACO_STALE = ("0,81", "5,40")
+
 READY_TIMEOUT = 180  # s: avvio a freddo dell'app
 REQUEST_TIMEOUT = 300  # s: una singola richiesta
 EXPORT_TIMEOUT = 180  # s: una conversione
@@ -108,6 +124,11 @@ def match_segments(expected, actual, tol=TOL):
         else:
             missing.append(seg)
     return missing, left
+
+
+def touches(point, segment, tol=TOL):
+    """Il punto (x, y) e' un estremo del segmento ((x1, y1), (x2, y2)), entro `tol` su ogni coordinata."""
+    return any(abs(point[0] - end[0]) <= tol and abs(point[1] - end[1]) <= tol for end in segment)
 
 
 def vertical_overlaps(segments, x, y0, y1, tol=TOL):
@@ -443,9 +464,10 @@ def read_dxf(path):
 # ---------------------------------------------------------------- il banco
 
 
-def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, table_dxf=None):
+def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, table_dxf=None, abaco_dir=None):
     """Esegue i comandi via --serve (AL_DEMOLISCI sull'asse `axis`) e ne controlla le risposte; con `csv_path`
-    poi `AL_ALTEZZA L 2.70` e `AL_ABACO_CSV` (e, con `table_dxf`, `AL_ABACO` e il salvataggio in DXF)."""
+    poi `AL_ALTEZZA L 2.70` e `AL_ABACO_CSV` (e, con `table_dxf`, `AL_ABACO` e il salvataggio in DXF; con
+    `abaco_dir` anche, dopo, `AL_ALTEZZA L 3.00` e `AL_ESTRAI` in `abaco_dir`)."""
     rep.check(bool(session.ready.get("ok")), "sessione", f"app pronta (versione {session.ready.get('version', '?')})")
     resp = session.request({"op": "open", "path": str(src)})
     by_type = resp.get("by_type", {})
@@ -460,7 +482,7 @@ def checks_session(rep, session, src, out_dir, axis=AXIS_EXACT, csv_path=None, t
             detail += f"; token non consumati: {resp.get('unconsumed')}"
         rep.check(ok, f"run {cmd.split()[0]}", detail)
     if csv_path is not None:
-        abaco_commands(rep, session, csv_path, table_dxf)
+        abaco_commands(rep, session, csv_path, table_dxf, abaco_dir)
 
 
 def run_ok(rep, session, cmd):
@@ -472,8 +494,9 @@ def run_ok(rep, session, cmd):
     return resp
 
 
-def abaco_commands(rep, session, csv_path, table_dxf):
-    """Parte 2 (abachi e quantita'): altezza del livello, CSV dell'abaco, tabelle. I file si leggono dopo."""
+def abaco_commands(rep, session, csv_path, table_dxf, abaco_dir=None):
+    """Parte 2 (abachi e quantita'): altezza del livello, CSV dell'abaco, tabelle; con `abaco_dir`, l'altezza
+    cambiata senza rilanciare AL_ABACO e una seconda estrazione. I file si leggono dopo."""
     run_ok(rep, session, HEIGHT_CMD)
     run_ok(rep, session, f"AL_ABACO_CSV {csv_path}")
     if table_dxf is not None:
@@ -482,17 +505,22 @@ def abaco_commands(rep, session, csv_path, table_dxf):
         resp = session.request({"op": "save", "path": str(table_dxf)})
         rep.check(bool(resp.get("ok")) and resp.get("target_format") == "dxf", "abaco: salvataggio DXF",
                   f"{Path(table_dxf).name} (DXF)" if resp.get("ok") else str(resp))
+        if abaco_dir is not None:
+            # Le tabelle del disegno restano quelle a 2,70: l'estratto deve ricalcolarle a 3,00.
+            run_ok(rep, session, HEIGHT_AFTER_CMD)
+            run_ok(rep, session, f"AL_ESTRAI {abaco_dir}")
 
 
-def checks_files(rep, exe, env, work, out_dir, src_doc):
-    """Riconverte i tre DWG in DXF e controlla ognuno con ezdxf."""
+def read_extracts(rep, exe, env, work, out_dir, dxf_dir, base=BASE):
+    """Riconverte i tre DWG `<base>_<elaborato>.dwg` di `out_dir` in DXF (in `dxf_dir`) e li legge con ezdxf:
+    {chiave: documento}, con un controllo FALLITO per ogni file che manca o non si legge."""
     docs = {}
     for key, suffix in SUFFIX.items():
-        dwg = Path(out_dir) / f"{BASE}_{suffix}.dwg"
+        dwg = Path(out_dir) / f"{base}_{suffix}.dwg"
         if not dwg.is_file():
             rep.check(False, f"{key}: file", f"{dwg.name} non scritto")
             continue
-        dxf = Path(work) / f"{BASE}_{suffix}.dxf"
+        dxf = Path(dxf_dir) / f"{base}_{suffix}.dxf"
         ok, why = run_export(exe, dwg, dxf, env, work)
         if not rep.check(ok, f"{key}: ricarica", f"{dwg.name} -> DXF" if ok else f"--export fallito ({why})"):
             continue
@@ -500,6 +528,12 @@ def checks_files(rep, exe, env, work, out_dir, src_doc):
         if not rep.check(doc is not None, f"{key}: ezdxf", "letto" if doc is not None else err):
             continue
         docs[key] = doc
+    return docs
+
+
+def checks_files(rep, exe, env, work, out_dir, src_doc):
+    """Riconverte i tre DWG in DXF e controlla ognuno con ezdxf."""
+    docs = read_extracts(rep, exe, env, work, out_dir, work)
 
     src_lines = lines_of(src_doc, LAYER_MURI)
     if "fatto" in docs:
@@ -660,17 +694,67 @@ def check_abaco_tables(rep, table_dxf, rows):
           "visualizzazione *T, non la struttura a celle (da vedere in AutoCAD)")
 
 
+def abaco_texts(doc):
+    """I testi (MTEXT) dello spazio modello sul layer AL-ABACO: le tabelle d'abaco di un estratto, che sono linee
+    e testi ordinari."""
+    return [e.plain_text() for e in doc.modelspace().query("MTEXT") if e.dxf.layer == LAYER_ABACO]
+
+
+def table_corners(doc):
+    """Il punto d'inserimento (x, y) di ogni ACAD_TABLE dello spazio modello: l'angolo in alto a sinistra."""
+    return [(t.dxf.insert.x, t.dxf.insert.y) for t in doc.modelspace().query("ACAD_TABLE")]
+
+
+def check_abaco_extract(rep, docs, corners):
+    """L'abaco nell'estrazione fatta dopo AL_ABACO e `AL_ALTEZZA L 3.00` (spec parte 2, 5.4): nei tre DWG nessuna
+    ACAD_TABLE e niente ARCHLINE; nel fatto e nel progetto niente su AL-ABACO; nella comparativa LINE e MTEXT su
+    AL-ABACO con i numeri ricalcolati (ABACO_FRESH), nessuno di quelli della tabella del disegno di lavoro
+    (ABACO_STALE), e una LINE che parte da ogni angolo `corners` (le ACAD_TABLE del disegno di lavoro)."""
+    for key, doc in docs.items():
+        tables = len(doc.modelspace().query("ACAD_TABLE"))
+        rep.check(tables == 0, f"{key}: nessuna ACAD_TABLE",
+                  "nessuna" if tables == 0 else f"{tables} ACAD_TABLE")
+        xdata, table = arch_xdata_appids(doc)
+        rep.check(not xdata and not table, f"{key}: niente ARCHLINE",
+                  "nessun XDATA ne' APPID ARCHLINE*" if not xdata and not table
+                  else f"XDATA {xdata}, tabella APPID {table}")
+    for key in ("fatto", "progetto"):
+        if key in docs:
+            on = [e.dxftype() for e in docs[key].modelspace() if e.dxf.layer == LAYER_ABACO]
+            rep.check(not on, f"{key}: niente abaco", f"niente su {LAYER_ABACO}" if not on else f"{on}")
+    doc = docs.get("comparativa")
+    if doc is None:
+        return
+    texts = abaco_texts(doc)
+    lines = lines_of(doc, LAYER_ABACO)
+    rep.check(bool(texts) and bool(lines), "comparativa: abaco in linee e testi",
+              f"{len(lines)} LINE e {len(texts)} MTEXT su {LAYER_ABACO}")
+    for code, value in ABACO_FRESH.items():
+        hit = code in texts and value in texts
+        rep.check(hit, f"comparativa: riga {code} ricalcolata",
+                  f"codice {code} e {value}" if hit else f"codice {code} o {value} mancanti")
+    stale = [v for v in ABACO_STALE if v in texts]
+    rep.check(not stale, "comparativa: niente numeri della tabella del disegno di lavoro",
+              "nessuno di " + ", ".join(ABACO_STALE) if not stale else f"trovati {stale}")
+    missing = [c for c in corners if not any(touches(c, seg) for seg in lines)]
+    rep.check(bool(corners) and not missing, "comparativa: tabelle nel punto del disegno di lavoro",
+              f"{len(corners)} tabelle, la griglia parte dal loro punto d'inserimento" if corners and not missing
+              else f"angoli senza griglia {missing} (tabelle del disegno di lavoro: {len(corners)})")
+
+
 def run_case(rep, exe, env, work, src, src_doc, before, axis):
     """Un giro: sessione --serve con AL_DEMOLISCI sull'asse `axis`, estratti in `work/out`, DXF riconvertiti in
-    `work`, controlli su `rep`."""
+    `work`, controlli su `rep`; poi l'estrazione con l'abaco, in `work/out-abaco` (DXF accanto ai DWG)."""
     work = Path(work)
     out_dir = work / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = work / "abaco.csv"
     table_dxf = work / "abaco-lavoro.dxf"
+    abaco_dir = work / ABACO_OUT
+    abaco_dir.mkdir(parents=True, exist_ok=True)
     session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
     try:
-        checks_session(rep, session, src, out_dir, axis, csv_path, table_dxf)
+        checks_session(rep, session, src, out_dir, axis, csv_path, table_dxf, abaco_dir)
     except BaseException:
         session.kill()
         raise
@@ -684,6 +768,11 @@ def run_case(rep, exe, env, work, src, src_doc, before, axis):
     checks_files(rep, exe, env, work, out_dir, src_doc)
     rows = check_abaco_csv(rep, csv_path)
     check_abaco_tables(rep, table_dxf, rows)
+    lavoro, _ = read_dxf(table_dxf) if Path(table_dxf).is_file() else (None, None)
+    abaco_rep = Prefixed(rep, ABACO_PREFIX)
+    # Dopo il salvataggio il disegno di lavoro si chiama come `abaco-lavoro.dxf`: e' il nome dei DWG estratti.
+    docs = read_extracts(abaco_rep, exe, env, work, abaco_dir, abaco_dir, base=Path(table_dxf).stem)
+    check_abaco_extract(abaco_rep, docs, table_corners(lavoro) if lavoro is not None else [])
 
 
 def run_bim_extract(exe, work, rep):
