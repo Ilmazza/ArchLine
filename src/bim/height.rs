@@ -78,8 +78,10 @@ pub fn resolve_varco(own: Option<f64>, unit: DrawingUnit) -> Height {
 }
 
 /// Altezza di un locale di progetto: il seme proprio; altrimenti i locali di
-/// fatto della sua faccia, se concordi (con lo stato di quelli); se discordi o
-/// con uno `n.d.`, `n.d.` con l'avviso; senza locali di fatto, la predefinita.
+/// fatto della sua faccia, se concordi (con lo stato di quelli); se nessuno ha
+/// un'altezza, `n.d.` con la nota e senza avviso (non è una discordanza); se
+/// discordi, o alcuni sì e altri `n.d.`, `n.d.` con l'avviso; senza locali di
+/// fatto, la predefinita.
 pub fn resolve_project_room(
     seed_own: Option<f64>,
     fatto: &[(String, Height)],
@@ -92,6 +94,12 @@ pub fn resolve_project_room(
     let Some((_, first)) = fatto.first() else {
         return (resolve(None, default, unit), None);
     };
+    if fatto.iter().all(|(_, h)| h.value_m.is_none()) {
+        return (
+            Height::missing(Some("altezza mancante nei locali di fatto")),
+            None,
+        );
+    }
     let concordant = match first.value_m {
         Some(first_m) => fatto.iter().all(|(_, h)| {
             h.value_m
@@ -271,6 +279,36 @@ mod tests {
         let (r, notice) = resolve_project_room(None, &fatto, Some(2.7), Metri);
         assert_eq!(r.state, HeightState::NonDisponibile);
         assert!(matches!(notice, Some(Notice::AltezzeDiscordi { .. })));
+    }
+
+    /// Ruling N: se nessun locale di fatto ha un'altezza (né propria né
+    /// predefinita) non è una discordanza: `n.d.` con la nota, senza avviso,
+    /// con uno o più locali, qualunque sia la predefinita (vale solo senza
+    /// locali di fatto).
+    #[test]
+    fn project_room_fatto_without_heights_is_missing_without_notice() {
+        let one = vec![named("A", Height::missing(None))];
+        let two = vec![
+            named("A", Height::missing(None)),
+            named("B", Height::missing(None)),
+        ];
+        for fatto in [one, two] {
+            for default in [None, Some(2.7)] {
+                let (r, notice) = resolve_project_room(None, &fatto, default, Metri);
+                assert_eq!(r.value_m, None, "{default:?}");
+                assert_eq!(r.state, HeightState::NonDisponibile, "{default:?}");
+                assert_eq!(
+                    r.note.as_deref(),
+                    Some("altezza mancante nei locali di fatto"),
+                    "{default:?}"
+                );
+                assert_eq!(notice, None, "{default:?}");
+            }
+        }
+        // Il seme proprio vince anche qui.
+        let only_missing = [named("A", Height::missing(None))];
+        let (r, _) = resolve_project_room(Some(3.0), &only_missing, None, Metri);
+        assert_eq!(r.value_m, Some(3.0));
     }
 
     #[test]

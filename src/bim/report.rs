@@ -275,7 +275,7 @@ impl Notice {
                     .map(|v| v.map_or("n.d.".to_string(), format_decimal))
                     .collect();
                 format!(
-                    "Altezze discordi nei locali {} ({} m): altezza non disponibile.",
+                    "Altezze discordi nei locali {} ({}): altezza non disponibile.",
                     names.join(" + "),
                     values.join("; ")
                 )
@@ -511,7 +511,7 @@ mod tests {
                     names: vec!["A".into(), "B".into(), "C".into()],
                     values_m: vec![Some(2.7), Some(3.0), None],
                 },
-                "Altezze discordi nei locali A + B + C (2,70; 3,00; n.d. m): altezza non disponibile.",
+                "Altezze discordi nei locali A + B + C (2,70; 3,00; n.d.): altezza non disponibile.",
             ),
             (
                 Notice::SpessoreDiverso {
