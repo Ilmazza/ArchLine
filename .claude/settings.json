@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "PowerShell(Get-Command cargo -ErrorAction SilentlyContinue | Select-Object Source; Test-Path \"$env:USERPROFILE\\\\.cargo\\\\bin\\\\cargo.exe\"; Get-Content README.md | Select-Object -Skip 144 -First 35; Test-Path target)"
+    ]
+  }
+}
