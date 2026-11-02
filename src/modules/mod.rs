@@ -30,6 +30,7 @@ pub mod draw;
 pub mod insert;
 pub mod layout;
 pub mod manage;
+pub mod ristrutturazione;
 pub mod model;
 pub mod parametric;
 pub mod view;
