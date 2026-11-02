@@ -1071,7 +1071,7 @@ impl Pipeline {
             visibility: vis,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                has_dynamic_offset: binding < 2,
                 min_binding_size: None,
             },
             count: None,
@@ -3978,8 +3978,13 @@ analytic={:.1} regular={:.1} blocks={:.1}",
         self.gpu_point_clouds.upload(device, queue, set);
     }
 
-    pub fn set_point_cloud_view(&mut self, queue: &wgpu::Queue, light: [f32; 12]) {
-        self.gpu_point_clouds.set_view(queue, light);
+    pub fn set_point_cloud_view(
+        &mut self,
+        queue: &wgpu::Queue,
+        light: [f32; 12],
+        clip: &[[f32; 4]],
+    ) {
+        self.gpu_point_clouds.set_view(queue, light, clip);
     }
 
     /// Upload the frame's SDF text-quad vertices, and (re)build the GPU glyph
@@ -5053,7 +5058,7 @@ analytic={:.1} regular={:.1} blocks={:.1}",
                     if self.wipeout_skip_flags.get(i).copied().unwrap_or(false) {
                         continue;
                     }
-                    pass.set_bind_group(1, &wipeout.bind_group, &[]);
+                    pass.set_bind_group(1, &wipeout.bind_group, &wipeout.dynamic_offsets);
                     pass.set_vertex_buffer(0, wipeout.vertex_buffer.slice(..));
                     pass.set_vertex_buffer(1, wipeout.instance_buffer.slice(..));
                     pass.draw(0..6, 0..wipeout.instance_count);

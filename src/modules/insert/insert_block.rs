@@ -645,7 +645,10 @@ impl CadCommand for InsertBlockCommand {
                     }
                 }
             }
-            Step::ListPattern => CmdResult::Measurement(self.listing("*")),
+            Step::ListPattern => {
+                self.step = Step::Name;
+                CmdResult::ReportMeasurement(self.listing("*"))
+            }
             Step::Point => {
                 if self.repeat && self.placed > 0 {
                     CmdResult::Cancel
@@ -741,7 +744,10 @@ impl CadCommand for InsertBlockCommand {
                     None => self.not_found(t),
                 }
             }
-            Step::ListPattern => CmdResult::Measurement(self.listing(t)),
+            Step::ListPattern => {
+                self.step = Step::Name;
+                CmdResult::ReportMeasurement(self.listing(t))
+            }
             Step::Point => match up.as_str() {
                 "B" | "BASEPOINT" => {
                     self.step = Step::Preset(Preset::Base);

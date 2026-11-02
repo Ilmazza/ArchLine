@@ -431,7 +431,12 @@ impl OpenCADStudio {
                 .active_cmd
                 .as_ref()
                 .is_some_and(|command| command.groups_undo());
-            if !self.joins_plugin_scope(i) && !grouping {
+            let held = self.tabs[i]
+                .history
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.held);
+            if !self.joins_plugin_scope(i) && !grouping && !held {
                 self.finish_pending_history(i);
             }
         }
@@ -472,6 +477,7 @@ impl OpenCADStudio {
             parametric_constraints_before: self.tabs[i].scene.parametric_constraints.clone(),
             plugin_owned: false,
             keep_empty: false,
+            held: false,
         });
     }
 
@@ -781,6 +787,7 @@ impl OpenCADStudio {
         label: impl Into<String>,
     ) -> PendingObjectDelta {
         self.finish_pending_history(i);
+        self.tabs[i].scene.begin_undo_recording();
         PendingObjectDelta {
             label: label.into(),
             current_layout: self.tabs[i].scene.current_layout.clone(),
@@ -791,6 +798,17 @@ impl OpenCADStudio {
     }
 
     pub(super) fn commit_group_undo(&mut self, i: usize, pending: PendingObjectDelta) {
+        let entities: Vec<_> = self.tabs[i]
+            .scene
+            .take_undo_recording()
+            .map(|rec| rec.into_recorded_images().0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(handle, before)| {
+                let after = self.tabs[i].scene.document.get_entity_arc(handle);
+                (handle, before, after)
+            })
+            .collect();
         let after = self.group_object_state(i);
         let mut handles: HashSet<Handle> = pending.before.keys().copied().collect();
         handles.extend(after.keys().copied());
@@ -806,12 +824,12 @@ impl OpenCADStudio {
                 })
             })
             .collect();
-        if entries.is_empty() {
+        if entries.is_empty() && entities.is_empty() {
             return;
         }
         let delta = DeltaSnapshot {
             visibility_states: None,
-            entities: Vec::new(),
+            entities,
             current_layout_before: pending.current_layout,
             current_layout_after: self.tabs[i].scene.current_layout.clone(),
             selected_before: pending.selected_before,
@@ -1345,6 +1363,10 @@ impl OpenCADStudio {
         changes: &[(Handle, crate::scene::ChangeKind)],
     ) {
         self.tabs[i].edit_revision = self.tabs[i].edit_revision.wrapping_add(1);
+        // The step's entity delta is the only account of what it changed when
+        // it restores a whole document snapshot; a whole-state bump leaves the
+        // geometry journal unable to diff it (see `control_settle_inner`).
+        let net_changes = net_entity_changes(changes);
         {
             let scene = &mut self.tabs[i].scene;
             if had_full {
@@ -1352,41 +1374,18 @@ impl OpenCADStudio {
                 // for the final state. Unlike the old path, decoded images stay
                 // cached instead of being immediately cleared.
                 scene.rebuild_derived_caches();
-            } else if !changes.is_empty() {
-                use crate::scene::ChangeKind::{Added, Modified, Removed};
-                let mut net: FxHashMap<Handle, crate::scene::ChangeKind> = FxHashMap::default();
-                for &(handle, kind) in changes {
-                    match (net.get(&handle).copied(), kind) {
-                        (None, kind) => {
-                            net.insert(handle, kind);
-                        }
-                        (Some(Added), Removed) => {
-                            net.remove(&handle);
-                        }
-                        (Some(Added), _) => {}
-                        (Some(Removed), Added) => {
-                            net.insert(handle, Modified);
-                        }
-                        (Some(Modified), Removed) => {
-                            net.insert(handle, Removed);
-                        }
-                        (Some(Removed), _) | (Some(Modified), _) => {}
-                    }
-                }
-                let final_changes: Vec<_> = net.into_iter().collect();
-                for &(handle, _) in &final_changes {
+            } else if !net_changes.is_empty() {
+                for &(handle, _) in &net_changes {
                     scene.reseed_derived_caches(handle);
                 }
-                if !final_changes.is_empty() {
-                    if scene.changes_touch_block_definition(&final_changes) {
-                        // A block-local delta changes the assembled definition
-                        // consumed by every INSERT (including nested blocks).
-                        // Replaying only the child handle leaves those cached
-                        // references visually stale after BEDIT closes.
-                        scene.bump_geometry();
-                    } else {
-                        scene.bump_entities_after_parametric_solve(&final_changes);
-                    }
+                if scene.changes_touch_block_definition(&net_changes) {
+                    // A block-local delta changes the assembled definition
+                    // consumed by every INSERT (including nested blocks).
+                    // Replaying only the child handle leaves those cached
+                    // references visually stale after BEDIT closes.
+                    scene.bump_geometry();
+                } else {
+                    scene.bump_entities_after_parametric_solve(&net_changes);
                 }
             }
             // Geometry or visibility replay does not change the constraint
@@ -1395,6 +1394,9 @@ impl OpenCADStudio {
                 scene.sync_native_parametric_graph();
             }
             scene.clear_preview_wire();
+        }
+        if had_full {
+            self.control.note_history_changes(net_changes);
         }
         // UCS state is cached separately from its persisted header/viewport
         // fields. History may just have restored those fields, so adopt them
@@ -1568,6 +1570,35 @@ impl OpenCADStudio {
         self.command_line
             .push_output(crate::tf!("Redo: {last_label}").as_ref());
     }
+}
+
+/// Collapse a step's entity changes to one kind per handle: an add followed
+/// by a remove never existed, a remove dominates a prior modify, and a
+/// re-add of a removed handle reads as a modify.
+fn net_entity_changes(
+    changes: &[(Handle, crate::scene::ChangeKind)],
+) -> Vec<(Handle, crate::scene::ChangeKind)> {
+    use crate::scene::ChangeKind::{Added, Modified, Removed};
+    let mut net: FxHashMap<Handle, crate::scene::ChangeKind> = FxHashMap::default();
+    for &(handle, kind) in changes {
+        match (net.get(&handle).copied(), kind) {
+            (None, kind) => {
+                net.insert(handle, kind);
+            }
+            (Some(Added), Removed) => {
+                net.remove(&handle);
+            }
+            (Some(Added), _) => {}
+            (Some(Removed), Added) => {
+                net.insert(handle, Modified);
+            }
+            (Some(Modified), Removed) => {
+                net.insert(handle, Removed);
+            }
+            (Some(Removed), _) | (Some(Modified), _) => {}
+        }
+    }
+    net.into_iter().collect()
 }
 
 pub(super) fn history_dropdown_labels(stack: &[HistorySnapshot]) -> Vec<String> {

@@ -33,9 +33,14 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 /// `block_delete` gained its optional `force` parameter. With API v11
 /// `grip_drag` became optional-`handle` (built-in entity grips) plus optional
 /// `plugin` (dragging a plugin-declared custom grip, routed to its owner).
-/// Sixteen generated intent tools now follow the four facades.
+/// Sixteen generated intent tools now follow the four facades. `node_graph`
+/// joined the execute ops; the action list gained `extraction_outdated`,
+/// `print_all` and `recovery_accept`.
+/// `input` gained `handles`, so a selection prompt can be handed a set
+/// without a round trip through `select`; the dialog actions gained
+/// `dialog_discard` and `dialog_cancel`.
 #[cfg(test)]
-const TOOL_SCHEMA_DIGEST: &str = "3d94fffb82a516e539c1622f2f6bda16dd348419adb2fccfaefa14997a685460";
+const TOOL_SCHEMA_DIGEST: &str = "31b9a8521e51fee379efeea3a7471fde1d7a7dea3ce3257b3f6e7fec411a7d2d";
 const MAX_REQUEST: usize = 1_048_576;
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 3_600_000;
@@ -99,6 +104,7 @@ const EXECUTE_OPS: &[&str] = &[
     "entities_create",
     "entities_delete",
     "entities_transform",
+    "node_graph",
     "text_replace",
     "block_define",
     "block_delete",
@@ -443,7 +449,6 @@ struct ResourceStore {
     snapshots: HashMap<String, CachedSnapshot>,
     order: VecDeque<String>,
     latest: HashMap<String, String>,
-    last_captures: HashMap<String, (image::RgbaImage, String)>,
     tiles: HashMap<String, CachedSnapshot>,
     tile_order: VecDeque<String>,
     pyramid_manifests: HashMap<String, Value>,
@@ -2084,7 +2089,7 @@ fn call_tool(
                     "ok": false,
                     "status": "failed",
                     "code": "use_capture_tool",
-                    "error": "Viewport captures run through the ocs_capture tool (scope, annotate, tiles, diff). ocs_read exposes capture products already stored as resources, not new captures."
+                    "error": "Viewport captures run through the ocs_capture tool (scope, annotate, tiles). ocs_read exposes capture products already stored as resources, not new captures."
                 }));
             }
             if op == "tools" {
@@ -2153,15 +2158,9 @@ fn call_tool(
             let scope = arguments["scope"].as_str().unwrap_or("viewport");
             let max_dimension = arguments["max_dimension"].as_u64().unwrap_or(1600);
             let delivery = arguments["delivery"].as_str().unwrap_or("inline");
-            let diff = arguments["diff"].as_bool().unwrap_or(false);
-            let diff_mode = arguments["diff_mode"].as_str().unwrap_or("highlight");
-            let reset_baseline = arguments["reset_diff_baseline"].as_bool().unwrap_or(false);
+            refuse_retired_capture_parameters(&arguments).map_err(CallError::from)?;
             let tile = arguments.get("tile");
             let want_manifest = arguments["pyramid_manifest"].as_bool().unwrap_or(false);
-
-            if reset_baseline {
-                resources.last_captures.remove(session_id);
-            }
 
             let mut tile_info: Option<(u32, u32, u32, [f64; 4])> = None;
             if let Some(tile_val) = tile {
@@ -2276,92 +2275,11 @@ fn call_tool(
                 }
             }
 
-            let mut final_bytes = bytes;
-            if diff {
-                let current_img = image::load_from_memory(&final_bytes)
-                    .map_err(|e| format!("Failed to decode capture for visual diff: {e}"))?
-                    .to_rgba8();
-
-                let mut p2w = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-                if let Some(arr) = meta
-                    .get("_spatial")
-                    .and_then(|s| s.get("pixel_to_world_matrix"))
-                    .and_then(Value::as_array)
-                {
-                    if arr.len() == 6 {
-                        for (i, v) in arr.iter().enumerate() {
-                            if let Some(num) = v.as_f64() {
-                                p2w[i] = num;
-                            }
-                        }
-                    }
-                }
-
-                if let Some((prev_img, prev_hash)) = resources.last_captures.get(session_id) {
-                    let diff_res = crate::app::control::vision::compute_visual_diff(
-                        prev_img,
-                        &current_img,
-                        &p2w,
-                    );
-                    let diff_info = json!({
-                        "is_baseline": false,
-                        "baseline_hash": prev_hash,
-                        "changed": diff_res.changed,
-                        "change_percentage": (diff_res.change_percentage * 100.0).round() / 100.0,
-                        "changed_pixels": diff_res.changed_pixels,
-                        "dirty_pixel_bounds": diff_res.dirty_pixel_bounds,
-                        "dirty_world_bounds": diff_res.dirty_world_bounds,
-                        "patch_resolution": diff_res.patch_resolution,
-                        "mode": diff_mode,
-                    });
-                    if let Some(obj) = meta.as_object_mut() {
-                        obj.insert("diff".into(), diff_info);
-                    }
-
-                    if diff_res.changed {
-                        match diff_mode {
-                            "crop" => {
-                                if let Some(crop) = &diff_res.cropped_patch {
-                                    final_bytes =
-                                        crate::app::control::vision::encode_image_png(crop)?;
-                                }
-                            }
-                            "highlight" => {
-                                final_bytes = crate::app::control::vision::encode_image_png(
-                                    &diff_res.diff_overlay,
-                                )?;
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    let diff_info = json!({
-                        "is_baseline": true,
-                        "changed": false,
-                        "change_percentage": 0.0,
-                        "changed_pixels": 0,
-                        "message": "Baseline capture established; subsequent captures with diff: true will report dirty regions.",
-                        "mode": diff_mode,
-                    });
-                    if let Some(obj) = meta.as_object_mut() {
-                        obj.insert("diff".into(), diff_info);
-                    }
-                }
-
-                let mut base_hasher = Sha256::new();
-                let full_png = crate::app::control::vision::encode_image_png(&current_img)?;
-                base_hasher.update(&full_png);
-                let current_full_hash = format!("{:x}", base_hasher.finalize());
-                resources
-                    .last_captures
-                    .insert(session_id.to_string(), (current_img, current_full_hash));
-            }
-
             let mut hasher = Sha256::new();
-            hasher.update(&final_bytes);
+            hasher.update(&bytes);
             let hash = format!("{:x}", hasher.finalize());
-            let b64 = BASE64.encode(&final_bytes);
-            let bytes_len = final_bytes.len();
+            let b64 = BASE64.encode(&bytes);
+            let bytes_len = bytes.len();
 
             let uri = resources.insert(session_id, &hash, b64.clone(), bytes_len, meta.clone());
             if let Some(obj) = meta.as_object_mut() {
@@ -2540,9 +2458,6 @@ pub(crate) fn capture_input_schema() -> Value {
             "scope":{"type":"string","enum":["viewport","window"],"default":"viewport","description":"Capture only the drawing viewport by default, or the complete application window."},
             "max_dimension":{"type":"integer","minimum":256,"maximum":4096,"default":1600,"description":"Resize the longest image edge to at most this many pixels."},
             "delivery":{"type":"string","enum":["inline","resource","both"],"default":"inline","description":"Image delivery method: 'inline' embeds base64 in tool content, 'resource' returns an MCP cad:// URI reference without inlining image bytes, 'both' returns both inline image and cad:// URI."},
-            "diff":{"type":"boolean","default":false,"description":"If true, calculates visual differential compared to the previous capture of this session, returning dirty bounds and changed areas."},
-            "diff_mode":{"type":"string","enum":["highlight","crop","metadata_only"],"default":"highlight","description":"Visual diff representation: 'highlight' returns full image with changed areas highlighted in vibrant green and unchanged background dimmed; 'crop' returns only the cropped dirty bounding box (saving maximum bandwidth/tokens); 'metadata_only' leaves image untouched but populates the diff metadata."},
-            "reset_diff_baseline":{"type":"boolean","default":false,"description":"If true, discards any previous diff baseline for this session and establishes this capture as the new baseline."},
             "view":{"type":"string","enum":["current","extents","selection","region"],"default":"current","description":"Frame the camera before capture: extents fits all entities, selection fits selected entities, region fits explicit world bounds."},
             "bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"World XY bounding box [min_x, min_y, max_x, max_y] to zoom and fit in view before capturing (used with view: 'region')."},
             "focus_handles":{"type":"array","items":{"type":"string"},"description":"Hex handles of entities to zoom and fit in view before capturing."},
@@ -2568,7 +2483,7 @@ pub(crate) fn tool_definitions() -> Value {
         {
             "name":"ocs_read",
             "description":"Use entity_schema with parameters.type for creation fields/examples; omit type to list. Use validate with parameters.request to check an execute request without running it (no live document checks). Use guide with parameters.name to read workflow, architecture, capture or batch-bindings guidance (omit name to list). Discover capabilities and record schemas, or read state, complete database records, command manifests, entities, blocks (semantic block instances with attributes, definition tags and dynamic properties), properties, kernel measurements and spatial relationships, history, events or operation status from a live OCS session. Use batch_result with parameters.request_id to retrieve retained batch details without executing steps; available only in the originating MCP connection, for up to 64 retained batches per session.",
-            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
+            "inputSchema":{"type":"object","properties":{"ocs_session_id":{"type":"string","minLength":1,"description":"Value of session_id returned by ocs_sessions."},"op":{"type":"string","enum":READ_OPS,"default":"state"},"parameters":{"type":"object","description":"Operation-specific filters.","properties":{"request":{"type":"object","description":"Execute request to preflight without dispatch. request_id may be omitted. Batch bindings are checked structurally; result-dependent values require execution."},"name":{"type":"string","description":"Command name, block name/glob, or record name."},"names":{"type":"array","items":{"type":"string"},"description":"Block name or wildcard glob filters (e.g. ['*'], ['DOOR*']) for op: blocks."},"extract_attributes":{"type":"boolean","default":true,"description":"Extract ATTRIB values, ATTDEF defaults, and visible definition text tags (e.g. TAG, DIMS) for op: blocks."},"extract_dynamic_properties":{"type":"boolean","default":true,"description":"Extract dynamic block parameters, visibility states, and lookup values for op: blocks."},"include_anonymous":{"type":"boolean","default":false,"description":"Include unlinked internal anonymous blocks (*U..., *D..., *T...) in op: blocks."},"search":{"type":"string","description":"Case-insensitive command or record-type search."},"find":{"type":"string","description":"Text query string for text_search."},"match_case":{"type":"boolean","default":false,"description":"Case-sensitive text search."},"whole_word":{"type":"boolean","default":false,"description":"Match only whole words."},"ignore_accents":{"type":"boolean","description":"Ignore accents/diacritics in text (defaults to true when match_case is false)."},"scope":{"type":"string","enum":["all","active_space","blocks"],"default":"all","description":"Text search scope."},"system_spellcheck":{"type":"boolean","default":false,"description":"Use native OS spell-checker (Windows, macOS, Linux)."},"language":{"type":"string","description":"Language tag for spell-checker (e.g. 'fr-FR', 'en-US', 'de-DE', 'es-ES')."},"suggest":{"type":"boolean","default":true,"description":"Include suggested corrections for misspelled words."},"check_terms":{"type":"array","items":{"type":"string"},"description":"List of terms or suspect misspellings to flag in text_audit."},"dictionary":{"type":"array","items":{"type":"string"},"description":"Known valid words for text_audit dictionary check."},"pairs":{"type":"array","description":"Find/replace pairs for dry-run simulation in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"dry_run_pairs":{"type":"array","description":"Alias for pairs in text_audit.","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"}},"required":["find","replace"]}},"document_id":{"type":"integer","minimum":0},"path":{"type":"string","description":"Optional intended output path for audit; extension determines target format."},"target_format":{"type":"string","enum":["dwg","dxf"],"description":"Intended output format for audit."},"target_version":{"type":"string","enum":["R14","2000","2004","2007","2010","2013","2018","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"],"description":"Intended CAD output version for audit."},"collection":{"type":"string","description":"Record collection, all for records, or omit to discover collections and schema types."},"handle":{"type":"string"},"handles":{"type":"array","items":{"type":"string"},"description":"Exact entity or record handles."},"type":{"type":"string","description":"Entity or record type filter; for record_schema, returns its complete type graph and writable field paths."},"layer":{"type":"string","description":"Layer name filter for query; * and ? are wildcards."},"xdata_app":{"type":"string","description":"Only entities carrying XDATA of this application (query)."},"detail":{"type":"string","enum":["summary","geometry","full"],"default":"geometry","description":"Entity detail returned by query."},"fields":{"type":"array","items":{"type":"string"},"description":"Return only these entity fields plus handle."},"paths":{"type":"array","items":{"type":"string"},"description":"Project RFC 6901 JSON Pointer paths relative to record.properties."},"where":{"type":"array","description":"All property filters must match.","items":{"type":"object","properties":{"path":{"type":"string"},"op":{"type":"string","enum":["eq","ne","lt","lte","gt","gte","contains","starts_with","ends_with","in","exists","not_exists"],"default":"eq"},"value":{}},"required":["path"],"additionalProperties":false}},"near":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Rank planar curves by exact kernel distance to this world XY point."},"point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"World point whose object snap the snap op reports."},"from":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Base point for perpendicular and tangent snaps (snap op)."},"contains_point":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3,"description":"Return closed planar curves containing this world XY point."},"bounds":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Filter entities whose world XY bounds overlap [min_x,min_y,max_x,max_y]."},"intersections":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":2,"description":"Return exact kernel intersections between two planar curve handles."},"after":{"type":"integer","minimum":0,"description":"Event cursor."},"request_id":{"type":"string","description":"Operation id to query."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}},"anyOf":[{"required":["ocs_session_id"]},{"required":["op"],"properties":{"op":{"enum":["guide","entity_schema","validate"]}}}],"additionalProperties":false},
             "outputSchema":read_output_schema(),
             "title":"Read OCS state","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         },
@@ -2581,7 +2496,7 @@ pub(crate) fn tool_definitions() -> Value {
         },
         {
             "name":"ocs_capture",
-            "description":"Capture the actual current OCS drawing viewport or window as a bounded PNG with optional camera framing, entity highlighting, spatial coordinates and Set-of-Marks annotations. Works quietly in background and overlapped window states without stealing focus. Read the capture guide for annotations, diff, resource delivery and tiling.",
+            "description":"Capture the actual current OCS drawing viewport or window as a bounded PNG with optional camera framing, entity highlighting, spatial coordinates and Set-of-Marks annotations. Works quietly in background and overlapped window states without stealing focus. Read the capture guide for annotations, resource delivery and tiling.",
             "inputSchema":capture_input_schema(),
             "title":"Capture OCS window","annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         }
@@ -2593,18 +2508,24 @@ pub(crate) fn tool_definitions() -> Value {
     tools
 }
 
+/// The capture used to compute a visual diff against the previous frame.
+/// That comparison was never trustworthy — its baseline reset whenever the
+/// camera moved and the on-screen command line counted as changed pixels —
+/// so it was removed rather than repaired, and a request that still asks for
+/// it is refused by name instead of quietly returning a plain capture.
+fn refuse_retired_capture_parameters(arguments: &Value) -> Result<(), String> {
+    const RETIRED: [&str; 3] = ["diff", "diff_mode", "reset_diff_baseline"];
+    match RETIRED.iter().find(|key| arguments.get(**key).is_some()) {
+        Some(key) => Err(format!(
+            "ocs_capture no longer computes a visual diff; remove '{key}' (retired: {}) and compare two captures yourself",
+            RETIRED.join(", ")
+        )),
+        None => Ok(()),
+    }
+}
+
 fn tool_result(value: Value) -> Value {
     if value.get("$resource").is_some() || value.get("$image").is_some() {
-        // A baseline also reports changed=false, but the client has not seen
-        // that image yet. Only omit media after an actual unchanged comparison.
-        // Keep the capture metadata (hash, URI, spatial data and request id)
-        // so clients can still fetch the stored image explicitly if needed.
-        let meta = &value["metadata"];
-        if meta["diff"]["is_baseline"].as_bool() == Some(false)
-            && meta["diff"]["changed"].as_bool() == Some(false)
-        {
-            return tool_result(meta.clone());
-        }
         let mut content = Vec::new();
         if let Some(res) = value.get("$resource") {
             let uri = res["uri"].as_str().unwrap_or("");
@@ -4323,65 +4244,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_capture_omits_media_but_preserves_metadata() {
-        let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]));
-        let diff = crate::app::control::vision::compute_visual_diff(
-            &image,
-            &image,
-            &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        );
-        assert!(!diff.changed);
-        for delivery in ["inline", "resource", "both"] {
-            let metadata = json!({
-                "hash":"unchanged-hash", "uri":"cad://session/s/snapshot/unchanged-hash.png",
-                "request_id":"capture-2", "revision":12,
-                "_spatial":{"crs":"CAD_WCS"},
-                "diff":{"is_baseline":false,"changed":diff.changed}
-            });
-            let mut capture = json!({"metadata":metadata});
-            if delivery != "resource" {
-                capture["$image"] = json!("image-bytes-must-not-be-returned");
-            }
-            if delivery != "inline" {
-                capture["$resource"] = json!({"uri":metadata["uri"],"mimeType":"image/png"});
-            }
-            let result = tool_result(capture);
-            assert_eq!(result["isError"], false);
-            assert_eq!(result["structuredContent"], metadata);
-            let content = result["content"].as_array().unwrap();
-            assert_eq!(content.len(), 1);
-            assert_eq!(content[0]["type"], "text");
-            assert_eq!(
-                serde_json::from_str::<Value>(content[0]["text"].as_str().unwrap()).unwrap(),
-                metadata
-            );
-        }
-    }
-
-    #[test]
-    fn baseline_changed_and_non_diff_captures_keep_images() {
-        for diff in [
-            json!({"is_baseline":true,"changed":false}),
-            json!({"is_baseline":false,"changed":true}),
-            Value::Null,
-        ] {
-            let result = tool_result(json!({
-                "$image":"baseline-or-changed-png",
-                "metadata":{"diff":diff}
-            }));
-            assert!(result["content"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(
-                    |block| block["type"] == "image" && block["data"] == "baseline-or-changed-png"
-                ));
-        }
-    }
-
-    #[test]
-    fn capture_tool_schema_and_diff_metadata_handling() {
-        // 1. Verify ocs_capture schema has diff parameters
+    fn capture_does_not_advertise_a_visual_diff() {
         let tools = tool_definitions();
         let capture_tool = tools
             .as_array()
@@ -4390,77 +4253,46 @@ mod tests {
             .find(|t| t["name"] == "ocs_capture")
             .expect("ocs_capture tool exists");
         let props = &capture_tool["inputSchema"]["properties"];
-        assert_eq!(props["diff"]["type"], "boolean");
-        assert_eq!(props["diff"]["default"], false);
-        assert_eq!(props["diff_mode"]["type"], "string");
-        assert_eq!(props["diff_mode"]["default"], "highlight");
-        let diff_modes = props["diff_mode"]["enum"].as_array().unwrap();
-        assert!(diff_modes.iter().any(|v| v == "highlight"));
-        assert!(diff_modes.iter().any(|v| v == "crop"));
-        assert!(diff_modes.iter().any(|v| v == "metadata_only"));
-        assert_eq!(props["reset_diff_baseline"]["type"], "boolean");
+        for retired in ["diff", "diff_mode", "reset_diff_baseline"] {
+            assert!(
+                props.get(retired).is_none(),
+                "ocs_capture still advertises '{retired}'"
+            );
+        }
         assert_eq!(props["delivery"]["type"], "string");
 
-        // 2. Test tool_result with diff metadata
-        let diff_capture_res = json!({
-            "$resource": {
-                "uri": "cad://session/s1/snapshot/diffhash789.png",
-                "mimeType": "image/png",
-                "hash": "diffhash789",
-                "bytes": 512
-            },
-            "metadata": {
-                "width": 800,
-                "height": 600,
-                "_spatial": {
-                    "crs": "CAD_WCS",
-                    "unit": "Millimeters",
-                    "pixel_to_world_matrix": [0.05, 0.0, 0.0, -0.05, -20.0, 15.0],
-                    "world_to_pixel_matrix": [20.0, 0.0, 0.0, -20.0, 400.0, 300.0]
-                },
-                "diff": {
-                    "is_baseline": false,
-                    "baseline_hash": "basehash123",
-                    "changed": true,
-                    "change_percentage": 2.5,
-                    "changed_pixels": 12000,
-                    "dirty_pixel_bounds": [100, 150, 300, 350],
-                    "dirty_world_bounds": [-15.0, -2.5, -5.0, 7.5],
-                    "patch_resolution": [201, 201],
-                    "mode": "crop"
-                }
-            }
-        });
+        for retired in ["diff", "diff_mode", "reset_diff_baseline"] {
+            let mut arguments = json!({"ocs_session_id": "s1"});
+            arguments[retired] = json!(true);
+            let error = refuse_retired_capture_parameters(&arguments)
+                .expect_err("the retired parameter must be refused, not ignored");
+            assert!(
+                error.contains(retired),
+                "'{retired}' must be named in the refusal: {error}"
+            );
+        }
+        assert!(refuse_retired_capture_parameters(&json!({"ocs_session_id": "s1"})).is_ok());
+    }
 
-        let structured = tool_result(diff_capture_res);
-        assert_eq!(structured["isError"], false);
-        assert_eq!(structured["structuredContent"]["diff"]["changed"], true);
-        assert_eq!(structured["structuredContent"]["diff"]["mode"], "crop");
-        assert_eq!(
-            structured["structuredContent"]["diff"]["dirty_pixel_bounds"],
-            json!([100, 150, 300, 350])
-        );
-        assert_eq!(
-            structured["structuredContent"]["diff"]["dirty_world_bounds"],
-            json!([-15.0, -2.5, -5.0, 7.5])
-        );
-        assert_eq!(
-            structured["structuredContent"]["_spatial"]["crs"],
-            "CAD_WCS"
-        );
-
-        let content = structured["content"].as_array().unwrap();
-        let text_block = content.iter().find(|c| {
-            c["type"] == "text"
-                && c["text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("\"dirty_pixel_bounds\"")
-        });
-        assert!(
-            text_block.is_some(),
-            "Metadata text block must format diff parameters"
-        );
+    #[test]
+    fn every_capture_delivers_its_image() {
+        for metadata in [
+            json!({"hash":"hash-1","uri":"cad://session/s/snapshot/hash-1.png"}),
+            json!({"hash":"hash-2","uri":"cad://session/s/snapshot/hash-2.png","revision":12}),
+        ] {
+            let result = tool_result(json!({
+                "$image":"capture-png",
+                "metadata":metadata
+            }));
+            assert_eq!(result["isError"], false);
+            assert_eq!(result["structuredContent"], metadata);
+            assert!(result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["type"] == "image"
+                    && block["data"] == "capture-png"));
+        }
     }
 
     #[test]

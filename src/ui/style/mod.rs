@@ -1,5 +1,6 @@
 pub mod anno_object_scale;
 pub mod archline_theme;
+pub mod chrome;
 pub mod common;
 pub mod dimstyle;
 pub(crate) mod editor_table;
@@ -9,11 +10,13 @@ pub mod mleaderstyle;
 pub mod mlstyle;
 pub mod plotstyle;
 pub mod point_style;
+pub mod ribbon_metrics;
 pub mod row_button;
 pub mod scale_manager;
 pub mod style_list;
 pub mod style_manager;
 pub mod tablestyle;
+pub mod text_metrics;
 pub mod textstyle;
 
 #[cfg(test)]

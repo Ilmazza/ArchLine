@@ -299,6 +299,7 @@ impl OpenCADStudio {
     ) -> std::collections::HashMap<Handle, Handle> {
         let deps = &self.clipboard_deps;
         let document = &mut self.tabs[i].scene.document;
+        let first_new_handle = document.next_handle();
         merge_app_ids(document, deps);
         let apps = eed_app_map(document, deps);
         let images = merge_image_definitions(document, deps);
@@ -306,6 +307,7 @@ impl OpenCADStudio {
         // rebuild instead of one per definition; same end state as the
         // per-definition bumps `Scene::define_block_raw` used to run.
         let (created, mleaders) = merge_blocks_and_mleader_styles(document, deps, &apps, &images);
+        ensure_pasted_image_reactors(&mut self.tabs[i].scene, &[], deps, first_new_handle);
         if created > 0 {
             self.tabs[i].scene.bump_geometry();
         }
@@ -362,6 +364,7 @@ impl OpenCADStudio {
             }
             None => PasteSpace::Model,
         };
+        let first_new_handle = self.tabs[i].scene.document.next_handle();
         let (by_index, handle_map) = paste_entities_kernel(
             &mut self.tabs[i].scene.document,
             &clipboard,
@@ -369,6 +372,7 @@ impl OpenCADStudio {
             translate.as_ref(),
             space,
         );
+        ensure_pasted_image_reactors(&mut self.tabs[i].scene, &by_index, &deps, first_new_handle);
         // Batched equivalent of `add_entity`'s per-add bump (same pattern as
         // `Scene::add_entities`): fresh top-level solids tessellate once here
         // instead of once per entity. Block-definition merges (and pasted
@@ -794,6 +798,40 @@ pub(crate) fn register_image_definition(
     Some(dictionary)
 }
 
+// The kernel has allocated the final entity handles. Register reactors in the
+// Scene shell so paste's existing undo scope captures objects and entity links.
+fn ensure_pasted_image_reactors(
+    scene: &mut crate::scene::Scene,
+    handles: &[Handle],
+    deps: &crate::app::ClipboardDeps,
+    first_new_handle: u64,
+) {
+    let mut images = handles.to_vec();
+    for block in &deps.blocks {
+        if let Some(record) = scene
+            .document
+            .block_records
+            .get(&block.name)
+            .filter(|record| record.handle.value() >= first_new_handle)
+        {
+            // Only newly imported members; existing definitions belong to the
+            // target drawing and COPY of an INSERT keeps their images intact.
+            images.extend(crate::scene::block_authoring::members(
+                &scene.document,
+                record.handle,
+            ));
+        }
+    }
+    for handle in images {
+        let Some(codec::EntityType::RasterImage(image)) = scene.document.get_entity(handle) else {
+            continue;
+        };
+        let mut entity = codec::EntityType::RasterImage(image.clone());
+        scene.ensure_image_definition(&mut entity);
+        *scene.document.get_entity_mut(handle).expect("pasted image") = entity;
+    }
+}
+
 /// Source image definition → this drawing's definition of the same file (one
 /// definition per file, as AutoCAD keeps it), recreated and registered in
 /// ACAD_IMAGE_DICT when the drawing has none. Pasting within the drawing
@@ -1207,13 +1245,11 @@ pub(crate) fn define_block_raw_doc(
     let next = doc.next_handle();
     let br_handle = Handle::new(next);
     let block_handle = Handle::new(next + 1);
-    let end_handle = Handle::new(next + 2);
     let mut block_record = codec::tables::BlockRecord::new(name);
     block_record.flags.anonymous =
         name.starts_with('*') && !(block_record.is_model_space() || block_record.is_paper_space());
     block_record.handle = br_handle;
     block_record.block_entity_handle = block_handle;
-    block_record.block_end_handle = end_handle;
     if doc.block_records.add(block_record).is_err() {
         return;
     }
@@ -1221,13 +1257,19 @@ pub(crate) fn define_block_raw_doc(
     block.common.handle = block_handle;
     block.common.owner_handle = br_handle;
     let _ = doc.add_entity(codec::EntityType::Block(block));
+    for mut entity in entities.iter().cloned() {
+        add_entity_clone_doc_inner(doc, &mut entity, br_handle);
+        let _ = doc.add_entity(entity);
+    }
+    // The terminator is allocated after the body so handle order matches
+    // record order inside the definition.
+    let end_handle = doc.allocate_handle();
     let mut block_end = codec::entities::BlockEnd::new();
     block_end.common.handle = end_handle;
     block_end.common.owner_handle = br_handle;
     let _ = doc.add_entity(codec::EntityType::BlockEnd(block_end));
-    for mut entity in entities.iter().cloned() {
-        add_entity_clone_doc_inner(doc, &mut entity, br_handle);
-        let _ = doc.add_entity(entity);
+    if let Some(record) = doc.block_records.get_mut(name) {
+        record.block_end_handle = end_handle;
     }
 }
 
@@ -1270,11 +1312,9 @@ fn define_transformed_block_doc(
     let next = doc.next_handle();
     let br_handle = Handle::new(next);
     let block_handle = Handle::new(next + 1);
-    let end_handle = Handle::new(next + 2);
     let mut br = codec::tables::BlockRecord::new(&new_name);
     br.handle = br_handle;
     br.block_entity_handle = block_handle;
-    br.block_end_handle = end_handle;
     // See `Scene::define_transformed_block`.
     br.flags.anonymous = true;
     doc.block_records.add(br).ok()?;
@@ -1282,16 +1322,20 @@ fn define_transformed_block_doc(
     block.common.handle = block_handle;
     block.common.owner_handle = br_handle;
     doc.add_entity(codec::EntityType::Block(block)).ok()?;
-    let mut block_end = codec::entities::BlockEnd::new();
-    block_end.common.handle = end_handle;
-    block_end.common.owner_handle = br_handle;
-    doc.add_entity(codec::EntityType::BlockEnd(block_end))
-        .ok()?;
     for sub in subs {
         let mut sub = sub.clone();
         crate::scene::view::dispatch::apply_transform(&mut sub, t);
         add_entity_clone_doc_inner(doc, &mut sub, br_handle);
         let _ = doc.add_entity(sub);
+    }
+    let end_handle = doc.allocate_handle();
+    let mut block_end = codec::entities::BlockEnd::new();
+    block_end.common.handle = end_handle;
+    block_end.common.owner_handle = br_handle;
+    doc.add_entity(codec::EntityType::BlockEnd(block_end))
+        .ok()?;
+    if let Some(record) = doc.block_records.get_mut(&new_name) {
+        record.block_end_handle = end_handle;
     }
     Some(new_name)
 }
@@ -1625,6 +1669,40 @@ mod clipboard_xdict_clone_tests {
             }
             other => panic!("expected recreated XRecord leaf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pasted_block_definition_ends_after_its_body() {
+        let mut doc = codec::Document::new();
+        let line = codec::entities::Line::from_points(
+            codec::types::Vector3::ZERO,
+            codec::types::Vector3::new(1.0, 0.0, 0.0),
+        );
+        super::define_block_raw_doc(
+            &mut doc,
+            "PASTED_IN",
+            codec::types::Vector3::ZERO,
+            &[codec::EntityType::Line(line)],
+        );
+        let record = doc
+            .block_records
+            .get("PASTED_IN")
+            .expect("the record is added");
+        let marker = record.block_entity_handle.value();
+        let end = record.block_end_handle.value();
+        let body: Vec<_> = record
+            .entity_handles
+            .iter()
+            .map(|handle| handle.value())
+            .collect();
+        assert!(
+            body.iter().all(|handle| *handle > marker),
+            "body handles follow the BLOCK marker: {body:?}"
+        );
+        assert!(
+            end > *body.iter().max().expect("the body is not empty"),
+            "the ENDBLK handle follows the body: marker {marker}, body {body:?}, end {end}"
+        );
     }
 
     /// PASTEBLOCK-style two-phase clone: recreate without a host entity, then
@@ -1972,6 +2050,125 @@ mod paste_entities_kernel_tests {
             image.definition_reactor_handle, None,
             "the pasted image must not share the source image's reactor"
         );
+    }
+
+    fn assert_pasted_image_reactor(doc: &codec::Document, handle: Handle) -> (Handle, Handle) {
+        use codec::objects::ObjectType;
+        let Some(codec::EntityType::RasterImage(image)) = doc.get_entity(handle) else {
+            panic!("missing pasted image");
+        };
+        let definition = image.definition_handle.expect("image definition link");
+        let reactor = image.definition_reactor_handle.expect("image reactor link");
+        let Some(ObjectType::ImageDefinitionReactor(object)) = doc.objects.get(&reactor) else {
+            panic!("missing image reactor");
+        };
+        assert_eq!(object.handle, reactor);
+        assert_eq!(object.owner, handle);
+        assert_eq!(object.image_handle, handle);
+        let Some(ObjectType::ImageDefinition(def)) = doc.objects.get(&definition) else {
+            panic!("missing image definition");
+        };
+        assert_eq!(def.reactors.iter().filter(|h| **h == reactor).count(), 1);
+        let root = doc.header.named_objects_dict_handle;
+        let Some(ObjectType::Dictionary(root)) = doc.objects.get(&root) else {
+            panic!("missing named object dictionary");
+        };
+        let dictionary = root.get("ACAD_IMAGE_DICT").expect("image dictionary entry");
+        let Some(ObjectType::Dictionary(entries)) = doc.objects.get(&dictionary) else {
+            panic!("missing image dictionary");
+        };
+        assert_eq!(entries.owner, doc.header.named_objects_dict_handle);
+        assert_eq!(entries.get("fx"), Some(definition));
+        assert_eq!(def.owner, dictionary);
+        assert_eq!(def.reactors.iter().filter(|h| **h == dictionary).count(), 1);
+        (definition, reactor)
+    }
+
+    fn check_pasted_image_owns_reactor(cross_drawing: bool) {
+        let mut app = crate::app::OpenCADStudio::new_for_test();
+        app.tabs
+            .push(crate::app::document::DocumentTab::new_drawing(99));
+        let source_tab = app.tabs.len() - 1;
+        let source = app.tabs[source_tab]
+            .scene
+            .add_entity(codec::EntityType::RasterImage(
+                codec::entities::RasterImage::new("fx.bmp", codec::types::Vector3::ZERO, 8.0, 8.0),
+            ));
+        let (source_definition, source_reactor) =
+            assert_pasted_image_reactor(&app.tabs[source_tab].scene.document, source);
+        let (entities, deps) =
+            copy_to_clipboard_kernel(&app.tabs[source_tab].scene.document, &[source]);
+        app.clipboard = entities;
+        app.clipboard_deps = deps;
+        let target = if cross_drawing {
+            app.tabs
+                .push(crate::app::document::DocumentTab::new_drawing(100));
+            let target = app.tabs.len() - 1;
+            // Handles are document-local; separate their numeric ranges so a
+            // reused source reactor link cannot accidentally pass this test.
+            while app.tabs[target].scene.document.next_handle() <= source_reactor.value() {
+                app.tabs[target].scene.document.allocate_handle();
+            }
+            target
+        } else {
+            source_tab
+        };
+        app.active_tab = target;
+        app.push_undo_snapshot(target, "PASTECLIP");
+        let handles = app.finalize_paste(
+            target,
+            Some(crate::command::EntityTransform::Translate(
+                glam::DVec3::new(50.0, 0.0, 0.0),
+            )),
+        );
+        assert_eq!(handles.len(), 1);
+        let pasted = handles[0];
+        let (definition, reactor) =
+            assert_pasted_image_reactor(&app.tabs[target].scene.document, pasted);
+        assert_ne!(reactor, source_reactor);
+        if !cross_drawing {
+            assert_ne!(pasted, source);
+            assert_eq!(definition, source_definition);
+        }
+        assert_eq!(
+            assert_pasted_image_reactor(&app.tabs[source_tab].scene.document, source),
+            (source_definition, source_reactor),
+        );
+
+        app.undo_active_tab();
+        assert!(app.tabs[target].scene.document.get_entity(pasted).is_none());
+        assert!(!app.tabs[target]
+            .scene
+            .document
+            .objects
+            .contains_key(&reactor));
+        if cross_drawing {
+            assert!(!app.tabs[target]
+                .scene
+                .document
+                .objects
+                .contains_key(&definition));
+        } else {
+            assert_eq!(
+                assert_pasted_image_reactor(&app.tabs[target].scene.document, source),
+                (source_definition, source_reactor),
+            );
+        }
+        app.redo_active_tab();
+        assert_eq!(
+            assert_pasted_image_reactor(&app.tabs[target].scene.document, pasted),
+            (definition, reactor),
+        );
+    }
+
+    #[test]
+    fn pasted_image_owns_reactor_in_same_drawing() {
+        check_pasted_image_owns_reactor(false);
+    }
+
+    #[test]
+    fn pasted_image_owns_reactor_in_another_drawing() {
+        check_pasted_image_owns_reactor(true);
     }
 
     #[test]

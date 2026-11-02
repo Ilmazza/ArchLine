@@ -351,7 +351,7 @@ mod tests {
         // through to the flyout.
         assert!(app
             .ribbon
-            .dropdown_overlay(&[], &[], (1600.0, 900.0), false, &[])
+            .dropdown_overlay(&[], &[], (1600.0, 900.0), false, &[], &[])
             .is_none());
     }
 

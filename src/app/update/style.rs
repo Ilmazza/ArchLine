@@ -1172,6 +1172,7 @@ impl OpenCADStudio {
             .unwrap_or_default();
         self.load_dimstyle_bufs(i);
         self.active_modal = Some(crate::app::ModalKind::DimStyle);
+        self.dimstyle_user_arrow = None;
         self.style_stage_begin();
         Task::none()
     }
@@ -1257,6 +1258,9 @@ impl OpenCADStudio {
                 Some(Message::PropColorFieldChanged { field, color })
             }
             Some(crate::app::ColorPickTarget::MText) => Some(Message::MTextColorChanged(color)),
+            Some(crate::app::ColorPickTarget::MTextMask) => {
+                Some(Message::MTextMaskColor(Some(color)))
+            }
             Some(crate::app::ColorPickTarget::Ribbon) => {
                 let task = self.update(Message::RibbonColorChanged(color));
                 self.ribbon.active_color_book = name.map(|name| (color, name));
@@ -1271,6 +1275,10 @@ impl OpenCADStudio {
                     }
                     None => None,
                 }
+            }
+            Some(crate::app::ColorPickTarget::LayerViewport(layer, viewport)) => {
+                self.set_layer_viewport_color(self.active_tab, &layer, viewport, color);
+                None
             }
             Some(crate::app::ColorPickTarget::LayerState(idx)) => {
                 Some(Message::LayerStateEditorLayerColor(idx, color))
@@ -1295,6 +1303,12 @@ impl OpenCADStudio {
         if self.selected_dimstyle_is_read_only() {
             return Task::none();
         }
+        // User Arrow… opens the list of the drawing's blocks for that field.
+        if value == crate::tr!("dimstyle", "user-arrow") {
+            self.dimstyle_user_arrow = Some(field);
+            return Task::none();
+        }
+        self.dimstyle_user_arrow = None;
         let i = self.active_tab;
         let name = self.dimstyle_selected.clone();
         let is_lt = matches!(

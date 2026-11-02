@@ -530,6 +530,14 @@ impl OpenCADStudio {
                 self.open_table_insert();
             }
 
+            "-TABLE" => {
+                self.start_command_line_table();
+            }
+
+            cmd if cmd.starts_with("-TABLE _LINK ") => {
+                self.place_command_line_link_table(&cmd["-TABLE _LINK ".len()..]);
+            }
+
             "TABLEDIT" => {
                 use crate::modules::annotate::table_cmd::TableditCommand;
                 let cmd = TableditCommand::new();
@@ -646,7 +654,13 @@ impl OpenCADStudio {
                     "AIMLEADEREDITREMOVE" => "AIMLEADEREDITREMOVE",
                     _ => "MLEADEREDIT",
                 };
-                let cmd = MLeaderEditCommand::new(name);
+                let mut cmd = MLeaderEditCommand::new(name);
+                // A single preselected multileader is the one edited.
+                let selected = self.tabs[i].scene.selected_entities();
+                if let [(handle, codec::EntityType::MultiLeader(ml))] = selected.as_slice() {
+                    cmd = cmd.with_target(*handle, (**ml).clone());
+                    self.tabs[i].scene.replace_selection(Default::default());
+                }
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
@@ -1093,7 +1107,7 @@ impl OpenCADStudio {
 
             "EXPLODE" => {
                 use crate::modules::draw::modify::explode::{
-                    apply_explode_replacements, plan_explode,
+                    apply_explode_replacements, plan_explode_in_context,
                 };
                 let selected: Vec<_> = self.tabs[i]
                     .scene
@@ -1133,7 +1147,11 @@ impl OpenCADStudio {
                         } else {
                             selected
                         };
-                    let replacements = plan_explode(&selected, &self.tabs[i].scene.document);
+                    let replacements = plan_explode_in_context(
+                        &selected,
+                        &self.tabs[i].scene.document,
+                        self.tabs[i].scene.displayed_annotation_scale_handle(),
+                    );
                     let exploded = replacements.len();
                     if exploded > 0 {
                         self.push_undo_snapshot(i, "EXPLODE");
@@ -1574,6 +1592,33 @@ impl OpenCADStudio {
                 self.command_line.push_output(&crate::tf!("{found} found"));
                 self.tabs[i].scene.select_entities(&handles);
                 return Some(self.dispatch_command("DIMREASSOCIATE"));
+            }
+
+            // DIMREGEN: every dimension draws its picture afresh, and the
+            // next save writes the new pictures.
+            "DIMREGEN" => {
+                let handles: Vec<_> = self.tabs[i]
+                    .scene
+                    .document
+                    .entities()
+                    .filter(|entity| {
+                        matches!(entity, codec::EntityType::Dimension(d)
+                            if !d.base().block_name.is_empty())
+                    })
+                    .map(|entity| entity.common().handle)
+                    .collect();
+                if !handles.is_empty() {
+                    self.push_undo_snapshot(i, "DIMREGEN");
+                    for &handle in &handles {
+                        self.tabs[i].scene.invalidate_dim_block_recorded(handle);
+                    }
+                    let changes: Vec<_> = handles
+                        .iter()
+                        .map(|&handle| (handle, crate::scene::ChangeKind::Modified))
+                        .collect();
+                    self.tabs[i].scene.bump_entities(&changes);
+                    self.tabs[i].dirty = true;
+                }
             }
 
             "DIMDISASSOCIATE" | "DIMREASSOCIATE" => {

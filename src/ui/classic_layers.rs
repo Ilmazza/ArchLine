@@ -75,9 +75,9 @@ pub fn layer_tools() -> &'static LayerTools {
 }
 
 /// Order of the object-based layer commands in the classic strip.
-const COMMAND_ORDER: [&str; 11] = [
+const COMMAND_ORDER: [&str; 13] = [
     "LAYOFF", "LAYON", "LAYFRZ", "LAYTHW", "LAYLCK", "LAYULK", "LAYISO", "LAYUNISO", "LAYMCUR",
-    "LAYMATCH", "LAYWALK",
+    "LAYMATCH", "LAYCUR", "COPYTOLAYER", "LAYWALK",
 ];
 
 fn swatch(color: Color) -> Element<'static, Message> {

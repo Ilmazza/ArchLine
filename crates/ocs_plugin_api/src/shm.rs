@@ -42,7 +42,13 @@ const CONTROL_MAGIC: u32 = 0x4F_43_53_44; // "OCSD"
 /// `ControlPage` and aligned to a typical page boundary so the snapshot segments
 /// that follow are naturally aligned for rkyv.
 const CONTROL_SIZE: usize = 4096;
-const MAX_SNAPSHOT_SIZE: usize = 1024 * 1024 * 1024;
+/// The mapping is a sparse file sized to the drawing; this only guards
+/// against a corrupt size.
+const MAX_SNAPSHOT_SIZE: usize = if usize::BITS >= 64 {
+    64 * 1024 * 1024 * 1024
+} else {
+    1024 * 1024 * 1024
+};
 
 /// Information sent to the plugin so it can open the shared mapping.
 #[derive(Debug, Clone)]
@@ -160,9 +166,18 @@ impl<T: SnapshotData> DocumentSnapshotStore<T> {
         &self.path
     }
 
+    /// The largest snapshot one segment holds.
+    pub fn segment_size(&self) -> usize {
+        self.segment_size
+    }
+
     /// Serialize `data` into the inactive segment and atomically publish it.
     pub fn publish(&mut self, data: &T) -> io::Result<()> {
-        let bytes = data.to_rkyv_bytes()?;
+        self.publish_bytes(&data.to_rkyv_bytes()?)
+    }
+
+    /// Publish bytes already serialized with [`SnapshotData::to_rkyv_bytes`].
+    pub fn publish_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
         if bytes.len() > self.segment_size {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
@@ -181,7 +196,7 @@ impl<T: SnapshotData> DocumentSnapshotStore<T> {
         };
         let offset = CONTROL_SIZE + inactive * self.segment_size;
 
-        self.mmap[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        self.mmap[offset..offset + bytes.len()].copy_from_slice(bytes);
         let control = ControlPage::from_bytes_mut(&mut self.mmap);
         // Ensure the plugin sees the new length before it sees the new version.
         control
@@ -630,7 +645,10 @@ mod tests {
         doc
     }
 
+    // NTFS allocates a file grown with set_len (it is sparse on Linux and
+    // macOS), and 64 GiB fills the CI runner's disk.
     #[test]
+    #[cfg_attr(windows, ignore = "allocates the whole oversized file on NTFS")]
     fn reader_rejects_oversized_snapshot() {
         let path = unique_path("oversized.bin");
         let file = OpenOptions::new()

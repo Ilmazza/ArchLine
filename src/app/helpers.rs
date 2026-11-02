@@ -498,6 +498,39 @@ pub(super) fn entities_lower_left_by_bbox(
 
 type BlockBounds = rustc_hash::FxHashMap<String, Option<codec::types::BoundingBox3D>>;
 
+/// Box enclosing every listed entity, measured through block definitions so a
+/// reference contributes what it draws and not just its insertion point.
+pub(crate) fn entities_bounds(
+    doc: &codec::Document,
+    handles: &[codec::Handle],
+) -> Option<codec::types::BoundingBox3D> {
+    let mut blocks = rustc_hash::FxHashMap::default();
+    let mut out: Option<codec::types::BoundingBox3D> = None;
+    for &handle in handles {
+        let Some(entity) = doc.get_entity(handle) else {
+            continue;
+        };
+        let bb = match entity {
+            codec::EntityType::Insert(insert) => {
+                insert_bounds(doc, insert, &mut blocks, 0).unwrap_or_default()
+            }
+            _ => {
+                let (lo, hi) = crate::scene::convert::tess::entity_bounds(entity);
+                codec::types::BoundingBox3D::new(
+                    codec::types::Vector3::new(lo[0], lo[1], lo[2]),
+                    codec::types::Vector3::new(hi[0], hi[1], hi[2]),
+                )
+            }
+        };
+        if is_default_box(&bb) {
+            continue;
+        }
+        include(&mut out, bb.min);
+        include(&mut out, bb.max);
+    }
+    out
+}
+
 /// Nesting deeper than this is treated as a cycle.
 const MAX_BLOCK_NESTING: usize = 32;
 

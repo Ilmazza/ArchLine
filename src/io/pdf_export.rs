@@ -990,6 +990,21 @@ fn append_pdf_page(
             };
             let stationed = !dash_arr.is_empty() && !stations.is_empty();
             if stationed {
+                // Match the screen's short-run policy. A sub-period aligned
+                // run is solid, even when clipping left its stations in a gap.
+                // Start-phased and longer continuous runs keep their phase.
+                let aligned_stations;
+                let stations = if wire.pattern[0] > 0.0 && wire.pattern[1] < 0.0 {
+                    let (mut distances, _, total) =
+                        crate::scene::pipeline::wire_gpu::wire_distances(wire);
+                    if total > 0.0 && total <= wire.pattern_length {
+                        distances.fill(0.0);
+                    }
+                    aligned_stations = distances;
+                    aligned_stations.as_slice()
+                } else {
+                    stations
+                };
                 if last_dash.as_ref().is_none_or(|dash| !dash.is_empty()) {
                     ops.push(Op::SetLineDashPattern {
                         dash: LineDashPattern::default(),
@@ -1874,7 +1889,7 @@ pub(crate) fn adapt_to_paper([r, g, b]: [f32; 3]) -> [f32; 3] {
 ///   A Type3 font synthesized from the SDF atlas would cover those exactly and
 ///   is the natural follow-up; it needs no new layout data.
 /// - `Tf` takes an *em* size but `run.height` is a *cap* height: the em size
-///   is `height / cap_ratio` (per-font OS/2 sCapHeight, 0.72 for Helvetica) so
+///   is `height / cap_ratio` (the face's capital A height, 0.72 for Helvetica) so
 ///   the invisible run aligns with the drawn cap height.
 /// - Width-matching (`Tz`, baked into the `Tm` x-basis — equivalent, and the
 ///   only horizontal scaling printpdf exposes): `k = laid_advance /
@@ -2185,12 +2200,13 @@ fn subset_family(
     // below must be in subset space. Anything unmappable stays out.
     let sub = ttf_parser::Face::parse(&subset_bytes, 0).ok()?;
     let upem = sub.units_per_em().max(1);
-    let cap_ratio = sub
-        .capital_height()
-        .filter(|c| *c > 0)
-        .map(|c| c as f32 / upem as f32)
-        .filter(|r| (0.2..=1.0).contains(r))
-        .unwrap_or(0.7);
+    // The drawn text's capital measure, read from the full face: the subset
+    // may not hold its A.
+    let cap_ratio = Some(
+        crate::scene::text::ttf_glyph::capital_units(&orig) / orig.units_per_em().max(1) as f32,
+    )
+    .filter(|r| (0.2..=1.0).contains(r))
+    .unwrap_or(0.7);
     let mut gid_chars: std::collections::BTreeMap<char, u16> = std::collections::BTreeMap::new();
     let mut width_of: std::collections::BTreeMap<u16, u16> = std::collections::BTreeMap::new();
     for c in chars {
@@ -2805,6 +2821,87 @@ mod tests {
             options: PdfPlotOptions::default(),
             plot_style: None,
         }
+    }
+
+    #[test]
+    fn short_aligned_dashes_plot_the_complete_run() {
+        let mut missing = Vec::new();
+        for stationed in [false, true] {
+            let mut wire = WireModel::solid(
+                "synthetic".into(),
+                vec![[10.0, 20.0, 0.0], [12.0, 20.0, 0.0]],
+                WireModel::WHITE,
+                false,
+            );
+            wire.pattern_length = 4.0;
+            wire.pattern = [0.25, -3.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            if stationed {
+                // A clipped, independently patterned run can start in a gap.
+                wire.plinegen = false;
+                wire.pattern_stations = vec![1.0, 3.0, 8.0];
+            }
+            let page = test_page(vec![PlotWire {
+                wire,
+                draw_depth: 0.0,
+            }]);
+            let text = pdf_stream_text(&render_pdf_bytes(&[page], None).unwrap());
+            let tokens: Vec<_> = text.split_whitespace().collect();
+            let ends: Vec<f32> = tokens
+                .windows(3)
+                .filter_map(|items| (items[2] == "l").then(|| items[0].parse().unwrap()))
+                .collect();
+            if ends.len() != 1 || (ends[0] - 12.0 * MM_TO_PT).abs() >= 0.001 {
+                missing.push((stationed, ends));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "short runs must reach their endpoints: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn short_start_phased_dashes_keep_their_gap() {
+        let mut wire = WireModel::solid(
+            "synthetic".into(),
+            vec![[10.0, 20.0, 0.0], [12.0, 20.0, 0.0]],
+            WireModel::WHITE,
+            false,
+        );
+        wire.pattern_length = 4.0;
+        wire.pattern = [0.25, -3.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        wire.dash_from_start = true;
+        let page = test_page(vec![PlotWire {
+            wire,
+            draw_depth: 0.0,
+        }]);
+        let text = pdf_stream_text(&render_pdf_bytes(&[page], None).unwrap());
+        let tokens: Vec<_> = text.split_whitespace().collect();
+        let ends: Vec<f32> = tokens
+            .windows(3)
+            .filter_map(|items| (items[2] == "l").then(|| items[0].parse().unwrap()))
+            .collect();
+        assert_eq!(ends.len(), 1);
+        assert!((ends[0] - 10.25 * MM_TO_PT).abs() < 0.001);
+    }
+
+    #[test]
+    fn short_clip_of_a_long_continuous_dash_keeps_its_gap() {
+        let mut wire = WireModel::solid(
+            "synthetic".into(),
+            vec![[10.0, 20.0, 0.0], [12.0, 20.0, 0.0]],
+            WireModel::WHITE,
+            false,
+        );
+        wire.pattern_length = 4.0;
+        wire.pattern = [0.25, -3.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        wire.pattern_stations = vec![1.0, 3.0, 8.0];
+        let page = test_page(vec![PlotWire {
+            wire,
+            draw_depth: 0.0,
+        }]);
+        let text = pdf_stream_text(&render_pdf_bytes(&[page], None).unwrap());
+        assert!(!text.split_whitespace().any(|token| token == "S"));
     }
 
     #[test]

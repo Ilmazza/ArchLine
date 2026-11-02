@@ -798,6 +798,8 @@ pub struct UserSettings {
     pub image_frame: i16,
     /// The Attribute Definition dialog's "Specify on-screen" choice.
     pub attdef_on_screen: bool,
+    /// Insert Table / -TABLE column and row settings and insertion behaviour.
+    pub table_insert: crate::modules::annotate::table_cmd::TableDefaults,
     /// Block Definition dialog: base point "Specify On-screen".
     pub block_base_on_screen: bool,
     /// Block Definition dialog: objects "Specify On-screen".
@@ -829,6 +831,8 @@ pub struct UserSettings {
     /// Fonts and plot styles kept in a chosen folder (`None`: the default).
     pub fonts_folder: Option<String>,
     pub plot_styles_folder: Option<String>,
+    /// The user's support files folder (patterns, linetypes, fonts).
+    pub support_folder: Option<String>,
     /// The file type ATTACH's picker was last left on (1-based).
     pub attach_filter: u32,
     /// SURFACEASSOCIATIVITY: new surfaces stay associative to their sources.
@@ -859,6 +863,13 @@ pub struct UserSettings {
     pub ucs_icon_at_origin: bool,
     /// Selection cycling: a click where objects overlap opens a picker.
     pub selection_cycling: bool,
+    /// OSNAPZ: object snaps take the current elevation instead of the
+    /// snapped object's Z.
+    pub osnap_z: bool,
+    /// SELECTSIMILARMODE: the properties besides the type that Select
+    /// Similar matches (1 colour, 2 layer, 4 linetype, 8 linetype scale,
+    /// 16 lineweight, 32 plot style, 64 object style, 128 name).
+    pub select_similar_mode: u16,
     /// CURSORTYPE: crosshair or the platform pointer over the drawing.
     pub cursor_type: CursorType,
     /// Explicit crosshair RGB. `None` keeps automatic background contrast.
@@ -1001,6 +1012,11 @@ pub struct UserSettings {
     pub pick_drag_rect: bool,
     /// Show the floating Quick Properties panel when objects are selected.
     pub quick_properties: bool,
+    /// QPLOCATION 1: the Quick Properties panel floats where it was last
+    /// dragged instead of following the cursor.
+    pub quick_properties_float: bool,
+    /// Where the floating Quick Properties panel sits (top-left).
+    pub quick_properties_pos: [f32; 2],
     /// Interface language preference. `System` negotiates against the
     /// platform locale on every launch.
     pub language: crate::i18n::Language,
@@ -1020,6 +1036,10 @@ pub struct UserSettings {
     pub commandline_fade_ms: i32,
     /// COMMANDLINEOPACITY: command-line panel opacity in percent (20–100).
     pub command_line_opacity: u8,
+    /// Command line font family; empty uses the interface font.
+    pub command_line_font: String,
+    /// Command line text size in pixels (8–24).
+    pub command_line_font_size: u16,
     /// SNAPUNIT X/Y spacing used by grid snap. 10 matches the Drafting
     /// Settings dialog defaults; older configs without these keys fall
     /// back via `default_snap_spacing`.
@@ -1318,6 +1338,8 @@ impl Default for UserSettings {
             show_ucs_icon: true,
             ucs_icon_at_origin: true,
             selection_cycling: false,
+            osnap_z: false,
+            select_similar_mode: crate::scene::SELECT_SIMILAR_DEFAULT,
             double_click_block_refedit: false,
             double_click_block_attedit: true,
             right_click_mode: RightClickMode::ShortcutMenu,
@@ -1325,6 +1347,7 @@ impl Default for UserSettings {
             grip_object_limit: DEFAULT_GRIP_OBJECT_LIMIT,
             image_frame: 1,
             attdef_on_screen: true,
+            table_insert: Default::default(),
             block_base_on_screen: false,
             block_objects_on_screen: false,
             block_object_mode: 1,
@@ -1340,6 +1363,7 @@ impl Default for UserSettings {
             trim_extend_quick: true,
             fonts_folder: None,
             plot_styles_folder: None,
+            support_folder: None,
             attach_filter: 7,
             surface_associativity: true,
             ucs_ortho: true,
@@ -1396,10 +1420,14 @@ impl Default for UserSettings {
             pick_add: true,
             pick_drag_rect: false,
             quick_properties: false,
+            quick_properties_float: false,
+            quick_properties_pos: [40.0, 40.0],
             language: crate::i18n::Language::default(),
             cliprompt_lines: 3,
             commandline_fade_ms: 3000,
             command_line_opacity: 80,
+            command_line_font: String::new(),
+            command_line_font_size: 11,
             snap_spacing_x: 10.0,
             snap_spacing_y: 10.0,
             grid_spacing_x: 10.0,

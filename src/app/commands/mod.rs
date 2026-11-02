@@ -11,6 +11,9 @@ mod bim_altezza;
 mod block_cmdline;
 mod blocks;
 mod blockvars;
+mod center_vars;
+mod purge;
+pub(crate) use purge::purge_pass;
 mod block_editor_vars;
 mod bvisibility;
 mod count;
@@ -20,6 +23,8 @@ mod dim;
 mod dim_cmd;
 mod dim_inspect;
 mod dim_layer;
+mod layer_variable;
+pub(crate) mod extraction_eval;
 mod mleader_layer;
 pub(crate) mod display;
 mod draw;
@@ -52,6 +57,7 @@ pub(crate) mod sheet_set;
 mod spell;
 mod styleprops;
 mod text_edit;
+mod table_style_var;
 mod text_layer;
 mod ucsfollow;
 mod table_export;
@@ -137,6 +143,17 @@ impl OpenCADStudio {
     /// part answers the running command's prompt, or starts a command when
     /// none runs (`PDFIMPORT;FILE`).
     pub(super) fn dispatch_ribbon_command(&mut self, cmd: &str) -> Task<Message> {
+        if cmd.eq_ignore_ascii_case("BLOOKUPTABLE")
+            && self.block_editor_preferences.action_bars
+            && self.tabs[self.active_tab]
+                .active_block_edit_session()
+                .is_some()
+        {
+            // The palette's Lookup tool is the action bar's own affordance, so
+            // the refusal meant for the typed verb would silence it: open the
+            // table editor instead.
+            return self.open_lookup_table("");
+        }
         if !cmd.contains(';') {
             return self.dispatch_command(cmd);
         }
@@ -274,18 +291,25 @@ impl OpenCADStudio {
             } else {
                 cmd.split_once(' ').map_or("", |(_, a)| a.trim())
             };
-            if !args.is_empty() && crate::scene::block_actions::Kind::parse(args).is_none() {
-                self.command_line.push_error(
-                    crate::t!(
-                        "Supported actions: Move, Scale, Stretch, Polar Stretch, Rotate, Flip, Array. Other action types are not wired yet."
-                    )
-                    .as_ref(),
-                );
-                return Some(Task::none());
-            }
-            if let Some(error) = self.action_error(crate::scene::block_actions::Kind::parse(args)) {
-                self.command_line.push_error(crate::t!(error).as_ref());
-                return Some(Task::none());
+            if crate::app::block_actions::lookup_action_arg(args) {
+                if let Some(error) = self.lookup_table_error() {
+                    self.command_line.push_error(crate::t!(error).as_ref());
+                    return Some(Task::none());
+                }
+            } else {
+                if !args.is_empty() && crate::scene::block_actions::Kind::parse(args).is_none() {
+                    self.command_line.push_error(
+                        crate::t!(
+                            "Supported actions: Move, Scale, Stretch, Polar Stretch, Rotate, Flip, Array, Lookup."
+                        )
+                        .as_ref(),
+                    );
+                    return Some(Task::none());
+                }
+                if let Some(error) = self.action_error(crate::scene::block_actions::Kind::parse(args)) {
+                    self.command_line.push_error(crate::t!(error).as_ref());
+                    return Some(Task::none());
+                }
             }
         }
         if cmd == "BPARAMETER" || cmd.starts_with("BPARAMETER ") {
@@ -568,7 +592,16 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_text_layer(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_dxeval(cmd, i) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_dim_layer(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_table_style_var(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_layer_variable(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_dim_cmd(cmd, i) {
@@ -1013,6 +1046,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "GRIDMODE",
         "GRIDUNIT",
         "QPMODE",
+        "QPLOCATION",
         "ZOOMWHEEL",
         "ZOOMFACTOR",
         "SHORTCUTMENU",
@@ -1093,6 +1127,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "TRIMEXTENDMODE",
         "PELLIPSE",
         "SELECTIONCYCLING",
+        "OSNAPZ",
+        "SELECTSIMILARMODE",
         "UCSDETECT",
         "SURFACEASSOCIATIVITY",
         "DGNIMPORTMODE",
@@ -1102,6 +1138,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "TXT2MTXTWORDWRAP",
         "TXT2MTXTLINESPACING",
         "FIELDEVAL",
+        "DXEVAL",
         "PDFIMPORTMODE",
         "PDFIMPORTFILTER",
         "PDFIMPORTLAYERS",
@@ -1153,6 +1190,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "SELECTIONAREAOPACITY",
         "SELECTIONEFFECT",
         "SELECTIONEFFECTCOLOR",
+        "VSEDGECOLOR",
         "WINDOWSAREACOLOR",
         "WINDOWAREACOLOR",
         "CROSSINGAREACOLOR",

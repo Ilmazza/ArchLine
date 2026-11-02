@@ -58,6 +58,22 @@ pub struct TablePopup {
     pub current: Option<usize>,
 }
 
+/// One floating list in the Test Block window: the control's label, the
+/// entries it offers and the entry shown now.
+#[derive(Clone, Debug)]
+pub struct TestWidget {
+    pub label: String,
+    pub items: Vec<String>,
+    pub current: Option<usize>,
+}
+
+/// The dynamic-block lists the Test Block window keeps on screen.
+#[derive(Clone, Debug)]
+pub struct TestBlockWidgets {
+    pub visibility: Option<TestWidget>,
+    pub lookup: Option<TestWidget>,
+}
+
 /// Block-local entity-handle lists for a dynamic definition and the anonymous
 /// block actually inserted, plus the state's visible-by-index set.
 struct StateMapping {
@@ -110,45 +126,8 @@ impl OpenCADStudio {
             let Ok(Some(view)) = crate::scene::block_properties_table::table(doc, def) else {
                 return;
             };
-            let parameters = crate::scene::block_actions::all_parameters(doc, def);
-            let header = view
-                .columns
-                .iter()
-                .map(|c| {
-                    let display = if c.connection_name.eq_ignore_ascii_case("UpdatedAngle") {
-                        crate::scene::block_orientation_parameter::parameters(doc, def)
-                            .into_iter()
-                            .find(|p| p.handle == c.handle)
-                            .map(|p| p.label)
-                    } else {
-                        crate::scene::block_distance_parameter::parameters(doc, def)
-                            .into_iter()
-                            .find(|p| p.handle == c.handle)
-                            .and_then(|p| p.labels.first().cloned())
-                    };
-                    display
-                        .filter(|n| !n.trim().is_empty())
-                        .or_else(|| {
-                            parameters
-                                .iter()
-                                .find(|p| p.handle == c.handle)
-                                .map(|p| p.name.clone())
-                        })
-                        .filter(|n| !n.trim().is_empty())
-                        .unwrap_or_else(|| c.connection_name.clone())
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let rows = view
-                .rows
-                .iter()
-                .map(|r| {
-                    r.iter()
-                        .map(|v| format!("{v:.4}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .collect();
+            let header = Self::table_header(doc, def, &view);
+            let rows = view.rows.iter().map(|r| Self::table_row_label(r)).collect();
             self.table_popup = Some(TablePopup {
                 insert_handle: grip.insert_handle,
                 anchor,
@@ -158,6 +137,102 @@ impl OpenCADStudio {
             });
         }
     }
+
+    /// Column labels of a Block Properties Table, resolving each column's
+    /// parameter display name.
+    fn table_header(
+        doc: &codec::Document,
+        def: Handle,
+        view: &crate::scene::block_properties_table::TableView,
+    ) -> String {
+        let parameters = crate::scene::block_actions::all_parameters(doc, def);
+        view.columns
+            .iter()
+            .map(|c| {
+                let display = if c.connection_name.eq_ignore_ascii_case("UpdatedAngle") {
+                    crate::scene::block_orientation_parameter::parameters(doc, def)
+                        .into_iter()
+                        .find(|p| p.handle == c.handle)
+                        .map(|p| p.label)
+                } else {
+                    crate::scene::block_distance_parameter::parameters(doc, def)
+                        .into_iter()
+                        .find(|p| p.handle == c.handle)
+                        .and_then(|p| p.labels.first().cloned())
+                };
+                display
+                    .filter(|n| !n.trim().is_empty())
+                    .or_else(|| {
+                        parameters
+                            .iter()
+                            .find(|p| p.handle == c.handle)
+                            .map(|p| p.name.clone())
+                    })
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| c.connection_name.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn table_row_label(row: &[f64]) -> String {
+        row.iter()
+            .map(|v| format!("{v:.4}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Resolve the lists a Test Block window keeps on screen. The visibility
+    /// state and lookup row are read from the temporary reference, so a pick
+    /// through either list changes that copy alone.
+    pub(super) fn test_block_widgets(&self, tab: usize) -> Option<TestBlockWidgets> {
+        let test = self.tabs.get(tab)?.block_test.as_ref()?;
+        let insert = test.insert;
+        let doc = &self.tabs[tab].scene.document;
+        let Some(EntityType::Insert(ins)) = doc.get_entity(insert) else {
+            return None;
+        };
+        let visibility = doc
+            .dynamic_visibility_for_insert(insert)
+            .and_then(|(def_block, param)| {
+                (!param.states.is_empty()).then(|| TestWidget {
+                    label: if param.name.trim().is_empty() {
+                        "Visibility1".to_string()
+                    } else {
+                        param.name.clone()
+                    },
+                    items: param.states.iter().map(|state| state.name.clone()).collect(),
+                    current: Self::current_visibility_state(
+                        doc,
+                        def_block,
+                        &ins.block_name,
+                        param,
+                    ),
+                })
+            });
+        let lookup = crate::scene::block_lookup::reference_properties(
+            doc,
+            Some(test.baseline.as_ref()),
+            0,
+            insert,
+        )
+        .into_iter()
+        .find_map(|property| match property.value {
+            crate::scene::model::object::PropValue::BlockChoice {
+                selected, options, ..
+            } => Some(TestWidget {
+                label: property.label,
+                items: options,
+                current: (selected < usize::MAX).then_some(selected),
+            }),
+            _ => None,
+        });
+        Some(TestBlockWidgets {
+            visibility,
+            lookup,
+        })
+    }
+
     pub(super) fn refresh_table_grip(&mut self, wo: [f64; 3]) {
         let i = self.active_tab;
         self.tabs[i].table_grip = None;
@@ -227,25 +302,25 @@ impl OpenCADStudio {
         state_idx: usize,
         param: &BlockVisibilityParameter,
     ) -> Option<StateMapping> {
-        let def_handles: Vec<Handle> = doc
-            .block_records
-            .iter()
-            .find(|b| b.handle == def_block)?
-            .entity_handles
-            .clone();
+        let def_handles = crate::scene::block_authoring::members(doc, def_block);
         let anon_handles: Vec<Handle> = doc
             .block_records
             .iter()
             .find(|b| b.name == anon_name)?
             .entity_handles
             .clone();
-        let state = param.states.get(state_idx)?;
-        let visible: HashSet<u64> = state.visible_blocks.iter().map(|h| h.value()).collect();
-        let visible_idx: HashSet<usize> = def_handles
+        if def_handles.len() != anon_handles.len() {
+            return None;
+        }
+        let shown = crate::scene::block_visibility::state_visibility(doc, param.handle, state_idx);
+        if shown.len() != def_handles.len() {
+            return None;
+        }
+        let visible_idx: HashSet<usize> = shown
             .iter()
             .enumerate()
-            .filter(|(_, h)| visible.contains(&h.value()))
-            .map(|(i, _)| i)
+            .filter(|(_, visible)| **visible)
+            .map(|(index, _)| index)
             .collect();
         Some(StateMapping {
             anon_handles,
@@ -310,6 +385,41 @@ impl OpenCADStudio {
                 options,
                 tooltip: param.description.clone(),
             },
+        })
+    }
+
+    /// The blocks a dynamic-block reference shows in its current visibility
+    /// state, as a read-only Properties row (#1862). None when it shows no
+    /// nested block.
+    pub(super) fn visible_blocks_property(
+        doc: &codec::Document,
+        handle: Handle,
+    ) -> Option<crate::scene::model::object::Property> {
+        let Some(EntityType::Insert(ins)) = doc.get_entity(handle) else {
+            return None;
+        };
+        doc.dynamic_visibility_for_insert(handle)?;
+        let record = doc.block_records.get(&ins.block_name)?;
+        let mut names: Vec<String> = Vec::new();
+        for member in &record.entity_handles {
+            let Some(EntityType::Insert(nested)) = doc.get_entity(*member) else {
+                continue;
+            };
+            if nested.common.invisible {
+                continue;
+            }
+            let name = doc
+                .dynamic_definition_for_insert(*member)
+                .and_then(|definition| doc.block_records.iter().find(|b| b.handle == definition))
+                .map_or_else(|| nested.block_name.clone(), |b| b.name.clone());
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        (!names.is_empty()).then(|| crate::scene::model::object::Property {
+            label: crate::t!("Visible block").into_owned(),
+            field: "dyn_visible_block",
+            value: crate::scene::model::object::PropValue::ReadOnly(names.join(", ")),
         })
     }
 

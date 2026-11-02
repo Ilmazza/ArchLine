@@ -131,7 +131,7 @@ mod tests {
             let mut ribbon = Ribbon::default();
             ribbon.open_dropdown = Some(id.to_string());
             assert!(
-                ribbon.dropdown_overlay(&[], &[], (1600.0, 900.0), false, &[]).is_some(),
+                ribbon.dropdown_overlay(&[], &[], (1600.0, 900.0), false, &[], &[]).is_some(),
                 "{id} opens nothing"
             );
         }

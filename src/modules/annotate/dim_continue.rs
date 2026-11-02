@@ -1,5 +1,5 @@
 use codec::entities::{
-    Dimension, DimensionAngular2Ln, DimensionAngular3Pt, DimensionLinear,
+    Dimension, DimensionAngular2Ln, DimensionAngular3Pt, DimensionBase, DimensionLinear,
     DimensionOrdinate,
 };
 use codec::types::Vector3;
@@ -14,7 +14,7 @@ use kernel::space::Plane;
 use crate::command::{
     CadCommand, CmdOption, CmdResult, DimensionAssociationInput, DimensionPreview,
 };
-use super::dim_baseline::SourceStyle;
+use super::dim_baseline::{OriginPicks, SourceStyle};
 use crate::modules::{IconKind, ModuleEvent, ToolDef};
 use crate::scene::model::wire_model::WireModel;
 
@@ -68,6 +68,10 @@ pub struct DimContinueCommand {
     preserve_base_style: bool,
     /// Run from DIM's Continue option: its own wording.
     in_dim: bool,
+    /// Each dimension style's DIMTMOVE (name, value).
+    style_text_move: Vec<(String, i16)>,
+    /// DIM's Continue: dimensions a typed extension line origin picks.
+    origin_picks: OriginPicks,
 }
 
 impl DimContinueCommand {
@@ -78,11 +82,27 @@ impl DimContinueCommand {
             history: Vec::new(),
             preserve_base_style,
             in_dim: false,
+            style_text_move: Vec::new(),
+            origin_picks: OriginPicks::default(),
         };
         if let Some(entity) = recent {
             let _ = command.install_base(&entity, None);
         }
         command
+    }
+
+    /// The drawing's dimension styles' DIMTMOVE, read when a continued
+    /// dimension decides whether it needs its own text movement override.
+    pub fn with_style_text_move(mut self, style_text_move: Vec<(String, i16)>) -> Self {
+        self.style_text_move = style_text_move;
+        self
+    }
+
+    /// The dimensions a typed point on an extension line origin picks as
+    /// the dimension to continue (DIM's Continue).
+    pub fn with_origin_picks(mut self, origin_picks: OriginPicks) -> Self {
+        self.origin_picks = origin_picks;
+        self
     }
 
     /// DIM's Continue: the dimension to continue is picked.
@@ -267,6 +287,9 @@ impl DimContinueCommand {
         state
             .style
             .apply(dimension.base_mut(), self.preserve_base_style);
+        if !matches!(dimension, Dimension::Ordinate(_)) {
+            text_moves_with_leader(dimension.base_mut(), &self.style_text_move);
+        }
         refresh_measurement(&mut dimension, state.plane);
         dimension.base_mut().common.handle = Handle::NULL;
         dimension.base_mut().block_name.clear();
@@ -365,7 +388,19 @@ impl CadCommand for DimContinueCommand {
         CmdResult::NeedPoint
     }
 
+    fn entity_pick_accepts_points(&self) -> bool {
+        self.in_dim
+    }
+
     fn on_point(&mut self, point: DVec3) -> CmdResult {
+        // DIM's Continue: a typed extension line origin picks its dimension;
+        // any other point asks again.
+        if self.base.is_none() {
+            if let Some(entity) = self.origin_picks.at(point).cloned() {
+                let _ = self.install_base(&entity, Some(point));
+            }
+            return CmdResult::NeedPoint;
+        }
         let Some(dimension) = self.build_dimension(point) else {
             return CmdResult::NeedPoint;
         };
@@ -428,6 +463,31 @@ impl CadCommand for DimContinueCommand {
                 preserve_base_style: self.preserve_base_style,
             }]
         })
+    }
+}
+
+/// A continued (not ordinate) dimension whose text would keep the
+/// dimension line with it when moved (DIMTMOVE 0) gets DIMTMOVE 1, a leader
+/// to moved text, as its first override; a style or base override that
+/// already moves the text otherwise is left alone.
+fn text_moves_with_leader(base: &mut DimensionBase, style_text_move: &[(String, i16)]) {
+    use crate::entities::dim_override::{self as ov, DIMTMOVE};
+    let current = ov::int(&base.common.extended_data, DIMTMOVE).unwrap_or_else(|| {
+        style_text_move
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&base.style_name))
+            .map_or(0, |(_, value)| *value)
+    });
+    if current != 0 {
+        return;
+    }
+    let rest = ov::pairs(&base.common.extended_data);
+    for (code, _) in &rest {
+        ov::set_on_common(&mut base.common, *code, None);
+    }
+    ov::set_on_common(&mut base.common, DIMTMOVE, Some(codec::xdata::XDataValue::Integer16(1)));
+    for (code, value) in rest.into_iter().filter(|(code, _)| *code != DIMTMOVE) {
+        ov::set_on_common(&mut base.common, code, Some(value));
     }
 }
 

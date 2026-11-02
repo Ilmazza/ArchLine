@@ -44,15 +44,19 @@ pub fn items(doc: &Document, definition: Handle) -> Vec<Item> {
             (Part::Base, p.native.definition_base_point),
             (Part::End, p.native.definition_end_point),
         ];
-        // Polar's second label is derived from its angle arc, not an editable offset.
-        grips.extend(
-            graphic
-                .labels
-                .iter()
-                .take(if p.kind == distance::Kind::XY { 2 } else { 1 })
-                .enumerate()
-                .map(|(i, (p, _))| (Part::Label(i), *p)),
-        );
+        // The polar label sits on the angle bisector and the XY labels on the
+        // dimension lines, both derived from the endpoint; only the linear
+        // label is an authored offset.
+        if p.kind == distance::Kind::Linear {
+            grips.extend(
+                graphic
+                    .labels
+                    .iter()
+                    .take(1)
+                    .enumerate()
+                    .map(|(i, (p, _))| (Part::Label(i), *p)),
+            );
+        }
         result.push(Item {
             handle: p.handle,
             name: p.labels.join(" / "),
@@ -270,6 +274,10 @@ pub fn move_part(
                     return Err("Parameter endpoints must remain distinct and finite.");
                 }
             }
+            if let DynamicBlockData::XYParameter(p) = &mut object.data {
+                p.x_value = p.parameter.definition_end_point.x - p.parameter.definition_base_point.x;
+                p.y_value = p.parameter.definition_end_point.y - p.parameter.definition_base_point.y;
+            }
             match &mut object.data {
                 DynamicBlockData::PointParameter(p) => match part {
                     Part::Point => {
@@ -297,19 +305,9 @@ pub fn move_part(
                         p.distance = label_offset(&p.parameter, at)
                     }
                 }
-                DynamicBlockData::PolarParameter(p) => {
-                    if let Part::Label(_) = part {
-                        p.offset = label_offset(&p.parameter, at)
-                    }
-                }
+                // Only the base and endpoint are draggable; the polar label follows them.
+                DynamicBlockData::PolarParameter(_) => {}
                 DynamicBlockData::XYParameter(p) => {
-                    if let Part::Label(index) = part {
-                        if index == 0 {
-                            p.x_value = at.y - p.parameter.definition_base_point.y
-                        } else {
-                            p.y_value = at.x - p.parameter.definition_base_point.x
-                        }
-                    }
                     if (p.parameter.definition_end_point.x - p.parameter.definition_base_point.x)
                         .abs()
                         < 1e-10

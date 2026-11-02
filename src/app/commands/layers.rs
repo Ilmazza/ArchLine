@@ -717,9 +717,12 @@ impl OpenCADStudio {
                 }
             }
 
-            // UNISOLATEOBJECTS — bring back everything hidden by Isolate / Hide
+            // UNISOLATEOBJECTS — bring back everything hidden by Isolate / Hide,
+            // including objects the drawing was saved with as invisible (e.g.
+            // hidden by another CAD program's HIDEOBJECTS).
             "UNISOLATEOBJECTS" => {
-                if self.tabs[i].scene.is_isolation_active() {
+                let session = self.tabs[i].scene.is_isolation_active();
+                if session {
                     let before = self.tabs[i].scene.object_isolation.clone();
                     let selected_before = self.tabs[i].scene.selected.iter().copied().collect();
                     self.tabs[i].scene.end_isolation();
@@ -729,6 +732,21 @@ impl OpenCADStudio {
                         before,
                         selected_before,
                     );
+                }
+                let dirty_before = self.tabs[i].dirty;
+                let originals = self.tabs[i].scene.show_persisted_hidden_objects();
+                let shown = !originals.is_empty();
+                if shown {
+                    self.push_entity_group_history(
+                        i,
+                        "UNISOLATEOBJECTS",
+                        originals,
+                        Vec::new(),
+                        dirty_before,
+                    );
+                    self.tabs[i].dirty = true;
+                }
+                if session || shown {
                     self.command_line
                         .push_info(crate::t!("Isolation ended — all objects shown.").as_ref());
                 } else {
@@ -880,7 +898,7 @@ impl OpenCADStudio {
                 }
             }
 
-            "LAYMATCH" | "LAYMCH" => {
+            "LAYMATCH" | "LAYMCH" | "COPYTOLAYER" => {
                 use crate::modules::draw::layers::match_layer::LayMatchCommand;
                 let dest: Vec<_> = self.tabs[i]
                     .scene
@@ -888,17 +906,32 @@ impl OpenCADStudio {
                     .into_iter()
                     .map(|(h, _)| h)
                     .collect();
-                let cmd = LayMatchCommand::new(dest);
+                // The preselection is consumed so it cannot become the
+                // source object picked next.
+                self.tabs[i].scene.deselect_all();
+                let cmd = if cmd == "COPYTOLAYER" {
+                    LayMatchCommand::copy_to_layer(dest)
+                } else {
+                    LayMatchCommand::new(dest)
+                };
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
             }
 
             "MATCHPROP" => {
                 use crate::modules::draw::properties::match_prop::MatchPropCommand;
+                // One preselected object is the source. Multiple objects are
+                // ambiguous, so keep the explicit source-pick prompt for them.
+                let src = match self.tabs[i].scene.selected_entities().as_slice() {
+                    [(handle, _)] => *handle,
+                    _ => codec::Handle::NULL,
+                };
+                // Consume the preselection so it cannot become a destination.
                 self.tabs[i].scene.deselect_all();
-                let cmd = MatchPropCommand::new();
+                let cmd = MatchPropCommand::new(src);
                 self.command_line.push_info(&cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(cmd));
+                self.refresh_active_cmd_preview(i);
             }
 
             "GROUP" => {
@@ -1488,6 +1521,36 @@ impl OpenCADStudio {
     /// they differ from the layer. Layers the state turns off are frozen in
     /// the viewport; lock and plot have no per-viewport form and apply to the
     /// drawing.
+    /// Give `layer` its own `color` in the layout viewport `viewport`.
+    pub(in crate::app) fn set_layer_viewport_color(
+        &mut self,
+        i: usize,
+        layer: &str,
+        viewport: codec::Handle,
+        color: codec::types::Color,
+    ) {
+        use codec::objects::{KnownXRecordKind as Kind, XRecordValue as Value};
+        let Some(layer) = self.tabs[i].scene.document.layers.get(layer).map(|l| l.handle) else {
+            return;
+        };
+        let Some(packed) = crate::scene::view::render::pack_layer_override_color(&color) else {
+            return;
+        };
+        self.push_undo_snapshot(i, "VP Color".to_string());
+        let scene = &mut self.tabs[i].scene;
+        scene.document.set_layer_viewport_override(
+            layer,
+            Kind::LayerViewportColorOverride,
+            viewport,
+            Value::Int32(packed),
+        );
+        scene.bump_geometry();
+        self.tabs[i].dirty = true;
+        let doc_layers = self.tabs[i].scene.document.layers.clone();
+        let vp_info = self.tabs[i].scene.viewport_list();
+        self.tabs[i].layers.sync_with_viewports(&doc_layers, vp_info);
+    }
+
     pub(in crate::app) fn restore_layer_state_here(&mut self, i: usize, name: &str) -> usize {
         use codec::layer_state::LayerStateMask as Mask;
         use codec::objects::{KnownXRecordKind as Kind, XRecordValue as Value};

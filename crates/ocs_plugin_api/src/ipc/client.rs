@@ -307,6 +307,30 @@ impl HostApi for PluginHostApi {
         }
     }
 
+    fn begin_undo_group(&mut self, label: &str) {
+        if let Err(e) = self.client.request(PluginRequest::BeginUndoGroup {
+            label: label.to_string(),
+        }) {
+            eprintln!("[plugin] begin_undo_group failed: {e}");
+        }
+    }
+
+    fn end_undo_group(&mut self) {
+        if let Err(e) = self.client.request(PluginRequest::EndUndoGroup) {
+            eprintln!("[plugin] end_undo_group failed: {e}");
+        }
+    }
+
+    fn query_entities(&mut self, query: &str) -> Result<crate::host::EntityPage, String> {
+        match self.client.request(PluginRequest::QueryEntities {
+            query: query.to_string(),
+        }) {
+            Ok(PluginResponse::EntityPage(page)) => page,
+            Ok(other) => Err(format!("unexpected QueryEntities response: {other:?}")),
+            Err(e) => Err(format!("QueryEntities failed: {e}")),
+        }
+    }
+
     fn set_dirty(&mut self) {
         if let Err(e) = self.client.request(PluginRequest::SetDirty) {
             eprintln!("[plugin] set_dirty failed: {e}");
@@ -706,6 +730,108 @@ impl HostApi for PluginHostApi {
             }
             Ok(PluginResponse::Error(error)) => Err(error),
             Ok(other) => Err(format!("unexpected reference-only response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn stage_parametric_chain(
+        &mut self,
+        reference_name: &str,
+        chain: &crate::host::ParametricChain,
+        tolerance: f64,
+    ) -> Result<Vec<Handle>, String> {
+        // API v14: declared chain in, reference-only display handles out.
+        // A staged write mutates the document: the cached snapshot invalidates
+        // like every write path.
+        match self.client.request(PluginRequest::StageParametricChain {
+            reference_name: reference_name.to_string(),
+            chain: chain.clone(),
+            tolerance,
+        }) {
+            Ok(PluginResponse::StageParametricChainResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected parametric staging response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn sample_parametric(
+        &self,
+        chain: &crate::host::ParametricChain,
+        s: f64,
+    ) -> Result<Option<crate::host::ParametricSample>, String> {
+        // API v14: pure evaluation, no write, no cache effect.
+        match self.client.request(PluginRequest::SampleParametric {
+            chain: chain.clone(),
+            s,
+        }) {
+            Ok(PluginResponse::SampleParametricResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected parametric sample response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn register_plugin_class(
+        &mut self,
+        _plugin_id: &str,
+        class: &crate::host::PluginClassDeclaration,
+    ) -> Result<(), String> {
+        // API v14: declared class in; session registry state (no document
+        // mutation, no cache effect).
+        match self.client.request(PluginRequest::RegisterPluginClass {
+            class: class.clone(),
+        }) {
+            Ok(PluginResponse::RegisterPluginClassResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected class registration response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn stage_plugin_class_instance(
+        &mut self,
+        _plugin_id: &str,
+        instance: &crate::host::PluginClassInstance,
+    ) -> Result<Vec<Handle>, String> {
+        // API v14: identity + design descriptor in, reference-only display
+        // handles out. A staged write mutates the document: the cached
+        // snapshot invalidates like every write path.
+        match self.client.request(PluginRequest::StagePluginClassInstance {
+            instance: instance.clone(),
+        }) {
+            Ok(PluginResponse::StagePluginClassInstanceResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected instance staging response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn plugin_class_instance_properties(
+        &self,
+        handle: Handle,
+    ) -> Result<Vec<crate::host::PluginClassParameterRow>, String> {
+        // API v14: a pure read (the record row stays the values' truth):
+        // no document mutation, no cache effect.
+        match self
+            .client
+            .request(PluginRequest::PluginClassInstanceProperties { handle })
+        {
+            Ok(PluginResponse::PluginClassInstancePropertiesResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!(
+                "unexpected class instance properties response: {other:?}"
+            )),
             Err(error) => Err(error.to_string()),
         }
     }

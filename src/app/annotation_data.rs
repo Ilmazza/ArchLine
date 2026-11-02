@@ -184,6 +184,12 @@ pub(crate) const DATA_LINK_DICTIONARY: &str = "ACAD_DATALINK";
 pub(crate) const EXCEL_LINK_ADAPTER: &str = "AcExcel";
 /// Data adapter of the links a data extraction table keeps to its settings.
 pub(crate) const EXTRACTION_LINK_ADAPTER: &str = "OpenCADStudio.DataExtraction.DataLinkAdapter";
+
+/// Whether a link adapter is a data extraction one: ours, or the adapter
+/// other extraction tools file their links under (`...DataExtraction.DxDataLinkAdapter`).
+fn is_extraction_adapter(adapter: &str) -> bool {
+    adapter == EXTRACTION_LINK_ADAPTER || adapter.ends_with(".DataExtraction.DxDataLinkAdapter")
+}
 /// Data-link option: keep a cached copy of the source data.
 pub(crate) const LINK_OPTION_PERSIST_CACHE: i32 = 0x1;
 /// Update-option bits.
@@ -311,6 +317,96 @@ pub(crate) fn stamp_data_link(link: &mut DataLink) {
     link.millisecond = elapsed.subsec_millis() as i16;
 }
 
+/// Stamps the last-update time of the link at `handle`.
+pub(crate) fn stamp_data_link_handle(doc: &mut Document, handle: Handle) {
+    if let Some(link) = data_link_mut(doc, handle) {
+        stamp_data_link(link);
+    }
+}
+
+/// DXEVAL: the events that compare extraction tables with their data —
+/// 1 open, 2 save, 4 plot, 8 publish, 16 eTransmit/archive — and 32 save,
+/// 64 plot, 128 publish, 256 eTransmit/archive updating them without
+/// asking. Kept in the drawing; 12 (plot and publish) until set.
+pub(crate) fn dxeval(doc: &Document) -> i32 {
+    crate::io::drawing_variable(doc, "DXEVAL")
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(12)
+}
+
+/// An extraction table whose data no longer matches the drawing.
+#[derive(Debug, Clone)]
+pub(crate) struct OutdatedExtraction {
+    pub table: Handle,
+    pub link: Handle,
+    /// The settings file the extraction runs from.
+    pub settings: String,
+    /// What the table shows once updated: its title over the new data.
+    pub rows: Vec<Vec<String>>,
+}
+
+/// The rows an extraction table shows from its data now, under its title
+/// row; `None` when `link` is not an extraction link.
+pub(crate) fn extraction_table_rows(
+    doc: &Document,
+    doc_path: Option<&Path>,
+    table: Handle,
+    link: Handle,
+) -> Option<Result<Vec<Vec<String>>, String>> {
+    let settings = extraction_link_settings(doc, link)?;
+    Some(rerun_extraction(doc, doc_path, &settings).map(|rows| {
+        let title = match doc.get_entity(table) {
+            Some(EntityType::Table(table)) => table.cell_text(0, 0).unwrap_or_default().to_string(),
+            _ => String::new(),
+        };
+        std::iter::once(vec![title]).chain(rows).collect()
+    }))
+}
+
+/// The extraction tables of the drawing whose cells differ from what their
+/// extraction gives now.
+pub(crate) fn outdated_extraction_tables(
+    doc: &Document,
+    doc_path: Option<&Path>,
+) -> Vec<OutdatedExtraction> {
+    let mut outdated = Vec::new();
+    for entity in doc.entities() {
+        let EntityType::Table(table) = entity else {
+            continue;
+        };
+        let Some(link) = table
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .find_map(|cell| cell.data_link_handle)
+        else {
+            continue;
+        };
+        let handle = entity.common().handle;
+        let Some(Ok(rows)) = extraction_table_rows(doc, doc_path, handle, link) else {
+            continue;
+        };
+        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let current = table.row_count() == rows.len()
+            && table.column_count() == columns
+            && rows.iter().enumerate().all(|(r, values)| {
+                (0..columns).all(|c| {
+                    table.cell_text(r, c).unwrap_or_default()
+                        == values.get(c).map(String::as_str).unwrap_or("")
+                })
+            });
+        if !current {
+            outdated.push(OutdatedExtraction {
+                table: handle,
+                link,
+                settings: extraction_link_settings(doc, link).unwrap_or_default(),
+                rows,
+            });
+        }
+    }
+    outdated
+}
+
 /// Renames a link (filing it in the dictionary when it was outside it).
 fn rename_data_link(doc: &mut Document, handle: Handle, name: &str) {
     put_data_link_entry(doc, handle, name);
@@ -373,7 +469,7 @@ fn resolve_link_path(doc: &Document, link: &DataLink) -> PathBuf {
 
 /// What a link takes from its source, as the manager describes it.
 fn link_details(doc: &Document, link: &DataLink) -> String {
-    if link.data_adapter == EXTRACTION_LINK_ADAPTER {
+    if is_extraction_adapter(&link.data_adapter) {
         return crate::t!("Data extraction settings").into_owned();
     }
     let (sheet, kind, range) = link_selection(doc, link);
@@ -641,6 +737,26 @@ pub(crate) fn read_tabular_file(
     }
 }
 
+/// The drawing's table styles, as the table commands pick them.
+fn table_style_choices(doc: &Document) -> Vec<crate::modules::annotate::table_cmd::StyleChoice> {
+    let mut styles: Vec<_> = doc
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| match object {
+            ObjectType::TableStyle(style) => {
+                Some(crate::modules::annotate::table_cmd::StyleChoice {
+                    name: style.name.clone(),
+                    handle: *handle,
+                    style: style.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    styles.sort_by_key(|choice| choice.name.to_ascii_lowercase());
+    styles
+}
+
 fn table_style_handle(doc: &Document, name: &str) -> Option<Handle> {
     doc.objects
         .iter()
@@ -829,7 +945,7 @@ pub(crate) fn add_extraction_link(doc: &mut Document, settings: &str) -> Handle 
 /// The settings file of a data extraction link.
 pub(crate) fn extraction_link_settings(doc: &Document, handle: Handle) -> Option<String> {
     data_link(doc, handle)
-        .filter(|link| link.data_adapter == EXTRACTION_LINK_ADAPTER)
+        .filter(|link| is_extraction_adapter(&link.data_adapter))
         .map(|link| link.connection_string.clone())
 }
 
@@ -1427,8 +1543,12 @@ fn save_extraction_settings(state: &DataExtractionState) -> Result<(), String> {
 
 fn load_extraction_settings(state: &mut DataExtractionState) -> Result<(), String> {
     let text = read_text_source(Path::new(state.settings_path.trim()))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|error| error.to_string())?;
+    if value["drawingDataExtractor"].is_object() {
+        load_extractor_settings(state, &value);
+        return Ok(());
+    }
     state.source = match value["source"].as_str() {
         Some("currentSelection") => ExtractionSource::CurrentSelection,
         Some("currentDrawing") => ExtractionSource::CurrentDrawing,
@@ -1487,6 +1607,72 @@ fn load_extraction_settings(state: &mut DataExtractionState) -> Result<(), Strin
     Ok(())
 }
 
+/// Settings in the layout other extraction tools write: the source files
+/// under `drawingDataExtractor.settings.fileList`, the object types and the
+/// report's columns (`strGlobalName`, the same keys these settings use;
+/// flag 16 marks a hidden column), and the table output.
+fn load_extractor_settings(state: &mut DataExtractionState, value: &serde_json::Value) {
+    let settings = &value["drawingDataExtractor"]["settings"];
+    let files = &settings["fileList"];
+    let paths = |key: &str| {
+        files[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["absolute"].as_str().or_else(|| entry.as_str()))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    state.source_files = paths("files").into_iter().chain(paths("folders")).collect();
+    state.include_current = files["currentFile"].is_object();
+    state.source = if state.source_files.is_empty() {
+        ExtractionSource::CurrentDrawing
+    } else {
+        ExtractionSource::DrawingsAndFolders
+    };
+    state.saved_objects = Some(
+        settings["selectedTypesAndProperties"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| kind["displayName"].as_str().map(str::to_string))
+            .collect(),
+    );
+    let report = &value["report"];
+    let columns: Vec<&str> = report["ColLists"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|column| column["flags"].as_i64().unwrap_or(0) & 16 == 0)
+        .filter_map(|column| column["strGlobalName"].as_str())
+        .collect();
+    state.show_count = columns.contains(&"AcDxCount");
+    state.show_name = columns.contains(&"AcDxObjectTypeName");
+    state.saved_properties = Some(
+        columns
+            .into_iter()
+            .filter(|key| !matches!(*key, "AcDxCount" | "AcDxObjectTypeName"))
+            .map(str::to_string)
+            .collect(),
+    );
+    if let Some(combine) = report["bInAggregateMode"].as_bool() {
+        state.combine_identical = combine;
+    }
+    let output = &value["outputSettings"];
+    let text_of = |key: &str, current: &str| output[key].as_str().unwrap_or(current).to_string();
+    state.output_path = text_of("fileName", &state.output_path);
+    state.output_file = !state.output_path.trim().is_empty();
+    state.output_table = output["ouputFlags"].as_i64().map_or(state.output_table, |f| f & 2 != 0);
+    state.table_style = text_of("tableStyleName", &state.table_style);
+    state.table_title = text_of("tableTitle", &state.table_title);
+    state.title_cell_style = text_of("titleCellStyle", &state.title_cell_style);
+    state.header_cell_style = text_of("headerCellStyle", &state.header_cell_style);
+    state.data_cell_style = text_of("dataCellStyle", &state.data_cell_style);
+    if let Some(headers) = output["usePropertyNameAsColumnHeader"].as_bool() {
+        state.property_headers = headers;
+    }
+}
+
 impl OpenCADStudio {
     fn reset_annotation_modal(&mut self, modal: ModalKind) {
         self.active_modal = Some(modal);
@@ -1503,8 +1689,79 @@ impl OpenCADStudio {
         self.table_insert.style = current;
         self.table_insert.links = links;
         self.table_insert.link = self.table_insert.links.first().cloned();
+        let saved = *crate::modules::annotate::table_cmd::session();
+        let state = &mut self.table_insert;
+        state.columns = saved.columns.to_string();
+        state.data_rows = saved.data_rows.to_string();
+        state.column_width = crate::entities::common::format_length(
+            saved.cell_width(self.tabs[i].scene.document.header.measurement == 1),
+        );
+        state.row_height = saved.row_lines.to_string();
+        state.insertion = if saved.window {
+            TableInsertion::Window
+        } else {
+            TableInsertion::Point
+        };
+        state.columns_fixed = saved.columns_fixed;
+        state.rows_fixed = saved.rows_fixed;
         self.table_insert.error.clear();
         self.reset_annotation_modal(ModalKind::InsertTable);
+    }
+
+    /// -TABLE: the table settings on the command line.
+    pub(super) fn start_command_line_table(&mut self) {
+        let i = self.active_tab;
+        let doc = &self.tabs[i].scene.document;
+        let styles = table_style_choices(doc);
+        let current = styles
+            .iter()
+            .find(|choice| choice.name.eq_ignore_ascii_case(&doc.header.current_table_style_name))
+            .or(styles.first())
+            .cloned();
+        let links = data_link_choices(doc)
+            .into_iter()
+            .map(|choice| (choice.name, choice.handle))
+            .collect();
+        let command = crate::modules::annotate::table_cmd::TableCommand::command_line(
+            current,
+            styles,
+            links,
+            doc.header.measurement == 1,
+        );
+        self.command_line.push_output(&command.status_line());
+        self.command_line
+            .push_info(&crate::command::CadCommand::prompt(&command));
+        self.tabs[i].active_cmd = Some(Box::new(command));
+    }
+
+    /// -TABLE's data Link option: `<link handle> <table style>`.
+    pub(super) fn place_command_line_link_table(&mut self, args: &str) {
+        let i = self.active_tab;
+        let (handle, style) = args.split_once(' ').unwrap_or((args, ""));
+        let doc = &self.tabs[i].scene.document;
+        let Some((handle, link)) = u64::from_str_radix(handle.trim(), 16)
+            .ok()
+            .map(Handle::new)
+            .and_then(|handle| data_link(doc, handle).map(|link| (handle, link)))
+        else {
+            self.command_line.push_error(crate::t!("Data link not found.").as_ref());
+            return;
+        };
+        let rows = match read_link_rows(doc, link) {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.command_line.push_error(&error);
+                return;
+            }
+        };
+        let table = build_table(&rows, table_style_handle(doc, style.trim()), None);
+        let command =
+            crate::modules::annotate::data_link::DataLinkPlaceCommand::existing_from_table(
+                table, handle,
+            );
+        self.command_line
+            .push_info(&crate::command::CadCommand::prompt(&command));
+        self.tabs[i].active_cmd = Some(Box::new(command));
     }
 
     pub(super) fn open_data_link_manager(&mut self, from_table: bool) {
@@ -1625,7 +1882,16 @@ impl OpenCADStudio {
             }
         };
         if state.output_file && !state.output_path.trim().is_empty() {
-            let file = PathBuf::from(state.output_path.trim());
+            // A relative output file goes next to the drawing.
+            let mut file = PathBuf::from(state.output_path.trim());
+            if let Some(dir) = self.tabs[i]
+                .current_path
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .filter(|_| file.is_relative())
+            {
+                file = dir.join(file);
+            }
             match write_extraction_file(&file, &rows) {
                 Ok(()) => self.command_line.push_output(
                     crate::tf!(
@@ -1666,6 +1932,8 @@ impl OpenCADStudio {
             TableInsertField::ColumnWidth(value) => self.table_insert.column_width = value,
             TableInsertField::RowHeight(value) => self.table_insert.row_height = value,
             TableInsertField::Preview(value) => self.table_insert.preview = value,
+            TableInsertField::ColumnsFixed(value) => self.table_insert.columns_fixed = value,
+            TableInsertField::RowsFixed(value) => self.table_insert.rows_fixed = value,
             TableInsertField::FirstRowStyle(value) => self.table_insert.first_row_style = value,
             TableInsertField::SecondRowStyle(value) => self.table_insert.second_row_style = value,
             TableInsertField::OtherRowStyle(value) => self.table_insert.other_row_style = value,
@@ -1727,42 +1995,44 @@ impl OpenCADStudio {
                 .ok()
                 .filter(|value| value.is_finite() && *value > 0.0)
         };
-        let (Some(columns), Some(data_rows), Some(column_width), Some(row_height)) = (
-            parse_usize(&self.table_insert.columns),
-            parse_usize(&self.table_insert.data_rows),
-            parse_number(&self.table_insert.column_width),
-            parse_number(&self.table_insert.row_height),
+        let state = &self.table_insert;
+        let window = state.insertion == TableInsertion::Window;
+        let (Some(columns), Some(data_rows), Some(column_width), Some(row_lines)) = (
+            parse_usize(&state.columns),
+            parse_usize(&state.data_rows),
+            parse_number(&state.column_width),
+            parse_usize(&state.row_height),
         ) else {
             self.table_insert.error =
                 crate::t!("Columns, rows, width, and height must be positive values.").into_owned();
             return Task::none();
         };
+        {
+            let mut saved = crate::modules::annotate::table_cmd::session();
+            saved.columns = columns;
+            saved.data_rows = data_rows;
+            saved.column_width = column_width;
+            saved.row_lines = row_lines;
+            saved.window = window;
+            saved.columns_fixed = state.columns_fixed;
+            saved.rows_fixed = state.rows_fixed;
+        }
         let doc = &self.tabs[i].scene.document;
-        let style = doc
-            .objects
-            .iter()
-            .find_map(|(handle, object)| match object {
-                ObjectType::TableStyle(style)
-                    if style.name.eq_ignore_ascii_case(&self.table_insert.style) =>
-                {
-                    Some((*handle, style))
-                }
-                _ => None,
-            });
-        let multiplier = self.tabs[i].scene.creation_annotation_multiplier();
+        let style = table_style_choices(doc)
+            .into_iter()
+            .find(|choice| choice.name.eq_ignore_ascii_case(&state.style));
         let command = crate::modules::annotate::table_cmd::TableCommand::configured(
             style,
-            multiplier,
-            columns,
-            data_rows,
+            (!window || state.columns_fixed).then_some(columns),
+            (!window || state.rows_fixed).then_some(data_rows),
             column_width,
-            row_height,
-            self.table_insert.insertion == TableInsertion::Window,
-            self.table_insert.preview,
+            row_lines,
+            window,
+            true,
             [
-                &self.table_insert.first_row_style,
-                &self.table_insert.second_row_style,
-                &self.table_insert.other_row_style,
+                &state.first_row_style,
+                &state.second_row_style,
+                &state.other_row_style,
             ],
         );
         self.active_modal = None;
@@ -2141,6 +2411,15 @@ impl OpenCADStudio {
         self.command_line.push_info(&command.prompt());
         self.tabs[i].active_cmd = Some(Box::new(command));
         Task::none()
+    }
+
+    /// Back from the Table Style dialog: the style lists and the current
+    /// style as that dialog left them.
+    pub(in crate::app) fn return_to_table_insert(&mut self) {
+        let doc = &self.tabs[self.active_tab].scene.document;
+        self.table_insert.styles = table_styles(doc);
+        self.table_insert.style = doc.header.current_table_style_name.clone();
+        self.reset_annotation_modal(ModalKind::InsertTable);
     }
 
     pub(super) fn on_data_link_close(&mut self) -> Task<Message> {

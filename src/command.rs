@@ -2125,14 +2125,29 @@ pub enum CmdResult {
         parameter: Handle,
         value: crate::scene::block_actions::Value,
     },
-    /// Place or relocate a Basepoint, or place a Lookup parameter.
+    /// Place or relocate a Basepoint, or place a Lookup parameter. A Lookup
+    /// takes its grip count, where `None` keeps the default one grip.
     PlaceBlockSingleParameter {
         document_id: u64,
         definition: Handle,
         kind: crate::modules::block_editor::single_parameter::Kind,
         location: DVec3,
+        grips: Option<usize>,
     },
-    /// Place a native Rotation, Alignment or Flip parameter.
+    /// An action type was chosen that has no geometry action of its own:
+    /// continue with Lookup parameter selection.
+    StartBlockLookupAction {
+        document: u64,
+        definition: Handle,
+    },
+    /// The chosen Lookup parameter's property table should open for editing.
+    OpenBlockLookupTable {
+        document: u64,
+        definition: Handle,
+        name: String,
+    },
+    /// Place a native Rotation, Alignment or Flip parameter. Rotation takes a
+    /// label location, which becomes the label's distance from the arc.
     PlaceBlockOrientationParameter {
         document_id: u64,
         definition: Handle,
@@ -2141,8 +2156,11 @@ pub enum CmdResult {
         base: DVec3,
         end: DVec3,
         reference: DVec3,
+        label_offset: Option<f64>,
+        grips: Option<usize>,
     },
-    /// Place a native two-point parameter after its base, end and label picks.
+    /// Place a native two-point parameter: Linear and Polar take a base, end and
+    /// label pick; XY takes its grip count and labels itself at the endpoint.
     PlaceBlockDistanceParameter {
         document_id: u64,
         definition: Handle,
@@ -2150,6 +2168,8 @@ pub enum CmdResult {
         base: DVec3,
         end: DVec3,
         label: DVec3,
+        /// XY parameter grip count chosen at authoring time, when asked.
+        grips: Option<usize>,
     },
     /// Place a native Point parameter after both authoring picks complete.
     PlaceBlockPointParameter {
@@ -2560,6 +2580,13 @@ pub enum CmdResult {
         source: Handle,
         point: DVec3,
     },
+    /// Attach one smart centre line to two newly selected lines, each given
+    /// with the point it was picked at.
+    ReassociateCenterLine {
+        target: Handle,
+        first: (Handle, DVec3),
+        second: (Handle, DVec3),
+    },
     EditDimensionBreak {
         dimensions: Vec<Handle>,
         operation: DimensionBreakOperation,
@@ -2630,10 +2657,12 @@ pub enum CmdResult {
     /// command calls of a script). A plugin command's script starts from an
     /// empty selection.
     Script(String),
-    /// Move `dest` entities to the layer of the `src` entity; end command.
+    /// Move `dest` entities to the layer of the `src` entity, or put copies
+    /// of them there when `copy` is set; end command.
     MatchEntityLayer {
         dest: Vec<Handle>,
         src: Handle,
+        copy: bool,
     },
     /// Copy all visual properties (layer/color/linetype/lineweight) from `src` to `dest`; end command.
     MatchProperties {
@@ -4187,6 +4216,10 @@ mod constraint_registry_tests {
             "FXCONSTRAINT",
             "GCFIX",
             "SYCONSTRAINT",
+            "GCPARALLEL",
+            "GCCOLLINEAR",
+            "GCTANGENT",
+            "GCSYMMETRIC",
             "DCONSTRAINT",
             "ACONSTRAINT",
         ] {

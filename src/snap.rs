@@ -390,6 +390,10 @@ pub struct Snapper {
     /// on and its master is forced on — the override works even with running
     /// osnap off (#337).
     override_saved: Option<SavedSnap>,
+    /// OSNAPZ: object snaps land on this plane (a point on it and its
+    /// normal: the current UCS at the current elevation) instead of keeping
+    /// the snapped object's height. `None` keeps the object's point.
+    pub osnap_z_plane: Option<(DVec3, DVec3)>,
 }
 
 /// Snap configuration parked while a one-shot override runs: both the 2D and
@@ -443,6 +447,7 @@ impl Default for Snapper {
             parallel_ref: None,
             parallel_dwell: None,
             override_saved: None,
+            osnap_z_plane: None,
         }
     }
 }
@@ -1345,6 +1350,7 @@ impl Snapper {
             parallel_ref: None,
             parallel_dwell: None,
             override_saved: None,
+            osnap_z_plane: None,
         };
         // Tangent-only: Grid is disabled here, so the grid basis is irrelevant.
         tmp.snap(
@@ -1461,7 +1467,15 @@ impl Snapper {
             } else {
                 self.snap_enabled && self.is_on(snap_type)
             };
-            on.then_some(snap_type)
+            // A solid's vertices and edge middles also answer the 2D
+            // Endpoint and Midpoint modes (#2153).
+            let planar = match hint {
+                SnapHint::Vertex => Some(SnapType::Endpoint),
+                SnapHint::EdgeMidpoint => Some(SnapType::Midpoint),
+                _ => None,
+            }
+            .filter(|planar| self.snap_enabled && self.is_on(*planar));
+            on.then_some(snap_type).or(planar)
         };
         if let Some(points) = wires.snap_points() {
             for point_ref in points {
@@ -1599,6 +1613,18 @@ impl Snapper {
             construction_ray,
             &[],
         )
+        .map(|hit| self.on_osnap_z_plane(hit))
+    }
+
+    /// The snapped point moved onto the OSNAPZ plane along its normal; a grid
+    /// point already lies on the drafting plane.
+    pub fn on_osnap_z_plane(&self, mut hit: SnapResult) -> SnapResult {
+        if let Some((origin, normal)) = self.osnap_z_plane {
+            if hit.snap_type != SnapType::Grid {
+                hit.world -= normal * (hit.world - origin).dot(normal);
+            }
+        }
+        hit
     }
 
     /// Find the best snap candidate while also testing extra construction rays

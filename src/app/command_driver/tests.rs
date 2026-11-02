@@ -233,6 +233,24 @@ mod parametric_constraint_undo_tests {
             )))
     }
 
+    fn add_circle(app: &mut OpenCADStudio, cx: f64, cy: f64, radius: f64) -> Handle {
+        let mut circle = codec::entities::Circle::new();
+        circle.center = codec::types::Vector3::new(cx, cy, 0.0);
+        circle.radius = radius;
+        app.tabs[app.active_tab]
+            .scene
+            .add_entity(codec::EntityType::Circle(circle))
+    }
+
+    fn circle_center_radius(app: &OpenCADStudio, handle: Handle) -> ([f64; 2], f64) {
+        match app.tabs[app.active_tab].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Circle(circle)) => {
+                ([circle.center.x, circle.center.y], circle.radius)
+            }
+            other => panic!("expected a Circle, got {other:?}"),
+        }
+    }
+
     fn line_angle_deg(app: &OpenCADStudio, handle: Handle) -> f64 {
         match app.tabs[app.active_tab].scene.document.get_entity(handle) {
             Some(codec::EntityType::Line(l)) => (l.end.y - l.start.y)
@@ -240,6 +258,219 @@ mod parametric_constraint_undo_tests {
                 .to_degrees(),
             other => panic!("expected a Line, got {other:?}"),
         }
+    }
+
+    fn line_segment(app: &OpenCADStudio, handle: Handle) -> ([f64; 2], [f64; 2]) {
+        match app.tabs[app.active_tab].scene.document.get_entity(handle) {
+            Some(codec::EntityType::Line(l)) => ([l.start.x, l.start.y], [l.end.x, l.end.y]),
+            other => panic!("expected a Line, got {other:?}"),
+        }
+    }
+
+    fn assert_segment_unmoved(
+        app: &OpenCADStudio,
+        handle: Handle,
+        start: [f64; 2],
+        end: [f64; 2],
+    ) {
+        let (s, e) = line_segment(app, handle);
+        assert!(
+            (s[0] - start[0]).abs() < 1e-9
+                && (s[1] - start[1]).abs() < 1e-9
+                && (e[0] - end[0]).abs() < 1e-9
+                && (e[1] - end[1]).abs() < 1e-9,
+            "the first-picked entity should not move: {s:?} -> {e:?}"
+        );
+    }
+
+    /// A parallel constraint keeps the first-selected entity where it is and
+    /// turns the second to match it, the order its prompt names.
+    #[test]
+    fn parallel_constraint_holds_the_first_selected_entity() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let horizontal = add_line(&mut app, 0.0, 0.0, 100.0, 0.0);
+        let vertical = add_line(&mut app, 0.0, 0.0, 0.0, 100.0);
+        app.tabs[app.active_tab]
+            .scene
+            .document
+            .get_entity_mut(vertical)
+            .unwrap()
+            .common_mut()
+            .layer = "WALLS".to_string();
+        let _ = app.apply_cmd_result(CmdResult::AddParametricConstraint {
+            kind: ConstraintKind::Parallel,
+            refs: vec![
+                ParametricRef::whole(horizontal),
+                ParametricRef::whole(vertical),
+            ],
+            driving_param: None,
+            label: "Parallel constraint",
+        });
+        assert_segment_unmoved(&app, horizontal, [0.0, 0.0], [100.0, 0.0]);
+        assert_eq!(
+            app.tabs[app.active_tab]
+                .scene
+                .document
+                .get_entity(vertical)
+                .unwrap()
+                .common()
+                .layer,
+            "WALLS",
+            "turning the second entity must keep its layer"
+        );
+        let angle = line_angle_deg(&app, vertical);
+        assert!(
+            angle.abs() < 1e-6,
+            "the second entity should turn parallel to the first, got {angle} degrees"
+        );
+    }
+
+    #[test]
+    fn parallel_constraint_holds_whichever_entity_was_picked_first() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let vertical = add_line(&mut app, 0.0, 0.0, 0.0, 100.0);
+        let horizontal = add_line(&mut app, 0.0, 0.0, 100.0, 0.0);
+        let _ = app.apply_cmd_result(CmdResult::AddParametricConstraint {
+            kind: ConstraintKind::Parallel,
+            refs: vec![
+                ParametricRef::whole(vertical),
+                ParametricRef::whole(horizontal),
+            ],
+            driving_param: None,
+            label: "Parallel constraint",
+        });
+        assert_segment_unmoved(&app, vertical, [0.0, 0.0], [0.0, 100.0]);
+        let angle = line_angle_deg(&app, horizontal);
+        assert!(
+            (angle - 90.0).abs() < 1e-6,
+            "the second entity should turn parallel to the first, got {angle} degrees"
+        );
+    }
+
+    /// A line already parallel but running the opposite way is left alone:
+    /// the second entity takes the shorter turn, which is none at all.
+    #[test]
+    fn parallel_constraint_leaves_an_opposite_direction_pair_alone() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let datum = add_line(&mut app, 0.0, 0.0, 100.0, 0.0);
+        let reversed = add_line(&mut app, 0.0, 50.0, -100.0, 50.0);
+        let _ = app.apply_cmd_result(CmdResult::AddParametricConstraint {
+            kind: ConstraintKind::Parallel,
+            refs: vec![
+                ParametricRef::whole(datum),
+                ParametricRef::whole(reversed),
+            ],
+            driving_param: None,
+            label: "Parallel constraint",
+        });
+        assert_segment_unmoved(&app, datum, [0.0, 0.0], [100.0, 0.0]);
+        assert_segment_unmoved(&app, reversed, [0.0, 50.0], [-100.0, 50.0]);
+    }
+
+    /// The redraw journal must name the entity the ordered command turned.
+    #[test]
+    fn parallel_constraint_publishes_the_entity_it_turned() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let horizontal = add_line(&mut app, 0.0, 0.0, 100.0, 0.0);
+        let vertical = add_line(&mut app, 0.0, 0.0, 0.0, 100.0);
+        let epoch = app.tabs[app.active_tab].scene.geometry_epoch;
+        let _ = app.apply_cmd_result(CmdResult::AddParametricConstraint {
+            kind: ConstraintKind::Parallel,
+            refs: vec![
+                ParametricRef::whole(horizontal),
+                ParametricRef::whole(vertical),
+            ],
+            driving_param: None,
+            label: "Parallel constraint",
+        });
+        let delta = app.tabs[app.active_tab]
+            .scene
+            .replay_since(epoch)
+            .expect("the add publishes a replayable delta");
+        assert!(
+            delta
+                .iter()
+                .any(|&(handle, kind)| handle == vertical
+                    && kind == crate::scene::ChangeKind::Modified),
+            "the turned handle must be named in the delta: {delta:?}"
+        );
+    }
+
+    /// The turn the ordered command applies is part of the same undo step.
+    #[test]
+    fn undo_restores_the_second_entity_a_parallel_constraint_turned() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let horizontal = add_line(&mut app, 0.0, 0.0, 100.0, 0.0);
+        let vertical = add_line(&mut app, 0.0, 0.0, 0.0, 100.0);
+        let _ = app.apply_cmd_result(CmdResult::AddParametricConstraint {
+            kind: ConstraintKind::Parallel,
+            refs: vec![
+                ParametricRef::whole(horizontal),
+                ParametricRef::whole(vertical),
+            ],
+            driving_param: None,
+            label: "Parallel constraint",
+        });
+        let turned = line_segment(&app, vertical);
+        app.undo_steps(1);
+        assert_segment_unmoved(&app, vertical, [0.0, 0.0], [0.0, 100.0]);
+        app.redo_steps(1);
+        assert_eq!(line_segment(&app, vertical), turned);
+    }
+
+    /// A tangent constraint holds the first-picked circle and slides the
+    /// second-picked line straight onto it. A solve from scratch is free to
+    /// turn the line and drift it off the exact tangent.
+    #[test]
+    fn tangent_constraint_slides_the_second_line_onto_the_first_circle() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let circle = add_circle(&mut app, 0.0, 0.0, 20.0);
+        let line = add_line(&mut app, -100.0, 221.0, 100.0, 221.0);
+        let _ = app.apply_cmd_result(CmdResult::AddTangentConstraint {
+            first: ParametricRef::whole(circle),
+            second: ParametricRef::whole(line),
+            label: "Tangent constraint",
+        });
+        let (center, radius) = circle_center_radius(&app, circle);
+        assert!(
+            center[0].abs() < 1e-9 && center[1].abs() < 1e-9 && (radius - 20.0).abs() < 1e-9,
+            "the datum circle should not move: {center:?} r {radius}"
+        );
+        let (start, end) = line_segment(&app, line);
+        assert!(
+            (start[0] + 100.0).abs() < 1e-6
+                && (start[1] - 20.0).abs() < 1e-6
+                && (end[0] - 100.0).abs() < 1e-6
+                && (end[1] - 20.0).abs() < 1e-6,
+            "the line should keep its direction and slide down onto the circle: {start:?} -> {end:?}"
+        );
+    }
+
+    /// The pick order decides which entity gives way: a line picked first
+    /// stays put and the circle slides onto it.
+    #[test]
+    fn tangent_constraint_holds_the_first_line_and_moves_the_circle() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let line = add_line(&mut app, -100.0, 0.0, 100.0, 0.0);
+        let circle = add_circle(&mut app, 0.0, 50.0, 20.0);
+        let _ = app.apply_cmd_result(CmdResult::AddTangentConstraint {
+            first: ParametricRef::whole(line),
+            second: ParametricRef::whole(circle),
+            label: "Tangent constraint",
+        });
+        assert_segment_unmoved(&app, line, [-100.0, 0.0], [100.0, 0.0]);
+        let (center, radius) = circle_center_radius(&app, circle);
+        assert!(
+            center[0].abs() < 1e-9 && (center[1] - 20.0).abs() < 1e-9 && (radius - 20.0).abs() < 1e-9,
+            "the circle should slide onto the line along the normal: {center:?} r {radius}"
+        );
     }
 
     /// Constraint state and solved geometry share one undo/redo transaction.
@@ -1968,13 +2199,14 @@ mod block_base_point_tests {
                 vec!["DEF_BASE".to_string()],
                 Vec::new(),
                 0,
+                4,
             ),
         );
         assert_eq!(
             app.block_definition
                 .as_ref()
                 .map(|s| s.base_point_y.as_str()),
-            Some("0"),
+            Some("0.0000"),
             "a new block starts at 0"
         );
 
@@ -2085,6 +2317,50 @@ mod block_base_point_tests {
             crate::scene::render_graph::block_base_point(&app.tabs[i].scene.document, "REFEDIT_BP"),
             Vector3::new(10.0, 5.0, 0.0),
             "the base point survives the round trip"
+        );
+    }
+
+    /// The definition body is replaced on save, so the terminator has to move
+    /// after the new body.
+    #[test]
+    fn a_refedit_save_ends_the_definition_after_its_body() {
+        let mut app = OpenCADStudio::new_for_test();
+        let handle = block_and_instance_with_base(&mut app, "REFEDIT_ORDER");
+        let i = app.active_tab;
+        let _ = app.dispatch_command(&format!("REFEDIT_BEGIN:{}", handle.value()));
+        assert!(
+            app.tabs[i].refedit_session.is_some(),
+            "setup: REFEDIT_BEGIN opens a session"
+        );
+        let _ = app.dispatch_command("REFCLOSE_SAVE");
+        assert!(app.tabs[i].refedit_session.is_none());
+        let record = app.tabs[i]
+            .scene
+            .document
+            .block_records
+            .get("REFEDIT_ORDER")
+            .expect("the block record");
+        let marker = record.block_entity_handle.value();
+        let end = record.block_end_handle.value();
+        let body: Vec<_> = record
+            .entity_handles
+            .iter()
+            .map(|h| h.value())
+            .collect();
+        assert!(
+            body.iter().all(|h| *h > marker),
+            "body handles follow the BLOCK marker: {body:?}"
+        );
+        assert!(
+            end > *body.iter().max().expect("the body is not empty"),
+            "the ENDBLK handle follows the body: marker {marker}, body {body:?}, end {end}"
+        );
+        assert!(
+            matches!(
+                app.tabs[i].scene.document.get_entity(codec::Handle::new(end)),
+                Some(EntityType::BlockEnd(_))
+            ),
+            "the record's end handle names an ENDBLK entity"
         );
     }
 

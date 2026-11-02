@@ -38,6 +38,6 @@ mod tests {
         add_insert(&mut scene, "Door", 5.0);
         add_insert(&mut scene, "Window", 10.0);
         scene.select_entity(first, true);
-        assert_eq!(scene.select_similar(), 1);
+        assert_eq!(scene.select_similar(130), 1);
     }
 }
