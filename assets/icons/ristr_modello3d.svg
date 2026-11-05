@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Modello 3D">
+  <path d="M12 2.25L20.25 6.75L12 11.25L3.75 6.75Z" fill="#6DB7ED"/>
+  <path d="M12 2.25L20.25 6.75V17.25L12 21.75L3.75 17.25V6.75Z" stroke="#B4B6B9" stroke-width="1.5"/>
+  <path d="M3.75 6.75L12 11.25L20.25 6.75M12 11.25V21.75" stroke="#B4B6B9" stroke-width="1.5"/>
+  <path d="M7.5 13.5V17.25L10.5 18.9V15.15Z" stroke="#B4B6B9" stroke-width="1"/>
+</svg>

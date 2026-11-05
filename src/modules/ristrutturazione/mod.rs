@@ -1,5 +1,5 @@
 //! Scheda «Ristrutturazione» del ribbon (workspace OpenCAD Studio): gli stessi
-//! quindici comandi `AL_*` di Tools > Ristrutturazione e della barra omonima del
+//! sedici comandi `AL_*` di Tools > Ristrutturazione e della barra omonima del
 //! workspace AutoCAD Classic, con le stesse icone (`assets/icons/ristr_*.svg`).
 //! Modulo proprio di ArchLine: nessun comando nuovo, solo l'accesso dal ribbon.
 
@@ -7,7 +7,7 @@ use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, 
 
 pub struct RistrutturazioneModule;
 
-/// I quindici comandi in ordine di gruppo: id, etichetta, icona.
+/// I sedici comandi in ordine di gruppo: id, etichetta, icona.
 fn command(id: &'static str, label: &'static str, icon: &'static [u8]) -> RibbonItem {
     RibbonItem::LargeTool(ToolDef {
         id,
@@ -108,6 +108,11 @@ impl CadModule for RistrutturazioneModule {
                             "Prospetto",
                             include_bytes!("../../../assets/icons/ristr_prospetto.svg"),
                         ),
+                        command(
+                            "AL_MODELLO3D",
+                            "Modello 3D",
+                            include_bytes!("../../../assets/icons/ristr_modello3d.svg"),
+                        ),
                     ],
                 },
                 RibbonGroup {
@@ -140,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tab_carries_the_fifteen_commands_of_the_menu() {
+    fn the_tab_carries_the_sixteen_commands_of_the_menu() {
         let ids: Vec<&str> = RistrutturazioneModule
             .ribbon_groups()
             .iter()
@@ -165,6 +170,7 @@ mod tests {
                 "AL_TAGLIO",
                 "AL_SEZIONE",
                 "AL_PROSPETTO",
+                "AL_MODELLO3D",
                 "AL_ESTRAI",
                 "AL_ABACO",
                 "AL_ABACO_CSV",

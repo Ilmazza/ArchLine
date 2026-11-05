@@ -48,6 +48,8 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("AL_TAGLIO", asset!("ristr_taglio.svg")),
     ("AL_SEZIONE", asset!("ristr_sezione.svg")),
     ("AL_PROSPETTO", asset!("ristr_prospetto.svg")),
+    // Part 5: a block in isometric view, the top face in the accent.
+    ("AL_MODELLO3D", asset!("ristr_modello3d.svg")),
 ];
 
 /// Black-stroke glyphs: some from the quick-access strip, the rest drawn for
@@ -120,7 +122,7 @@ mod tests {
         assert_eq!(all.len(), n, "a command has two icons");
     }
 
-    const RISTRUTTURAZIONE: [&str; 15] = [
+    const RISTRUTTURAZIONE: [&str; 16] = [
         "AL_DEMOLISCI",
         "AL_NUOVO",
         "AL_STATO",
@@ -136,6 +138,7 @@ mod tests {
         "AL_TAGLIO",
         "AL_SEZIONE",
         "AL_PROSPETTO",
+        "AL_MODELLO3D",
     ];
 
     fn text(bytes: &[u8]) -> String {
@@ -203,6 +206,7 @@ mod tests {
             "AL_TAGLIO",
             "AL_SEZIONE",
             "AL_PROSPETTO",
+            "AL_MODELLO3D",
         ] {
             let pixmap = render(ribbon(command).unwrap_or_else(|| panic!("{command}: no icon")));
             let accent = pixmap
