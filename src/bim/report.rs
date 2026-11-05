@@ -153,6 +153,12 @@ pub enum Notice {
         what: String,
         reason: String,
     },
+    /// Una parte che il modello 3D non estrude (parte 5, R123): `what` dice
+    /// quale (una massa muraria, un'apertura), `reason` perché.
+    ModelloEscluso {
+        what: String,
+        reason: String,
+    },
     /// Tabelle d'abaco scritte in un disegno R2000 o precedente: la `TABLE` è
     /// provata solo dal DWG 2004 in poi (spike del Task 7, Ruling X).
     TabellaNonProvataR2000,
@@ -323,6 +329,9 @@ impl Notice {
             }
             Self::SezioneEsclusa { what, reason } => {
                 format!("Sezione: {what} non disegnato: {reason}.")
+            }
+            Self::ModelloEscluso { what, reason } => {
+                format!("Modello 3D: {what} non estruso: {reason}.")
             }
             Self::TabellaNonProvataR2000 => {
                 "TABLE non provata in formato R2000: da verificare in AutoCAD.".into()

@@ -17,6 +17,7 @@ pub mod cut_command;
 pub mod elevation;
 pub mod extract;
 pub mod height;
+pub mod mass3d;
 pub mod migrate;
 pub mod project;
 pub mod quantities;
