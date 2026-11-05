@@ -169,6 +169,46 @@ pub struct ApertureGeom {
     pub ring: Vec<[f64; 2]>,
 }
 
+/// Un cambio di `AL_APERTURA_DATI` su un'apertura (spec parte 3 §5.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ApertureChange {
+    Stato(ApertureState),
+    /// `None` toglie il valore: l'altezza torna `n.d.`, mai un ripiego.
+    Altezza(Option<f64>),
+    Davanzale(Option<f64>),
+    Appoggio(Option<f64>),
+    Soglia(bool),
+    Architrave(bool),
+}
+
+impl ApertureChange {
+    /// L'apertura con il cambio, o il motivo per cui non si applica: il
+    /// davanzale è solo delle finestre, la soglia solo di porte e
+    /// portefinestre.
+    pub fn apply(self, a: &Aperture) -> Result<Aperture, &'static str> {
+        let mut new = a.clone();
+        match self {
+            Self::Stato(state) => new.state = state,
+            Self::Altezza(value) => new.height = value,
+            Self::Appoggio(value) => new.bearing = value,
+            Self::Architrave(on) => new.lintel = on,
+            Self::Davanzale(value) => {
+                if a.kind != ApertureKind::Finestra {
+                    return Err("il davanzale è solo delle finestre");
+                }
+                new.sill = value;
+            }
+            Self::Soglia(on) => {
+                if !a.kind.is_door() {
+                    return Err("la soglia è solo di porte e portefinestre");
+                }
+                new.threshold = on;
+            }
+        }
+        Ok(new)
+    }
+}
+
 fn key(text: &str) -> XDataValue {
     XDataValue::String(text.to_string())
 }
@@ -786,6 +826,27 @@ mod tests {
             ..door()
         }]);
         assert!(threshold_segments(&doc, Phase::Fatto).is_empty(), "senza soglia");
+    }
+
+    /// I cambi di `AL_APERTURA_DATI`: ognuno tocca solo il suo campo; il
+    /// davanzale è delle finestre e la soglia delle porte.
+    #[test]
+    fn changes_touch_only_their_field_and_respect_the_kind() {
+        let a = door();
+        let c = |change: ApertureChange| change.apply(&a).unwrap();
+        assert_eq!(c(ApertureChange::Stato(ApertureState::Nuova)).state, ApertureState::Nuova);
+        assert_eq!(c(ApertureChange::Altezza(Some(2.2))).height, Some(2.2));
+        assert_eq!(c(ApertureChange::Altezza(None)).height, None, "toglie, non ripiega");
+        assert_eq!(c(ApertureChange::Appoggio(Some(0.2))).bearing, Some(0.2));
+        assert!(c(ApertureChange::Architrave(true)).lintel);
+        assert!(!c(ApertureChange::Soglia(false)).threshold);
+        let after = c(ApertureChange::Altezza(Some(2.2)));
+        assert_eq!(Aperture { height: a.height, ..after }, a, "il resto non cambia");
+
+        assert!(ApertureChange::Davanzale(Some(0.9)).apply(&a).is_err(), "una porta");
+        let window = Aperture { kind: ApertureKind::Finestra, threshold: false, ..door() };
+        assert_eq!(ApertureChange::Davanzale(Some(0.9)).apply(&window).unwrap().sill, Some(0.9));
+        assert!(ApertureChange::Soglia(true).apply(&window).is_err(), "una finestra");
     }
 
     #[test]

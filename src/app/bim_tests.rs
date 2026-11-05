@@ -5045,3 +5045,96 @@ fn a_door_closes_the_survey_vano_for_the_rooms() {
         assert_eq!(rilievo_snapshot(&app), before, "{form:?}: il rilievo non si tocca");
     }
 }
+
+// ------------------------------------------------------ AL_APERTURA_DATI
+
+/// Parte 3, task 4: `AL_APERTURA_DATI` cambia stato, altezza, davanzale e
+/// soglia delle aperture selezionate, in un solo passo di annullamento (nessuno
+/// se nulla cambia); i valori si ripetono in metri; ciò che non si applica o
+/// non è un'apertura si dice e non si tocca.
+#[test]
+fn al_apertura_dati_edits_the_selected_apertures() {
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+    let door = apertures_in(doc(&app))[0].handle;
+    let survey = rilievo_snapshot(&app);
+    let read = |app: &OpenCADStudio| apertures_in(doc(app))[0].aperture.clone();
+
+    // Senza selezione lo dice e non chiede nulla.
+    run(&mut app, "AL_APERTURA_DATI Altezza 2.2");
+    assert!(history(&app).contains("AL_APERTURA_DATI: nessun oggetto selezionato."));
+    assert_eq!(read(&app).height, Some(2.1));
+
+    select(&mut app, &[door]);
+    let steps = undo_steps(&app);
+    forget_history(&mut app);
+    run(&mut app, "AL_APERTURA_DATI Altezza 2.2");
+    assert_eq!(read(&app).height, Some(2.2), "storia: {}", history(&app));
+    assert!(history(&app).contains("altezza 2,20 m; 1 aperture modificate."), "{}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    // Lo stesso valore non cambia nulla e non apre un passo.
+    forget_history(&mut app);
+    run(&mut app, "AL_APERTURA_DATI Altezza 2.2");
+    assert!(history(&app).contains("0 aperture modificate."), "{}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    // Rimuovi: l'altezza torna n.d., mai un ripiego.
+    run(&mut app, "AL_APERTURA_DATI Rimuovi Altezza");
+    assert_eq!(read(&app).height, None);
+
+    // Stato nuovo: il contorno diventa rosso, il record dice nuova.
+    run(&mut app, "AL_APERTURA_DATI Stato N");
+    assert_eq!(read(&app).state, ApertureState::Nuova);
+    let entity = doc(&app).get_entity(door).unwrap();
+    assert_eq!(entity.common().color, Color::from_index(ACI_ROSSO));
+    assert_eq!(entity.common().layer, LAYER_APERTURE);
+
+    // Soglia e architrave.
+    run(&mut app, "AL_APERTURA_DATI Soglia no");
+    run(&mut app, "AL_APERTURA_DATI Architrave S");
+    run(&mut app, "AL_APERTURA_DATI Appoggio 0.2");
+    let a = read(&app);
+    assert!(!a.threshold && a.lintel);
+    assert_eq!(a.bearing, Some(0.2));
+
+    // Il davanzale è delle finestre: su una porta non si applica.
+    forget_history(&mut app);
+    run(&mut app, "AL_APERTURA_DATI Davanzale 0.9");
+    assert!(history(&app).contains("Non si applica a 1 aperture"), "{}", history(&app));
+    assert_eq!(read(&app).sill, None);
+
+    // Opzione sconosciuta e valore sbagliato: errore, niente cambia.
+    let before = read(&app);
+    run(&mut app, "AL_APERTURA_DATI Colore rosso");
+    run(&mut app, "AL_APERTURA_DATI Altezza -1");
+    assert_eq!(read(&app), before);
+
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+
+    // Un solo annullamento rifà l'ultimo cambio (l'appoggio).
+    undo(&mut app);
+    assert_eq!(read(&app).bearing, None);
+}
+
+/// Un oggetto che non è un'apertura si ignora e si conta.
+#[test]
+fn al_apertura_dati_ignores_what_is_not_an_aperture() {
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+    let door = apertures_in(doc(&app))[0].handle;
+    let wall = rilievo_snapshot(&app)[0].0;
+    select(&mut app, &[door, wall]);
+    forget_history(&mut app);
+
+    run(&mut app, "AL_APERTURA_DATI Stato D");
+
+    assert_eq!(apertures_in(doc(&app))[0].aperture.state, ApertureState::Demolita);
+    assert!(
+        history(&app).contains("1 oggetti non sono aperture e sono stati ignorati."),
+        "{}",
+        history(&app)
+    );
+}

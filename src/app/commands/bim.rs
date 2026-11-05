@@ -53,6 +53,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_PORTA",
         "AL_FINESTRA",
         "AL_PORTAFINESTRA",
+        "AL_APERTURA_DATI",
     ]
 });
 
@@ -100,6 +101,7 @@ impl OpenCADStudio {
             "AL_PORTA" => Some(self.bim_aperture(i, cmd, ApertureKind::Porta)),
             "AL_FINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Finestra)),
             "AL_PORTAFINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Portafinestra)),
+            "AL_APERTURA_DATI" => Some(self.bim_aperture_dati(i, cmd)),
             _ => None,
         }
     }
