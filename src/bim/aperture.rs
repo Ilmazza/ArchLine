@@ -849,6 +849,67 @@ mod tests {
         assert!(ApertureChange::Soglia(true).apply(&window).is_err(), "una finestra");
     }
 
+    /// `AL_ESTRAI` (spec §5.4): il fatto ha le aperture esistenti e da
+    /// demolire, la comparativa tutte, il progetto le esistenti e le nuove;
+    /// colore dello stato (giallo, rosso, o ByLayer), nessun XDATA né APPID
+    /// nostro nei tre DWG.
+    #[test]
+    fn extraction_keeps_the_apertures_of_each_phase() {
+        use crate::bim::extract::{extract, Elaborato, ExtractOptions};
+        let at = |y: f64, state| Aperture {
+            axis: ([4.05, y], [4.05, y + 0.9]),
+            state,
+            ..door()
+        };
+        let (doc, _) = doc_with(&[
+            at(0.0, ApertureState::Esistente),
+            at(1.0, ApertureState::Demolita),
+            at(2.0, ApertureState::Nuova),
+        ]);
+        let all = [
+            Elaborato::StatoDiFatto,
+            Elaborato::DemolizioniCostruzioni,
+            Elaborato::StatoDiProgetto,
+        ];
+        let ex = extract(
+            &doc,
+            &ExtractOptions {
+                elaborati: all.to_vec(),
+                new_walls_layer: "0".into(),
+                unit: crate::bim::units::DrawingUnit::Metri,
+                tol: 1e-6,
+                room_tol: 1e-6,
+            },
+        );
+        let colours = |elaborato: Elaborato| -> Vec<Color> {
+            let (_, out) = ex.docs.iter().find(|(e, _)| *e == elaborato).unwrap();
+            assert!(!out.app_ids.iter().any(|a| a.name.starts_with("ARCHLINE")));
+            let mut colours: Vec<Color> = out
+                .entities()
+                .filter(|e| e.common().layer == LAYER_APERTURE)
+                .inspect(|e| assert!(e.common().extended_data.records().is_empty()))
+                .map(|e| e.common().color.clone())
+                .collect();
+            colours.sort_by_key(|c| format!("{c:?}"));
+            colours
+        };
+        let (by_layer, yellow, red) = (
+            Color::ByLayer,
+            Color::from_index(ACI_GIALLO),
+            Color::from_index(ACI_ROSSO),
+        );
+        let mut fatto = vec![by_layer.clone(), yellow.clone()];
+        fatto.sort_by_key(|c| format!("{c:?}"));
+        let mut comparativa = vec![by_layer.clone(), yellow.clone(), red.clone()];
+        comparativa.sort_by_key(|c| format!("{c:?}"));
+        let mut progetto = vec![by_layer, red];
+        progetto.sort_by_key(|c| format!("{c:?}"));
+        assert_eq!(colours(Elaborato::StatoDiFatto), fatto);
+        assert_eq!(colours(Elaborato::DemolizioniCostruzioni), comparativa);
+        assert_eq!(colours(Elaborato::StatoDiProgetto), progetto);
+
+    }
+
     #[test]
     fn migration_leaves_apertures_alone() {
         let (mut doc, _) = doc_with(&[door()]);

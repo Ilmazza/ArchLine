@@ -57,7 +57,7 @@ use crate::scene::BoundarySource;
 
 use super::abaco::{compute_abaco, render_tables, AbacoOptions};
 use super::abaco_table::{self, kind_name, tables_in};
-use super::aperture;
+use super::aperture::{self, ApertureState};
 use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
@@ -178,6 +178,23 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
         .into_iter()
         .map(|(handle, _)| handle)
         .collect();
+    // Parte 3 (spec §5.4): le aperture stanno nello stato in cui sono. Il fatto
+    // non ha quelle nuove, il progetto non ha quelle da demolire, la
+    // comparativa le ha tutte (le demolite in giallo, le nuove in rosso: il
+    // colore è dell'entità). L'XDATA lo toglie `copy_out` come per le zone.
+    let mut new_apertures: FxHashSet<Handle> = FxHashSet::default();
+    let mut demolished_apertures: FxHashSet<Handle> = FxHashSet::default();
+    for geom in aperture::apertures_in(src) {
+        match geom.aperture.state {
+            ApertureState::Nuova => {
+                new_apertures.insert(geom.handle);
+            }
+            ApertureState::Demolita => {
+                demolished_apertures.insert(geom.handle);
+            }
+            ApertureState::Esistente => {}
+        }
+    }
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
@@ -192,6 +209,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                         && !on_layers(entity, &[LAYER_LOCALI_PROGETTO])
                         && !seeds.contains(&handle)
                         && !abaco.contains(&handle)
+                        && !new_apertures.contains(&handle)
                 });
                 copy_out(src, &mut work, &handles, None)
             }
@@ -240,6 +258,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                             && !room_parts.contains(&handle)
                             && !excluded.contains(&handle)
                             && !abaco.contains(&handle)
+                            && !demolished_apertures.contains(&handle)
                     }
                 });
                 let (drawn, mut refused) = add_drawn(&mut work, &pg.drawn);
