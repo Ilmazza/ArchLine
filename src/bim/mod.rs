@@ -23,6 +23,7 @@ pub mod model3d;
 pub mod model3d_place;
 pub mod model3d_views;
 pub mod strata;
+pub mod strata_assign;
 pub mod migrate;
 pub mod project;
 pub mod quantities;

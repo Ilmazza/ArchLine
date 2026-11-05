@@ -159,6 +159,27 @@ pub enum Notice {
         what: String,
         reason: String,
     },
+    /// Un elemento con una stratigrafia che il disegno non ha più (parte 6):
+    /// `what` è l'elemento (codice della riga o descrizione).
+    StratigrafiaMancante {
+        what: String,
+        name: String,
+    },
+    /// Una stratigrafia del tipo sbagliato per l'elemento (una parete su un
+    /// locale, un solaio su una zona): nessuna riga di strato.
+    StratigrafiaTipoDiverso {
+        what: String,
+        name: String,
+        kind: String,
+    },
+    /// La somma degli strati di una parete non è lo spessore della muratura
+    /// (in cm, già formattati).
+    StratigrafiaDiversa {
+        code: String,
+        name: String,
+        sum_cm: String,
+        thickness_cm: String,
+    },
     /// Tabelle d'abaco scritte in un disegno R2000 o precedente: la `TABLE` è
     /// provata solo dal DWG 2004 in poi (spike del Task 7, Ruling X).
     TabellaNonProvataR2000,
@@ -333,6 +354,20 @@ impl Notice {
             Self::ModelloEscluso { what, reason } => {
                 format!("Modello 3D: {what} non estruso: {reason}.")
             }
+            Self::StratigrafiaMancante { what, name } => {
+                format!("{what}: la stratigrafia «{name}» non c'è più nel disegno.")
+            }
+            Self::StratigrafiaTipoDiverso { what, name, kind } => {
+                format!("{what}: la stratigrafia «{name}» è di tipo {kind}, non va bene qui.")
+            }
+            Self::StratigrafiaDiversa {
+                code,
+                name,
+                sum_cm,
+                thickness_cm,
+            } => format!(
+                "{code}: gli strati di «{name}» sommano {sum_cm} cm, la muratura è spessa {thickness_cm} cm."
+            ),
             Self::TabellaNonProvataR2000 => {
                 "TABLE non provata in formato R2000: da verificare in AutoCAD.".into()
             }
