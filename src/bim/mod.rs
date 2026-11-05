@@ -6,6 +6,7 @@
 pub mod abaco;
 pub mod abaco_render;
 pub mod abaco_table;
+pub mod aperture;
 pub mod clip;
 pub mod commands;
 pub mod extract;
@@ -43,6 +44,10 @@ pub const APP_ZONA: &str = "ARCHLINE_ZONA";
 pub const APP_LOCALE: &str = "ARCHLINE_LOCALE";
 /// Chiave dell'XRecord con le impostazioni del disegno (dizionario radice).
 pub const RECORD_PROGETTO: &str = "ARCHLINE_PROGETTO";
+/// Layer delle aperture (porte e finestre, parte 3).
+pub const LAYER_APERTURE: &str = "AL-APERTURE";
+/// APPID dell'XDATA delle aperture.
+pub const APP_APERTURA: &str = "ARCHLINE_APERTURA";
 /// Layer delle tabelle d'abaco (`AL_ABACO`).
 pub const LAYER_ABACO: &str = "AL-ABACO";
 /// APPID dell'XDATA delle tabelle d'abaco.
