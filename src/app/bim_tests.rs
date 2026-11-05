@@ -362,6 +362,7 @@ fn paper_space_is_refused() {
         ("AL_TAGLIO 2,-1 2,4 3,1.5 A-A", 6),
         ("AL_SEZIONE", 6),
         ("AL_PROSPETTO S", 6),
+        ("AL_MODELLO3D", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5314,4 +5315,88 @@ fn al_prospetto_places_three_drawings_per_view_and_replaces_by_name() {
     // script passa le parole una a una alla scelta Nord/Sud/Est/Ovest).
     dispatch_line(&mut app, "AL_PROSPETTO 180 Fronte strada");
     assert!(!handles_of(&app, "Fronte strada").is_empty(), "storia: {}", history(&app));
+}
+
+// ------------------------------------------------------- AL_MODELLO3D
+
+/// Parte 5, task 6: `AL_MODELLO3D` da script. Il caso A con la porta, i locali
+/// e l'altezza del livello: le `3DFACE` delle due fasi sui loro layer, a
+/// destra del modello; le cinque viste con nome; il rilievo non si tocca;
+/// rilanciato sostituisce dov'era; un annullamento toglie solo l'ultima posa.
+#[test]
+fn al_modello3d_places_both_models_and_saves_the_views() {
+    use crate::bim::model3d_place::{existing_anchor, models_in, ModelPhase};
+    use crate::bim::model3d_views::names;
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    let survey = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+    let camera = app.tabs[app.active_tab].scene.current_as_named_view("prima");
+
+    run(&mut app, "AL_MODELLO3D");
+
+    let first = models_in(doc(&app));
+    assert!(!first.is_empty(), "storia: {}", history(&app));
+    for phase in [ModelPhase::Fatto, ModelPhase::Progetto] {
+        let of_phase: Vec<_> = first.iter().filter(|(_, p)| *p == phase).collect();
+        assert!(!of_phase.is_empty(), "{phase:?}");
+        for (handle, _) in of_phase {
+            assert_eq!(doc(&app).get_entity(*handle).unwrap().common().layer, phase.layer());
+        }
+    }
+    assert_eq!(undo_steps(&app), steps + 2, "layer, poi modelli");
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+    let anchor = existing_anchor(doc(&app)).unwrap();
+    assert!(anchor[0] > 8.3, "a destra del modello: {anchor:?}");
+    for name in names() {
+        let view = doc(&app).views.get(name).unwrap_or_else(|| panic!("vista {name}"));
+        assert!(view.target.x > anchor[0], "{name}: punta sui modelli posati");
+    }
+    assert!(history(&app).contains("viste con nome"), "{}", history(&app));
+    // La camera non cambia.
+    let now = app.tabs[app.active_tab].scene.current_as_named_view("dopo");
+    assert_eq!(
+        (now.target.x, now.target.y, now.direction.z),
+        (camera.target.x, camera.target.y, camera.direction.z)
+    );
+
+    run(&mut app, "AL_MODELLO3D");
+    let second = models_in(doc(&app));
+    assert_eq!(second.len(), first.len(), "storia: {}", history(&app));
+    assert!(second.iter().all(|(h, _)| !first.iter().any(|(old, _)| old == h)));
+    let again = existing_anchor(doc(&app)).unwrap();
+    assert!((again[0] - anchor[0]).abs() < 1e-9 && (again[1] - anchor[1]).abs() < 1e-9);
+    assert_eq!(undo_steps(&app), steps + 3);
+    assert_eq!(doc(&app).views.iter().count(), 5, "le viste si sostituiscono");
+
+    undo(&mut app);
+    let restored = models_in(doc(&app));
+    assert_eq!(restored.len(), first.len());
+    assert!(restored.iter().all(|(h, _)| first.iter().any(|(old, _)| old == h)));
+
+    // Annullata anche la prima posa: niente facce e niente viste.
+    undo(&mut app);
+    assert!(models_in(doc(&app)).is_empty());
+    assert_eq!(doc(&app).views.iter().count(), 0, "le viste fanno parte del passo");
+}
+
+/// Senza altezze non c'è nulla da estrudere: lo dice e non crea nulla, né
+/// facce, né layer, né viste, né passi.
+#[test]
+fn al_modello3d_without_heights_says_so() {
+    use crate::bim::model3d_place::{missing_layers, models_in};
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    let steps = undo_steps(&app);
+    run(&mut app, "AL_MODELLO3D");
+    assert!(history(&app).contains("niente da estrudere"), "{}", history(&app));
+    assert!(models_in(doc(&app)).is_empty());
+    assert!(missing_layers(doc(&app)));
+    assert_eq!(doc(&app).views.iter().count(), 0);
+    assert_eq!(undo_steps(&app), steps);
 }

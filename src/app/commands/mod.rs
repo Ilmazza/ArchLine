@@ -9,6 +9,7 @@ mod bim;
 mod bim_abaco;
 mod bim_altezza;
 mod bim_aperture;
+mod bim_modello3d;
 mod bim_sezione;
 mod bim_taglio;
 mod block_cmdline;
