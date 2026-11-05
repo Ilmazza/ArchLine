@@ -204,16 +204,21 @@ fn drawing_only(notice: &Notice) -> bool {
 }
 
 /// Le righe dei locali (spec §4.3). Un locale di fatto e uno di progetto si
-/// accoppiano se il progetto ha come solo membro quel locale di fatto e il
-/// seme di questo non sta in nessun altro locale di progetto: una riga con la
-/// variazione. Gli altri restano righe separate: un locale di fatto con
-/// «unito in C» (o «diviso tra C + D» se il suo seme sta in più locali di
-/// progetto), un locale di progetto con «da A + B»; nessuna somma.
+/// accoppiano se il progetto ha come solo membro quel locale di fatto e
+/// nessun altro locale di progetto ne contiene il seme né sta nel suo
+/// contorno: una riga con la variazione. Gli altri restano righe separate: un
+/// locale di fatto con «unito in C» (o «diviso tra C + D» se il suo seme sta
+/// in più locali di progetto, o se una parte del suo contorno è un altro
+/// locale di progetto: R93), un locale di progetto con «da A + B» (anche «da
+/// A» per la parte di A senza il suo seme); nessuna somma.
 fn pair_rooms(fatto: Vec<RoomRow>, progetto: Vec<ProjectRoomRow>) -> Vec<LocaleLine> {
-    // I locali di progetto che contengono il seme di ciascun locale di fatto.
+    // I locali di progetto che contengono il seme di ciascun locale di fatto
+    // o che stanno nel suo contorno (la parte di un locale diviso senza il
+    // suo seme, R93): con più di un locale di progetto il locale di fatto è
+    // diviso e non si accoppia.
     let mut owners: Vec<Vec<usize>> = vec![Vec::new(); fatto.len()];
     for (p, project) in progetto.iter().enumerate() {
-        for &f in &project.fatto_members {
+        for &f in project.fatto_members.iter().chain(&project.inside_fatto) {
             if let Some(list) = owners.get_mut(f) {
                 list.push(p);
             }
@@ -223,7 +228,9 @@ fn pair_rooms(fatto: Vec<RoomRow>, progetto: Vec<ProjectRoomRow>) -> Vec<LocaleL
         .iter()
         .enumerate()
         .map(|(f, list)| match list[..] {
-            [p] if progetto[p].fatto_members == [f] => Some(p),
+            [p] if progetto[p].fatto_members == [f] && progetto[p].inside_fatto.is_empty() => {
+                Some(p)
+            }
             _ => None,
         })
         .collect();
@@ -235,6 +242,7 @@ fn pair_rooms(fatto: Vec<RoomRow>, progetto: Vec<ProjectRoomRow>) -> Vec<LocaleL
             project
                 .fatto_members
                 .iter()
+                .chain(&project.inside_fatto)
                 .copied()
                 .filter(|&f| f < fatto.len())
                 .max()
@@ -299,6 +307,7 @@ fn project_line(project: ProjectRoomRow, fatto_names: &[String]) -> LocaleLine {
     let names: Vec<&str> = project
         .fatto_members
         .iter()
+        .chain(&project.inside_fatto)
         .filter_map(|&f| fatto_names.get(f))
         .map(String::as_str)
         .collect();

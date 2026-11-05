@@ -33,7 +33,7 @@
 //!   escono con le righe di progetto, come in `AL_ESTRAI`.
 
 use codec::{Document, Handle};
-use kernel::geom2d::{distance_to, Curve};
+use kernel::geom2d::{contains, distance_to, Curve, Tolerance};
 use rustc_hash::FxHashMap;
 
 use crate::scene::BoundarySource;
@@ -44,7 +44,8 @@ use super::project::project_geometry;
 use super::refresh::measure_fatto;
 use super::report::Notice;
 use super::rooms::{
-    closed_region, distinct, in_new_zone, quality_notices, region_holds, rooms_in, Phase, RoomPart,
+    closed_region, distinct, in_new_zone, quality_notices, region_holds, ring_curves, rooms_in,
+    Phase, RoomPart,
 };
 use super::units::DrawingUnit;
 use super::walls::{wall_set_without_rooms, Region};
@@ -100,6 +101,10 @@ pub struct RoomRow {
     pub perimeter_approximate: bool,
     /// Note separate da «; ».
     pub note: Option<String>,
+    /// L'anello esterno della regione misurata, in unità del disegno (vuoto
+    /// se il locale non è misurato). Serve a dire se un locale di progetto sta
+    /// dentro un locale di fatto ([`ProjectRoomRow::inside_fatto`], R93).
+    pub outline: Vec<[f64; 2]>,
 }
 
 /// Una riga di un locale di progetto e i locali di fatto i cui semi cadono
@@ -109,6 +114,11 @@ pub struct ProjectRoomRow {
     pub row: RoomRow,
     /// Indici nelle righe di fatto date a [`project_room_rows`].
     pub fatto_members: Vec<usize>,
+    /// Indici delle righe di fatto il cui contorno esterno contiene il seme di
+    /// questo locale senza che il loro seme cada nella sua regione: la parte
+    /// di un locale diviso che non ha il seme di fatto (R93, spec §4.3). Mai
+    /// un indice di `fatto_members`.
+    pub inside_fatto: Vec<usize>,
 }
 
 impl RoomRow {
@@ -163,6 +173,7 @@ impl RoomRow {
             approximate: false,
             perimeter_approximate: false,
             note: None,
+            outline: Vec::new(),
         }
     }
 
@@ -185,6 +196,7 @@ impl RoomRow {
         self.volume_m3 = self.height.value_m.map(|height| area * height);
         self.approximate = !exact;
         self.perimeter_approximate = outer_on_chords(region, sources, tol);
+        self.outline = region.outer.clone();
     }
 
     /// Le note degli stati: quella della superficie (`area_note`, se non è
@@ -346,6 +358,18 @@ pub fn project_room_rows(
             .filter(|(_, row)| region_holds(&room.region, row.seed, tol))
             .map(|(member, _)| member)
             .collect();
+        // R93: i locali di fatto che questo divide con altri, perché il suo
+        // seme sta nel loro contorno senza che il loro seme sia qui.
+        let inside_fatto: Vec<usize> = fatto
+            .iter()
+            .enumerate()
+            .filter(|(member, row)| {
+                !fatto_members.contains(member)
+                    && row.outline.len() >= 3
+                    && contains(&ring_curves(&row.outline), room.seed, Tolerance::new(room_tol))
+            })
+            .map(|(member, _)| member)
+            .collect();
         let own = rooms
             .progetto
             .iter()
@@ -353,6 +377,7 @@ pub fn project_room_rows(
             .and_then(|seed| seed.height);
         let members: Vec<(String, Height)> = fatto_members
             .iter()
+            .chain(&inside_fatto)
             .map(|&member| (fatto[member].name.clone(), fatto[member].height.clone()))
             .collect();
         let (height, notice) = resolve_project_room(own, &members, default_height, unit);
@@ -377,7 +402,11 @@ pub fn project_room_rows(
             row.add_note(NOTE_CONFIRM);
         }
         row.note_quality((!room.exact).then_some(NOTE_APPROXIMATE));
-        rows.push(ProjectRoomRow { row, fatto_members });
+        rows.push(ProjectRoomRow {
+            row,
+            fatto_members,
+            inside_fatto,
+        });
     }
     // Ruling M: i semi senza locale chiuso restano tra le righe.
     let seeds = distinct(&rooms.fatto, room_tol)
@@ -407,6 +436,7 @@ pub fn project_room_rows(
         rows.push(ProjectRoomRow {
             row,
             fatto_members: Vec::new(),
+            inside_fatto: Vec::new(),
         });
     }
     (rows, notices)
@@ -1230,6 +1260,73 @@ mod tests {
                     notices.contains(&Notice::LocaleNonChiuso { name: name.into() }),
                     "{form:?}: {notices:?}"
                 );
+            }
+        }
+    }
+
+    /// R93 (spec §4.3): un muro nuovo divide B in due. Il locale di progetto
+    /// senza il seme di fatto («Studio», a ovest del muro) sta nel contorno di
+    /// B (`inside_fatto`) e prende l'altezza di B (3,00, non la predefinita
+    /// 2,70); B non si accoppia più con la sua metà, ma resta una riga «diviso
+    /// tra B + Studio», e le due metà sono righe «da B». Nessuna variazione.
+    #[test]
+    fn a_room_split_by_a_new_wall_is_divided_not_paired() {
+        use crate::bim::abaco::compute_abaco;
+        use crate::bim::abaco::test_support::{set_default_height, OPTS};
+        use crate::bim::walls::rect_from_axis_thickness;
+        for form in FORMS {
+            let mut scene = scene_of(form, Vec::new());
+            set_default_height(&mut scene, 2.7);
+            let (outline, _) = write_room(&mut scene, "B", [7.0, 1.5]);
+            set_height(&mut scene, outline, 3.0);
+            let rect = rect_from_axis_thickness([6.0, 0.0], [6.0, 3.0], 0.12).expect("asse");
+            let zone = Zone {
+                state: ZoneState::Nuovo,
+                origin: ZoneOrigin::LineaSpessore,
+                axis: Some(rect.axis),
+                thickness: Some(rect.thickness),
+                height: None,
+                varco: false,
+            };
+            scene.add_entity(zone_hatch(&zone, &[rect.ring()]));
+            write_seed(&mut scene, "Studio", [5.0, 1.5]);
+
+            let (fatto, _) = fatto_room_rows(&scene.document, M, TOL, DEFAULT);
+            let (rows, _) = project_room_rows(&scene.document, M, TOL, TOL, DEFAULT, &fatto);
+            let by_name = |name: &str| {
+                rows.iter()
+                    .find(|row| row.row.name == name)
+                    .unwrap_or_else(|| panic!("{form:?}: manca {name}: {rows:?}"))
+            };
+            let (b, studio) = (by_name("B"), by_name("Studio"));
+            assert_eq!(b.fatto_members, [0], "{form:?}");
+            assert!(b.inside_fatto.is_empty(), "{form:?}");
+            assert!(studio.fatto_members.is_empty(), "{form:?}");
+            assert_eq!(studio.inside_fatto, [0], "{form:?}");
+            approx(b.row.area_m2, 5.82, &format!("{form:?}: B"));
+            approx(studio.row.area_m2, 5.52, &format!("{form:?}: Studio"));
+            approx(studio.row.height.value_m, 3.0, &format!("{form:?}: Studio"));
+
+            let abaco = compute_abaco(&scene.document, &OPTS);
+            let [fatto_line, first, second] = &abaco.locali[..] else {
+                panic!("{form:?}: {:?}", abaco.locali)
+            };
+            assert_eq!(
+                fatto_line.fatto.as_ref().map(|row| row.name.as_str()),
+                Some("B"),
+                "{form:?}"
+            );
+            assert_eq!(fatto_line.progetto, None, "{form:?}");
+            assert_eq!(fatto_line.variation_m2, None, "{form:?}");
+            assert_eq!(
+                fatto_line.note.as_deref(),
+                Some("diviso tra B + Studio"),
+                "{form:?}"
+            );
+            for line in [first, second] {
+                assert_eq!(line.fatto, None, "{form:?}");
+                assert_eq!(line.variation_m2, None, "{form:?}");
+                assert_eq!(line.note.as_deref(), Some("da B"), "{form:?}");
             }
         }
     }
