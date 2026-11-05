@@ -22,6 +22,7 @@ pub mod mass3d_prism;
 pub mod model3d;
 pub mod model3d_place;
 pub mod model3d_views;
+pub mod strata;
 pub mod migrate;
 pub mod project;
 pub mod quantities;
@@ -71,6 +72,14 @@ pub const APP_TAGLIO: &str = "ARCHLINE_TAGLIO";
 pub const APP_MODELLO3D: &str = "ARCHLINE_MODELLO3D";
 /// APPID dell'XDATA dei disegni di sezione (parte 4).
 pub const APP_SEZIONE: &str = "ARCHLINE_SEZIONE";
+/// Chiave dell'XRecord con le stratigrafie del disegno (parte 6).
+pub const RECORD_STRATIGRAFIE: &str = "ARCHLINE_STRATIGRAFIE";
+/// APPID dell'XDATA dell'assegnazione di una stratigrafia (parte 6).
+pub const APP_STRATIGRAFIA: &str = "ARCHLINE_STRATIGRAFIA";
+/// Layer dei particolari costruttivi (parte 6).
+pub const LAYER_PARTICOLARI: &str = "AL-PARTICOLARI";
+/// APPID dell'XDATA dei particolari costruttivi (parte 6).
+pub const APP_PARTICOLARE: &str = "ARCHLINE_PARTICOLARE";
 /// Layer delle tabelle d'abaco (`AL_ABACO`).
 pub const LAYER_ABACO: &str = "AL-ABACO";
 /// APPID dell'XDATA delle tabelle d'abaco.

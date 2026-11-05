@@ -59,10 +59,6 @@ pub fn read(doc: &Document) -> ProjectRecord {
 /// Crea il record o ne sostituisce le voci. Senza dizionario radice non fa
 /// nulla (un disegno aperto dal codec lo ha sempre).
 pub fn write(doc: &mut Document, rec: &ProjectRecord) {
-    let root = doc.header.named_objects_dict_handle;
-    if !matches!(doc.objects.get(&root), Some(ObjectType::Dictionary(_))) {
-        return;
-    }
     let mut entries = vec![
         XRecordEntry::int32(CODE_VERSION, VERSION),
         XRecordEntry::int16(CODE_UNIT, rec.unit.map_or(0, DrawingUnit::insunits)),
@@ -75,7 +71,26 @@ pub fn write(doc: &mut Document, rec: &ProjectRecord) {
         entries.push(XRecordEntry::double(CODE_DEFAULT_HEIGHT, height));
     }
 
-    if let Some(handle) = record_handle(doc) {
+    write_named_xrecord(doc, RECORD_PROGETTO, entries);
+}
+
+/// Le voci dell'XRecord `name` del dizionario radice, se c'è (parte 6: anche
+/// `ARCHLINE_STRATIGRAFIE`).
+pub(super) fn named_xrecord_entries<'a>(doc: &'a Document, name: &str) -> Option<&'a [XRecordEntry]> {
+    match doc.objects.get(&named_xrecord_handle(doc, name)?) {
+        Some(ObjectType::XRecord(xrecord)) => Some(&xrecord.entries),
+        _ => None,
+    }
+}
+
+/// Crea l'XRecord `name` nel dizionario radice o ne sostituisce le voci. Senza
+/// dizionario radice non fa nulla (un disegno aperto dal codec lo ha sempre).
+pub(super) fn write_named_xrecord(doc: &mut Document, name: &str, entries: Vec<XRecordEntry>) {
+    let root = doc.header.named_objects_dict_handle;
+    if !matches!(doc.objects.get(&root), Some(ObjectType::Dictionary(_))) {
+        return;
+    }
+    if let Some(handle) = named_xrecord_handle(doc, name) {
         if let Some(ObjectType::XRecord(xrecord)) = doc.objects.get_mut(&handle) {
             xrecord.entries = entries;
             // Come `update_xrecord`: flusso dei riferimenti ricostruito e byte
@@ -92,7 +107,7 @@ pub fn write(doc: &mut Document, rec: &ProjectRecord) {
     }
 
     let handle = doc.allocate_handle();
-    let mut xrecord = XRecord::named(RECORD_PROGETTO);
+    let mut xrecord = XRecord::named(name);
     xrecord.handle = handle;
     xrecord.owner = root;
     xrecord.entries = entries;
@@ -102,18 +117,22 @@ pub fn write(doc: &mut Document, rec: &ProjectRecord) {
         // Una voce rimasta senza XRecord (file danneggiato) non deve restare doppia.
         dictionary
             .entries
-            .retain(|(key, _)| !key.eq_ignore_ascii_case(RECORD_PROGETTO));
-        dictionary.add_entry(RECORD_PROGETTO, handle);
+            .retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+        dictionary.add_entry(name, handle);
     }
 }
 
-/// Handle dell'XRecord `ARCHLINE_PROGETTO` nel dizionario radice, se esiste ed è un XRecord.
 fn record_handle(doc: &Document) -> Option<Handle> {
+    named_xrecord_handle(doc, RECORD_PROGETTO)
+}
+
+/// Handle dell'XRecord `name` nel dizionario radice, se esiste ed è un XRecord.
+fn named_xrecord_handle(doc: &Document, name: &str) -> Option<Handle> {
     let ObjectType::Dictionary(root) = doc.objects.get(&doc.header.named_objects_dict_handle)?
     else {
         return None;
     };
-    let handle = root.get(RECORD_PROGETTO)?;
+    let handle = root.get(name)?;
     matches!(doc.objects.get(&handle), Some(ObjectType::XRecord(_))).then_some(handle)
 }
 
