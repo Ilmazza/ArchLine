@@ -8,6 +8,7 @@ mod attman;
 mod bim;
 mod bim_abaco;
 mod bim_altezza;
+mod bim_aperture;
 mod block_cmdline;
 mod blocks;
 mod blockvars;

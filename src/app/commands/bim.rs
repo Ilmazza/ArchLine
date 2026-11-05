@@ -13,6 +13,7 @@
 //! `bim_abaco.rs`) e passano da `dispatch_bim`.
 
 use crate::app::{Message, ModalKind, OpenCADStudio};
+use crate::bim::aperture::ApertureKind;
 use crate::bim::commands::{ZoneCommand, ZoneSnapshot};
 use crate::bim::extract::{self, Elaborato, ExtractOptions, WriteError};
 use crate::bim::height::range_warning;
@@ -49,6 +50,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_ALTEZZA",
         "AL_ABACO",
         "AL_ABACO_CSV",
+        "AL_PORTA",
+        "AL_FINESTRA",
+        "AL_PORTAFINESTRA",
     ]
 });
 
@@ -92,6 +96,10 @@ impl OpenCADStudio {
             "AL_ALTEZZA" => Some(self.bim_altezza(i, cmd)),
             "AL_ABACO" => Some(self.bim_abaco(i, cmd)),
             "AL_ABACO_CSV" => Some(self.bim_abaco_csv(i, cmd)),
+            // Parte 3: in `bim_aperture.rs`.
+            "AL_PORTA" => Some(self.bim_aperture(i, cmd, ApertureKind::Porta)),
+            "AL_FINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Finestra)),
+            "AL_PORTAFINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Portafinestra)),
             _ => None,
         }
     }

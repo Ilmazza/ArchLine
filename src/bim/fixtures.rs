@@ -101,6 +101,56 @@ pub(crate) fn case_a(form: Form, unit: DrawingUnit) -> Vec<EntityType> {
     }
 }
 
+/// Il caso A con un vano porta di 0,90 m nel tramezzo, da y = 1,00 a y = 1,90
+/// (asse x = 4,05, spessore 0,10): il rilievo ha il buco, nessuna linea di
+/// soglia. Nella forma a linee le due facce del tramezzo si interrompono; in
+/// quella a polilinee il tramezzo è fatto di due rettangoli chiusi.
+pub(crate) fn case_a_with_door(form: Form, unit: DrawingUnit) -> Vec<EntityType> {
+    let wall = |a: [f64; 2], b: [f64; 2]| line(unit, LAYER_MURI, a, b);
+    match form {
+        Form::Continua => {
+            let mut entities = lines(
+                unit,
+                LAYER_MURI,
+                &[[-0.30, -0.30], [8.30, -0.30], [8.30, 3.30], [-0.30, 3.30]],
+            );
+            entities.extend([
+                // Locale A, senza il lato est.
+                wall([4.00, 0.0], [0.0, 0.0]),
+                wall([0.0, 0.0], [0.0, 3.00]),
+                wall([0.0, 3.00], [4.00, 3.00]),
+                // Locale B, senza il lato ovest.
+                wall([4.10, 0.0], [8.00, 0.0]),
+                wall([8.00, 0.0], [8.00, 3.00]),
+                wall([8.00, 3.00], [4.10, 3.00]),
+                // Le due facce del tramezzo con il vano.
+                wall([4.00, 0.0], [4.00, 1.00]),
+                wall([4.00, 1.90], [4.00, 3.00]),
+                wall([4.10, 0.0], [4.10, 1.00]),
+                wall([4.10, 1.90], [4.10, 3.00]),
+            ]);
+            entities
+        }
+        Form::ChiusaPerMuro => {
+            let mut entities = case_a(form, unit);
+            entities.pop();
+            entities.extend([
+                closed_polyline(
+                    unit,
+                    LAYER_MURI,
+                    &[[4.00, 0.0], [4.10, 0.0], [4.10, 1.00], [4.00, 1.00]],
+                ),
+                closed_polyline(
+                    unit,
+                    LAYER_MURI,
+                    &[[4.00, 1.90], [4.10, 1.90], [4.10, 3.00], [4.00, 3.00]],
+                ),
+            ]);
+            entities
+        }
+    }
+}
+
 /// Il pilastro del caso D: 0,30 × 0,30 m dentro il locale A, layer `PILASTRI`.
 pub(crate) fn pilastro(unit: DrawingUnit) -> EntityType {
     closed_polyline(

@@ -462,7 +462,7 @@ impl ZoneCommand {
 }
 
 /// Il numero con la virgola e senza zeri in coda: `0,12`, `120`.
-fn format_number(value: f64) -> String {
+pub(super) fn format_number(value: f64) -> String {
     let text = format!("{value:.6}");
     text.trim_end_matches('0')
         .trim_end_matches('.')
@@ -470,7 +470,7 @@ fn format_number(value: f64) -> String {
 }
 
 /// Un numero con la virgola o il punto decimale (uno solo, una volta).
-fn parse_number(text: &str) -> Option<f64> {
+pub(super) fn parse_number(text: &str) -> Option<f64> {
     let text = text.trim();
     if text.chars().filter(|c| matches!(c, ',' | '.')).count() > 1 {
         return None;
@@ -482,7 +482,7 @@ fn parse_number(text: &str) -> Option<f64> {
 }
 
 /// `S`/`SÌ`/`SI` o `N`/`NO`, già in maiuscolo.
-fn yes_no(word: &str) -> Option<bool> {
+pub(super) fn yes_no(word: &str) -> Option<bool> {
     match word {
         "S" | "SI" | "SÌ" => Some(true),
         "N" | "NO" => Some(false),

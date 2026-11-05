@@ -16,16 +16,18 @@
 
 use super::{Message, ModalKind, OpenCADStudio};
 use crate::bim::abaco::TableKind;
+use crate::bim::aperture::{apertures_in, missing_layer as aperture_layer_missing, ApertureKind, ApertureState};
 use crate::bim::abaco_table::tables_in;
 use crate::bim::extract::{file_name, Elaborato};
-use crate::bim::fixtures::{case_a, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
+use crate::bim::fixtures::{case_a, case_a_with_door, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
 use crate::bim::record;
 use crate::bim::report::Notice;
 use crate::bim::rooms::{rooms_in, Phase, Room, RoomPart};
 use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{missing_layers, read_zone, zones_in, Zone, ZoneState};
 use crate::bim::{
-    ACI_GIALLO, ACI_ROSSO, APP_ABACO, APP_LOCALE, APP_ZONA, LAYER_ABACO, LAYER_DEMOLIZIONI,
+    ACI_GIALLO, ACI_ROSSO, APP_ABACO, APP_APERTURA, APP_LOCALE, APP_ZONA, LAYER_ABACO, LAYER_APERTURE,
+    LAYER_DEMOLIZIONI,
     LAYER_LOCALI, LAYER_LOCALI_PROGETTO, LAYER_NUOVE,
 };
 use crate::command::StepInput;
@@ -355,6 +357,8 @@ fn paper_space_is_refused() {
         ("AL_LOCALE 2,1.5 A", 6),
         ("AL_LOCALE", 0),
         ("AL_AGGIORNA", 6),
+        ("AL_PORTA 4.05,1 4.05,1.9 E 2.1", 6),
+        ("AL_FINESTRA", 0),
     ] {
         let mut app = fresh_app();
         load(
@@ -4907,4 +4911,92 @@ fn altezza_on_a_copied_label_moved_back_leaves_the_original_alone() {
         rooms_in(doc(&app)).into_iter().map(|(h, room, _)| (h, room.height)).collect();
     assert_eq!((heights[&outline], heights[&label]), (Some(2.9), Some(2.9)));
     assert_eq!(heights[&copy], Some(3.2), "la copia resta com'era");
+}
+
+// ------------------------------------------------- AL_PORTA e AL_FINESTRA
+
+/// Parte 3, task 2: `AL_PORTA` da script. Due punti alle spalle del vano, stato
+/// e altezza; la larghezza è quella del disegno, lo spessore quello delle facce
+/// ai lati del vano. Il rilievo non si tocca, layer e APPID sono un passo a sé
+/// e l'apertura un altro.
+#[test]
+fn al_porta_creates_an_aperture_from_the_command_line() {
+    for form in [Form::Continua, Form::ChiusaPerMuro] {
+        let mut app = fresh_app();
+        load(&mut app, case_a_with_door(form, DrawingUnit::Metri), 6);
+        let before = rilievo_snapshot(&app);
+        let steps = undo_steps(&app);
+        assert!(aperture_layer_missing(doc(&app)));
+
+        run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+
+        let found = apertures_in(doc(&app));
+        assert_eq!(found.len(), 1, "{form:?}: storia: {}", history(&app));
+        let a = &found[0].aperture;
+        assert_eq!(a.kind, ApertureKind::Porta, "{form:?}");
+        assert_eq!(a.state, ApertureState::Esistente, "{form:?}");
+        assert!((a.width() - 0.9).abs() < 1e-9, "{form:?}: {}", a.width());
+        assert!((a.thickness - 0.10).abs() < 1e-9, "{form:?}: {}", a.thickness);
+        assert_eq!(a.height, Some(2.1), "{form:?}");
+        let entity = doc(&app).get_entity(found[0].handle).unwrap();
+        assert_eq!(entity.common().layer, LAYER_APERTURE, "{form:?}");
+        assert!(entity.common().extended_data.get_record(APP_APERTURA).is_some());
+        assert!(!aperture_layer_missing(doc(&app)), "{form:?}");
+        assert_eq!(rilievo_snapshot(&app), before, "{form:?}: il rilievo non si tocca");
+        assert_eq!(doc(&app).header.insertion_units, 6);
+        assert_eq!(active_command(&app), None, "{form:?}");
+        assert_eq!(undo_steps(&app), steps + 2, "{form:?}: layer, poi apertura");
+
+        // Un annullamento toglie l'apertura e lascia il layer.
+        undo(&mut app);
+        assert!(apertures_in(doc(&app)).is_empty(), "{form:?}");
+        assert!(!aperture_layer_missing(doc(&app)), "{form:?}");
+    }
+}
+
+/// `AL_FINESTRA`: stato nuovo (giallo/rosso del contorno), altezza e davanzale.
+#[test]
+fn al_finestra_asks_for_state_height_and_sill() {
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+
+    run(&mut app, "AL_FINESTRA 4.05,1 4.05,1.9 N 1.4 0.9");
+
+    let found = apertures_in(doc(&app));
+    assert_eq!(found.len(), 1, "storia: {}", history(&app));
+    let a = &found[0].aperture;
+    assert_eq!(a.kind, ApertureKind::Finestra);
+    assert_eq!(a.state, ApertureState::Nuova);
+    assert_eq!((a.height, a.sill), (Some(1.4), Some(0.9)));
+    assert!(!a.threshold, "una finestra non chiude il vano");
+    let entity = doc(&app).get_entity(found[0].handle).unwrap();
+    assert_eq!(entity.common().color, Color::from_index(ACI_ROSSO));
+}
+
+/// Senza altezza resta `n.d.`: nessun valore di ripiego.
+#[test]
+fn al_porta_without_a_height_keeps_it_missing() {
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E");
+    // L'Invio che chiude la riga risponde all'altezza.
+    let found = apertures_in(doc(&app));
+    assert_eq!(found.len(), 1, "storia: {}", history(&app));
+    assert_eq!(found[0].aperture.height, None);
+}
+
+/// Con `INSUNITS` = 0 chiede l'unità, la salva nel record (mai in
+/// `INSUNITS`) e poi rilancia il comando.
+#[test]
+fn al_porta_asks_for_the_unit_when_missing() {
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 0);
+
+    run(&mut app, "AL_PORTA");
+    assert_eq!(app.bim_pending.as_deref(), Some("AL_PORTA"));
+    answer(&mut app, "M");
+    assert_eq!(doc(&app).header.insertion_units, 0, "INSUNITS non si scrive");
+    assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Metri));
+    assert_eq!(active_command(&app), Some("AL_PORTA"), "storia: {}", history(&app));
 }
