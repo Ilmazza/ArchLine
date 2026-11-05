@@ -24,6 +24,7 @@ pub mod report;
 pub mod room_command;
 pub mod rooms;
 pub mod section;
+pub mod section_draw;
 pub mod units;
 pub mod walls;
 pub mod zone;
