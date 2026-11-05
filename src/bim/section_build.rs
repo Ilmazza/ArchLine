@@ -123,7 +123,7 @@ struct Plan {
 
 /// I codici delle aperture come nell'abaco: `P1`, `F1`, `PF1`, per tipo e
 /// nell'ordine degli handle.
-fn codes_of(found: &[ApertureGeom]) -> Vec<(usize, String)> {
+pub(super) fn codes_of(found: &[ApertureGeom]) -> Vec<(usize, String)> {
     let mut order: Vec<usize> = (0..found.len()).collect();
     let rank = |kind| match kind {
         super::aperture::ApertureKind::Porta => 0,

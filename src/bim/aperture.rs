@@ -421,9 +421,10 @@ pub fn vano_rings(doc: &Document, phase: Phase) -> Vec<Vec<[f64; 2]>> {
         .collect()
 }
 
-fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
-    // R116: nel progetto una porta esistente dentro una zona demolita non c'è
-    // più (il muro è tolto): le sue soglie non chiudono nulla.
+/// Le aperture presenti nella fase (spec parte 5 §4.4): nel fatto le esistenti e
+/// quelle da demolire, nel progetto le esistenti e le nuove; R116: nel progetto
+/// una porta esistente dentro una zona demolita non c'è più (il muro è tolto).
+pub fn present_apertures(doc: &Document, phase: Phase) -> Vec<ApertureGeom> {
     let demolished: Vec<Vec<kernel::geom2d::Curve>> = match phase {
         Phase::Progetto => zones_in(doc)
             .into_iter()
@@ -434,7 +435,6 @@ fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
     };
     apertures_in(doc)
         .into_iter()
-        .filter(|geom| geom.aperture.threshold && geom.aperture.kind.is_door())
         .filter(|geom| match (phase, geom.aperture.state) {
             (_, ApertureState::Esistente) => true,
             (Phase::Fatto, ApertureState::Demolita) => true,
@@ -450,6 +450,13 @@ fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
                     .iter()
                     .any(|curves| kernel::geom2d::contains(curves, mid, tolerance))
         })
+        .collect()
+}
+
+fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
+    present_apertures(doc, phase)
+        .into_iter()
+        .filter(|geom| geom.aperture.threshold && geom.aperture.kind.is_door())
         .filter_map(|geom| {
             let a = geom.aperture;
             rect_from_axis_thickness(a.axis.0, a.axis.1, a.thickness)
