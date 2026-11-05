@@ -28,8 +28,9 @@ use codec::{Color, Document, EntityType, Handle, Vector2, Vector3};
 use rustc_hash::FxHashMap;
 
 use super::project::FIRST_SYNTHETIC_HANDLE;
-use super::rooms::Phase;
+use super::rooms::{ring_curves, Phase};
 use super::walls::{rect_from_axis_thickness, sources_of, WallRect};
+use super::zone::{zones_in, ZoneState};
 use super::{ACI_GIALLO, ACI_ROSSO, APP_APERTURA, LAYER_APERTURE};
 use crate::scene::BoundarySource;
 
@@ -421,6 +422,16 @@ pub fn vano_rings(doc: &Document, phase: Phase) -> Vec<Vec<[f64; 2]>> {
 }
 
 fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
+    // R116: nel progetto una porta esistente dentro una zona demolita non c'è
+    // più (il muro è tolto): le sue soglie non chiudono nulla.
+    let demolished: Vec<Vec<kernel::geom2d::Curve>> = match phase {
+        Phase::Progetto => zones_in(doc)
+            .into_iter()
+            .filter(|zone| zone.zone.state == ZoneState::Demolito)
+            .filter_map(|zone| zone.rings.first().map(|ring| ring_curves(ring)))
+            .collect(),
+        Phase::Fatto => Vec::new(),
+    };
     apertures_in(doc)
         .into_iter()
         .filter(|geom| geom.aperture.threshold && geom.aperture.kind.is_door())
@@ -429,6 +440,15 @@ fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
             (Phase::Fatto, ApertureState::Demolita) => true,
             (Phase::Progetto, ApertureState::Nuova) => true,
             _ => false,
+        })
+        .filter(|geom| {
+            let (a, b) = geom.aperture.axis;
+            let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+            let tolerance = kernel::geom2d::Tolerance::new(geom.aperture.thickness * 1.0e-3);
+            geom.aperture.state != ApertureState::Esistente
+                || !demolished
+                    .iter()
+                    .any(|curves| kernel::geom2d::contains(curves, mid, tolerance))
         })
         .filter_map(|geom| {
             let a = geom.aperture;
@@ -908,6 +928,36 @@ mod tests {
         assert_eq!(colours(Elaborato::DemolizioniCostruzioni), comparativa);
         assert_eq!(colours(Elaborato::StatoDiProgetto), progetto);
 
+    }
+
+    /// R116: una porta esistente dentro un muro demolito non chiude nulla nel
+    /// progetto (il muro non c'è più); nel fatto sì. Una porta fuori dalla zona
+    /// demolita resta.
+    #[test]
+    fn an_existing_door_in_a_demolished_wall_does_not_close_the_project() {
+        use crate::bim::zone::{ensure_layers, zone_hatch, Zone, ZoneOrigin};
+        let mut doc = Document::new();
+        ensure_layer(&mut doc);
+        ensure_layers(&mut doc);
+        doc.add_entity(aperture_polyline(&door()).unwrap()).unwrap();
+        let far = Aperture {
+            axis: ([9.05, 1.0], [9.05, 1.9]),
+            ..door()
+        };
+        doc.add_entity(aperture_polyline(&far).unwrap()).unwrap();
+        let wall = vec![[4.0, 0.0], [4.1, 0.0], [4.1, 3.0], [4.0, 3.0]];
+        let zone = Zone {
+            state: ZoneState::Demolito,
+            origin: ZoneOrigin::MuroDuePunti,
+            axis: Some(([4.05, 0.0], [4.05, 3.0])),
+            thickness: Some(0.1),
+            height: None,
+            varco: false,
+        };
+        doc.add_entity(zone_hatch(&zone, &[wall])).unwrap();
+        assert_eq!(threshold_segments(&doc, Phase::Fatto).len(), 4, "due porte, nel fatto");
+        assert_eq!(threshold_segments(&doc, Phase::Progetto).len(), 2, "resta quella lontana");
+        assert_eq!(vano_rings(&doc, Phase::Progetto).len(), 1);
     }
 
     #[test]
