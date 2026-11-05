@@ -42,6 +42,7 @@
 use codec::Document;
 
 use super::abaco_render::{height_state, room_notes, zone_notes, ND};
+use super::aperture_quantities::{aperture_quantities, ApertureQuantities};
 use super::extract::push_unique;
 use super::quantities::{zone_rows, ZoneKind, ZoneRow};
 use super::quantities_rooms::{fatto_room_rows, project_room_rows, ProjectRoomRow, RoomRow};
@@ -73,10 +74,12 @@ const CSV_EOL: &str = "\r\n";
 const CSV_DECIMALS: usize = 4;
 /// Tra le note di un campo, come nelle tabelle.
 const CSV_NOTE_SEP: &str = "; ";
-/// Nessuna riga è «a detrarre» finché porte e finestre non ci sono (spec §4.4).
+/// La colonna `detrai` (spec parte 3 §5.3): le detrazioni dei vani sono le
+/// sole righe «a detrarre».
 const CSV_NO_DEDUCTION: &str = "no";
-const UNIT_M3: &str = "m³";
-const UNIT_M2: &str = "m²";
+const CSV_DEDUCTION: &str = "sì";
+pub(super) const UNIT_M3: &str = "m³";
+pub(super) const UNIT_M2: &str = "m²";
 const DEMOLITION_WITHOUT_AXIS: &str = "Demolizione area in pianta (zona senza asse)";
 
 /// Unità e tolleranze del calcolo, come per `AL_ESTRAI` (`ExtractOptions`).
@@ -117,6 +120,8 @@ pub struct Abaco {
     /// progetto non accoppiati di cui è l'ultimo membro; in fondo i locali di
     /// progetto senza locali di fatto.
     pub locali: Vec<LocaleLine>,
+    /// Le aperture con le detrazioni e le pareti dei locali (parte 3).
+    pub aperture: ApertureQuantities,
     /// Un [`Notice::RigaIncompleta`] per riga incompleta (zone, poi locali di
     /// fatto, poi di progetto), poi gli avvisi delle zone, dei locali di fatto
     /// e di quelli di progetto (senza quelli del solo disegno,
@@ -130,7 +135,8 @@ pub struct Abaco {
 /// del record di progetto. Non scrive nulla nel disegno.
 pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
     let default_height = record::read(doc).default_height;
-    let (zones, zone_notices) = zone_rows(&zones_in(doc), default_height, opts.unit, opts.tol);
+    let zone_geoms = zones_in(doc);
+    let (zones, zone_notices) = zone_rows(&zone_geoms, default_height, opts.unit, opts.tol);
     let (fatto, fatto_notices) = fatto_room_rows(doc, opts.unit, opts.room_tol, default_height);
     let (progetto, project_notices) = project_room_rows(
         doc,
@@ -163,11 +169,24 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
         push_unique(&mut notices, more);
     }
 
+    // Parte 3: aperture, detrazioni e pareti dei locali, sulle stesse righe.
+    let aperture = aperture_quantities(
+        doc,
+        opts.unit,
+        opts.tol,
+        &zone_geoms,
+        &zones,
+        &fatto,
+        &progetto,
+    );
+    push_unique(&mut notices, aperture.notices.clone());
+
     let mut abaco = Abaco {
         demolizioni: Vec::new(),
         varchi: Vec::new(),
         nuove: Vec::new(),
         locali: pair_rooms(fatto, progetto),
+        aperture,
         notices,
     };
     for row in zones {
@@ -397,17 +416,19 @@ pub fn csv_row_count(abaco: &Abaco) -> usize {
 /// a detrarre. I fattori sono quelli non arrotondati; `None` = un fattore che
 /// non si applica: campo vuoto, saltato nel prodotto. La quantità non si
 /// tiene: è il prodotto dei fattori scritti ([`CsvRecord::fields`]).
-struct CsvRecord {
-    tipo: &'static str,
-    code: String,
-    description: String,
-    length: f64,
-    width: Option<f64>,
-    height: Option<f64>,
-    unit: &'static str,
-    height_state: &'static str,
-    source: String,
-    notes: Vec<String>,
+pub(super) struct CsvRecord {
+    pub(super) tipo: &'static str,
+    pub(super) code: String,
+    pub(super) description: String,
+    pub(super) length: f64,
+    pub(super) width: Option<f64>,
+    pub(super) height: Option<f64>,
+    pub(super) unit: &'static str,
+    pub(super) height_state: &'static str,
+    pub(super) source: String,
+    pub(super) notes: Vec<String>,
+    /// Una detrazione (`detrai` = sì): la quantità si toglie.
+    pub(super) deduct: bool,
 }
 
 impl CsvRecord {
@@ -428,7 +449,7 @@ impl CsvRecord {
             factor(length),
             factor(width),
             factor(height),
-            CSV_NO_DEDUCTION.to_string(),
+            if self.deduct { CSV_DEDUCTION } else { CSV_NO_DEDUCTION }.to_string(),
             csv_number(quantity),
             self.unit.to_string(),
             self.height_state.to_string(),
@@ -471,6 +492,7 @@ fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
     zones
         .chain(rooms(Phase::Fatto))
         .chain(rooms(Phase::Progetto))
+        .chain(super::abaco_aperture::csv_records(&abaco.aperture))
         .collect()
 }
 
@@ -527,6 +549,7 @@ fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
         height_state: height_state(&row.height),
         source: format!("zona {:X}", row.handle),
         notes: zone_notes(row),
+        deduct: false,
     })
 }
 
@@ -556,6 +579,7 @@ fn room_record(row: &RoomRow, line_note: Option<&str>) -> Option<CsvRecord> {
         height_state: height_state(&row.height),
         source: format!("locale {}", row.name),
         notes,
+        deduct: false,
     })
 }
 

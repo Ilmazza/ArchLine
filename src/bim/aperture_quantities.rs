@@ -18,7 +18,7 @@
 //!   volume della parte 2 è area × H anche senza asse); la superficie del vano
 //!   di un'apertura nuova il cui asse cade in una zona nuova. Un varco non
 //!   ha detrazioni: è già il vano;
-//! - pareti dei locali: perimetro dell'anello esterno × altezza del locale −
+//! - pareti dei locali (solo se il disegno ha almeno un'apertura, R106): perimetro dell'anello esterno × altezza del locale −
 //!   superficie dei vani delle aperture sul perimetro (il punto medio del
 //!   vano a non più di metà spessore dall'anello). Le isole non si contano
 //!   (R104: `RoomRow` ha solo l'anello esterno). Un'altezza che manca, del
@@ -30,6 +30,7 @@ use codec::{Document, Handle};
 use kernel::geom2d::{contains, distance_to, Tolerance};
 
 use super::aperture::{apertures_in, Aperture, ApertureGeom, ApertureKind, ApertureState};
+use super::abaco_render::height_state;
 use super::height::{Height, HeightState};
 use super::quantities::{ZoneKind, ZoneRow};
 use super::quantities_rooms::{ProjectRoomRow, RoomRow};
@@ -61,6 +62,8 @@ pub struct ApertureRow {
     pub vano_m3: Option<f64>,
     /// Lunghezza della soglia (la larghezza), solo se ne ha una.
     pub threshold_m: Option<f64>,
+    /// L'architrave è attivo (si computa).
+    pub lintel_requested: bool,
     /// Larghezza + 2 × appoggio, solo con l'architrave attivo.
     pub lintel_m: Option<f64>,
     /// Note separate da «; » (il motivo di un architrave `n.d.`).
@@ -108,6 +111,8 @@ pub struct RoomWalls {
     pub phase: Phase,
     pub perimeter_m: f64,
     pub height_m: Option<f64>,
+    /// Lo stato dell'altezza del locale: `inserita`, `ereditata` o `n.d.`.
+    pub height_state: &'static str,
     /// Perimetro × altezza.
     pub gross_m2: Option<f64>,
     /// I vani sul perimetro.
@@ -143,6 +148,13 @@ pub fn aperture_quantities(
     let mut found = apertures_in(doc);
     found.sort_by_key(|geom| (kind_order(geom.aperture.kind), geom.handle.value()));
     let rows = rows_of(&found, unit);
+    // R106: senza nessuna apertura nel disegno le pareti dei locali non si
+    // calcolano: un netto «senza vani» direbbe che non ce ne sono, mentre il
+    // disegno può non averli disegnati (come la detrazione delle nuove murature,
+    // «non calcolata»).
+    if rows.is_empty() {
+        return ApertureQuantities::default();
+    }
     let mut out = ApertureQuantities {
         notices: rows
             .iter()
@@ -229,6 +241,7 @@ fn rows_of(found: &[ApertureGeom], unit: DrawingUnit) -> Vec<ApertureRow> {
                 vano_m2,
                 sill_m: a.sill.map(|s| s / per_metre),
                 threshold_m: (a.threshold && a.kind.is_door()).then_some(width_m),
+                lintel_requested: a.lintel,
                 lintel_m,
                 height,
                 note: (!notes.is_empty()).then(|| notes.join("; ")),
@@ -353,6 +366,7 @@ fn room_walls(
         phase,
         perimeter_m,
         height_m,
+        height_state: height_state(&room.height),
         gross_m2,
         apertures: on_ring.iter().map(|row| row.code.clone()).collect(),
         vani_m2,

@@ -89,6 +89,8 @@ fn kind_key(kind: TableKind) -> &'static str {
         TableKind::Demolizioni => "demolizioni",
         TableKind::Nuove => "nuove",
         TableKind::Locali => "locali",
+        TableKind::Aperture => "aperture",
+        TableKind::Pareti => "pareti",
     }
 }
 
@@ -97,6 +99,8 @@ fn kind_from_key(text: &str) -> Option<TableKind> {
         "demolizioni" => Some(TableKind::Demolizioni),
         "nuove" => Some(TableKind::Nuove),
         "locali" => Some(TableKind::Locali),
+        "aperture" => Some(TableKind::Aperture),
+        "pareti" => Some(TableKind::Pareti),
         _ => None,
     }
 }
@@ -107,6 +111,8 @@ pub fn kind_name(kind: TableKind) -> &'static str {
         TableKind::Demolizioni => "Demolizioni",
         TableKind::Nuove => "Nuove murature",
         TableKind::Locali => "Locali",
+        TableKind::Aperture => "Aperture",
+        TableKind::Pareti => "Pareti dei locali",
     }
 }
 

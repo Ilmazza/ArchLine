@@ -20,13 +20,14 @@ use super::rooms::Phase;
 
 pub(super) const ND: &str = "n.d.";
 /// Ciò che in una cella non si applica: non è un dato che manca.
-const NOT_APPLICABLE: &str = "-";
+pub(super) const NOT_APPLICABLE: &str = "-";
 const NOT_COMPUTED: &str = "non calcolata";
+const SEE_OPENINGS: &str = "vedi Aperture";
 const INCOMPLETE: &str = "da completare";
 const APPROXIMATE: &str = "approssimata";
 const HEIGHT_ND: &str = "altezza n.d.";
 /// Tra le note di una cella.
-const SEP: &str = "; ";
+pub(super) const SEP: &str = "; ";
 /// Tra il valore di fatto e quello di progetto di una riga accoppiata.
 const SIDES: &str = " / ";
 /// Decimali nelle tabelle (spec §3).
@@ -80,17 +81,23 @@ const NOTE_CROSSINGS: &str = "Agli angoli e agli incroci le zone nuove si sovrap
     lunghezze, superfici e volumi sono la somma delle zone come disegnate, non corretti.";
 const NOTE_OPENINGS: &str =
     "Detrazione vani non calcolata: porte e finestre non sono ancora nel disegno.";
+const NOTE_SEE_OPENINGS: &str =
+    "Detrazione vani: nella tabella Aperture, per le aperture nuove che cadono nella zona.";
 const NOTE_VARIATION: &str = "Variazione = progetto meno fatto, solo per un locale di fatto e \
     uno di progetto che si corrispondono uno a uno; in quelle righe codice, nome, perimetro, \
     volume e altezza sono fatto / progetto quando differiscono.";
 const NOTE_MERGED: &str = "Locali uniti o divisi: righe separate, senza somme e senza variazione.";
 
-/// Le tre tabelle dell'abaco.
+/// Le tabelle dell'abaco.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableKind {
     Demolizioni,
     Nuove,
     Locali,
+    /// Porte e finestre con le detrazioni (parte 3).
+    Aperture,
+    /// Pareti dei locali al netto dei vani (parte 3).
+    Pareti,
 }
 
 /// Il testo di una cella; `missing` = un dato che manca (`n.d.`), da
@@ -120,37 +127,37 @@ pub struct TableText {
 }
 
 impl Cell {
-    fn plain(text: impl Into<String>) -> Self {
+    pub(super) fn plain(text: impl Into<String>) -> Self {
         Cell {
             text: text.into(),
             missing: false,
         }
     }
 
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Cell::plain("")
     }
 
-    fn nd() -> Self {
+    pub(super) fn nd() -> Self {
         Cell {
             text: ND.to_string(),
             missing: true,
         }
     }
 
-    fn not_applicable() -> Self {
+    pub(super) fn not_applicable() -> Self {
         Cell::plain(NOT_APPLICABLE)
     }
 
     /// Il numero con due decimali, `n.d.` se manca (o non è finito).
-    fn number(value: Option<f64>) -> Self {
+    pub(super) fn number(value: Option<f64>) -> Self {
         match value.filter(|v| v.is_finite()) {
             Some(v) => Cell::plain(format_fixed(v, DECIMALS)),
             None => Cell::nd(),
         }
     }
 
-    fn notes(notes: Vec<String>) -> Self {
+    pub(super) fn notes(notes: Vec<String>) -> Self {
         Cell::plain(notes.join(SEP))
     }
 }
@@ -186,11 +193,39 @@ pub fn render_tables(abaco: &Abaco) -> Vec<TableText> {
     if !abaco.locali.is_empty() {
         tables.push(rooms_table(&abaco.locali));
     }
+    // Parte 3: con le aperture nel disegno la detrazione dei vani c'è, nella
+    // tabella Aperture; le nuove murature rimandano lì invece di dire «non
+    // calcolata».
+    if !abaco.aperture.rows.is_empty() {
+        for table in &mut tables {
+            if table.kind == TableKind::Nuove {
+                point_to_openings(table);
+            }
+        }
+        tables.push(super::abaco_aperture::aperture_table(&abaco.aperture));
+    }
+    if !abaco.aperture.room_walls.is_empty() {
+        tables.push(super::abaco_aperture::walls_table(&abaco.aperture));
+    }
     tables
 }
 
+/// La detrazione dei vani delle nuove murature sta nella tabella Aperture.
+fn point_to_openings(table: &mut TableText) {
+    for cell in table.rows.iter_mut().chain(table.totals.iter_mut()).flatten() {
+        if cell.text == NOT_COMPUTED {
+            cell.text = SEE_OPENINGS.to_string();
+        }
+    }
+    for note in &mut table.notes {
+        if note == NOTE_OPENINGS {
+            *note = NOTE_SEE_OPENINGS.to_string();
+        }
+    }
+}
+
 /// La tabella con le note comuni in fondo a quelle date.
-fn table(
+pub(super) fn table(
     kind: TableKind,
     title: &str,
     columns: &[&str],
@@ -219,7 +254,7 @@ fn table(
 
 /// Una riga di intestazione o di totale di gruppo: l'etichetta nella prima
 /// cella, le altre vuote.
-fn label_row(text: String, missing: bool, width: usize) -> Vec<Cell> {
+pub(super) fn label_row(text: String, missing: bool, width: usize) -> Vec<Cell> {
     let mut row = vec![Cell::empty(); width];
     row[0] = Cell { text, missing };
     row
@@ -521,7 +556,7 @@ fn rooms_total(label: &str, rows: &[&RoomRow], phase: Phase) -> Vec<Cell> {
 }
 
 /// «2,70 (ereditata)», «3,00 (inserita)» o `n.d.`.
-fn height_cell(height: &Height) -> Cell {
+pub(super) fn height_cell(height: &Height) -> Cell {
     if height.state == HeightState::NonDisponibile {
         return Cell::nd();
     }
@@ -631,7 +666,7 @@ fn locale_notes(line: &LocaleLine) -> Vec<String> {
 }
 
 /// «1 riga esclusa», «3 righe escluse», «nessuna riga esclusa».
-fn excluded(n: usize) -> String {
+pub(super) fn excluded(n: usize) -> String {
     if n == 0 {
         "nessuna riga esclusa".to_string()
     } else {
@@ -1425,6 +1460,7 @@ mod tests {
                     varchi: Vec::new(),
                     nuove: Vec::new(),
                     locali: Vec::new(),
+                    aperture: Default::default(),
                     notices: Vec::new(),
                 }
             );
