@@ -28,6 +28,13 @@ Le otto scelte del §9 della spec (aperture come oggetto proprio, chiusura autom
 altezza di ripiego, default stato/soglia/architrave, soglie degli avvisi, pareti dei locali, nessun simbolo
 dell'anta, dipendenza).
 
+## Verifica
+
+`cargo test --locked --lib`: 5120 ok, 0 falliti, 33 ignorati. `bim::` 388, `app::bim_tests` 112, `commands::bim_a` 4. Banco `bim_extract.py` con la build release del branch: **181 controlli su 181** (152 + 29 del giro «porta, »); `unittest` del banco 106 ok. La porta chiude il vano da sola nei DWG estratti riletti con ezdxf, senza nessuna linea di soglia nel rilievo.
+
 ## Da vedere a schermo / in AutoCAD
 
-Da compilare a fine implementazione.
+- **A schermo su Windows**: le tre icone (porta, finestra, dati apertura) a 16 px e la barra a dodici comandi (dopo aver riselezionato AutoCAD Classic); i prompt di `AL_PORTA` (due punti alle spalle, stato, altezza, davanzale); il contorno giallo/rosso delle aperture; la scheda Ristrutturazione nel ribbon con il gruppo «Aperture».
+- **In AutoCAD vero**: le due `TABLE` in più (Aperture, Pareti dei locali) con il loro blocco `*T`; il contorno delle aperture nei tre DWG estratti; AUDIT.
+- **Non provato**: un rilievo reale di Mauro (solo casi sintetici con numeri calcolati a mano); un DWG R2000 con le nuove tabelle; più aperture sulla stessa parete; vani larghi più dei muri vicini.
+

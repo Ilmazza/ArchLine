@@ -26,6 +26,13 @@ La tabella riscritta (revisione finale), in ogni giro dopo la seconda estrazione
 in `abaco-rifatto.dxf` (righe con il prefisso "abaco riscritto"): ancora due ACAD_TABLE, e nel loro blocco `*T` (cio'
 che disegnano ArchLine, AutoCAD ed ezdxf) i numeri a 3,00 (D1 0,90, N1 6,00), nessuno di quelli a 2,70 (0,81 e 5,40).
 
+Porte (BIM parte 3), terzo giro (righe con il prefisso "porta, "): il caso A con un vano porta di 0,90 m nel
+tramezzo (y da 1,00 a 1,90, nessuna linea di soglia), `AL_PORTA 4.05,1 4.05,1.9 E 2.1`, i locali A e B, l'altezza
+del livello, `AL_ESTRAI` e `AL_ABACO_CSV`. Nei tre DWG: una polilinea 0,90 x 0,10 su AL-APERTURE, nessun XDATA ne'
+APPID ARCHLINE; nel fatto e nel progetto i locali A 12,00 e B 11,70 m2 (la porta chiude il vano da sola) e nessun
+locale in piu'. Nel CSV la porta (P1, 1,8900 m2), le pareti lorde (LF1-PA, 37,8000) e le detrazioni a detrarre
+(LF1-PA-P1 e LF2-PA-P1, 1,8900), con `quantita` = prodotto dei fattori.
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -817,6 +824,128 @@ def run_case(rep, exe, env, work, src, src_doc, before, axis):
     check_abaco_rewritten(rep, rewritten_dxf)
 
 
+# ---------------------------------------------------------------- porte e finestre (BIM parte 3)
+
+LAYER_APERTURE = "AL-APERTURE"
+DOOR_PREFIX = "porta, "
+DOOR_CMDS = ("AL_PORTA 4.05,1 4.05,1.9 E 2.1", "AL_LOCALE 2,1.5 A", "AL_LOCALE 6,1.5 B")
+DOOR_BASE = "casoAporta"
+
+
+def build_case_a_door(path):
+    """Il caso A, forma Continua, con un vano porta nel tramezzo da y = 1,00 a y = 1,90 (0,90 m): le facce del
+    tramezzo (x = 4,00 e x = 4,10) si interrompono, nessuna linea di soglia. $INSUNITS = 6, muri su MURI."""
+    import ezdxf
+
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 6
+    doc.layers.add(LAYER_MURI)
+    msp = doc.modelspace()
+    attribs = {"layer": LAYER_MURI}
+
+    def line(a, b):
+        msp.add_line((a[0], a[1], 0.0), (b[0], b[1], 0.0), dxfattribs=attribs)
+
+    for k, start in enumerate(OUTER):
+        line(start, OUTER[(k + 1) % 4])
+    # A senza il lato est, B senza il lato ovest, poi le quattro mezze facce del tramezzo.
+    for a, b in (((4.00, 0.0), (0.0, 0.0)), ((0.0, 0.0), (0.0, 3.00)), ((0.0, 3.00), (4.00, 3.00)),
+                 ((4.10, 0.0), (8.00, 0.0)), ((8.00, 0.0), (8.00, 3.00)), ((8.00, 3.00), (4.10, 3.00)),
+                 ((4.00, 0.0), (4.00, 1.00)), ((4.00, 1.90), (4.00, 3.00)),
+                 ((4.10, 0.0), (4.10, 1.00)), ((4.10, 1.90), (4.10, 3.00))):
+        line(a, b)
+    doc.saveas(path)
+    return Path(path)
+
+
+def apertures_of(doc):
+    """Le polilinee del layer AL-APERTURE dello spazio modello: lista di liste di vertici (x, y)."""
+    out = []
+    for e in doc.modelspace().query("LWPOLYLINE"):
+        if e.dxf.layer == LAYER_APERTURE:
+            out.append([(p[0], p[1]) for p in e.get_points("xy")])
+    return out
+
+
+def room_labels(doc):
+    """I testi (MTEXT) dei locali, sul layer AL-LOCALI, con il formato a capo di MTEXT reso in spazio."""
+    return sorted(e.plain_text().replace("\n", " ") for e in doc.modelspace().query("MTEXT")
+                  if e.dxf.layer == "AL-LOCALI")
+
+
+def check_door_extract(rep, docs):
+    """I tre DWG del caso con la porta: il vano e' una polilinea sola di 0,90 x 0,10 su AL-APERTURE in ognuno
+    (la porta e' esistente), i locali A e B misurano 12,00 e 11,70 m2 anche senza una linea di soglia nel
+    rilievo, e non resta nulla di nostro nell'XDATA."""
+    for key, doc in docs.items():
+        found = apertures_of(doc)
+        want = {(4.00, 1.00), (4.10, 1.00), (4.10, 1.90), (4.00, 1.90)}
+        ok = len(found) == 1 and len(found[0]) == 4 and all(
+            any(abs(x - wx) < 1e-6 and abs(y - wy) < 1e-6 for (wx, wy) in want) for (x, y) in found[0])
+        rep.check(ok, f"{key}: vano della porta",
+                  "una polilinea 0,90 x 0,10 su AL-APERTURE" if ok else f"{len(found)} polilinee: {found}")
+        xdata, table = arch_xdata_appids(doc)
+        rep.check(not xdata and not table, f"{key}: niente ARCHLINE",
+                  "nessun XDATA ne' APPID ARCHLINE*" if not xdata and not table else f"XDATA {xdata}, APPID {table}")
+    for key in ("fatto", "progetto"):
+        if key not in docs:
+            continue
+        labels = room_labels(docs[key])
+        good = (len(labels) == 2 and "12,00" in labels[0] and labels[0].startswith("A")
+                and "11,70" in labels[1] and labels[1].startswith("B"))
+        rep.check(good, f"{key}: locali con la porta",
+                  "A 12,00 m2 e B 11,70 m2, nessun locale in piu'" if good else f"etichette {labels}")
+
+
+def check_door_csv(rep, csv_path):
+    """Il CSV del caso con la porta: la porta (1,8900 m2), la detrazione dalle pareti di A e di B (a detrarre) e le
+    pareti lorde; ogni `quantita` e' il prodotto dei fattori scritti."""
+    try:
+        bom, crlf, header, rows = read_abaco_csv(csv_path)
+    except (OSError, ValueError) as ex:
+        rep.check(False, "csv", f"non si legge: {ex}")
+        return
+    rep.check(bom and crlf and header == CSV_HEADER, "csv: forma", "BOM, CRLF e intestazione come attesi")
+    problems = csv_problems(rows)
+    rep.check(not problems, "csv: quantita = prodotto dei fattori", f"{len(rows)} righe" if not problems else "; ".join(problems))
+    by_code = {row["codice"]: row for row in rows}
+    want = {"P1": ("porta", "no", "1,8900"), "LF1-PA": ("pareti locale di fatto", "no", "37,8000"),
+            "LF1-PA-P1": ("detrazione pareti", "sì", "1,8900"), "LF2-PA-P1": ("detrazione pareti", "sì", "1,8900")}
+    for code, (tipo, detrai, quantity) in want.items():
+        row = by_code.get(code)
+        ok = row is not None and (row["tipo"], row["detrai"], row["quantita"]) == (tipo, detrai, quantity)
+        rep.check(ok, f"csv: riga {code}", f"{tipo}, detrai {detrai}, quantita {quantity}" if ok else str(row))
+
+
+def run_door_case(rep, exe, env, work):
+    """Il caso A con il vano porta: `AL_PORTA` dal vano, i locali A e B (senza linea di soglia), l'altezza del
+    livello, `AL_ESTRAI` e `AL_ABACO_CSV`; poi i tre DWG riconvertiti si controllano con ezdxf."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    out_dir = work / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = work / "abaco.csv"
+    src = build_case_a_door(work / f"{DOOR_BASE}.dxf")
+    before = sha256_of(src)
+    session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
+    try:
+        resp = session.request({"op": "open", "path": str(src)})
+        rep.check(bool(resp.get("ok")), "open", f"disegno aperto, entita': {resp.get('total')}" if resp.get("ok") else str(resp))
+        for cmd in (*DOOR_CMDS, HEIGHT_CMD, f"AL_ESTRAI {out_dir}", f"AL_ABACO_CSV {csv_path}"):
+            run_ok(rep, session, cmd)
+    except BaseException:
+        session.kill()
+        raise
+    code = session.close()
+    rep.check(code == 0, "sessione: chiusura", "exit 0" if code == 0 else f"exit {code}. {session.stderr_tail()}")
+    after = sha256_of(src)
+    rep.check(after == before, "sorgente intatta", "DXF di partenza identico byte per byte (SHA-256)"
+              if after == before else "il DXF di partenza e' cambiato")
+    docs = read_extracts(rep, exe, env, work, out_dir, work, base=DOOR_BASE)
+    check_door_extract(rep, docs)
+    check_door_csv(rep, csv_path)
+
+
 def run_bim_extract(exe, work, rep):
     """Tutto il banco in `work` (percorso senza spazi): il giro con l'asse esatto in `work`, quello con l'asse
     oltre le facce in `work/asse-oltre` (stessi controlli, nomi col prefisso). Ritorna l'oggetto Report."""
@@ -829,6 +958,7 @@ def run_bim_extract(exe, work, rep):
     before = sha256_of(src)
     run_case(rep, exe, env, work, src, src_doc, before, AXIS_EXACT)
     run_case(Prefixed(rep, PAST_PREFIX), exe, env, work / "asse-oltre", src, src_doc, before, AXIS_PAST)
+    run_door_case(Prefixed(rep, DOOR_PREFIX), exe, env, work / "porta")
     return rep
 
 
