@@ -24,7 +24,8 @@ use crate::bim::strata_assign::{
     self, assignment_of, assignments_in, element_of, project_room_outlines, target_at, Element,
 };
 use crate::bim::units::DrawingUnit;
-use crate::bim::APP_STRATIGRAFIA;
+use crate::bim::detail;
+use crate::bim::{APP_STRATIGRAFIA, LAYER_PARTICOLARI};
 use crate::scene::view::dispatch::set_entity_xdata;
 use codec::Handle;
 use iced::Task;
@@ -386,6 +387,87 @@ impl OpenCADStudio {
             changed.len()
         ));
         self.bim_strati_skipped(&targets, 0);
+    }
+}
+
+const PARTICOLARE: &str = "AL_PARTICOLARE";
+
+/// Quanto staccare i particolari da ciò che c'è la prima volta, in metri.
+const MARGIN_M: f64 = 5.0;
+
+impl OpenCADStudio {
+    /// `AL_PARTICOLARE` (spec parte 6, §5.2): i particolari di tutte le
+    /// stratigrafie, posati la prima volta a destra dello spazio modello e poi
+    /// dove sono; quelli di prima si sostituiscono in un passo; layer e APPID in
+    /// un passo a sé. Senza stratigrafie lo dice e non cambia nulla.
+    pub(super) fn bim_particolare(&mut self, i: usize, cmd: &str) -> Task<Message> {
+        if !self.bim_in_model_space(i, PARTICOLARE) {
+            return Task::none();
+        }
+        let Some(unit) = self.bim_unit_or_ask(i, cmd.trim()) else {
+            return self.finish_dispatch(PARTICOLARE);
+        };
+        self.bim_pending = None;
+        let all = strata::read_all(&self.tabs[i].scene.document);
+        if all.is_empty() {
+            self.command_line.push_info(&format!(
+                "{PARTICOLARE}: nessuna stratigrafia nel disegno (AL_STRATIGRAFIA Nuova): i                  particolari già nel disegno restano com'erano."
+            ));
+            return Task::none();
+        }
+        let old: Vec<Handle> = detail::details_in(&self.tabs[i].scene.document)
+            .into_iter()
+            .map(|(handle, _)| handle)
+            .collect();
+        if old.iter().any(|&handle| self.tabs[i].scene.is_layer_locked(handle)) {
+            self.command_line.push_error(&format!(
+                "{PARTICOLARE}: il layer {LAYER_PARTICOLARI} è bloccato: sblocca per rigenerare i                  particolari."
+            ));
+            return Task::none();
+        }
+        let anchor = detail::existing_anchor(&self.tabs[i].scene.document).unwrap_or_else(|| {
+            self.tabs[i]
+                .scene
+                .model_space_extents()
+                .map_or([0.0, 0.0], |(_, max)| {
+                    [
+                        f64::from(max.x) + MARGIN_M * unit.per_metre(),
+                        f64::from(max.y),
+                    ]
+                })
+        });
+        let placed = detail::place(&all, unit, anchor);
+
+        if detail::missing_layer(&self.tabs[i].scene.document) {
+            self.push_undo_snapshot(i, "AL_LAYER");
+            detail::ensure_layer(&mut self.tabs[i].scene.document);
+            self.tabs[i].dirty = true;
+            self.finish_pending_history(i);
+            self.refresh_layer_panel();
+        }
+        self.push_undo_snapshot(i, PARTICOLARE);
+        let scene = &mut self.tabs[i].scene;
+        if !old.is_empty() {
+            scene.erase_entities(&old);
+        }
+        for entity in placed {
+            scene.add_entity(entity);
+        }
+        self.tabs[i].dirty = true;
+        self.finish_pending_history(i);
+        self.refresh_properties();
+        let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
+        self.command_line.push_info(&format!(
+            "{PARTICOLARE}: {} particolari ({}){}.",
+            all.len(),
+            names.join(", "),
+            if old.is_empty() {
+                String::new()
+            } else {
+                format!(", {} entità di prima sostituite", old.len())
+            }
+        ));
+        Task::none()
     }
 }
 

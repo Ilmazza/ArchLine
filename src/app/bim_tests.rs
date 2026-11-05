@@ -364,6 +364,7 @@ fn paper_space_is_refused() {
         ("AL_PROSPETTO S", 6),
         ("AL_MODELLO3D", 6),
         ("AL_STRATIGRAFIA Elenco", 6),
+        ("AL_PARTICOLARE", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5491,4 +5492,43 @@ fn al_stratigrafia_assigns_by_point_and_selection() {
     // Un punto fuori da tutto.
     run(&mut app, "AL_STRATIGRAFIA Assegna T12 -50,-50");
     assert!(history(&app).contains("nel punto non c'è"), "{}", history(&app));
+}
+
+// ----------------------------------------------------- AL_PARTICOLARE
+
+/// Parte 6, task 6: `AL_PARTICOLARE` da script. Senza stratigrafie lo dice e
+/// non cambia nulla; con due posa i loro particolari a destra del modello
+/// (layer, poi particolari); rilanciato sostituisce dov'era; il rilievo non si
+/// tocca.
+#[test]
+fn al_particolare_places_and_replaces_the_details() {
+    use crate::bim::detail::{details_in, existing_anchor, missing_layer};
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let steps = undo_steps(&app);
+    run(&mut app, "AL_PARTICOLARE");
+    assert!(history(&app).contains("nessuna stratigrafia"), "{}", history(&app));
+    assert_eq!(undo_steps(&app), steps);
+    assert!(missing_layer(doc(&app)));
+
+    run(&mut app, "AL_STRATIGRAFIA Nuova T12 Parete Intonaco 0.015; Laterizio forato 0.09; Intonaco 0.015");
+    run(&mut app, "AL_STRATIGRAFIA Nuova P1 Solaio Ceramica 0.01; Massetto 0.05");
+    let survey = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+    run(&mut app, "AL_PARTICOLARE");
+    let first = details_in(doc(&app));
+    // T12: 3 bande, 3 richiami, 3 testi, titolo; P1: 2+2+2+1.
+    assert_eq!(first.len(), 10 + 7, "storia: {}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 2, "layer, poi particolari");
+    assert_eq!(rilievo_snapshot(&app), survey);
+    let anchor = existing_anchor(doc(&app)).unwrap();
+    assert!(anchor[0] > 8.3, "a destra del modello: {anchor:?}");
+
+    run(&mut app, "AL_PARTICOLARE");
+    let second = details_in(doc(&app));
+    assert_eq!(second.len(), first.len());
+    assert!(second.iter().all(|(h, _)| !first.iter().any(|(old, _)| old == h)));
+    let again = existing_anchor(doc(&app)).unwrap();
+    assert!((again[0] - anchor[0]).abs() < 1e-9 && (again[1] - anchor[1]).abs() < 1e-9);
+    assert_eq!(undo_steps(&app), steps + 3);
 }

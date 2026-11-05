@@ -22,6 +22,7 @@ pub mod mass3d_prism;
 pub mod model3d;
 pub mod model3d_place;
 pub mod model3d_views;
+pub mod detail;
 pub mod strata;
 pub mod strata_assign;
 pub mod migrate;

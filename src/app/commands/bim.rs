@@ -59,6 +59,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_PROSPETTO",
         "AL_MODELLO3D",
         "AL_STRATIGRAFIA",
+        "AL_PARTICOLARE",
     ]
 });
 
@@ -115,6 +116,7 @@ impl OpenCADStudio {
             "AL_MODELLO3D" => Some(self.bim_modello3d(i, cmd)),
             // Parte 6: in `bim_strati.rs`.
             "AL_STRATIGRAFIA" => Some(self.bim_stratigrafia(i, cmd)),
+            "AL_PARTICOLARE" => Some(self.bim_particolare(i, cmd)),
             _ => None,
         }
     }
