@@ -22,7 +22,7 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("SHEETSET", asset!("sheetset.svg")),
     ("TABLESTYLE", asset!("table_style.svg")),
     ("MLEADERSTYLE", asset!("mleader_style.svg")),
-    // The nine Tools > Ristrutturazione commands, drawn for ArchLine: yellow is
+    // The twelve Tools > Ristrutturazione commands, drawn for ArchLine: yellow is
     // a demolished zone (ACI 2), red a new one (ACI 1). Both are written as
     // CSS keywords because the recolouring in `icons.rs` turns `#FF0000` into
     // the theme's danger colour.
@@ -38,6 +38,11 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("AL_ALTEZZA", asset!("ristr_altezza.svg")),
     ("AL_ABACO", asset!("ristr_abaco.svg")),
     ("AL_ABACO_CSV", asset!("ristr_abaco_csv.svg")),
+    // Part 3: a door in plan (leaf and swing), a window in plan (glass in the
+    // wall) and an opening in elevation with its two dimensions.
+    ("AL_PORTA", asset!("ristr_porta.svg")),
+    ("AL_FINESTRA", asset!("ristr_finestra.svg")),
+    ("AL_APERTURA_DATI", asset!("ristr_apertura_dati.svg")),
 ];
 
 /// Black-stroke glyphs: some from the quick-access strip, the rest drawn for
@@ -110,7 +115,7 @@ mod tests {
         assert_eq!(all.len(), n, "a command has two icons");
     }
 
-    const RISTRUTTURAZIONE: [&str; 9] = [
+    const RISTRUTTURAZIONE: [&str; 12] = [
         "AL_DEMOLISCI",
         "AL_NUOVO",
         "AL_STATO",
@@ -120,6 +125,9 @@ mod tests {
         "AL_ALTEZZA",
         "AL_ABACO",
         "AL_ABACO_CSV",
+        "AL_PORTA",
+        "AL_FINESTRA",
+        "AL_APERTURA_DATI",
     ];
 
     fn text(bytes: &[u8]) -> String {
@@ -177,7 +185,14 @@ mod tests {
         // at least one pixel is the accent itself, fully covered, so the
         // drawing really carries the colour the theme will follow.
         const ACCENT: [u8; 4] = [0x6D, 0xB7, 0xED, 255];
-        for command in ["AL_ALTEZZA", "AL_ABACO", "AL_ABACO_CSV"] {
+        for command in [
+            "AL_ALTEZZA",
+            "AL_ABACO",
+            "AL_ABACO_CSV",
+            "AL_PORTA",
+            "AL_FINESTRA",
+            "AL_APERTURA_DATI",
+        ] {
             let pixmap = render(ribbon(command).unwrap_or_else(|| panic!("{command}: no icon")));
             let accent = pixmap
                 .pixels()

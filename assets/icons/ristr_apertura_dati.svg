@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Dati apertura">
+  <rect x="3.75" y="2.25" width="10.5" height="15" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <circle cx="11.25" cy="10.5" r="0.75" stroke="#B4B6B9" stroke-width="1.5"/>
+  <path d="M18.75 2.25V17.25M16.5 4.5L18.75 2.25L21 4.5M16.5 15L18.75 17.25L21 15" stroke="#6DB7ED" stroke-width="2"/>
+  <path d="M3.75 21H14.25M6 18.75L3.75 21L6 23.25M12 18.75L14.25 21L12 23.25" stroke="#6DB7ED" stroke-width="2"/>
+</svg>

@@ -227,6 +227,10 @@ fn build() -> Vec<MenuDef> {
                         cmd("Altezza", "AL_ALTEZZA"),
                         cmd("Abaco", "AL_ABACO"),
                         cmd("Abaco CSV", "AL_ABACO_CSV"),
+                        // Parte 3 (spec 2026-11-05-bim-porte-finestre §6).
+                        cmd("Porta", "AL_PORTA"),
+                        cmd("Finestra", "AL_FINESTRA"),
+                        cmd("Dati apertura", "AL_APERTURA_DATI"),
                     ],
                 ),
                 Sep,
@@ -883,7 +887,7 @@ mod tests {
     /// quick-access glyph). Adding a menu row without an icon fails the test
     /// below until the row gets one or is listed here on purpose. Kept sorted.
     ///
-    /// The nine Ristrutturazione commands have their own icons
+    /// The twelve Ristrutturazione commands have their own icons
     /// (`menu_icons::RIBBON`); only FIND, from the merge of upstream v2026.43,
     /// is left without one.
     const NO_ICON: &[&str] = &["FIND"];

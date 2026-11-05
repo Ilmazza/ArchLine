@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Porta">
+  <rect x="0.75" y="15" width="6.75" height="4.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <rect x="16.5" y="15" width="6.75" height="4.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <path d="M7.5 15V6" stroke="#6DB7ED" stroke-width="2"/>
+  <path d="M7.5 6A9 9 0 0 1 16.5 15" stroke="#6DB7ED" stroke-width="1.5" stroke-dasharray="2.25 1.5"/>
+</svg>

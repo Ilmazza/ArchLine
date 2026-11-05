@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Finestra">
+  <rect x="0.75" y="9.75" width="6.75" height="4.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <rect x="16.5" y="9.75" width="6.75" height="4.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <path d="M7.5 9.75H16.5M7.5 14.25H16.5" stroke="#B4B6B9" stroke-width="1.5" stroke-linecap="butt"/>
+  <path d="M7.5 12H16.5" stroke="#6DB7ED" stroke-width="2" stroke-linecap="butt"/>
+  <path d="M7.5 5.25V18.75M16.5 5.25V18.75" stroke="#6DB7ED" stroke-width="1.5" stroke-dasharray="1.5 1.5"/>
+</svg>
