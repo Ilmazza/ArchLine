@@ -20,6 +20,7 @@ pub mod height;
 pub mod mass3d;
 pub mod mass3d_prism;
 pub mod model3d;
+pub mod model3d_place;
 pub mod migrate;
 pub mod project;
 pub mod quantities;
@@ -65,6 +66,8 @@ pub const APP_APERTURA: &str = "ARCHLINE_APERTURA";
 pub const LAYER_TAGLI: &str = "AL-TAGLI";
 /// APPID dell'XDATA dei tagli di sezione.
 pub const APP_TAGLIO: &str = "ARCHLINE_TAGLIO";
+/// APPID dell'XDATA delle 3DFACE del modello 3D (parte 5).
+pub const APP_MODELLO3D: &str = "ARCHLINE_MODELLO3D";
 /// APPID dell'XDATA dei disegni di sezione (parte 4).
 pub const APP_SEZIONE: &str = "ARCHLINE_SEZIONE";
 /// Layer delle tabelle d'abaco (`AL_ABACO`).
