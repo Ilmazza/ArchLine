@@ -360,6 +360,7 @@ fn paper_space_is_refused() {
         ("AL_PORTA 4.05,1 4.05,1.9 E 2.1", 6),
         ("AL_FINESTRA", 0),
         ("AL_TAGLIO 2,-1 2,4 3,1.5 A-A", 6),
+        ("AL_SEZIONE", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5176,4 +5177,70 @@ fn al_taglio_creates_a_cut_from_the_command_line() {
     // Un annullamento toglie solo l'ultimo taglio.
     undo(&mut app);
     assert_eq!(cuts_in(doc(&app)).len(), 1);
+}
+
+// ----------------------------------------------------------- AL_SEZIONE
+
+/// Parte 4, task 6: `AL_SEZIONE` da script. Il caso A con la porta, i locali,
+/// l'altezza del livello e un taglio a y = 1,5: tre disegni (fatto,
+/// demolizioni e costruzioni, progetto) posati a destra del modello con il
+/// record `ARCHLINE_SEZIONE`; il rilievo non si tocca; rilanciarlo li sostituisce
+/// dov'erano; un annullamento toglie solo l'ultima posa.
+#[test]
+fn al_sezione_places_three_drawings_and_replaces_them() {
+    use crate::bim::section_place::{existing_anchor, sections_in};
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    run(&mut app, "AL_TAGLIO -1,1.5 9,1.5 4,3 A-A");
+    let survey = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_SEZIONE");
+
+    let first = sections_in(doc(&app));
+    assert!(!first.is_empty(), "storia: {}", history(&app));
+    let mut phases: Vec<String> = first.iter().map(|(_, _, phase)| phase.clone()).collect();
+    phases.sort();
+    phases.dedup();
+    assert_eq!(phases, ["demolizioni-costruzioni", "fatto", "progetto"], "{}", history(&app));
+    assert!(first.iter().all(|(_, cut, _)| cut == "A-A"));
+    for (handle, _, _) in &first {
+        assert_eq!(doc(&app).get_entity(*handle).unwrap().common().layer, "AL-SEZIONI");
+    }
+    assert_eq!(undo_steps(&app), steps + 2, "layer, poi sezioni");
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+    let anchor = existing_anchor(doc(&app)).unwrap();
+    assert!(anchor[0] > 8.3, "a destra del modello: {anchor:?}");
+
+    // Rilanciato: le stesse entità in numero, nello stesso angolo, e un solo
+    // passo nuovo; quelle di prima sono sparite.
+    run(&mut app, "AL_SEZIONE");
+    let second = sections_in(doc(&app));
+    assert_eq!(second.len(), first.len(), "storia: {}", history(&app));
+    assert!(second.iter().all(|(h, _, _)| !first.iter().any(|(old, _, _)| old == h)));
+    let again = existing_anchor(doc(&app)).unwrap();
+    assert!((again[0] - anchor[0]).abs() < 1e-9 && (again[1] - anchor[1]).abs() < 1e-9, "{again:?}");
+    assert_eq!(undo_steps(&app), steps + 3);
+
+    undo(&mut app);
+    let restored = sections_in(doc(&app));
+    assert_eq!(restored.len(), first.len());
+    assert!(restored.iter().all(|(h, _, _)| first.iter().any(|(old, _, _)| old == h)));
+}
+
+/// Senza tagli lo dice e non crea nulla.
+#[test]
+fn al_sezione_without_cuts_says_so() {
+    use crate::bim::section_place::sections_in;
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let steps = undo_steps(&app);
+    run(&mut app, "AL_SEZIONE");
+    assert!(history(&app).contains("nessun taglio nel disegno"), "{}", history(&app));
+    assert!(sections_in(doc(&app)).is_empty());
+    assert_eq!(undo_steps(&app), steps);
 }

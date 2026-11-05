@@ -28,6 +28,7 @@ pub mod rooms;
 pub mod section;
 pub mod section_build;
 pub mod section_draw;
+pub mod section_place;
 pub mod units;
 pub mod walls;
 pub mod zone;
@@ -60,6 +61,8 @@ pub const APP_APERTURA: &str = "ARCHLINE_APERTURA";
 pub const LAYER_TAGLI: &str = "AL-TAGLI";
 /// APPID dell'XDATA dei tagli di sezione.
 pub const APP_TAGLIO: &str = "ARCHLINE_TAGLIO";
+/// APPID dell'XDATA dei disegni di sezione (parte 4).
+pub const APP_SEZIONE: &str = "ARCHLINE_SEZIONE";
 /// Layer delle tabelle d'abaco (`AL_ABACO`).
 pub const LAYER_ABACO: &str = "AL-ABACO";
 /// APPID dell'XDATA delle tabelle d'abaco.

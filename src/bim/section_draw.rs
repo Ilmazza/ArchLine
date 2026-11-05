@@ -101,9 +101,10 @@ fn rectangle(x0: f64, y0: f64, x1: f64, y1: f64, tint: Tint) -> [EntityType; 2] 
     ]
 }
 
-fn text(at: [f64; 2], value: &str, height: f64, top_left: bool) -> EntityType {
+fn text(at: [f64; 2], value: &str, height: f64, width: f64, top_left: bool) -> EntityType {
     let mut text = MText::with_value(value, Vector3::new(at[0], at[1], 0.0));
     text.height = height;
+    text.rectangle_width = width;
     text.attachment_point = if top_left {
         AttachmentPoint::TopLeft
     } else {
@@ -185,16 +186,21 @@ pub fn draw_section(
         }
     }
     let below = frame.at(start, 0.0);
+    // I testi vanno a capo a questa larghezza: quella della sezione, ma mai
+    // meno di quaranta altezze di testo (i limiti restano su tre righe).
+    let width = (end - start).max(40.0 * text_height);
     out.push(text(
         [below[0], below[1] - text_height],
         title,
         text_height,
+        width,
         true,
     ));
     out.push(text(
         [below[0], below[1] - 3.0 * text_height],
         LIMITS_TEXT,
         text_height * 0.6,
+        width,
         true,
     ));
     out
