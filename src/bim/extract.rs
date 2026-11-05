@@ -213,11 +213,20 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
             .map(|(handle, _)| *handle)
             .collect()
     };
-    let (other_fatto, other_comparativa, other_progetto) = (
+    let (mut other_fatto, mut other_comparativa, mut other_progetto) = (
         of_other_phase(SectionPhase::Fatto),
         of_other_phase(SectionPhase::Comparativa),
         of_other_phase(SectionPhase::Progetto),
     );
+    // Parte 5 (spec §5.3, R130): i modelli 3D vanno nel solo elaborato della
+    // loro fase; la comparativa non ne ha (la differenza non è modellata).
+    for (handle, phase) in super::model3d_place::models_in(src) {
+        other_comparativa.insert(handle);
+        match phase {
+            super::model3d_place::ModelPhase::Fatto => other_progetto.insert(handle),
+            super::model3d_place::ModelPhase::Progetto => other_fatto.insert(handle),
+        };
+    }
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
@@ -4645,6 +4654,53 @@ mod tests {
                 !abaco_texts(&ex.docs[1].1).is_empty(),
                 "l'abaco c'è lo stesso"
             );
+        }
+    }
+
+    /// Parte 5 (spec §5.3, R130): le `3DFACE` del modello di fatto vanno nel
+    /// solo stato di fatto, quelle del progetto nel solo stato di progetto; la
+    /// comparativa non ne ha. Nessun XDATA né APPID `ARCHLINE_*`.
+    #[test]
+    fn models_3d_go_only_to_their_phase() {
+        use crate::bim::mass3d_prism::{Face3, Tone};
+        use crate::bim::model3d::Model3d;
+        use crate::bim::model3d_place::{self, place, LAYER_FATTO, LAYER_PROGETTO};
+        let face = |x: f64| Face3 {
+            quad: [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x + 1.0, 1.0, 2.7], [x, 1.0, 2.7]],
+            tone: Tone::Mass,
+        };
+        let fatto = Model3d {
+            faces: vec![face(0.0), face(1.0)],
+            ..Model3d::default()
+        };
+        let progetto = Model3d {
+            faces: vec![face(0.0), face(1.0), face(2.0)],
+            ..Model3d::default()
+        };
+        let mut doc = case_a_doc(Form::Continua);
+        model3d_place::ensure_layers(&mut doc);
+        for entity in place(&fatto, &progetto, [20.0, 0.0], 1.0) {
+            doc.add_entity(entity).unwrap();
+        }
+        let ex = extract(&doc, &opts(&all_three()));
+        assert_eq!(ex.docs.len(), 3);
+        let count = |out: &Document, layer: &str| {
+            out.entities()
+                .filter(|e| matches!(e, EntityType::Face3D(_)) && e.common().layer == layer)
+                .count()
+        };
+        for (elaborato, out) in &ex.docs {
+            let expected = match elaborato {
+                Elaborato::StatoDiFatto => (2, 0),
+                Elaborato::DemolizioniCostruzioni => (0, 0),
+                Elaborato::StatoDiProgetto => (0, 3),
+            };
+            assert_eq!(
+                (count(out, LAYER_FATTO), count(out, LAYER_PROGETTO)),
+                expected,
+                "{elaborato:?}"
+            );
+            assert_no_archline_data(out);
         }
     }
 }
