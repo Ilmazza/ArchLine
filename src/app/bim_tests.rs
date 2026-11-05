@@ -359,6 +359,7 @@ fn paper_space_is_refused() {
         ("AL_AGGIORNA", 6),
         ("AL_PORTA 4.05,1 4.05,1.9 E 2.1", 6),
         ("AL_FINESTRA", 0),
+        ("AL_TAGLIO 2,-1 2,4 3,1.5 A-A", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5137,4 +5138,42 @@ fn al_apertura_dati_ignores_what_is_not_an_aperture() {
         "{}",
         history(&app)
     );
+}
+
+// ------------------------------------------------------------- AL_TAGLIO
+
+/// Parte 4, task 4: `AL_TAGLIO` da script. Tre punti (tracciato e lato di
+/// vista) e il nome; layer e APPID sono un passo a sé, il taglio un altro; il
+/// rilievo non si tocca; un nome già preso si rifiuta e non crea nulla.
+#[test]
+fn al_taglio_creates_a_cut_from_the_command_line() {
+    use crate::bim::cut::cuts_in;
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let before = rilievo_snapshot(&app);
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_TAGLIO 2,-1 2,4 3,1.5 A-A");
+
+    let found = cuts_in(doc(&app));
+    assert_eq!(found.len(), 1, "storia: {}", history(&app));
+    let cut = &found[0].cut;
+    assert_eq!(cut.name, "A-A");
+    assert_eq!((cut.from, cut.to, cut.view), ([2.0, -1.0], [2.0, 4.0], [3.0, 1.5]));
+    let entity = doc(&app).get_entity(found[0].handle).unwrap();
+    assert_eq!(entity.common().layer, "AL-TAGLI");
+    assert_eq!(rilievo_snapshot(&app), before, "il rilievo non si tocca");
+    assert_eq!(active_command(&app), None);
+    assert_eq!(undo_steps(&app), steps + 2, "layer, poi taglio");
+
+    // Lo stesso nome non si riusa: il nome è rifiutato (maiuscole comprese) e
+    // l'Invio con cui il runner chiude la riga prende quello proposto, B-B.
+    run(&mut app, "AL_TAGLIO 5,-1 5,4 6,1.5 a-a");
+    assert!(history(&app).contains("Esiste già un taglio"), "{}", history(&app));
+    let names: Vec<String> = cuts_in(doc(&app)).into_iter().map(|c| c.cut.name).collect();
+    assert_eq!(names, ["A-A", "B-B"], "storia: {}", history(&app));
+
+    // Un annullamento toglie solo l'ultimo taglio.
+    undo(&mut app);
+    assert_eq!(cuts_in(doc(&app)).len(), 1);
 }

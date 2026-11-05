@@ -12,6 +12,8 @@ pub mod aperture_command;
 pub mod aperture_quantities;
 pub mod clip;
 pub mod commands;
+pub mod cut;
+pub mod cut_command;
 pub mod extract;
 pub mod height;
 pub mod migrate;
@@ -53,6 +55,10 @@ pub const RECORD_PROGETTO: &str = "ARCHLINE_PROGETTO";
 pub const LAYER_APERTURE: &str = "AL-APERTURE";
 /// APPID dell'XDATA delle aperture.
 pub const APP_APERTURA: &str = "ARCHLINE_APERTURA";
+/// Layer dei tagli di sezione (parte 4).
+pub const LAYER_TAGLI: &str = "AL-TAGLI";
+/// APPID dell'XDATA dei tagli di sezione.
+pub const APP_TAGLIO: &str = "ARCHLINE_TAGLIO";
 /// Layer delle tabelle d'abaco (`AL_ABACO`).
 pub const LAYER_ABACO: &str = "AL-ABACO";
 /// APPID dell'XDATA delle tabelle d'abaco.

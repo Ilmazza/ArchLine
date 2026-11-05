@@ -54,6 +54,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_FINESTRA",
         "AL_PORTAFINESTRA",
         "AL_APERTURA_DATI",
+        "AL_TAGLIO",
     ]
 });
 
@@ -102,6 +103,8 @@ impl OpenCADStudio {
             "AL_FINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Finestra)),
             "AL_PORTAFINESTRA" => Some(self.bim_aperture(i, cmd, ApertureKind::Portafinestra)),
             "AL_APERTURA_DATI" => Some(self.bim_aperture_dati(i, cmd)),
+            // Parte 4: in `bim_taglio.rs`.
+            "AL_TAGLIO" => Some(self.bim_taglio(i)),
             _ => None,
         }
     }
