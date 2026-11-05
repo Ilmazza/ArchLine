@@ -21,6 +21,7 @@ pub mod mass3d;
 pub mod mass3d_prism;
 pub mod model3d;
 pub mod model3d_place;
+pub mod model3d_views;
 pub mod migrate;
 pub mod project;
 pub mod quantities;
