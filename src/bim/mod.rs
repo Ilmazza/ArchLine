@@ -8,6 +8,7 @@ pub mod abaco_render;
 pub mod abaco_table;
 pub mod aperture;
 pub mod aperture_command;
+pub mod aperture_quantities;
 pub mod clip;
 pub mod commands;
 pub mod extract;
