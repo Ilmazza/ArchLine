@@ -100,7 +100,9 @@ use rustc_hash::FxHashSet;
 use crate::entities::curve::{entity_curve_xy, ocs_plane};
 use crate::entities::traits::EntityTypeOps;
 
+use super::aperture;
 use super::clip::kept_pieces;
+use super::rooms::Phase;
 use super::report::Notice;
 use super::units::{resolve, UnitLookup};
 use super::walls::{
@@ -243,6 +245,14 @@ pub fn project_geometry(
             None => notices.push(Notice::VarcoNonSupportato { at: zone.centroid }),
         }
     }
+
+    // 3 bis. Porte e portefinestre con la soglia (parte 3, R97): come i
+    // varchi, chiudono il vano per i locali e non si disegnano.
+    thresholds.extend(
+        aperture::threshold_segments(doc, Phase::Progetto)
+            .into_iter()
+            .map(|(a, b)| by_layer_line(a, b, THRESHOLD_LAYER, owner)),
+    );
 
     // 4. Zone nuove (e chiusure che restano).
     drawn.extend(new_walls(

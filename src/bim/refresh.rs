@@ -6,6 +6,7 @@ use codec::entities::{LwPolyline, LwVertex, MText};
 use codec::{Document, EntityType, Handle};
 use rustc_hash::FxHashMap;
 
+use super::aperture;
 use super::report::Notice;
 use super::rooms::{
     ambiguous_parts, label, measure_at, quality_notices, region_holds, room_entities, rooms_in, Computed, Measured,
@@ -233,7 +234,9 @@ pub(crate) fn measure_fatto(doc: &Document, unit: DrawingUnit, tol: f64) -> Fatt
     let base = unit.tolerance();
     // R67: le parti dei locali (anche spostate su un layer non `AL-*`) non
     // sono muri.
-    let walls = wall_set_without_rooms(doc, base);
+    let mut walls = wall_set_without_rooms(doc, base);
+    // Parte 3, R97: le porte del rilievo chiudono il vano per i locali.
+    aperture::add_fatto_thresholds(doc, &mut walls.sources, base);
     let faces = wall_faces(&walls.sources, tol);
     // R47: le facce alla tolleranza di base, una volta per tutti i locali.
     let base_faces = (tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));

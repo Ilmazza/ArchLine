@@ -964,10 +964,12 @@ pub fn project_rooms(
     fatto_regions: &[Region],
     progetto: &[Room],
     zones: &[ZoneGeom],
+    vani: &[Vec<[f64; 2]>],
     unit: DrawingUnit,
     tol: f64,
 ) -> (Vec<Computed>, Vec<Notice>) {
     let tolerance = Tolerance::new(tol);
+    let vani: Vec<Vec<Curve>> = vani.iter().map(|ring| ring_curves(ring)).collect();
     let zones: Vec<ZoneShape> = zones.iter().filter_map(ZoneShape::new).collect();
     let mut notices = Vec::new();
     // R47: le facce alla tolleranza di base, una volta sola.
@@ -1078,6 +1080,10 @@ pub fn project_rooms(
             .iter()
             .any(|hole| contains(hole, inner, tolerance))
         {
+            continue;
+        }
+        // Il vano di una porta (parte 3, R97) non è di nessun locale.
+        if vani.iter().any(|vano| contains(vano, inner, tolerance)) {
             continue;
         }
         if let Some(zone) = zones
@@ -1807,6 +1813,7 @@ mod tests {
             &fatto_regions,
             progetto,
             zones,
+            &[],
             M,
             TOL,
         )
@@ -2174,6 +2181,7 @@ mod tests {
             &pg_sources,
             &[fatto_a],
             &[region],
+            &[],
             &[],
             &[],
             M,

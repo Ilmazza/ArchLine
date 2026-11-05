@@ -5000,3 +5000,48 @@ fn al_porta_asks_for_the_unit_when_missing() {
     assert_eq!(record::read(doc(&app)).unit, Some(DrawingUnit::Metri));
     assert_eq!(active_command(&app), Some("AL_PORTA"), "storia: {}", history(&app));
 }
+
+/// Parte 3, task 3 (R97): con la porta il vano del rilievo non unisce più A e
+/// B. `AL_LOCALE` misura 12,00 e 11,70 m² (senza la porta le due stanze
+/// sarebbero una regione sola), `AL_AGGIORNA` non cambia nulla e anche i
+/// locali di progetto restano due, senza una linea di soglia a mano.
+#[test]
+fn a_door_closes_the_survey_vano_for_the_rooms() {
+    use crate::bim::quantities_rooms::{fatto_room_rows, project_room_rows};
+    for form in [Form::Continua, Form::ChiusaPerMuro] {
+        let mut app = fresh_app();
+        load(&mut app, case_a_with_door(form, DrawingUnit::Metri), 6);
+        run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+        assert_eq!(apertures_in(doc(&app)).len(), 1, "{form:?}: {}", history(&app));
+        let before = rilievo_snapshot(&app);
+
+        run(&mut app, "AL_LOCALE 2,1.5 A");
+        run(&mut app, "AL_LOCALE 6,1.5 B");
+
+        assert_eq!(
+            labels_in(doc(&app), LAYER_LOCALI),
+            ["A\\PS = 12,00 m²", "B\\PS = 11,70 m²"],
+            "{form:?}: storia: {}",
+            history(&app)
+        );
+        forget_history(&mut app);
+        run(&mut app, "AL_AGGIORNA");
+        assert!(
+            history(&app).contains("AL_AGGIORNA: 0 locali aggiornati."),
+            "{form:?}: storia: {}",
+            history(&app)
+        );
+
+        let unit = DrawingUnit::Metri;
+        let (fatto, _) = fatto_room_rows(doc(&app), unit, unit.tolerance(), Some(2.7));
+        let (project, _) =
+            project_room_rows(doc(&app), unit, unit.tolerance(), unit.tolerance(), Some(2.7), &fatto);
+        let areas: Vec<f64> = project
+            .iter()
+            .filter_map(|row| row.row.area_m2)
+            .map(|a| (a * 100.0).round() / 100.0)
+            .collect();
+        assert_eq!(areas, [12.0, 11.7], "{form:?}: progetto: {project:?}");
+        assert_eq!(rilievo_snapshot(&app), before, "{form:?}: il rilievo non si tocca");
+    }
+}

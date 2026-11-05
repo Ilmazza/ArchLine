@@ -57,6 +57,7 @@ use crate::scene::BoundarySource;
 
 use super::abaco::{compute_abaco, render_tables, AbacoOptions};
 use super::abaco_table::{self, kind_name, tables_in};
+use super::aperture;
 use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
@@ -409,19 +410,23 @@ pub(crate) fn computed_project_rooms(
     let fatto_regions: Vec<Region> = if fatto.is_empty() {
         Vec::new()
     } else {
-        let faces = wall_faces(&walls.sources, room_tol);
+        // Parte 3, R97: le porte del rilievo chiudono il vano (come in
+        // `measure_fatto`).
+        let base = unit.tolerance();
+        let mut survey_sources = walls.sources.clone();
+        aperture::add_fatto_thresholds(src, &mut survey_sources, base);
+        let faces = wall_faces(&survey_sources, room_tol);
         // R47: le facce alla tolleranza di base una volta sola, se servono
         // (come in `refresh_rooms`).
-        let base = unit.tolerance();
         let base_faces =
-            (room_tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&walls.sources, base));
+            (room_tol > base * (1.0 + 1.0e-9)).then(|| wall_faces(&survey_sources, base));
         fatto
             .iter()
             .filter_map(|room| {
                 measure_at(
                     &faces,
                     base_faces.as_deref(),
-                    &walls.sources,
+                    &survey_sources,
                     room.seed,
                     unit,
                     room_tol,
@@ -439,6 +444,7 @@ pub(crate) fn computed_project_rooms(
         &fatto_regions,
         &progetto,
         zones,
+        &aperture::vano_rings(src, Phase::Progetto),
         unit,
         room_tol,
     );

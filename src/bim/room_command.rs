@@ -14,6 +14,7 @@ use rustc_hash::FxHashMap;
 use crate::command::{CadCommand, CmdOption, CmdResult, InputKind};
 use crate::scene::BoundarySource;
 
+use super::aperture;
 use super::project::project_geometry;
 use super::report::Notice;
 use super::rooms::{
@@ -66,7 +67,11 @@ pub fn room_snapshot(doc: &Document, unit: DrawingUnit, tol: f64) -> (RoomSnapsh
     let pg = project_geometry(doc, &walls, &zones, "0", base);
     let (pg_sources, _) = sources_of(&pg.room_entities, base);
     let pg_faces = wall_faces(&pg_sources, tol);
-    let fatto_faces = wall_faces(&walls.sources, tol);
+    // Parte 3, R97: le porte del rilievo chiudono il vano per i locali di
+    // fatto (non per la geometria di progetto, che ha le sue soglie).
+    let mut fatto_sources = walls.sources.clone();
+    aperture::add_fatto_thresholds(doc, &mut fatto_sources, base);
+    let fatto_faces = wall_faces(&fatto_sources, tol);
     // Una zona nuova data due volte (lo stesso muro) conta una volta: per la
     // regola pari-dispari due anelli uguali si annullerebbero.
     let mut new_zone_rings: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -80,7 +85,7 @@ pub fn room_snapshot(doc: &Document, unit: DrawingUnit, tol: f64) -> (RoomSnapsh
         }
     }
     let snap = RoomSnapshot {
-        fatto: (fatto_faces, walls.sources),
+        fatto: (fatto_faces, fatto_sources),
         progetto: (pg_faces, pg_sources),
         new_zone_rings,
         unit,

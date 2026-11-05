@@ -20,13 +20,21 @@
 //!
 //! Qui non c'è undo: lo apre il comando che crea o cambia le aperture.
 
-use codec::entities::{EntityCommon, LwPolyline, LwVertex};
+use codec::entities::{EntityCommon, Line, LwPolyline, LwVertex};
 use codec::tables::{AppId, Layer};
 use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Color, Document, EntityType, Handle, Vector2, Vector3};
 
-use super::walls::rect_from_axis_thickness;
+use rustc_hash::FxHashMap;
+
+use super::project::FIRST_SYNTHETIC_HANDLE;
+use super::rooms::Phase;
+use super::walls::{rect_from_axis_thickness, sources_of, WallRect};
 use super::{ACI_GIALLO, ACI_ROSSO, APP_APERTURA, LAYER_APERTURE};
+use crate::scene::BoundarySource;
+
+/// Il layer delle linee di soglia sintetiche: non compaiono mai nel disegno.
+const THRESHOLD_LAYER: &str = "0";
 
 /// Versione del record XDATA.
 const VERSION: i16 = 1;
@@ -350,6 +358,73 @@ pub fn apertures_in(doc: &Document) -> Vec<ApertureGeom> {
         .collect()
 }
 
+/// I due lati lunghi del vano di ogni porta o portafinestra con la soglia, per
+/// la fase: nel calcolo dei locali chiudono il vano come le spallette di un
+/// varco (spec parte 3 §4.2, R97). Una `finestra` non chiude nulla (il muro è
+/// continuo nel rilievo). Lo stato di fatto vede le aperture esistenti e
+/// quelle da demolire; quello di progetto le esistenti e le nuove.
+pub fn threshold_segments(doc: &Document, phase: Phase) -> Vec<([f64; 2], [f64; 2])> {
+    closing_rects(doc, phase)
+        .into_iter()
+        .flat_map(|rect| rect.long_sides())
+        .collect()
+}
+
+/// Gli anelli dei vani che chiudono i locali nella fase (gli stessi rettangoli
+/// di [`threshold_segments`]): l'area di un vano porta non è di nessun locale,
+/// quindi la faccia che ne nasce non è mai un locale «(senza nome)».
+pub fn vano_rings(doc: &Document, phase: Phase) -> Vec<Vec<[f64; 2]>> {
+    closing_rects(doc, phase)
+        .into_iter()
+        .map(|rect| rect.ring())
+        .collect()
+}
+
+fn closing_rects(doc: &Document, phase: Phase) -> Vec<WallRect> {
+    apertures_in(doc)
+        .into_iter()
+        .filter(|geom| geom.aperture.threshold && geom.aperture.kind.is_door())
+        .filter(|geom| match (phase, geom.aperture.state) {
+            (_, ApertureState::Esistente) => true,
+            (Phase::Fatto, ApertureState::Demolita) => true,
+            (Phase::Progetto, ApertureState::Nuova) => true,
+            _ => false,
+        })
+        .filter_map(|geom| {
+            let a = geom.aperture;
+            rect_from_axis_thickness(a.axis.0, a.axis.1, a.thickness)
+        })
+        .collect()
+}
+
+/// Aggiunge a `sources` (i muri del rilievo) le soglie delle aperture dello
+/// stato di fatto come linee sintetiche, con handle sopra quelli dei muri. Il
+/// disegno non si tocca: servono solo alle facce dei locali.
+pub fn add_fatto_thresholds(
+    doc: &Document,
+    sources: &mut FxHashMap<Handle, BoundarySource>,
+    tol: f64,
+) {
+    let first = sources
+        .keys()
+        .map(|handle| handle.value().saturating_add(1))
+        .fold(FIRST_SYNTHETIC_HANDLE, u64::max);
+    let lines: Vec<(Handle, EntityType)> = (0u64..)
+        .zip(threshold_segments(doc, Phase::Fatto))
+        .map(|(offset, (a, b))| {
+            let handle = Handle::new(first.saturating_add(offset));
+            let mut line = Line::from_points(
+                Vector3::new(a[0], a[1], 0.0),
+                Vector3::new(b[0], b[1], 0.0),
+            );
+            line.common.layer = THRESHOLD_LAYER.to_string();
+            line.common.handle = handle;
+            (handle, EntityType::Line(line))
+        })
+        .collect();
+    sources.extend(sources_of(&lines, tol).0);
+}
+
 /// Manca il layer o l'APPID delle aperture?
 pub fn missing_layer(doc: &Document) -> bool {
     !doc.layers.contains(LAYER_APERTURE) || !doc.app_ids.contains(APP_APERTURA)
@@ -643,6 +718,74 @@ mod tests {
             !missing_layer(&read),
             "layer e APPID devono sopravvivere al DWG"
         );
+    }
+
+    /// Un vano porta senza linea di soglia unisce A e B nel rilievo; con la
+    /// soglia dell'apertura i due locali restano due (12,00 e 11,70 m²) e
+    /// l'area del vano non è di nessuno. Una finestra non chiude nulla.
+    #[test]
+    fn a_door_closes_the_survey_vano_for_the_rooms_of_the_fatto() {
+        use crate::bim::fixtures::{case_a_with_door, scene_with, Form};
+        use crate::bim::units::DrawingUnit;
+        use crate::bim::walls::{faces, net_area, region_at, wall_set_without_rooms};
+        const TOL: f64 = 1e-6;
+        let area_at = |sources: &FxHashMap<Handle, BoundarySource>, p: [f64; 2]| {
+            let faces = faces(sources, TOL);
+            region_at(&faces, p, TOL).map(|region| net_area(&region, sources, TOL).0)
+        };
+        for form in [Form::Continua, Form::ChiusaPerMuro] {
+            let mut scene = scene_with(
+                case_a_with_door(form, DrawingUnit::Metri),
+                DrawingUnit::Metri.insunits(),
+            );
+            ensure_layer(&mut scene.document);
+            let sources = wall_set_without_rooms(&scene.document, TOL).sources;
+            let open = area_at(&sources, [2.0, 1.5]).expect("regione aperta");
+            // Aperto: A e B sono una regione sola (nella forma a linee anche con la
+            // massa dei muri, che il vano senza spallette lascia aperta).
+            assert!(open > 23.0, "{form:?}: A+B+vano = {open}");
+
+            for (kind, closes) in [(ApertureKind::Porta, true), (ApertureKind::Finestra, false)] {
+                let a = Aperture {
+                    kind,
+                    threshold: kind.is_door(),
+                    ..door()
+                };
+                let handle = scene.add_entity(aperture_polyline(&a).unwrap());
+                let mut closed = sources.clone();
+                add_fatto_thresholds(&scene.document, &mut closed, TOL);
+                let area = area_at(&closed, [2.0, 1.5]).expect("regione");
+                if closes {
+                    assert!((area - 12.0).abs() < 0.01, "{form:?}: A = {area}");
+                    let b = area_at(&closed, [6.0, 1.5]).expect("regione");
+                    assert!((b - 11.7).abs() < 0.01, "{form:?}: B = {b}");
+                } else {
+                    assert!((area - open).abs() < 0.01, "{form:?}: finestra = {area}");
+                }
+                scene.erase_entities(&[handle]);
+            }
+        }
+    }
+
+    /// Le fasi: nel fatto contano le aperture esistenti e quelle da demolire,
+    /// nel progetto le esistenti e le nuove.
+    #[test]
+    fn thresholds_follow_the_phase() {
+        let count = |state: ApertureState, phase: Phase| {
+            let (doc, _) = doc_with(&[Aperture { state, ..door() }]);
+            threshold_segments(&doc, phase).len()
+        };
+        assert_eq!(count(ApertureState::Esistente, Phase::Fatto), 2);
+        assert_eq!(count(ApertureState::Esistente, Phase::Progetto), 2);
+        assert_eq!(count(ApertureState::Demolita, Phase::Fatto), 2);
+        assert_eq!(count(ApertureState::Demolita, Phase::Progetto), 0);
+        assert_eq!(count(ApertureState::Nuova, Phase::Fatto), 0);
+        assert_eq!(count(ApertureState::Nuova, Phase::Progetto), 2);
+        let (doc, _) = doc_with(&[Aperture {
+            threshold: false,
+            ..door()
+        }]);
+        assert!(threshold_segments(&doc, Phase::Fatto).is_empty(), "senza soglia");
     }
 
     #[test]
