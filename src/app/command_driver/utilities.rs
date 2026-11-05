@@ -1059,6 +1059,9 @@ impl OpenCADStudio {
             // ArchLine: the path after `AL_ABACO_CSV` may hold spaces and is
             // one answer; bare, in a script, the command refuses at once.
             || tokens[0].eq_ignore_ascii_case("AL_ABACO_CSV")
+            // ArchLine: `AL_STRATIGRAFIA` takes material names with spaces in
+            // one line; bare, it only prints its syntax.
+            || tokens[0].eq_ignore_ascii_case("AL_STRATIGRAFIA")
         {
             return self.dispatch_command(cmd);
         }

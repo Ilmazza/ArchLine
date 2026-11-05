@@ -11,6 +11,7 @@ mod bim_altezza;
 mod bim_aperture;
 mod bim_modello3d;
 mod bim_sezione;
+mod bim_strati;
 mod bim_taglio;
 mod block_cmdline;
 mod blocks;

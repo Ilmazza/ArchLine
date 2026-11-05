@@ -363,6 +363,7 @@ fn paper_space_is_refused() {
         ("AL_SEZIONE", 6),
         ("AL_PROSPETTO S", 6),
         ("AL_MODELLO3D", 6),
+        ("AL_STRATIGRAFIA Elenco", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5399,4 +5400,95 @@ fn al_modello3d_without_heights_says_so() {
     assert!(missing_layers(doc(&app)));
     assert_eq!(doc(&app).views.iter().count(), 0);
     assert_eq!(undo_steps(&app), steps);
+}
+
+// ---------------------------------------------------- AL_STRATIGRAFIA
+
+/// Parte 6, task 3: `AL_STRATIGRAFIA Nuova/Elenco/Rimuovi` da script. La riga
+/// intera arriva al comando (materiali con spazi); il record si scrive in un
+/// passo a sé; un nome già usato o strati sbagliati non cambiano nulla.
+#[test]
+fn al_stratigrafia_creates_lists_and_removes() {
+    use crate::bim::strata::{read_all, Kind};
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    let steps = undo_steps(&app);
+
+    run(
+        &mut app,
+        "AL_STRATIGRAFIA Nuova T12 Parete Intonaco di calce 0.015; Laterizio forato 0.09; Intonaco di calce 0.015",
+    );
+    let all = read_all(doc(&app));
+    assert_eq!(all.len(), 1, "storia: {}", history(&app));
+    assert_eq!(all[0].kind, Kind::Parete);
+    assert_eq!(all[0].layers[1].material, "Laterizio forato");
+    assert!(history(&app).contains("totale 12,0 cm"), "{}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    run(&mut app, "AL_STRATIGRAFIA Nuova t12 Solaio Ceramica 0.01");
+    assert!(history(&app).contains("c'è già"), "{}", history(&app));
+    run(&mut app, "AL_STRATIGRAFIA Nuova P1 Solaio Ceramica zero");
+    assert!(history(&app).contains("non è un numero"), "{}", history(&app));
+    run(&mut app, "AL_STRATIGRAFIA Nuova P2 Tetto Coppi 0.02");
+    assert!(history(&app).contains("Parete o Solaio"), "{}", history(&app));
+    assert_eq!(read_all(doc(&app)).len(), 1);
+    assert_eq!(undo_steps(&app), steps + 1);
+
+    run(&mut app, "AL_STRATIGRAFIA Elenco");
+    assert!(history(&app).contains("«T12» (parete), 12,0 cm"), "{}", history(&app));
+
+    run(&mut app, "AL_STRATIGRAFIA Rimuovi T12");
+    assert!(read_all(doc(&app)).is_empty());
+    assert_eq!(undo_steps(&app), steps + 2);
+    undo(&mut app);
+    assert_eq!(read_all(doc(&app)).len(), 1, "l'annullamento la riporta");
+}
+
+/// Parte 6, task 4: `Assegna` e `Togli` per punto e per selezione. Una parete
+/// va sulla zona nuova, un solaio sul seme del locale di progetto; il tipo
+/// sbagliato si salta; un passo di annullamento per assegnazione.
+#[test]
+fn al_stratigrafia_assigns_by_point_and_selection() {
+    use crate::bim::strata_assign::{assignments_in, Element};
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_NUOVO 2,0 2,3 0.12");
+    run(&mut app, "AL_LOCALE F 6,1.5 Studio");
+    run(&mut app, "AL_STRATIGRAFIA Nuova T12 Parete Intonaco 0.015; Laterizio forato 0.09; Intonaco 0.015");
+    run(&mut app, "AL_STRATIGRAFIA Nuova P1 Solaio Ceramica 0.01; Massetto 0.05");
+    let steps = undo_steps(&app);
+
+    run(&mut app, "AL_STRATIGRAFIA Assegna T12 2.0,1.5");
+    run(&mut app, "AL_STRATIGRAFIA Assegna P1 6,1.5");
+    let mut found = assignments_in(doc(&app));
+    found.sort_by_key(|(_, _, name)| name.clone());
+    let summary: Vec<(Option<Element>, String)> =
+        found.iter().map(|(_, e, n)| (*e, n.clone())).collect();
+    assert_eq!(
+        summary,
+        [
+            (Some(Element::ProjectRoom), "P1".to_string()),
+            (Some(Element::NewWall), "T12".to_string())
+        ],
+        "storia: {}",
+        history(&app)
+    );
+    assert_eq!(undo_steps(&app), steps + 2);
+
+    // Il tipo sbagliato: un solaio sulla muratura nuova si salta.
+    run(&mut app, "AL_STRATIGRAFIA Assegna P1 2.0,1.5");
+    assert!(history(&app).contains("tipo sbagliato"), "{}", history(&app));
+    assert_eq!(undo_steps(&app), steps + 2, "nessun passo");
+
+    // Per selezione: Togli sulla zona selezionata.
+    let wall = found.iter().find(|(_, e, _)| *e == Some(Element::NewWall)).unwrap().0;
+    select(&mut app, &[wall]);
+    run(&mut app, "AL_STRATIGRAFIA Togli");
+    assert_eq!(assignments_in(doc(&app)).len(), 1, "{}", history(&app));
+    undo(&mut app);
+    assert_eq!(assignments_in(doc(&app)).len(), 2);
+
+    // Un punto fuori da tutto.
+    run(&mut app, "AL_STRATIGRAFIA Assegna T12 -50,-50");
+    assert!(history(&app).contains("nel punto non c'è"), "{}", history(&app));
 }
