@@ -45,6 +45,14 @@ DWG di fatto solo 3DFACE su AL-3D-FATTO, in quello di progetto solo su AL-3D-PRO
 coperchi a quota 2,70 per 7,26 m2 (7,17 di muro e 0,09 di testa della porta) e pavimenti a quota 0 per 23,70 m2
 (A 12,00 + B 11,70), calcolati a mano; nessun XDATA ne' APPID ARCHLINE.
 
+Stratigrafie e particolari (BIM parte 6), sesto giro (righe con il prefisso "strati, "): il caso A, l'altezza del
+livello, il tramezzo nuovo `AL_NUOVO 2,0 2,3 0.12`, il locale di progetto «Studio», le stratigrafie T12 (parete:
+intonaco 0,015, laterizio forato 0,09, intonaco 0,015) e P1 (solaio: ceramica 0,01, massetto 0,05) assegnate per
+punto, `AL_PARTICOLARE`, `AL_ABACO_CSV` e `AL_ESTRAI`. Nel CSV le righe di strato N1-S1..S3 (8,1000 m2 = 3,00 x 2,70)
+e LP1-S1..S2 (11,7000 m2), con `quantita` = prodotto dei fattori; nei DWG i particolari solo nel progetto e nella
+comparativa (tre bande 0,015 / 0,09 / 0,015 alte 0,50, titolo «spessore totale 12,0 cm»), nessun XDATA ne' APPID
+ARCHLINE.
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -223,7 +231,8 @@ def csv_problems(rows):
             continue
         if quantity is None or abs(quantity - product) > CSV_QUANTITY_TOL:
             problems.append(f"{who}: quantita {row['quantita']} contro il prodotto dei fattori {product:.6f}")
-        if not row["tipo"].startswith("locale") and row["altezza"] == "":
+        # Un locale e lo strato di un solaio hanno la sola superficie: niente altezza.
+        if not (row["tipo"].startswith("locale") or row["tipo"] == "strato solaio") and row["altezza"] == "":
             problems.append(f"{who}: altezza vuota")
     return problems
 
@@ -1124,6 +1133,110 @@ def run_model3d_case(rep, exe, env, work):
     docs = read_extracts(rep, exe, env, work, out_dir, work, base=MODEL3D_BASE)
     check_model3d_extract(rep, docs)
 
+STRATA_PREFIX = "strati, "
+STRATA_BASE = "casoAstrati"
+LAYER_PARTICOLARI = "AL-PARTICOLARI"
+STRATA_CMDS = (
+    "AL_ALTEZZA L 2.70",
+    "AL_NUOVO 2,0 2,3 0.12",
+    "AL_LOCALE F 6,1.5 Studio",
+    "AL_STRATIGRAFIA Nuova T12 Parete Intonaco di calce 0.015; Laterizio forato 0.09; Intonaco di calce 0.015",
+    "AL_STRATIGRAFIA Nuova P1 Solaio Ceramica 0.01; Massetto 0.05",
+    "AL_STRATIGRAFIA Assegna T12 2.0,1.5",
+    "AL_STRATIGRAFIA Assegna P1 6,1.5",
+    "AL_PARTICOLARE",
+)
+# Calcolati a mano: tramezzo 3,00 x 2,70; locale B 11,70 (spec parte 6 §7).
+STRATA_WANT = {
+    "N1-S1": ("strato parete", "Intonaco di calce", "8,1000"),
+    "N1-S2": ("strato parete", "Laterizio forato", "8,1000"),
+    "N1-S3": ("strato parete", "Intonaco di calce", "8,1000"),
+    "LP1-S1": ("strato solaio", "Ceramica", "11,7000"),
+    "LP1-S2": ("strato solaio", "Massetto", "11,7000"),
+}
+
+
+def check_strata_csv(rep, csv_path):
+    """Le cinque righe di strato con la quantita' dell'elemento; ogni `quantita` e' il prodotto dei fattori."""
+    try:
+        bom, crlf, header, rows = read_abaco_csv(csv_path)
+    except (OSError, ValueError) as ex:
+        rep.check(False, "csv", f"non si legge: {ex}")
+        return
+    rep.check(bom and crlf and header == CSV_HEADER, "csv: forma", "BOM, CRLF e intestazione come attesi")
+    problems = csv_problems(rows)
+    rep.check(not problems, "csv: quantita = prodotto dei fattori", f"{len(rows)} righe" if not problems else "; ".join(problems))
+    strata = [row for row in rows if row["tipo"].startswith("strato ")]
+    rep.check(len(strata) == len(STRATA_WANT), "csv: righe di strato", f"{len(strata)} (attese {len(STRATA_WANT)})")
+    by_code = {row["codice"]: row for row in strata}
+    for code, (tipo, material, quantity) in STRATA_WANT.items():
+        row = by_code.get(code)
+        ok = row is not None and (row["tipo"], row["descrizione"], row["quantita"]) == (tipo, material, quantity)
+        rep.check(ok, f"csv: riga {code}", f"{tipo}, {material}, {quantity}" if ok else str(row))
+
+
+def detail_bands(doc):
+    """Larghezza e altezza delle polilinee chiuse su AL-PARTICOLARI, arrotondate al decimo di millimetro."""
+    out = []
+    for e in doc.modelspace().query("LWPOLYLINE"):
+        if e.dxf.layer != LAYER_PARTICOLARI:
+            continue
+        pts = [(p[0], p[1]) for p in e.get_points("xy")]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        out.append((round(max(xs) - min(xs), 4), round(max(ys) - min(ys), 4)))
+    return sorted(out)
+
+
+def check_strata_extract(rep, docs):
+    """I particolari: nessuno nel fatto; nel progetto e nella comparativa le cinque bande (tre della parete, due del
+    solaio), i titoli e il testo dello strato di laterizio; nessun XDATA ne' APPID ARCHLINE."""
+    want_bands = sorted([(0.015, 0.5), (0.09, 0.5), (0.015, 0.5), (0.5, 0.01), (0.5, 0.05)])
+    for key, doc in docs.items():
+        on_layer = [e for e in doc.modelspace() if e.dxf.layer == LAYER_PARTICOLARI]
+        if key == "fatto":
+            rep.check(not on_layer, f"{key}: nessun particolare", f"{len(on_layer)} entita' su {LAYER_PARTICOLARI}")
+        else:
+            bands = detail_bands(doc)
+            rep.check(bands == want_bands, f"{key}: bande dei particolari", f"{bands}")
+            texts = [e.plain_text().replace("\n", " ") for e in doc.modelspace().query("MTEXT")
+                     if e.dxf.layer == LAYER_PARTICOLARI]
+            good = ("Particolare T12 — parete, spessore totale 12,0 cm" in texts
+                    and "Particolare P1 — solaio, spessore totale 6,0 cm" in texts
+                    and "2. Laterizio forato — sp. 9,0 cm" in texts)
+            rep.check(good, f"{key}: testi dei particolari", f"{len(texts)} testi" if good else f"{texts}")
+        xdata, table = arch_xdata_appids(doc)
+        rep.check(not xdata and not table, f"{key}: niente ARCHLINE",
+                  "nessun XDATA ne' APPID ARCHLINE*" if not xdata and not table else f"XDATA {xdata}, APPID {table}")
+
+
+def run_strata_case(rep, exe, env, work):
+    """Il caso A con un tramezzo nuovo e un locale di progetto, due stratigrafie assegnate, `AL_PARTICOLARE`,
+    `AL_ABACO_CSV` e `AL_ESTRAI`; poi CSV e DWG riconvertiti si controllano."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    out_dir = work / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = work / "abaco.csv"
+    src = build_case_a(work / f"{STRATA_BASE}.dxf")
+    before = sha256_of(src)
+    session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
+    try:
+        resp = session.request({"op": "open", "path": str(src)})
+        rep.check(bool(resp.get("ok")), "open", f"disegno aperto, entita': {resp.get('total')}" if resp.get("ok") else str(resp))
+        for cmd in (*STRATA_CMDS, f"AL_ABACO_CSV {csv_path}", f"AL_ESTRAI {out_dir}"):
+            run_ok(rep, session, cmd)
+    except BaseException:
+        session.kill()
+        raise
+    code = session.close()
+    rep.check(code == 0, "sessione: chiusura", "exit 0" if code == 0 else f"exit {code}. {session.stderr_tail()}")
+    after = sha256_of(src)
+    rep.check(after == before, "sorgente intatta", "DXF di partenza identico byte per byte (SHA-256)"
+              if after == before else "il DXF di partenza e' cambiato")
+    check_strata_csv(rep, csv_path)
+    docs = read_extracts(rep, exe, env, work, out_dir, work, base=STRATA_BASE)
+    check_strata_extract(rep, docs)
+
 def run_bim_extract(exe, work, rep):
     """Tutto il banco in `work` (percorso senza spazi): il giro con l'asse esatto in `work`, quello con l'asse
     oltre le facce in `work/asse-oltre` (stessi controlli, nomi col prefisso). Ritorna l'oggetto Report."""
@@ -1139,6 +1252,7 @@ def run_bim_extract(exe, work, rep):
     run_door_case(Prefixed(rep, DOOR_PREFIX), exe, env, work / "porta")
     run_section_case(Prefixed(rep, SECTION_PREFIX), exe, env, work / "sezione")
     run_model3d_case(Prefixed(rep, MODEL3D_PREFIX), exe, env, work / "modello3d")
+    run_strata_case(Prefixed(rep, STRATA_PREFIX), exe, env, work / "strati")
     return rep
 
 

@@ -14,3 +14,27 @@ Spec: `docs/superpowers/specs/2026-11-05-bim-particolari-design.md`. Piano:
 | R138 | Quantità (task 7, `strata_quantities.rs`, `abaco_strata.rs`): per ogni elemento con stratigrafia valida una riga per strato, codice `<elemento>-S<n>`, con la **superficie dell'elemento** (N: L × H; LP: superficie netta) e il suo stato; volume = superficie × spessore solo informativo. Elemento incompleto → strati incompleti con lo stesso motivo. `StratigrafiaMancante` e `StratigrafiaTipoDiverso` → nessuna riga; `StratigrafiaDiversa` (somma ≠ spessore effettivo oltre 1e-6 m) → avviso, righe comunque. Tabella **Stratigrafie** (`TableKind::Strati`, chiave `strati`) con **totali per materiale** (senza distinzione di maiuscole); CSV `strato parete` / `strato solaio` con i fattori, l'unità, lo stato e la fonte della misura dell'elemento (`zone_record`, `room_record`, ora `pub(super)`), materiale come descrizione, note «sp. X,X cm; stratigrafia NOME». Verificato a mano: N1 con T12 → tre righe da 8,10 m² (3,00 × 2,70), totale intonaco 16,20; LP1 «Studio» con P1 → due righe da 11,70 m². | Un locale di progetto senza seme non ha stratigrafia; con più semi nella stessa faccia (locale fuso) solo il seme della riga porta gli strati. |
 | R139 | Estrazione (task 8, `extract.rs`): le entità con il record `ARCHLINE_PARTICOLARE` vanno nello stato di progetto e nella comparativa, non nel fatto (descrivono le opere nuove); l'XRecord `ARCHLINE_STRATIGRAFIE` non esce (la copia passa da un documento nuovo, il dizionario radice non si copia) e gli XDATA `ARCHLINE_STRATIGRAFIA` li toglie `copy_out`. Provato con un test. | Chi vuole i particolari anche nel fatto deve copiarli a mano. |
 | R140 | Interfaccia (task 8): **Stratigrafia** (`AL_STRATIGRAFIA`) e **Particolare** (`AL_PARTICOLARE`) dopo Modello 3D in Tools > Ristrutturazione e nella barra (diciotto comandi), gruppo nuovo «Particolari» nel ribbon prima di «Elaborati». Icone `assets/icons/ristr_{stratigrafia,particolare}.svg` disegnate da zero: un pacchetto a tre strati con lo strato centrale nell'accento e tre righe di testo; una parete a tre strati con il nucleo nell'accento e i richiami verso tre testi. Solo `#B4B6B9` e `#6DB7ED`. La voce `Stratigrafia` lanciata dal pulsante stampa la sintassi (nessuna finestra, R134). | Il pulsante Stratigrafia da solo non fa nulla oltre la sintassi: serve la riga di comando. |
+
+## Da confermare con Mauro
+
+Le otto scelte del §9 della spec: nessun catalogo; spessori in unità del disegno con eco in cm; parete solo su zone
+nuove e solaio solo su locali di progetto; particolare senza retini (bande 0,50 m, testi 0,025 m); quantità per
+strato = quantità dell'elemento con volume solo informativo; particolari nei DWG di progetto e di demolizioni e
+costruzioni, non nel fatto; riga di comando senza finestra (modifica = Rimuovi + Nuova); dipendenza dalle parti 3–5
+non ancora unite. Anche il gancio nuovo in `command_driver/utilities.rs` (R134).
+
+## Da vedere a schermo / in AutoCAD
+
+- Su Windows: `AL_STRATIGRAFIA` dalla riga di comando vera (materiali con spazi, virgola decimale), `AL_PARTICOLARE`
+  sul caso A (leggibilità dei testi a 0,025 m, richiami del solaio), le due icone e la barra a diciotto comandi dopo
+  aver riselezionato AutoCAD Classic, il gruppo «Particolari» del ribbon, la tabella Stratigrafie con `AL_ABACO`.
+- In AutoCAD vero: la `TABLE` Stratigrafie, i particolari nei DWG estratti, AUDIT.
+
+## Verifica (2026-11-05, build release del branch)
+
+- `cargo test --locked --lib bim::` 472 ok; `--lib app::bim_tests` 123 ok; tutta la libreria 5217 ok, 0 falliti,
+  33 ignorati.
+- Banco `bim_extract.py`: 275 controlli su 275 (sesto giro «strati, »: 35 controlli; CSV con N1-S1…S3 a 8,1000 m² e
+  LP1-S1…S2 a 11,7000 m², calcolati a mano, `quantita` = prodotto dei fattori; particolari solo nel progetto e nella
+  comparativa con le cinque bande attese e i titoli; nessun `ARCHLINE_*`). `unittest` del banco 106 ok.
+- Limite: un solo caso sintetico; `StratigrafiaDiversa` e `StratigrafiaMancante` provati solo nei test Rust.
