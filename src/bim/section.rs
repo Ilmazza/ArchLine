@@ -20,6 +20,9 @@
 
 use kernel::geom2d::{contains, Tolerance};
 
+use super::aperture::ApertureKind;
+use super::height::{Height, HeightState};
+use super::report::Notice;
 use super::rooms::ring_curves;
 use super::walls::region_at;
 
@@ -155,6 +158,266 @@ pub fn profile(
         }
     }
     spans
+}
+
+
+// ---------------------------------------------------------------------------
+// Altezze e aperture sul profilo
+// ---------------------------------------------------------------------------
+
+/// Un'apertura vista dal taglio: il rettangolo del vano in pianta e le misure
+/// inserite, in metri (`None` = `n.d.`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionAperture {
+    pub code: String,
+    pub kind: ApertureKind,
+    pub ring: Vec<[f64; 2]>,
+    pub height_m: Option<f64>,
+    pub sill_m: Option<f64>,
+}
+
+/// Il vano di un'apertura nella massa muraria: tra due distanze dal primo
+/// punto del taglio, dalla quota `bottom_m` per `height_m`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hole {
+    pub code: String,
+    pub from: f64,
+    pub to: f64,
+    /// Quota del bordo basso: 0 per porte e portefinestre, il davanzale per le
+    /// finestre; `None` se il davanzale manca.
+    pub bottom_m: Option<f64>,
+    pub height_m: Option<f64>,
+}
+
+impl Hole {
+    /// Il vano si può disegnare: ha quota e altezza.
+    pub fn is_drawable(&self) -> bool {
+        self.bottom_m.is_some() && self.height_m.is_some()
+    }
+}
+
+/// Un elemento della sezione, con la sua altezza e lo stato di questa.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Element {
+    /// Un locale: vuoto da terra al soffitto (quota = altezza del locale).
+    Room {
+        span: Span,
+        index: usize,
+        height: Height,
+    },
+    /// La massa muraria (poché) con i vani delle aperture che il taglio
+    /// attraversa.
+    Mass {
+        span: Span,
+        height: Height,
+        holes: Vec<Hole>,
+    },
+}
+
+impl Element {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Room { span, .. } | Self::Mass { span, .. } => *span,
+        }
+    }
+
+    pub fn height(&self) -> &Height {
+        match self {
+            Self::Room { height, .. } | Self::Mass { height, .. } => height,
+        }
+    }
+}
+
+/// I parametri `t` (0..1 lungo il taglio) in cui il taglio entra ed esce dal
+/// rettangolo (convesso) `ring`: Cyrus-Beck. `None` se non lo attraversa.
+fn clip_to_convex(from: [f64; 2], to: [f64; 2], ring: &[[f64; 2]]) -> Option<(f64, f64)> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let d = sub(to, from);
+    let area: f64 = (0..ring.len())
+        .map(|i| cross(ring[i], ring[(i + 1) % ring.len()]))
+        .sum();
+    let orientation = if area >= 0.0 { 1.0 } else { -1.0 };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for i in 0..ring.len() {
+        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+        let edge = sub(b, a);
+        // Dentro = a sinistra del lato (per un anello antiorario).
+        let side = |p: [f64; 2]| orientation * cross(edge, sub(p, a));
+        let (start, along) = (side(from), orientation * cross(edge, d));
+        if along.abs() < 1.0e-15 {
+            if start < 0.0 {
+                return None;
+            }
+        } else {
+            let t = -start / along;
+            if along > 0.0 {
+                lo = lo.max(t);
+            } else {
+                hi = hi.min(t);
+            }
+        }
+    }
+    (lo < hi).then_some((lo, hi))
+}
+
+/// Gli elementi della sezione: i tratti `Room` e `Mass` del profilo con le
+/// altezze risolte (R111), i vani delle aperture dentro la massa e gli avvisi
+/// per ciò che non si può disegnare.
+///
+/// - un locale ha l'altezza della sua riga (`rooms`: nome e altezza, nell'ordine
+///   dei contorni passati a [`profile`]); senza, l'elemento c'è con l'altezza
+///   `n.d.`;
+/// - la massa ha il **massimo** delle altezze dei locali che la toccano
+///   (il tratto `Room` che la precede e quello che la segue, se ci sono); se uno
+///   di quei locali non ha altezza, o la massa non tocca nessun locale, è `n.d.`
+///   e un avviso la elenca: mai un'altezza di ripiego;
+/// - un'apertura fa un vano nella massa dove il taglio la attraversa (più
+///   corto di `tol` non conta): porte e portefinestre da terra, finestre dal
+///   davanzale; con l'altezza o il davanzale che mancano il vano è `n.d.`, non si
+///   disegna e un avviso lo dice.
+///
+/// `per_metre` converte le distanze del disegno in metri per i messaggi.
+pub fn elements(
+    spans: &[Span],
+    rooms: &[(String, Height)],
+    apertures: &[SectionAperture],
+    from: [f64; 2],
+    to: [f64; 2],
+    per_metre: f64,
+    tol: f64,
+) -> (Vec<Element>, Vec<Notice>) {
+    let d = sub(to, from);
+    let len = d[0].hypot(d[1]);
+    let mut out = Vec::new();
+    let mut notices = Vec::new();
+    for (position, span) in spans.iter().enumerate() {
+        match span.kind {
+            SpanKind::Outside => {}
+            SpanKind::Room(index) => {
+                let (name, height) = rooms
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), Height::missing(Some("locale sconosciuto"))));
+                if height.value_m.is_none() {
+                    notices.push(Notice::SezioneEsclusa {
+                        what: format!("altezza del locale {name}"),
+                        reason: "altezza del locale n.d.".to_string(),
+                    });
+                }
+                out.push(Element::Room {
+                    span: *span,
+                    index,
+                    height,
+                });
+            }
+            SpanKind::Mass => {
+                let neighbour = |other: Option<&Span>| match other.map(|s| s.kind) {
+                    Some(SpanKind::Room(index)) => rooms.get(index),
+                    _ => None,
+                };
+                let touching: Vec<&(String, Height)> = [
+                    position.checked_sub(1).and_then(|i| spans.get(i)),
+                    spans.get(position + 1),
+                ]
+                .into_iter()
+                .filter_map(neighbour)
+                .collect();
+                let at = format!("muro a {} m", super::units::format_decimal(span.from / per_metre));
+                let height = if touching.is_empty() {
+                    notices.push(Notice::SezioneEsclusa {
+                        what: at,
+                        reason: "nessun locale accanto".to_string(),
+                    });
+                    Height::missing(Some("nessun locale accanto"))
+                } else if touching.iter().any(|(_, h)| h.value_m.is_none()) {
+                    notices.push(Notice::SezioneEsclusa {
+                        what: at,
+                        reason: "altezza del locale accanto n.d.".to_string(),
+                    });
+                    Height::missing(Some("altezza del locale accanto n.d."))
+                } else {
+                    let value = touching
+                        .iter()
+                        .filter_map(|(_, h)| h.value_m)
+                        .fold(f64::MIN, f64::max);
+                    let all_given = touching
+                        .iter()
+                        .all(|(_, h)| h.state == HeightState::Inserita);
+                    Height {
+                        value_m: Some(value),
+                        state: if all_given {
+                            HeightState::Inserita
+                        } else {
+                            HeightState::Ereditata
+                        },
+                        note: None,
+                    }
+                };
+                let holes = if height.value_m.is_some() {
+                    holes_in(span, apertures, from, to, len, per_metre, tol, &mut notices)
+                } else {
+                    Vec::new()
+                };
+                out.push(Element::Mass {
+                    span: *span,
+                    height,
+                    holes,
+                });
+            }
+        }
+    }
+    (out, notices)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn holes_in(
+    span: &Span,
+    apertures: &[SectionAperture],
+    from: [f64; 2],
+    to: [f64; 2],
+    len: f64,
+    per_metre: f64,
+    tol: f64,
+    notices: &mut Vec<Notice>,
+) -> Vec<Hole> {
+    let _ = per_metre;
+    let mut holes = Vec::new();
+    for aperture in apertures {
+        let Some((t0, t1)) = clip_to_convex(from, to, &aperture.ring) else {
+            continue;
+        };
+        let (start, end) = ((t0 * len).max(span.from), (t1 * len).min(span.to));
+        if end - start <= tol {
+            continue;
+        }
+        let bottom_m = match aperture.kind {
+            ApertureKind::Finestra => aperture.sill_m,
+            ApertureKind::Porta | ApertureKind::Portafinestra => Some(0.0),
+        };
+        let hole = Hole {
+            code: aperture.code.clone(),
+            from: start,
+            to: end,
+            bottom_m,
+            height_m: aperture.height_m,
+        };
+        if !hole.is_drawable() {
+            let reason = if aperture.height_m.is_none() {
+                "altezza dell'apertura n.d."
+            } else {
+                "davanzale n.d."
+            };
+            notices.push(Notice::SezioneEsclusa {
+                what: format!("vano di {}", aperture.code),
+                reason: reason.to_string(),
+            });
+        }
+        holes.push(hole);
+    }
+    holes.sort_by(|a, b| a.from.total_cmp(&b.from));
+    holes
 }
 
 #[cfg(test)]
@@ -313,5 +576,198 @@ mod tests {
             "{through_door:?}"
         );
         near(through_door[1].length(), 0.1, "il vano è spesso come il muro");
+    }
+
+    // ------------------------------------------------ altezze e aperture
+
+    use crate::bim::aperture::{aperture_polyline, Aperture, ApertureState};
+    use crate::bim::height::Height;
+
+    fn given(value: f64) -> Height {
+        Height {
+            value_m: Some(value),
+            state: HeightState::Inserita,
+            note: None,
+        }
+    }
+
+    fn inherited(value: f64) -> Height {
+        Height {
+            value_m: Some(value),
+            state: HeightState::Ereditata,
+            note: None,
+        }
+    }
+
+    fn ring_of(a: &Aperture) -> Vec<[f64; 2]> {
+        let EntityType::LwPolyline(p) = aperture_polyline(a).unwrap() else {
+            panic!("polilinea")
+        };
+        p.vertices.iter().map(|v| [v.location.x, v.location.y]).collect()
+    }
+
+    fn door_aperture(height: Option<f64>) -> SectionAperture {
+        let a = Aperture {
+            kind: ApertureKind::Porta,
+            state: ApertureState::Esistente,
+            axis: ([4.05, 1.0], [4.05, 1.9]),
+            thickness: 0.10,
+            height,
+            sill: None,
+            threshold: true,
+            lintel: false,
+            bearing: None,
+        };
+        SectionAperture {
+            code: "P1".into(),
+            kind: a.kind,
+            ring: ring_of(&a),
+            height_m: height,
+            sill_m: None,
+        }
+    }
+
+    fn case_a_profile() -> Vec<Span> {
+        let (faces, rooms) = plan(case_a(Form::Continua, M));
+        profile(&faces, &rooms, [-1.0, 1.5], [9.0, 1.5], TOL)
+    }
+
+    use codec::EntityType;
+
+    /// Il poché ha il massimo delle altezze dei locali che tocca: il muro
+    /// d'ambito quella del suo locale, il tramezzo la maggiore dei due; un
+    /// locale ereditato rende la massa ereditata. I locali hanno la loro.
+    #[test]
+    fn mass_takes_the_highest_of_the_rooms_it_touches() {
+        let spans = case_a_profile();
+        let rooms = [("A".to_string(), given(2.7)), ("B".to_string(), inherited(3.0))];
+        let (elements, notices) = elements(&spans, &rooms, &[], [-1.0, 1.5], [9.0, 1.5], 1.0, TOL);
+        assert!(notices.is_empty(), "{notices:?}");
+        let heights: Vec<(f64, HeightState)> = elements
+            .iter()
+            .map(|e| (e.height().value_m.unwrap(), e.height().state))
+            .collect();
+        assert_eq!(
+            heights,
+            [
+                (2.7, HeightState::Inserita),   // muro ovest: solo A
+                (2.7, HeightState::Inserita),   // A
+                (3.0, HeightState::Ereditata),  // tramezzo: max(2,7; 3,0), B ereditata
+                (3.0, HeightState::Ereditata),  // B
+                (3.0, HeightState::Ereditata),  // muro est: solo B
+            ]
+        );
+    }
+
+    /// Un locale senza altezza: l'elemento c'è con `n.d.`, e i muri che lo
+    /// toccano non si disegnano; ogni cosa esclusa è un avviso. Mai un ripiego.
+    #[test]
+    fn a_room_without_height_excludes_the_walls_around_it() {
+        let spans = case_a_profile();
+        let rooms = [
+            ("A".to_string(), given(2.7)),
+            ("B".to_string(), Height::missing(None)),
+        ];
+        let (elements, notices) = elements(&spans, &rooms, &[], [-1.0, 1.5], [9.0, 1.5], 1.0, TOL);
+        let missing: Vec<bool> = elements.iter().map(|e| e.height().value_m.is_none()).collect();
+        assert_eq!(missing, [false, false, true, true, true]);
+        let texts: Vec<String> = notices.iter().map(Notice::text).collect();
+        assert!(texts.iter().any(|t| t.contains("altezza del locale B")), "{texts:?}");
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("muro a")).count(),
+            2,
+            "il tramezzo e il muro est: {texts:?}"
+        );
+    }
+
+    /// La porta del tramezzo buca il poché: dal pavimento a 2,10 m, larga 0,10
+    /// lungo il taglio (lo spessore del muro).
+    #[test]
+    fn a_door_makes_a_hole_in_the_mass() {
+        let (faces, rooms) = plan(case_a(Form::Continua, M));
+        let spans = profile(&faces, &rooms, [2.0, 1.5], [6.0, 1.5], TOL);
+        let heights = [("A".to_string(), given(2.7)), ("B".to_string(), given(2.7))];
+        let (elements, notices) = elements(
+            &spans,
+            &heights,
+            &[door_aperture(Some(2.1))],
+            [2.0, 1.5],
+            [6.0, 1.5],
+            1.0,
+            TOL,
+        );
+        assert!(notices.is_empty(), "{notices:?}");
+        let Element::Mass { holes, span, .. } = &elements[1] else {
+            panic!("{elements:?}")
+        };
+        let [hole] = &holes[..] else {
+            panic!("{holes:?}")
+        };
+        assert_eq!(hole.code, "P1");
+        near(hole.from, span.from, "inizio");
+        near(hole.to - hole.from, 0.1, "spessore");
+        assert_eq!((hole.bottom_m, hole.height_m), (Some(0.0), Some(2.1)));
+        assert!(hole.is_drawable());
+    }
+
+    /// Una finestra parte dal davanzale; senza altezza o davanzale il vano
+    /// non si disegna e c'è l'avviso. Fuori dal taglio non buca nulla.
+    #[test]
+    fn windows_start_at_the_sill_and_missing_data_is_a_notice() {
+        let (faces, rooms) = plan(case_a(Form::Continua, M));
+        let spans = profile(&faces, &rooms, [2.0, 1.5], [6.0, 1.5], TOL);
+        let heights = [("A".to_string(), given(2.7)), ("B".to_string(), given(2.7))];
+        let window = |height, sill| SectionAperture {
+            kind: ApertureKind::Finestra,
+            height_m: height,
+            sill_m: sill,
+            ..door_aperture(Some(1.0))
+        };
+        let run = |aperture: SectionAperture| {
+            elements(&spans, &heights, &[aperture], [2.0, 1.5], [6.0, 1.5], 1.0, TOL)
+        };
+        let (elements_ok, notices) = run(window(Some(1.4), Some(0.9)));
+        assert!(notices.is_empty());
+        let Element::Mass { holes, .. } = &elements_ok[1] else { panic!() };
+        assert_eq!((holes[0].bottom_m, holes[0].height_m), (Some(0.9), Some(1.4)));
+
+        for (height, sill, why) in [
+            (None, Some(0.9), "altezza dell'apertura n.d."),
+            (Some(1.4), None, "davanzale n.d."),
+        ] {
+            let (elements_nd, notices) = run(window(height, sill));
+            let Element::Mass { holes, .. } = &elements_nd[1] else { panic!() };
+            assert!(!holes[0].is_drawable());
+            let texts: Vec<String> = notices.iter().map(Notice::text).collect();
+            assert!(texts.iter().any(|t| t.contains("vano di P1") && t.contains(why)), "{texts:?}");
+        }
+
+        // Un taglio che non attraversa il vano (y = 0,5) non ha buchi.
+        let low = profile(&faces, &rooms, [2.0, 0.5], [6.0, 0.5], TOL);
+        let (elements_low, _) = elements(
+            &low,
+            &heights,
+            &[door_aperture(Some(2.1))],
+            [2.0, 0.5],
+            [6.0, 0.5],
+            1.0,
+            TOL,
+        );
+        let Element::Mass { holes, .. } = &elements_low[1] else { panic!() };
+        assert!(holes.is_empty());
+    }
+
+    /// Un muro che non tocca nessun locale non ha altezza.
+    #[test]
+    fn a_mass_touching_no_room_has_no_height() {
+        let spans = vec![Span {
+            from: 0.0,
+            to: 0.3,
+            kind: SpanKind::Mass,
+        }];
+        let (elements, notices) = elements(&spans, &[], &[], [0.0, 0.0], [0.3, 0.0], 1.0, TOL);
+        assert_eq!(elements[0].height().value_m, None);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].text().contains("nessun locale accanto"));
     }
 }
