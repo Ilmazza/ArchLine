@@ -797,4 +797,72 @@ mod tests {
         assert_eq!(red(SectionPhase::Comparativa), 1, "nella comparativa è rossa");
         assert_eq!(red(SectionPhase::Progetto), 1, "nel progetto c'è, rossa");
     }
+
+    /// `AL_ESTRAI`: ogni elaborato ha dei disegni posati solo quelli della sua
+    /// fase (sezioni e prospetti), con il taglio in tutti e tre; nessun XDATA né
+    /// APPID nostro.
+    #[test]
+    fn extraction_keeps_the_drawings_of_each_phase() {
+        use crate::bim::cut::{cut_line, ensure_layer as ensure_cut_layer};
+        use crate::bim::extract::{extract, Elaborato, ExtractOptions};
+        use crate::bim::section_place::{ensure_layer as ensure_section_layer, place};
+
+        let mut scene = scene();
+        ensure_cut_layer(&mut scene.document);
+        ensure_section_layer(&mut scene.document);
+        scene.add_entity(cut_line(&cut_east().cut).unwrap());
+        let sections = build_sections(&scene.document, &[cut_east()], &OPTS);
+        let elevations = build_elevations(&scene.document, "Sud", [0.0, -1.0], &OPTS);
+        let mut counts = std::collections::HashMap::new();
+        let all: Vec<SectionDrawing> = sections.drawings.into_iter().chain(elevations.drawings).collect();
+        for drawing in &all {
+            *counts.entry(drawing.phase.key()).or_insert(0) += drawing.entities.len();
+        }
+        for entity in place(all, [30.0, 20.0], 0.25) {
+            scene.add_entity(entity);
+        }
+
+        let ex = extract(
+            &scene.document,
+            &ExtractOptions {
+                elaborati: vec![
+                    Elaborato::StatoDiFatto,
+                    Elaborato::DemolizioniCostruzioni,
+                    Elaborato::StatoDiProgetto,
+                ],
+                new_walls_layer: "0".into(),
+                unit: M,
+                tol: TOL,
+                room_tol: TOL,
+            },
+        );
+        for (elaborato, key) in [
+            (Elaborato::StatoDiFatto, "fatto"),
+            (Elaborato::DemolizioniCostruzioni, "demolizioni-costruzioni"),
+            (Elaborato::StatoDiProgetto, "progetto"),
+        ] {
+            let (_, out) = ex.docs.iter().find(|(e, _)| *e == elaborato).unwrap();
+            let in_layer = out
+                .entities()
+                .filter(|e| e.common().layer == super::super::section_draw::LAYER_SEZIONI)
+                .count();
+            assert_eq!(in_layer, counts[key], "{key}: solo i disegni della sua fase");
+            assert!(
+                out.entities().any(|e| e.common().layer == crate::bim::LAYER_TAGLI),
+                "{key}: il taglio c'è"
+            );
+            assert!(!out.app_ids.iter().any(|a| a.name.starts_with("ARCHLINE")), "{key}: APPID");
+            for e in out.entities() {
+                let ours: Vec<&str> = e
+                    .common()
+                    .extended_data
+                    .records()
+                    .iter()
+                    .map(|r| r.application_name.as_str())
+                    .filter(|n| n.to_ascii_uppercase().starts_with("ARCHLINE"))
+                    .collect();
+                assert!(ours.is_empty(), "{key}: XDATA nostro {ours:?} su {:?}", e.common().layer);
+            }
+        }
+    }
 }

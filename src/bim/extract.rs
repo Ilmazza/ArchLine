@@ -58,6 +58,8 @@ use crate::scene::BoundarySource;
 use super::abaco::{compute_abaco, render_tables, AbacoOptions};
 use super::abaco_table::{self, kind_name, tables_in};
 use super::aperture::{self, ApertureState};
+use super::section_build::{DrawingKind, SectionPhase};
+use super::section_place;
 use super::project::project_geometry;
 use super::refresh::{fatto_rooms, refresh_rooms};
 use super::report::Notice;
@@ -195,6 +197,27 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
             ApertureState::Esistente => {}
         }
     }
+    // Parte 4 (R121): sezioni e prospetti posati nel disegno di lavoro vanno in
+    // ogni elaborato con la sola fase che gli corrisponde (fatto, demolizioni e
+    // costruzioni, progetto). I tagli (`AL-TAGLI`) sono segni di disegno e si
+    // copiano ovunque. L'XDATA lo toglie `copy_out`.
+    let placed: Vec<(Handle, String)> = [DrawingKind::Sezione, DrawingKind::Prospetto]
+        .into_iter()
+        .flat_map(|kind| section_place::drawings_in(src, kind))
+        .map(|(handle, _, phase)| (handle, phase))
+        .collect();
+    let of_other_phase = |phase: SectionPhase| -> FxHashSet<Handle> {
+        placed
+            .iter()
+            .filter(|(_, found)| found != phase.key())
+            .map(|(handle, _)| *handle)
+            .collect()
+    };
+    let (other_fatto, other_comparativa, other_progetto) = (
+        of_other_phase(SectionPhase::Fatto),
+        of_other_phase(SectionPhase::Comparativa),
+        of_other_phase(SectionPhase::Progetto),
+    );
     for &elaborato in &opts.elaborati {
         if ex.docs.iter().any(|(done, _)| *done == elaborato) {
             continue;
@@ -210,6 +233,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                         && !seeds.contains(&handle)
                         && !abaco.contains(&handle)
                         && !new_apertures.contains(&handle)
+                        && !other_fatto.contains(&handle)
                 });
                 copy_out(src, &mut work, &handles, None)
             }
@@ -218,6 +242,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                     !on_layers(entity, &[LAYER_LOCALI, LAYER_LOCALI_PROGETTO])
                         && !room_parts.contains(&handle)
                         && !abaco.contains(&handle)
+                        && !other_comparativa.contains(&handle)
                 });
                 let (tables, abaco_notices) = abaco_entities(src, opts);
                 let (drawn, refused) = add_drawn(&mut work, &tables);
@@ -259,6 +284,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                             && !excluded.contains(&handle)
                             && !abaco.contains(&handle)
                             && !demolished_apertures.contains(&handle)
+                            && !other_progetto.contains(&handle)
                     }
                 });
                 let (drawn, mut refused) = add_drawn(&mut work, &pg.drawn);
