@@ -22,6 +22,12 @@ Spec: `docs/superpowers/specs/2026-11-05-bim-sezioni-prospetti-design.md`. Piano
 
 Le scelte del §9 della spec, più R111.
 
+## Verifica
+
+`cargo test --locked --lib`: 5172 ok, 0 falliti, 33 ignorati. `bim::` 435, `app::bim_tests` 116. Banco `bim_extract.py` con la build release del branch: **214 controlli su 214** (181 + 33 del giro «sezione, »); `unittest` del banco 106 ok. Sezioni e prospetti estratti nei tre DWG e riletti con ezdxf: titoli con la fase giusta, poché 0,30 × 2,70, campiture solide, taglio su `AL-TAGLI`, nessun dato `ARCHLINE_*`; `AL_SEZIONE` lanciato due volte non duplica i disegni.
+
 ## Da vedere a schermo / in AutoCAD
 
-Da compilare a fine implementazione.
+- **A schermo su Windows**: le tre icone (taglio, sezione, prospetto) a 16 px e la barra a quindici comandi (dopo aver riselezionato AutoCAD Classic); i prompt di `AL_TAGLIO` (tre punti e nome); le sezioni e i prospetti posati accanto al modello, la leggibilità del riquadro dei limiti, il colore giallo/rosso nella comparativa.
+- **In AutoCAD vero**: i tre DWG estratti con campiture e testi; AUDIT.
+- **Non provato**: un rilievo reale di Mauro; più tagli sullo stesso disegno; edifici con corte o più corpi; muri obliqui; sezioni attraverso più locali con altezze diverse.

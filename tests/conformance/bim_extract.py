@@ -33,6 +33,12 @@ APPID ARCHLINE; nel fatto e nel progetto i locali A 12,00 e B 11,70 m2 (la porta
 locale in piu'. Nel CSV la porta (P1, 1,8900 m2), le pareti lorde (LF1-PA, 37,8000) e le detrazioni a detrarre
 (LF1-PA-P1 e LF2-PA-P1, 1,8900), con `quantita` = prodotto dei fattori.
 
+Sezioni e prospetti (BIM parte 4), quarto giro (righe con il prefisso "sezione, "): il caso A con la porta, l'altezza
+del livello, i locali A e B, `AL_TAGLIO -1,1.5 9,1.5 4,3 A-A`, `AL_SEZIONE` (due volte: i disegni si sostituiscono, non
+si duplicano), `AL_PROSPETTO S` e `AL_ESTRAI`. Nei tre DWG: due titoli (sezione A-A e prospetto Sud) con la fase
+dell'elaborato, il poche' del muro d'ambito 0,30 x 2,70 su AL-SEZIONI, campiture solide, il taglio su AL-TAGLI, nessun
+XDATA ne' APPID ARCHLINE.
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -946,6 +952,91 @@ def run_door_case(rep, exe, env, work):
     check_door_csv(rep, csv_path)
 
 
+# ---------------------------------------------------------------- sezioni e prospetti (BIM parte 4)
+
+LAYER_SEZIONI = "AL-SEZIONI"
+LAYER_TAGLI = "AL-TAGLI"
+SECTION_PREFIX = "sezione, "
+SECTION_BASE = "casoAsezione"
+SECTION_CMDS = (
+    "AL_ALTEZZA L 2.70",
+    "AL_PORTA 4.05,1 4.05,1.9 E 2.1",
+    "AL_LOCALE 2,1.5 A",
+    "AL_LOCALE 6,1.5 B",
+    "AL_TAGLIO -1,1.5 9,1.5 4,3 A-A",
+    "AL_SEZIONE",
+    "AL_PROSPETTO S",
+)
+PHASE_TEXT = {"fatto": "stato di fatto", "comparativa": "demolizioni e costruzioni", "progetto": "stato di progetto"}
+
+
+def section_texts(doc):
+    """I testi (MTEXT) sul layer AL-SEZIONI, con il formato a capo di MTEXT reso in spazio."""
+    return sorted(e.plain_text().replace("\n", " ") for e in doc.modelspace().query("MTEXT")
+                  if e.dxf.layer == LAYER_SEZIONI)
+
+
+def has_wall_outline(doc, width, height):
+    """C'e' una polilinea chiusa su AL-SEZIONI larga `width` e alta `height` (il poche' di un muro)?"""
+    for e in doc.modelspace().query("LWPOLYLINE"):
+        if e.dxf.layer != LAYER_SEZIONI:
+            continue
+        pts = [(p[0], p[1]) for p in e.get_points("xy")]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        if abs((max(xs) - min(xs)) - width) < 1e-6 and abs((max(ys) - min(ys)) - height) < 1e-6:
+            return True
+    return False
+
+
+def check_section_extract(rep, docs):
+    """I tre DWG con il taglio A-A e il prospetto Sud: ognuno ha solo i disegni della sua fase (il titolo lo dice),
+    una sezione e un prospetto, il poche' del muro d'ambito (0,30 x 2,70) e un campitura solida; il taglio c'e' in
+    tutti; nessun XDATA ne' APPID ARCHLINE."""
+    for key, doc in docs.items():
+        texts = section_texts(doc)
+        mine = PHASE_TEXT[key]
+        titles = [t for t in texts if t.startswith("Sezione A-A") or t.startswith("Prospetto Sud")]
+        good = (len(titles) == 2 and all(t.endswith(mine) for t in titles)
+                and any(t.startswith("Sezione A-A") for t in titles) and any(t.startswith("Prospetto Sud") for t in titles))
+        rep.check(good, f"{key}: titoli", f"{titles}" if good else f"attesi sezione e prospetto «{mine}», trovati {titles}")
+        rep.check(has_wall_outline(doc, 0.30, 2.70), f"{key}: poche' del muro 0,30 x 2,70", "trovato")
+        hatches = [e for e in doc.modelspace().query("HATCH") if e.dxf.layer == LAYER_SEZIONI]
+        rep.check(bool(hatches) and all(h.dxf.solid_fill == 1 for h in hatches), f"{key}: campiture solide",
+                  f"{len(hatches)} campiture" if hatches else "nessuna campitura")
+        cuts = [e for e in doc.modelspace().query("LINE") if e.dxf.layer == LAYER_TAGLI]
+        rep.check(len(cuts) == 1, f"{key}: taglio", f"{len(cuts)} linee su {LAYER_TAGLI}")
+        xdata, table = arch_xdata_appids(doc)
+        rep.check(not xdata and not table, f"{key}: niente ARCHLINE",
+                  "nessun XDATA ne' APPID ARCHLINE*" if not xdata and not table else f"XDATA {xdata}, APPID {table}")
+
+
+def run_section_case(rep, exe, env, work):
+    """Il caso A con la porta: altezza, locali, taglio A-A, `AL_SEZIONE`, `AL_PROSPETTO S` e `AL_ESTRAI`; poi i tre
+    DWG riconvertiti si controllano con ezdxf. Rilanciare AL_SEZIONE non deve duplicare i disegni."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    out_dir = work / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = build_case_a_door(work / f"{SECTION_BASE}.dxf")
+    before = sha256_of(src)
+    session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
+    try:
+        resp = session.request({"op": "open", "path": str(src)})
+        rep.check(bool(resp.get("ok")), "open", f"disegno aperto, entita': {resp.get('total')}" if resp.get("ok") else str(resp))
+        for cmd in (*SECTION_CMDS, "AL_SEZIONE", f"AL_ESTRAI {out_dir}"):
+            run_ok(rep, session, cmd)
+    except BaseException:
+        session.kill()
+        raise
+    code = session.close()
+    rep.check(code == 0, "sessione: chiusura", "exit 0" if code == 0 else f"exit {code}. {session.stderr_tail()}")
+    after = sha256_of(src)
+    rep.check(after == before, "sorgente intatta", "DXF di partenza identico byte per byte (SHA-256)"
+              if after == before else "il DXF di partenza e' cambiato")
+    docs = read_extracts(rep, exe, env, work, out_dir, work, base=SECTION_BASE)
+    check_section_extract(rep, docs)
+
+
 def run_bim_extract(exe, work, rep):
     """Tutto il banco in `work` (percorso senza spazi): il giro con l'asse esatto in `work`, quello con l'asse
     oltre le facce in `work/asse-oltre` (stessi controlli, nomi col prefisso). Ritorna l'oggetto Report."""
@@ -959,6 +1050,7 @@ def run_bim_extract(exe, work, rep):
     run_case(rep, exe, env, work, src, src_doc, before, AXIS_EXACT)
     run_case(Prefixed(rep, PAST_PREFIX), exe, env, work / "asse-oltre", src, src_doc, before, AXIS_PAST)
     run_door_case(Prefixed(rep, DOOR_PREFIX), exe, env, work / "porta")
+    run_section_case(Prefixed(rep, SECTION_PREFIX), exe, env, work / "sezione")
     return rep
 
 
