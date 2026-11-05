@@ -50,6 +50,10 @@ const RIBBON: &[(&str, &[u8])] = &[
     ("AL_PROSPETTO", asset!("ristr_prospetto.svg")),
     // Part 5: a block in isometric view, the top face in the accent.
     ("AL_MODELLO3D", asset!("ristr_modello3d.svg")),
+    // Part 6: a layered package (the core in the accent) with its labels,
+    // and a wall detail with leaders.
+    ("AL_STRATIGRAFIA", asset!("ristr_stratigrafia.svg")),
+    ("AL_PARTICOLARE", asset!("ristr_particolare.svg")),
 ];
 
 /// Black-stroke glyphs: some from the quick-access strip, the rest drawn for
@@ -122,7 +126,7 @@ mod tests {
         assert_eq!(all.len(), n, "a command has two icons");
     }
 
-    const RISTRUTTURAZIONE: [&str; 16] = [
+    const RISTRUTTURAZIONE: [&str; 18] = [
         "AL_DEMOLISCI",
         "AL_NUOVO",
         "AL_STATO",
@@ -139,6 +143,8 @@ mod tests {
         "AL_SEZIONE",
         "AL_PROSPETTO",
         "AL_MODELLO3D",
+        "AL_STRATIGRAFIA",
+        "AL_PARTICOLARE",
     ];
 
     fn text(bytes: &[u8]) -> String {
@@ -207,6 +213,8 @@ mod tests {
             "AL_SEZIONE",
             "AL_PROSPETTO",
             "AL_MODELLO3D",
+            "AL_STRATIGRAFIA",
+            "AL_PARTICOLARE",
         ] {
             let pixmap = render(ribbon(command).unwrap_or_else(|| panic!("{command}: no icon")));
             let accent = pixmap

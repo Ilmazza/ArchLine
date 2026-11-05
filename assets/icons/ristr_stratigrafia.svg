@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Stratigrafia">
+  <rect x="2.25" y="9" width="12" height="6" fill="#6DB7ED"/>
+  <rect x="2.25" y="3" width="12" height="18" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <path d="M2.25 9H14.25M2.25 15H14.25" stroke="#B4B6B9" stroke-width="1.5" stroke-linecap="butt"/>
+  <path d="M17.25 6H21.75M17.25 12H21.75M17.25 18H21.75" stroke="#B4B6B9" stroke-width="1.5"/>
+</svg>

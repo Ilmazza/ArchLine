@@ -220,6 +220,11 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
     );
     // Parte 5 (spec §5.3, R130): i modelli 3D vanno nel solo elaborato della
     // loro fase; la comparativa non ne ha (la differenza non è modellata).
+    // Parte 6 (spec §5.4, R139): i particolari costruttivi descrivono le opere
+    // nuove: nel progetto e nella comparativa, non nel fatto.
+    for (handle, _) in super::detail::details_in(src) {
+        other_fatto.insert(handle);
+    }
     for (handle, phase) in super::model3d_place::models_in(src) {
         other_comparativa.insert(handle);
         match phase {
@@ -4701,6 +4706,44 @@ mod tests {
                 "{elaborato:?}"
             );
             assert_no_archline_data(out);
+        }
+    }
+
+    /// Parte 6 (spec §5.4, R139): i particolari vanno nel progetto e nella
+    /// comparativa, non nel fatto; le stratigrafie (XRecord) e le assegnazioni
+    /// (XDATA) non escono.
+    #[test]
+    fn details_go_to_project_and_comparison_only() {
+        use crate::bim::detail::{self, place};
+        use crate::bim::strata::{parse_layers, write_all, Kind, Stratigraphy};
+        use crate::bim::LAYER_PARTICOLARI;
+        let mut doc = case_a_doc(Form::Continua);
+        let t12 = Stratigraphy {
+            name: "T12".into(),
+            kind: Kind::Parete,
+            layers: parse_layers("Intonaco 0.015; Laterizio forato 0.09; Intonaco 0.015").unwrap(),
+        };
+        write_all(&mut doc, &[t12.clone()]);
+        detail::ensure_layer(&mut doc);
+        let placed = place(&[t12], M, [20.0, 5.0]);
+        let n = placed.len();
+        for entity in placed {
+            doc.add_entity(entity).unwrap();
+        }
+        let ex = extract(&doc, &opts(&all_three()));
+        assert_eq!(ex.docs.len(), 3);
+        for (elaborato, out) in &ex.docs {
+            let count = out
+                .entities()
+                .filter(|e| e.common().layer == LAYER_PARTICOLARI)
+                .count();
+            let expected = match elaborato {
+                Elaborato::StatoDiFatto => 0,
+                _ => n,
+            };
+            assert_eq!(count, expected, "{elaborato:?}");
+            assert_no_archline_data(out);
+            assert!(crate::bim::strata::read_all(out).is_empty(), "{elaborato:?}: stratigrafie copiate");
         }
     }
 }

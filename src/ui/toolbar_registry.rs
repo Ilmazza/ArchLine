@@ -705,8 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn ristrutturazione_bar_has_the_sixteen_commands() {
-        // ArchLine BIM: Tools > Ristrutturazione is a submenu with sixteen commands
+    fn ristrutturazione_bar_has_the_eighteen_commands() {
+        // ArchLine BIM: Tools > Ristrutturazione is a submenu with eighteen commands
         // (the six of part 1, Altezza, Abaco and Abaco CSV of part 2, Porta,
         // Finestra and Dati apertura of part 3, then Taglio, Sezione and
         // Prospetto of part 4), so
@@ -733,6 +733,8 @@ mod tests {
                 "AL_SEZIONE",
                 "AL_PROSPETTO",
                 "AL_MODELLO3D",
+                "AL_STRATIGRAFIA",
+                "AL_PARTICOLARE",
             ]
         );
         // One plain button per command, no dropdown variants.
@@ -752,7 +754,7 @@ mod tests {
             }
             assert!(!b.tinted, "{} is coloured art, it must not be tinted", b.main.id);
         }
-        assert_eq!(icons.len(), 16, "one icon per command");
+        assert_eq!(icons.len(), 18, "one icon per command");
         for (n, a) in icons.iter().enumerate() {
             assert!(icons[n + 1..].iter().all(|b| a != b), "two buttons share an icon");
         }
