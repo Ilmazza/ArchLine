@@ -15,6 +15,12 @@ Spec: `docs/superpowers/specs/2026-11-05-bim-modello-3d-design.md`. Piano:
 | R130 | Estrazione (task 7, `extract.rs`): le `3DFACE` con il record `ARCHLINE_MODELLO3D` vanno nel solo elaborato della loro fase (fatto → stato di fatto, progetto → stato di progetto); la comparativa non ne ha. Stesso meccanismo delle sezioni (R121): si aggiungono agli insiemi «di altra fase»; l'XDATA lo toglie `copy_out`. Le `3DFACE` non sono mai muri (`wall_set` prende solo linee, archi e polilinee). | Una `3DFACE` disegnata a mano sui layer `AL-3D-*` senza il record si copia ovunque, come ogni entità non nostra. |
 | R131 | Interfaccia (task 8): voce **Modello 3D** (`AL_MODELLO3D`) dopo Prospetto in Tools > Ristrutturazione, quindi nella barra omonima (sedici comandi) e nel gruppo «Sezioni» della scheda del ribbon. Icona `assets/icons/ristr_modello3d.svg`, disegnata da zero: un volume in assonometria con i contorni nel colore delle linee (`#B4B6B9`) e la faccia superiore nell'accento (`#6DB7ED`, verificato a pixel), una finestrella sul fronte sinistro; nessun colore della lista che il tema rimappa. | Il gruppo del ribbon si chiama ancora «Sezioni». |
 
+## Dopo la revisione del 2026-11-05
+
+| ID | Decisione | Costo se sbagliata |
+|---|---|---|
+| R144 | **Viste negli estratti** (corregge R130). Prima i DWG di fatto e di progetto avevano le 46 `3DFACE` del loro modello ma nessuna vista (il documento nuovo non riceve la tabella VIEW). Ora `AL_ESTRAI` mette le cinque viste nell'elaborato di fatto e in quello di progetto, **rifatte sul modello di quella fase** (`model3d_views::for_phase`, stesse regole di R128: centro del parallelepipedo, altezza = diagonale × 1,15), perché nel disegno di lavoro inquadrano il progetto; la comparativa, che non ha modelli, non ne ha. Solo se il disegno di lavoro ha almeno una delle cinque viste: chi le ha cancellate non le ritrova negli estratti. Le altre viste con nome del disegno non si copiano (com'era). Provato in DWG con il round-trip del codec e nel banco (viste lette con ezdxf dopo la riconversione). | Una vista rinominata a mano nel disegno di lavoro non conta come «c'è»; le viste dell'utente restano fuori dagli estratti. Richiamo con VIEW in AutoCAD vero non provato. |
+
 ## Da confermare con Mauro
 
 Le sette scelte del §9 della spec (spaccato senza tetto né solai, solo `3DFACE`, due modelli e nessun 3D delle

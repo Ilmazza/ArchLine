@@ -27,7 +27,7 @@
 //!   progetto le esistenti e le nuove.
 
 use codec::{Document, Handle};
-use kernel::geom2d::{contains, distance_to, Tolerance};
+use kernel::geom2d::distance_to;
 
 use super::aperture::{apertures_in, Aperture, ApertureGeom, ApertureKind, ApertureState};
 use super::abaco_render::height_state;
@@ -186,6 +186,32 @@ pub fn aperture_quantities(
                 .extend(room_walls(room, phase, &found, &rows, tol));
         }
     }
+    // Revisione del 2026-11-05: un gruppo di misure senza netto (una zona con
+    // una detrazione n.d., le pareti di un locale senza netto) resta fuori dal
+    // CSV per intero, mai il lordo da solo; qui l'avviso, uno per gruppo.
+    for deduction in out
+        .demolition_deductions
+        .iter()
+        .chain(&out.new_wall_deductions)
+        .filter(|d| d.value.is_none())
+    {
+        out.notices.push(Notice::RigaIncompleta {
+            code: deduction.zone_code.clone(),
+            reason: format!(
+                "{} (fuori dal CSV con le sue detrazioni)",
+                deduction.reason.clone().unwrap_or_else(|| "detrazione n.d.".into())
+            ),
+        });
+    }
+    for walls in out.room_walls.iter().filter(|w| w.net_m2.is_none()) {
+        out.notices.push(Notice::RigaIncompleta {
+            code: format!("{}-PA", walls.room_code),
+            reason: format!(
+                "pareti n.d., {} (fuori dal CSV con i loro vani)",
+                walls.reason.clone().unwrap_or_else(|| "netto n.d.".into())
+            ),
+        });
+    }
     out.rows = rows;
     out
 }
@@ -268,7 +294,6 @@ fn deductions(
     kind: ZoneKind,
     tol: f64,
 ) -> Vec<Deduction> {
-    let tolerance = Tolerance::new(tol);
     let counts = |state: ApertureState| match kind {
         ZoneKind::Demolizione => matches!(state, ApertureState::Esistente | ApertureState::Demolita),
         ZoneKind::Nuova => state == ApertureState::Nuova,
@@ -278,14 +303,14 @@ fn deductions(
         .iter()
         .filter(|row| row.kind == kind)
         .filter_map(|zone_row| {
-            let geom = zones.iter().find(|geom| geom.handle == zone_row.handle)?;
-            let outer = geom.rings.first()?;
-            let curves = ring_curves(outer);
+            let zone = zones.iter().find(|geom| geom.handle == zone_row.handle)?;
+            // Con i buchi: un vano in un'isola (muro che resta) non è nel
+            // volume demolito e non si detrae.
             let inside: Vec<&ApertureRow> = found
                 .iter()
                 .zip(rows)
                 .filter(|(geom, _)| counts(geom.aperture.state))
-                .filter(|(geom, _)| contains(&curves, middle(&geom.aperture), tolerance))
+                .filter(|(geom, _)| zone.contains(middle(&geom.aperture), tol))
                 .map(|(_, row)| row)
                 .collect();
             if inside.is_empty() {
@@ -511,11 +536,17 @@ mod tests {
         assert_eq!((row.vano_m2, row.vano_m3), (None, None));
         assert!(!row.is_complete());
         assert_eq!(row.height.state, HeightState::NonDisponibile);
-        assert!(
-            matches!(&q.notices[..], [Notice::RigaIncompleta { code, .. }] if code == "P1"),
-            "{:?}",
-            q.notices
-        );
+        // Un avviso per la porta, uno per la zona e uno per le pareti di A:
+        // zona e pareti restano fuori dal CSV (revisione del 2026-11-05).
+        let codes: Vec<&str> = q
+            .notices
+            .iter()
+            .map(|n| match n {
+                Notice::RigaIncompleta { code, .. } => code.as_str(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(codes, ["P1", "D1", "LF1-PA"], "{:?}", q.notices);
         let [d] = &q.demolition_deductions[..] else {
             panic!("{:?}", q.demolition_deductions)
         };
@@ -544,6 +575,44 @@ mod tests {
             assert_eq!(d.reason, None);
             assert!(q.new_wall_deductions.is_empty());
         }
+    }
+
+    /// Revisione del 2026-11-05: una zona demolita con un'isola che contiene
+    /// tutta la porta (esterno 3,90…4,20 × 0…3, isola 3,99…4,11 × 0,99…1,91).
+    /// L'isola è muro che resta: niente detrazione, e nel progetto la porta
+    /// esistente c'è ancora.
+    #[test]
+    fn a_door_in_an_island_of_the_demolition_is_not_deducted() {
+        let mut scene = scene_with_door(Form::Continua, door(Some(2.1)));
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let zone = Zone {
+            state: ZoneState::Demolito,
+            origin: ZoneOrigin::Rettangolo,
+            axis: None,
+            thickness: None,
+            height: Some(2.7),
+            varco: false,
+        };
+        scene.add_entity(zone_hatch(
+            &zone,
+            &[rect(3.90, 0.0, 4.20, 3.0), rect(3.99, 0.99, 4.11, 1.91)],
+        ));
+        let zones = zones_in(&scene.document);
+        assert_eq!(zones[0].rings.len(), 2, "l'isola c'è: {:?}", zones[0].rings);
+        let q = compute(&scene);
+        assert!(q.demolition_deductions.is_empty(), "{:?}", q.demolition_deductions);
+        let in_project = crate::bim::aperture::present_apertures(&scene.document, Phase::Progetto);
+        assert_eq!(in_project.len(), 1, "la porta nell'isola resta nel progetto");
+
+        // Senza l'isola la stessa porta si detrae e nel progetto non c'è più.
+        let mut scene = scene_with_door(Form::Continua, door(Some(2.1)));
+        scene.add_entity(zone_hatch(&zone, &[rect(3.90, 0.0, 4.20, 3.0)]));
+        let q = compute(&scene);
+        let [d] = &q.demolition_deductions[..] else {
+            panic!("{:?}", q.demolition_deductions)
+        };
+        near(d.value, 0.189, "detrazione senza isola");
+        assert!(crate::bim::aperture::present_apertures(&scene.document, Phase::Progetto).is_empty());
     }
 
     /// Un'apertura nuova in un muro nuovo: superficie del vano 1,20 × 1,40 =

@@ -93,10 +93,13 @@ pub(super) fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
     let mut out = Vec::new();
     for row in abaco.strati.rows.iter().filter(|r| r.is_complete()) {
         let owner = match row.owner {
+            // Una muratura fuori dal CSV (detrazione di un vano n.d.) porta
+            // fuori anche i suoi strati.
             Element::NewWall => abaco
                 .nuove
                 .iter()
                 .find(|z| z.code == row.owner_code)
+                .filter(|z| !super::abaco_aperture::zone_left_out(&abaco.aperture, &z.code))
                 .and_then(zone_record),
             Element::ProjectRoom => abaco
                 .locali

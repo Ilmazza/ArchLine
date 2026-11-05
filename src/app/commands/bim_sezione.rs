@@ -22,7 +22,8 @@ use crate::bim::section_build::{
 };
 use crate::bim::section_place::{self, drawings_in, existing_anchor_of, place};
 use crate::bim::units::DrawingUnit;
-use crate::command::{CadCommand, KeywordCommand};
+use crate::command::{CadCommand, CmdOption, CmdResult};
+use glam::DVec3;
 use codec::Handle;
 use iced::Task;
 
@@ -35,6 +36,45 @@ const PROSPETTO: &str = "AL_PROSPETTO";
 const MARGIN_M: f64 = 5.0;
 /// Altezza dei testi del disegno, in metri (come `section_build`).
 const TEXT_HEIGHT_M: f64 = 0.25;
+
+/// La domanda di `AL_PROSPETTO` senza argomenti: una delle quattro facciate
+/// (anche dai pulsanti) **o un angolo in gradi** (revisione del 2026-11-05: la
+/// domanda a parole chiave scartava gli angoli, e da script `AL_PROSPETTO 45`
+/// chiedeva di nuovo la facciata). La risposta rilancia il comando con la
+/// direzione: il controllo e l'errore sono quelli di [`parse_direction`].
+struct DirectionCommand;
+
+impl CadCommand for DirectionCommand {
+    fn name(&self) -> &'static str {
+        PROSPETTO
+    }
+    fn prompt(&self) -> String {
+        "AL_PROSPETTO  Facciata da vedere [Nord/Sud/Est/Ovest] o angolo in gradi:".to_string()
+    }
+    fn options(&self) -> Vec<CmdOption> {
+        [("Nord", "N"), ("Sud", "S"), ("Est", "E"), ("Ovest", "O")]
+            .into_iter()
+            .map(|(label, keyword)| CmdOption::new(label, keyword))
+            .collect()
+    }
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let t = text.trim();
+        let t = t.strip_prefix('_').unwrap_or(t);
+        if t.is_empty() {
+            return None;
+        }
+        Some(CmdResult::Dispatch(format!("{PROSPETTO} {t}")))
+    }
+    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
 
 impl OpenCADStudio {
     /// `AL_SEZIONE`: spazio modello, unità, tagli, costruzione, posa e
@@ -69,16 +109,7 @@ impl OpenCADStudio {
         let mut words = cmd.split_whitespace();
         let _name = words.next();
         let Some(direction) = words.next() else {
-            let ask = KeywordCommand::new(
-                PROSPETTO,
-                "AL_PROSPETTO  Facciata da vedere [Nord/Sud/Est/Ovest]:",
-                vec![
-                    ("Nord", "N", None),
-                    ("Sud", "S", None),
-                    ("Est", "E", None),
-                    ("Ovest", "O", None),
-                ],
-            );
+            let ask = DirectionCommand;
             self.command_line.push_info(&ask.prompt());
             self.tabs[i].active_cmd = Some(Box::new(ask));
             return self.finish_dispatch(PROSPETTO);

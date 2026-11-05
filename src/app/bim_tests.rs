@@ -5317,6 +5317,12 @@ fn al_prospetto_places_three_drawings_per_view_and_replaces_by_name() {
     // script passa le parole una a una alla scelta Nord/Sud/Est/Ovest).
     dispatch_line(&mut app, "AL_PROSPETTO 180 Fronte strada");
     assert!(!handles_of(&app, "Fronte strada").is_empty(), "storia: {}", history(&app));
+
+    // Revisione del 2026-11-05: a 45° prima non si disegnava nulla. Ora per
+    // fase due facciate scorciate, la linea di terra, titolo e limiti.
+    run(&mut app, "AL_PROSPETTO 45");
+    let oblique = handles_of(&app, "45°");
+    assert_eq!(oblique.len(), 3 * 5, "storia: {}", history(&app));
 }
 
 // ------------------------------------------------------- AL_MODELLO3D

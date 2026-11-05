@@ -23,6 +23,16 @@ registri `2026-10-23-…` e `2026-10-28-…`; la numerazione continua da R96.
 | R110 | Interfaccia (task 8): tre voci in Tools > Ristrutturazione e nella barra omonima (**Porta**, **Finestra**, **Dati apertura**, in fondo, dopo Abaco CSV: dodici comandi); `AL_PORTAFINESTRA` si digita ma non ha pulsante. Tre icone nuove 24×24 in `assets/icons` (porta con anta e arco di rotazione, finestra con il vetro nel muro, apertura con le due quote), colori solo `#B4B6B9` e `#6DB7ED` come le altre; un gruppo «Aperture» nella scheda Ristrutturazione del ribbon. Nessuna icona è colorata per stato (giallo/rosso): lo stato è un attributo del comando, non del pulsante. Le icone sono verificate a pixel (accento) ma **non viste a schermo**. | Se le icone non si leggono a 16 px vanno ridisegnate; la barra salvata di chi ha già un layout mostra le tre voci solo dopo aver riselezionato AutoCAD Classic. |
 | R111b | (aggiunta dalla parte 4, vedi R116 di `2026-11-05-bim-sezioni-prospetti.md`) Una porta esistente dentro una zona demolita non chiude il vano nel progetto: il muro non c'è più. | Vedi R116. |
 
+## Dopo la revisione del 2026-11-05
+
+La revisione (`docs/superpowers/reviews/2026-11-05-bim-3-6-review.md`, nel checkout principale) ha riprodotto
+due errori di quantità della parte 3, entrambi corretti sul branch `claude/bim-particolari`.
+
+| ID | Decisione | Costo se sbagliata |
+|---|---|---|
+| R141 | **Un gruppo di misure senza netto resta fuori dal CSV per intero.** Prima, con un vano senza altezza, il CSV esportava il lordo delle pareti (`LF1-PA` 37,80 m²) senza vani né nota, e il volume lordo della demolizione (`D1`) senza la sua detrazione: un lordo spacciato per netto. Ora: pareti di un locale con il netto `n.d.` (altezza del locale o di un vano qualunque sul perimetro) → né `LF1-PA` né i suoi `LF1-PA-*`; zona con una detrazione `n.d.` → né la zona né le sue detrazioni (nemmeno quelle dei vani completi) né gli strati della muratura (parte 6). Un `RigaIncompleta` per gruppo (`LF1-PA`, `D1`) con il motivo e «fuori dal CSV». Nelle tabelle le righe restano (lordo e `n.d.` nel netto, «D1 (n.d.)» in «Detrae da»), come prima. Spec §7 «Caso n.d.»: «pareti `n.d.`», che il CSV ora rispetta. | Un disegno con molte porte senza altezza perde dal CSV pareti e demolizioni intere fino a che le altezze non sono inserite: è voluto (nessun numero parziale), lo dicono gli avvisi. |
+| R142 | **Zone con isole**: una detrazione (R105) e la presenza di un'apertura esistente nel progetto (`present_apertures`, R116) guardano la zona con i suoi buchi (`ZoneGeom::contains`: dentro l'esterno, bordo compreso, e non strettamente dentro un buco). Prima contava solo l'anello esterno: una porta interamente in un'isola (muro che resta) si detraeva (0,189 m³ su una zona che vale `(0,30 × 3 − 0,12 × 0,92) × 2,70 = 2,13192 m³`) e spariva dal progetto. Test: `a_door_in_an_island_of_the_demolition_is_not_deducted`. | Un vano a cavallo del bordo di un'isola conta come dentro la zona (bordo compreso). |
+
 ## Da confermare con Mauro
 
 Le otto scelte del §9 della spec (aperture come oggetto proprio, chiusura automatica del vano, nessuna
@@ -38,4 +48,3 @@ dell'anta, dipendenza).
 - **A schermo su Windows**: le tre icone (porta, finestra, dati apertura) a 16 px e la barra a dodici comandi (dopo aver riselezionato AutoCAD Classic); i prompt di `AL_PORTA` (due punti alle spalle, stato, altezza, davanzale); il contorno giallo/rosso delle aperture; la scheda Ristrutturazione nel ribbon con il gruppo «Aperture».
 - **In AutoCAD vero**: le due `TABLE` in più (Aperture, Pareti dei locali) con il loro blocco `*T`; il contorno delle aperture nei tre DWG estratti; AUDIT.
 - **Non provato**: un rilievo reale di Mauro (solo casi sintetici con numeri calcolati a mano); un DWG R2000 con le nuove tabelle; più aperture sulla stessa parete; vani larghi più dei muri vicini.
-

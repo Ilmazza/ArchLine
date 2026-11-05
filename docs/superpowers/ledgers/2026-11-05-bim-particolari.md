@@ -38,3 +38,15 @@ non ancora unite. Anche il gancio nuovo in `command_driver/utilities.rs` (R134).
   LP1-S1…S2 a 11,7000 m², calcolati a mano, `quantita` = prodotto dei fattori; particolari solo nel progetto e nella
   comparativa con le cinque bande attese e i titoli; nessun `ARCHLINE_*`). `unittest` del banco 106 ok.
 - Limite: un solo caso sintetico; `StratigrafiaDiversa` e `StratigrafiaMancante` provati solo nei test Rust.
+
+## Verifica dopo la revisione del 2026-11-05 (build release del branch)
+
+Correzioni R141–R142 (registro della parte 3), R143 e R145 (parte 4), R144 (parte 5); in questa parte cambia solo che
+gli strati di una muratura fuori dal CSV (R141) restano fuori anche loro.
+- `cargo test --locked --lib`: 5222 ok, 0 falliti, 33 ignorati; `bim::` 477, `app::bim_tests` 123, `commands::bim_a` 4.
+- Banco `bim_extract.py`: 290 controlli su 290 (275 + 15: prospetto a 45° con le due facciate scorciate in ciascun
+  DWG, le cinque viste centrate sul modello nel fatto e nel progetto e nessuna nella comparativa). `unittest` del
+  banco 106 ok.
+- Non provato: la sonda della revisione sul caso con l'isola gira sulla release (il caso è coperto dal test Rust
+  `a_door_in_an_island_of_the_demolition_is_not_deducted` con gli stessi numeri); richiamo delle viste con VIEW in
+  AutoCAD vero.

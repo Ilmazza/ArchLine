@@ -9,16 +9,17 @@
 //!   `(−n.y; n.x)`: guardando a sud (prospetto Nord) l'est è a sinistra;
 //! - il contorno dell'edificio è l'anello della **faccia più grande** delle
 //!   facce dei muri (un solo edificio); un suo lato è una facciata se la
-//!   normale uscente sta entro [`FACING_DEGREES`] dalla direzione;
+//!   normale uscente sta entro [`FACING_DEGREES`] dalla direzione (ogni lato
+//!   rivolto verso chi guarda, anche obliquo: si vede scorciato);
 //! - l'altezza di una facciata si prende dal muro dietro di essa: da tre punti
 //!   del lato (¼, ½, ¾) si manda un raggio verso l'interno e si legge l'altezza
 //!   della massa muraria che incontra per prima (`section::elements`, il
 //!   massimo delle altezze dei locali accanto); vale il massimo dei valori
 //!   noti. Senza nessuna altezza la facciata non si disegna e c'è un avviso;
-//! - **occlusione semplice**: una facciata più vicina nasconde, lungo la sua
-//!   estensione orizzontale, quelle più lontane che non la superano in altezza;
-//!   una più bassa lascia vedere la più alta. Nessuna occlusione parziale in
-//!   verticale;
+//! - **occlusione semplice**: dove una facciata sta davanti a un'altra (la
+//!   profondità varia lungo un lato obliquo: si confronta punto per punto) e
+//!   non è più bassa, la nasconde; una più bassa lascia vedere la più alta.
+//!   Nessuna occlusione parziale in verticale;
 //! - un'apertura sta sulla facciata se il punto medio del suo asse dista dal
 //!   lato al più metà del suo spessore; porte e portefinestre partono da
 //!   terra, le finestre dal davanzale; senza altezza o davanzale non si
@@ -37,8 +38,11 @@ use super::section_draw::{Tint, LAYER_SEZIONI};
 use super::units::format_decimal;
 
 /// Di quanti gradi al massimo la normale di un lato si discosta dalla
-/// direzione di vista perché sia una facciata.
-pub const FACING_DEGREES: f64 = 30.0;
+/// direzione di vista perché sia una facciata: ogni lato rivolto verso chi
+/// guarda, tranne quelli di taglio (revisione del 2026-11-05: con 30° un
+/// prospetto a 45° di un edificio rettangolare era vuoto). Un lato obliquo
+/// si vede scorciato, come in ogni proiezione ortogonale.
+pub const FACING_DEGREES: f64 = 89.0;
 /// Quanto lontano dal lato si cerca la massa che dà l'altezza, in metri.
 const PROBE_M: f64 = 1.5;
 
@@ -100,6 +104,66 @@ fn area(ring: &[[f64; 2]]) -> f64 {
         / 2.0
 }
 
+/// Occlusione semplice: `ends[i]` sono le profondità della facciata `i` ai suoi
+/// estremi `x0` e `x1` (più vicina = più grande), lineari in mezzo. Dove una
+/// facciata non più bassa sta davanti a un'altra di più di `tol`, quella
+/// dietro perde il tratto. Per facciate parallele la profondità è costante: è
+/// la regola di prima; per lati obliqui il tratto nascosto finisce dove le due
+/// profondità si incrociano.
+fn occlude(facades: &mut [Facade], ends: &[(f64, f64)], tol: f64) {
+    let depth = |f: &Facade, (d0, d1): (f64, f64), x: f64| {
+        if f.x1 - f.x0 <= tol {
+            d0
+        } else {
+            d0 + (d1 - d0) * (x - f.x0) / (f.x1 - f.x0)
+        }
+    };
+    for far in 0..facades.len() {
+        for near in 0..facades.len() {
+            if near == far || facades[near].height_m + 1.0e-9 < facades[far].height_m {
+                continue;
+            }
+            let (a, b) = (
+                facades[far].x0.max(facades[near].x0),
+                facades[far].x1.min(facades[near].x1),
+            );
+            if b - a <= tol {
+                continue;
+            }
+            let gap = |x: f64| {
+                depth(&facades[near], ends[near], x) - depth(&facades[far], ends[far], x)
+            };
+            let (ga, gb) = (gap(a), gap(b));
+            let (n0, n1) = match (ga > tol, gb > tol) {
+                (true, true) => (a, b),
+                (false, false) => continue,
+                _ => {
+                    let cross = a + (tol - ga) / (gb - ga) * (b - a);
+                    if ga > tol {
+                        (a, cross)
+                    } else {
+                        (cross, b)
+                    }
+                }
+            };
+            let mut pieces = Vec::new();
+            for &(a, b) in &facades[far].visible {
+                if n1 <= a || n0 >= b {
+                    pieces.push((a, b));
+                    continue;
+                }
+                if n0 > a + tol {
+                    pieces.push((a, n0));
+                }
+                if n1 < b - tol {
+                    pieces.push((n1, b));
+                }
+            }
+            facades[far].visible = pieces;
+        }
+    }
+}
+
 /// Il prospetto con normale uscente `normal` (di lunghezza unitaria).
 #[allow(clippy::too_many_arguments)]
 pub fn elevation(
@@ -132,6 +196,8 @@ pub fn elevation(
         outward: [f64; 2],
         lo: f64,
         hi: f64,
+        /// Profondità (lungo la direzione) agli estremi `lo` e `hi`.
+        depths: (f64, f64),
     }
     let mut raws: Vec<Raw> = Vec::new();
     for i in 0..ring.len() {
@@ -146,12 +212,17 @@ pub fn elevation(
             continue;
         }
         let (pa, pb) = (dot(a, right), dot(b, right));
+        if (pb - pa).abs() <= tol {
+            continue;
+        }
+        let (da, db) = (dot(a, normal), dot(b, normal));
         raws.push(Raw {
             a,
             b,
             outward,
             lo: pa.min(pb),
             hi: pa.max(pb),
+            depths: if pa <= pb { (da, db) } else { (db, da) },
         });
     }
     if raws.is_empty() {
@@ -202,32 +273,8 @@ pub fn elevation(
         });
         sides.push(index);
     }
-    // Occlusione semplice: una facciata più vicina nasconde la più lontana
-    // dove non è più bassa.
-    for far in 0..facades.len() {
-        for near in 0..facades.len() {
-            if facades[near].depth <= facades[far].depth + tol
-                || facades[near].height_m + 1.0e-9 < facades[far].height_m
-            {
-                continue;
-            }
-            let (n0, n1) = (facades[near].x0, facades[near].x1);
-            let mut pieces = Vec::new();
-            for &(a, b) in &facades[far].visible {
-                if n1 <= a || n0 >= b {
-                    pieces.push((a, b));
-                    continue;
-                }
-                if n0 > a + tol {
-                    pieces.push((a, n0));
-                }
-                if n1 < b - tol {
-                    pieces.push((n1, b));
-                }
-            }
-            facades[far].visible = pieces;
-        }
-    }
+    let ends: Vec<(f64, f64)> = sides.iter().map(|&side| raws[side].depths).collect();
+    occlude(&mut facades, &ends, tol);
     // Aperture sulle facciate.
     for aperture in apertures {
         let mid = [
@@ -534,27 +581,67 @@ mod tests {
             },
             near_facade(2.7),
         ];
-        // Stessa regola di `elevation`, applicata a mano.
-        for far in 0..facades.len() {
-            for near in 0..facades.len() {
-                if facades[near].depth <= facades[far].depth || facades[near].height_m < facades[far].height_m {
-                    continue;
-                }
-                let (n0, n1) = (facades[near].x0, facades[near].x1);
-                let mut pieces = Vec::new();
-                for &(a, b) in &facades[far].visible {
-                    if n0 > a {
-                        pieces.push((a, n0));
-                    }
-                    if n1 < b {
-                        pieces.push((n1, b));
-                    }
-                }
-                facades[far].visible = pieces;
-            }
-        }
+        let ends = [(1.0, 1.0), (5.0, 5.0)];
+        occlude(&mut facades, &ends, TOL);
         assert_eq!(facades[0].visible, vec![(0.0, 2.0), (4.0, 6.0)]);
         assert_eq!(facades[1].visible, vec![(2.0, 4.0)]);
+        // Più bassa: non nasconde.
+        let mut facades = vec![facades[0].clone(), near_facade(2.0)];
+        facades[0].visible = vec![(0.0, 6.0)];
+        occlude(&mut facades, &ends, TOL);
+        assert_eq!(facades[0].visible, vec![(0.0, 6.0)]);
+    }
+
+    /// Lati obliqui: due facciate che si incrociano in profondità a x = 3. A
+    /// sinistra di 3 la prima sta davanti, a destra la seconda: ciascuna
+    /// perde solo il tratto dove sta dietro.
+    #[test]
+    fn oblique_facades_hide_each_other_up_to_the_crossing() {
+        let facade = |depth| Facade {
+            x0: 0.0,
+            x1: 6.0,
+            height_m: 2.7,
+            depth,
+            visible: vec![(0.0, 6.0)],
+            openings: Vec::new(),
+        };
+        let mut facades = vec![facade(2.0), facade(2.0)];
+        occlude(&mut facades, &[(4.0, 0.0), (1.0, 3.0)], TOL);
+        let [(a0, a1)] = facades[0].visible[..] else {
+            panic!("{:?}", facades[0].visible)
+        };
+        let [(b0, b1)] = facades[1].visible[..] else {
+            panic!("{:?}", facades[1].visible)
+        };
+        near(a0, 0.0, "prima: inizio");
+        assert!((a1 - 3.0).abs() < 1e-5, "prima fino all'incrocio: {a1}");
+        assert!((b0 - 3.0).abs() < 1e-5, "seconda dall'incrocio: {b0}");
+        near(b1, 6.0, "seconda: fine");
+    }
+
+    /// Revisione del 2026-11-05: il prospetto a 45° (normale verso nord-est)
+    /// del caso A vede due facciate scorciate, nord ed est, alte 2,70 e
+    /// intere (edificio convesso); a 45° da sud-ovest le altre due.
+    #[test]
+    fn an_oblique_elevation_sees_two_foreshortened_facades() {
+        let (faces, outlines, rooms) = plan([Some(2.7), Some(2.7)]);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        for normal in [[s, s], [-s, -s]] {
+            let (elevation, notices) =
+                super::elevation(&faces, &outlines, &rooms, &[], normal, 1.0, TOL);
+            assert!(notices.is_empty(), "{normal:?}: {notices:?}");
+            let [first, second] = &elevation.facades[..] else {
+                panic!("{normal:?}: {elevation:?}")
+            };
+            let mut widths = [first.x1 - first.x0, second.x1 - second.x0];
+            widths.sort_by(f64::total_cmp);
+            near(widths[0], 3.6 * s, "lato corto scorciato");
+            near(widths[1], 8.6 * s, "lato lungo scorciato");
+            for facade in [first, second] {
+                near(facade.height_m, 2.7, "altezza");
+                assert_eq!(facade.visible, vec![(facade.x0, facade.x1)], "{normal:?}: intera");
+            }
+        }
     }
 
     /// Il disegno: linea di terra, un contorno per tratto di facciata, uno per

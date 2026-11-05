@@ -493,6 +493,7 @@ fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
         .iter()
         .chain(&abaco.varchi)
         .chain(&abaco.nuove)
+        .filter(|row| !super::abaco_aperture::zone_left_out(&abaco.aperture, &row.code))
         .filter_map(zone_record);
     let rooms = |phase: Phase| {
         abaco.locali.iter().filter_map(move |line| {

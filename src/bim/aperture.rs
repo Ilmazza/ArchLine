@@ -28,7 +28,7 @@ use codec::{Color, Document, EntityType, Handle, Vector2, Vector3};
 use rustc_hash::FxHashMap;
 
 use super::project::FIRST_SYNTHETIC_HANDLE;
-use super::rooms::{ring_curves, Phase};
+use super::rooms::Phase;
 use super::walls::{rect_from_axis_thickness, sources_of, WallRect};
 use super::zone::{zones_in, ZoneState};
 use super::{ACI_GIALLO, ACI_ROSSO, APP_APERTURA, LAYER_APERTURE};
@@ -425,11 +425,12 @@ pub fn vano_rings(doc: &Document, phase: Phase) -> Vec<Vec<[f64; 2]>> {
 /// quelle da demolire, nel progetto le esistenti e le nuove; R116: nel progetto
 /// una porta esistente dentro una zona demolita non c'è più (il muro è tolto).
 pub fn present_apertures(doc: &Document, phase: Phase) -> Vec<ApertureGeom> {
-    let demolished: Vec<Vec<kernel::geom2d::Curve>> = match phase {
+    // Con i buchi (revisione del 2026-11-05): una porta esistente in un'isola
+    // di una zona demolita sta in un muro che resta, quindi c'è nel progetto.
+    let demolished: Vec<crate::bim::zone::ZoneGeom> = match phase {
         Phase::Progetto => zones_in(doc)
             .into_iter()
             .filter(|zone| zone.zone.state == ZoneState::Demolito)
-            .filter_map(|zone| zone.rings.first().map(|ring| ring_curves(ring)))
             .collect(),
         Phase::Fatto => Vec::new(),
     };
@@ -444,11 +445,9 @@ pub fn present_apertures(doc: &Document, phase: Phase) -> Vec<ApertureGeom> {
         .filter(|geom| {
             let (a, b) = geom.aperture.axis;
             let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
-            let tolerance = kernel::geom2d::Tolerance::new(geom.aperture.thickness * 1.0e-3);
+            let tol = geom.aperture.thickness * 1.0e-3;
             geom.aperture.state != ApertureState::Esistente
-                || !demolished
-                    .iter()
-                    .any(|curves| kernel::geom2d::contains(curves, mid, tolerance))
+                || !demolished.iter().any(|zone| zone.contains(mid, tol))
         })
         .collect()
 }

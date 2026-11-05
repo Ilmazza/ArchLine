@@ -96,6 +96,33 @@ pub fn build(lo: [f64; 3], hi: [f64; 3]) -> Vec<View> {
         .collect()
 }
 
+/// Le viste per l'elaborato di una fase (revisione del 2026-11-05: prima gli
+/// estratti non ne avevano): inquadrano il solo modello di quella fase, che
+/// l'estrazione copia senza spostarlo. Vuoto se il disegno di lavoro non ha
+/// nessuna delle cinque viste (chi le ha tolte non le ritrova negli estratti)
+/// o se non ha il modello di quella fase.
+pub fn for_phase(src: &Document, phase: super::model3d_place::ModelPhase) -> Vec<View> {
+    if !names().iter().any(|name| src.views.get(name).is_some()) {
+        return Vec::new();
+    }
+    let corners: Vec<[f64; 3]> = super::model3d_place::models_in(src)
+        .into_iter()
+        .filter(|(_, found)| *found == phase)
+        .filter_map(|(handle, _)| match src.get_entity(handle) {
+            Some(codec::EntityType::Face3D(face)) => Some([
+                face.first_corner,
+                face.second_corner,
+                face.third_corner,
+                face.fourth_corner,
+            ]),
+            _ => None,
+        })
+        .flatten()
+        .map(|c| [c.x, c.y, c.z])
+        .collect();
+    bounds(corners.iter()).map_or_else(Vec::new, |(lo, hi)| build(lo, hi))
+}
+
 /// Mette le viste nella tabella VIEW: una con lo stesso nome si **sostituisce**
 /// tenendo il suo handle, le altre ne prendono uno nuovo. Dà quante erano
 /// nuove e quante sostituite.

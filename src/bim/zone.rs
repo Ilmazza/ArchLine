@@ -159,6 +159,27 @@ pub struct ZoneGeom {
     pub curved: bool,
 }
 
+impl ZoneGeom {
+    /// `p` sta nella zona: dentro il contorno esterno (bordo compreso) e non
+    /// strettamente dentro un buco. Un'isola è muro che resta: ciò che vi cade
+    /// non è nella zona (revisione del 2026-11-05: prima contava solo
+    /// `rings[0]`, e una porta nell'isola di una demolizione si detraeva).
+    pub fn contains(&self, p: [f64; 2], tol: f64) -> bool {
+        use kernel::geom2d::{contains, distance_to, Tolerance};
+        let tolerance = Tolerance::new(tol);
+        let Some((outer, holes)) = self.rings.split_first() else {
+            return false;
+        };
+        if outer.len() < 3 || !contains(&super::rooms::ring_curves(outer), p, tolerance) {
+            return false;
+        }
+        !holes.iter().filter(|hole| hole.len() >= 3).any(|hole| {
+            let edges = super::rooms::ring_curves(hole);
+            contains(&edges, p, tolerance) && edges.iter().all(|edge| distance_to(edge, p) > tol)
+        })
+    }
+}
+
 fn key(text: &str) -> XDataValue {
     XDataValue::String(text.to_string())
 }

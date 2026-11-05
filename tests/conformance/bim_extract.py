@@ -35,15 +35,17 @@ locale in piu'. Nel CSV la porta (P1, 1,8900 m2), le pareti lorde (LF1-PA, 37,80
 
 Sezioni e prospetti (BIM parte 4), quarto giro (righe con il prefisso "sezione, "): il caso A con la porta, l'altezza
 del livello, i locali A e B, `AL_TAGLIO -1,1.5 9,1.5 4,3 A-A`, `AL_SEZIONE` (due volte: i disegni si sostituiscono, non
-si duplicano), `AL_PROSPETTO S` e `AL_ESTRAI`. Nei tre DWG: due titoli (sezione A-A e prospetto Sud) con la fase
-dell'elaborato, il poche' del muro d'ambito 0,30 x 2,70 su AL-SEZIONI, campiture solide, il taglio su AL-TAGLI, nessun
-XDATA ne' APPID ARCHLINE.
+si duplicano), `AL_PROSPETTO S`, `AL_PROSPETTO 45` e `AL_ESTRAI`. Nei tre DWG: due titoli (sezione A-A e prospetto Sud)
+con la fase dell'elaborato, il poche' del muro d'ambito 0,30 x 2,70 su AL-SEZIONI, campiture solide, il taglio su
+AL-TAGLI, il prospetto a 45 gradi con le facciate nord ed est scorciate (8,60 e 3,60 x cos 45, alte 2,70: revisione del
+2026-11-05), nessun XDATA ne' APPID ARCHLINE.
 
 Modello 3D (BIM parte 5), quinto giro (righe con il prefisso "modello 3D, "): il caso A con la porta, l'altezza del
 livello, i locali A e B, `AL_MODELLO3D` (due volte: i modelli si sostituiscono, non si duplicano) e `AL_ESTRAI`. Nel
 DWG di fatto solo 3DFACE su AL-3D-FATTO, in quello di progetto solo su AL-3D-PROGETTO, nella comparativa nessuna;
 coperchi a quota 2,70 per 7,26 m2 (7,17 di muro e 0,09 di testa della porta) e pavimenti a quota 0 per 23,70 m2
-(A 12,00 + B 11,70), calcolati a mano; nessun XDATA ne' APPID ARCHLINE.
+(A 12,00 + B 11,70), calcolati a mano; nessun XDATA ne' APPID ARCHLINE; nel fatto e nel progetto le cinque viste con nome, centrate sul
+modello di quella fase, nessuna nella comparativa (revisione del 2026-11-05).
 
 Stratigrafie e particolari (BIM parte 6), sesto giro (righe con il prefisso "strati, "): il caso A, l'altezza del
 livello, il tramezzo nuovo `AL_NUOVO 2,0 2,3 0.12`, il locale di progetto «Studio», le stratigrafie T12 (parete:
@@ -981,7 +983,11 @@ SECTION_CMDS = (
     "AL_TAGLIO -1,1.5 9,1.5 4,3 A-A",
     "AL_SEZIONE",
     "AL_PROSPETTO S",
+    "AL_PROSPETTO 45",
 )
+# Revisione del 2026-11-05: a 45 gradi (normale verso nord-est) si vedono le facciate nord ed est scorciate,
+# 8,60 x cos 45 e 3,60 x cos 45, alte 2,70 (prima il prospetto obliquo era vuoto).
+OBLIQUE_WIDTHS = (8.6 * 0.5 ** 0.5, 3.6 * 0.5 ** 0.5)
 PHASE_TEXT = {"fatto": "stato di fatto", "comparativa": "demolizioni e costruzioni", "progetto": "stato di progetto"}
 
 
@@ -1015,6 +1021,11 @@ def check_section_extract(rep, docs):
                 and any(t.startswith("Sezione A-A") for t in titles) and any(t.startswith("Prospetto Sud") for t in titles))
         rep.check(good, f"{key}: titoli", f"{titles}" if good else f"attesi sezione e prospetto «{mine}», trovati {titles}")
         rep.check(has_wall_outline(doc, 0.30, 2.70), f"{key}: poche' del muro 0,30 x 2,70", "trovato")
+        oblique = [t for t in texts if t.startswith("Prospetto 45")]
+        good = len(oblique) == 1 and oblique[0].endswith(mine)
+        rep.check(good, f"{key}: prospetto a 45 gradi", f"{oblique}")
+        for width in OBLIQUE_WIDTHS:
+            rep.check(has_wall_outline(doc, width, 2.70), f"{key}: facciata obliqua {width:.4f} x 2,70", "trovata")
         hatches = [e for e in doc.modelspace().query("HATCH") if e.dxf.layer == LAYER_SEZIONI]
         rep.check(bool(hatches) and all(h.dxf.solid_fill == 1 for h in hatches), f"{key}: campiture solide",
                   f"{len(hatches)} campiture" if hatches else "nessuna campitura")
@@ -1082,11 +1093,36 @@ def face_area_at(face, z, tol=1e-6):
     return abs(area) / 2.0
 
 
+MODEL3D_VIEWS = ("Assonometria SE", "Assonometria SO", "Assonometria NE", "Assonometria NO", "Prospettiva")
+
+
+def check_model3d_views(rep, key, doc, faces):
+    """Revisione del 2026-11-05: le cinque viste con nome nel DWG di fatto e di progetto, puntate al centro del
+    modello di quella fase; nessuna nella comparativa."""
+    views = {v.dxf.name: v for v in doc.views}
+    if key == "comparativa":
+        rep.check(not views, f"{key}: nessuna vista", f"{sorted(views)}")
+        return
+    missing = [name for name in MODEL3D_VIEWS if name not in views]
+    rep.check(not missing, f"{key}: cinque viste", "tutte" if not missing else f"mancano {missing}")
+    if missing or not faces:
+        return
+    xs = [p[0] for f in faces for p in (f.dxf.vtx0, f.dxf.vtx1, f.dxf.vtx2, f.dxf.vtx3)]
+    ys = [p[1] for f in faces for p in (f.dxf.vtx0, f.dxf.vtx1, f.dxf.vtx2, f.dxf.vtx3)]
+    centre = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+    off = [name for name in MODEL3D_VIEWS
+           if abs(views[name].dxf.target[0] - centre[0]) > 1e-6 or abs(views[name].dxf.target[1] - centre[1]) > 1e-6]
+    rep.check(not off, f"{key}: viste centrate sul modello", f"centro {centre[0]:.3f}, {centre[1]:.3f}"
+              if not off else f"fuori centro: {off}")
+
+
 def check_model3d_extract(rep, docs):
     """Le 3DFACE di ogni DWG: solo quelle della sua fase, nessuna nella comparativa; coperchi e pavimenti con le aree
-    attese (un modello solo: AL_MODELLO3D rilanciato non duplica); nessun XDATA ne' APPID ARCHLINE."""
+    attese (un modello solo: AL_MODELLO3D rilanciato non duplica); le cinque viste nel fatto e nel progetto; nessun
+    XDATA ne' APPID ARCHLINE."""
     for key, doc in docs.items():
         faces = list(doc.modelspace().query("3DFACE"))
+        check_model3d_views(rep, key, doc, faces)
         by_layer = {layer: [f for f in faces if f.dxf.layer == layer] for layer in LAYER_3D.values()}
         if key == "comparativa":
             rep.check(not faces, f"{key}: nessuna 3DFACE", f"{len(faces)} 3DFACE")

@@ -237,7 +237,7 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
             continue;
         }
         let mut work = src.clone();
-        let (out, notices) = match elaborato {
+        let (mut out, notices) = match elaborato {
             Elaborato::StatoDiFatto => {
                 let rooms = refresh_fatto_rooms(&mut work, opts.unit, room_tol(opts));
                 push_unique(&mut ex.notices, rooms);
@@ -326,6 +326,17 @@ pub fn extract(src: &Document, opts: &ExtractOptions) -> Extracted {
                 (out, notices)
             }
         };
+        // Parte 5 (revisione del 2026-11-05): le cinque viste con nome del
+        // modello 3D vanno nell'elaborato che ha il modello, rifatte sul
+        // modello di quella fase (nel disegno di lavoro inquadrano il progetto).
+        let phase = match elaborato {
+            Elaborato::StatoDiFatto => Some(super::model3d_place::ModelPhase::Fatto),
+            Elaborato::StatoDiProgetto => Some(super::model3d_place::ModelPhase::Progetto),
+            Elaborato::DemolizioniCostruzioni => None,
+        };
+        if let Some(phase) = phase {
+            super::model3d_views::install(&mut out, super::model3d_views::for_phase(src, phase));
+        }
         ex.docs.push((elaborato, out));
         push_unique(&mut ex.notices, notices);
     }
@@ -4705,6 +4716,75 @@ mod tests {
                 expected,
                 "{elaborato:?}"
             );
+            assert_no_archline_data(out);
+        }
+    }
+
+    /// Revisione del 2026-11-05: le cinque viste del modello 3D vanno negli
+    /// elaborati di fatto e di progetto, ognuna centrata sul modello di quella
+    /// fase, e restano dopo il passaggio in DWG; la comparativa (senza modelli)
+    /// non ne ha. Un disegno di lavoro senza le viste non le fa nascere.
+    #[test]
+    fn model_views_go_to_the_extract_of_their_model() {
+        use crate::bim::mass3d_prism::{Face3, Tone};
+        use crate::bim::model3d::Model3d;
+        use crate::bim::model3d_place::{self, place, ModelPhase};
+        use crate::bim::model3d_views::{build, for_phase, install, names};
+        let face = |x: f64| Face3 {
+            quad: [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x + 1.0, 1.0, 2.7], [x, 1.0, 2.7]],
+            tone: Tone::Mass,
+        };
+        let fatto = Model3d {
+            faces: vec![face(0.0), face(1.0)],
+            ..Model3d::default()
+        };
+        let progetto = Model3d {
+            faces: vec![face(0.0), face(1.0), face(2.0)],
+            ..Model3d::default()
+        };
+        let mut doc = case_a_doc(Form::Continua);
+        model3d_place::ensure_layers(&mut doc);
+        for entity in place(&fatto, &progetto, [20.0, 0.0], 1.0) {
+            doc.add_entity(entity).unwrap();
+        }
+        // Senza le viste nel disegno di lavoro, nessuna vista negli estratti.
+        let ex = extract(&doc, &opts(&all_three()));
+        assert!(ex.docs.iter().all(|(_, out)| out.views.iter().count() == 0));
+
+        install(&mut doc, build([0.0; 3], [1.0; 3]));
+        let centre = |phase: ModelPhase| {
+            let views = for_phase(&doc, phase);
+            assert_eq!(views.len(), 5, "{phase:?}");
+            let t = &views[0].target;
+            [t.x, t.y, t.z]
+        };
+        let (c_fatto, c_progetto) = (centre(ModelPhase::Fatto), centre(ModelPhase::Progetto));
+        assert!(c_fatto[0] < c_progetto[0], "il fatto sta a sinistra del progetto");
+        let ex = extract(&doc, &opts(&all_three()));
+        for (elaborato, out) in &ex.docs {
+            let want = match elaborato {
+                Elaborato::StatoDiFatto => Some(c_fatto),
+                Elaborato::StatoDiProgetto => Some(c_progetto),
+                Elaborato::DemolizioniCostruzioni => None,
+            };
+            let Some(want) = want else {
+                assert_eq!(out.views.iter().count(), 0, "{elaborato:?}");
+                continue;
+            };
+            for name in names() {
+                let view = out.views.get(name).unwrap_or_else(|| panic!("{elaborato:?}: manca {name}"));
+                assert!(view.handle.is_valid());
+                let t = [view.target.x, view.target.y, view.target.z];
+                assert_eq!(t, want, "{elaborato:?} {name}");
+            }
+            let bytes = codec::DwgWriter::write_to_vec(out).expect("DWG");
+            let back = codec::DwgReader::from_stream(std::io::Cursor::new(bytes))
+                .read()
+                .expect("rilettura");
+            let found: Vec<String> = back.views.iter().map(|v| v.name.clone()).collect();
+            for name in names() {
+                assert!(found.iter().any(|f| f == name), "{elaborato:?} DWG: {found:?}");
+            }
             assert_no_archline_data(out);
         }
     }

@@ -190,6 +190,17 @@ pub(super) fn walls_table(q: &ApertureQuantities) -> TableText {
     )
 }
 
+/// La zona `code` ha una detrazione n.d.: resta fuori dal CSV con le sue
+/// detrazioni (il suo volume o la sua superficie senza i vani sarebbero un
+/// lordo spacciato per netto). In tabella resta, con «n.d.» nella colonna
+/// «Detrae da» delle aperture.
+pub(super) fn zone_left_out(q: &ApertureQuantities, code: &str) -> bool {
+    q.demolition_deductions
+        .iter()
+        .chain(&q.new_wall_deductions)
+        .any(|d| d.zone_code == code && d.value.is_none())
+}
+
 /// Le misure del libretto: le aperture complete (vano = larghezza × altezza,
 /// m²), le detrazioni sulle demolizioni (m³) e sulle nuove murature (m²), le
 /// pareti dei locali e i loro vani, tutte con `detrai` = sì dove si tolgono.
@@ -230,7 +241,9 @@ pub(super) fn csv_records(q: &ApertureQuantities) -> Vec<CsvRecord> {
         (&q.demolition_deductions, "detrazione demolizione", UNIT_M3, true),
         (&q.new_wall_deductions, "detrazione nuova muratura", UNIT_M2, false),
     ] {
-        for deduction in deductions {
+        // Una detrazione n.d. (un vano senza altezza) toglie dal CSV tutta la
+        // zona: né la zona (`zone_left_out`) né le detrazioni degli altri vani.
+        for deduction in deductions.iter().filter(|d| d.value.is_some()) {
             for code in &deduction.apertures {
                 let Some(row) = find(code) else { continue };
                 let Some(height) = row.height.value_m else {
@@ -253,7 +266,10 @@ pub(super) fn csv_records(q: &ApertureQuantities) -> Vec<CsvRecord> {
         }
     }
     for walls in &q.room_walls {
-        let Some(height) = walls.height_m else {
+        // Revisione del 2026-11-05: senza netto (altezza del locale o di un
+        // vano n.d.) le pareti restano fuori per intero, lordo compreso: un
+        // lordo senza i suoi vani sarebbe una parete parziale.
+        let (Some(height), Some(_)) = (walls.height_m, walls.net_m2) else {
             continue;
         };
         let (tipo, label) = match walls.phase {
@@ -469,6 +485,25 @@ mod tests {
         assert!(!csv.contains(";P1;"), "{csv}");
         assert!(!csv.contains("D1-P1"));
         assert!(!csv.contains("-PA-P1"));
+        // Revisione del 2026-11-05: senza il vano non c'è il netto, quindi
+        // restano fuori anche la demolizione D1 e le pareti di A e di B (il
+        // lordo da solo sarebbe una parete parziale).
+        assert!(!csv.contains(";D1;"), "{csv}");
+        assert!(!csv.contains("LF1-PA") && !csv.contains("LF2-PA"), "{csv}");
+        // A + B nel progetto: la porta sta nel tramezzo demolito e non c'è più
+        // (R116), quindi il netto c'è e la riga resta.
+        assert!(csv.contains(";LP1-PA;"), "{csv}");
+        let codes: Vec<&str> = abaco
+            .notices
+            .iter()
+            .filter_map(|n| match n {
+                crate::bim::report::Notice::RigaIncompleta { code, .. } => Some(code.as_str()),
+                _ => None,
+            })
+            .collect();
+        for code in ["P1", "D1", "LF1-PA", "LF2-PA"] {
+            assert!(codes.contains(&code), "{code}: {codes:?}");
+        }
         assert!(
             abaco.notices.iter().any(|n| matches!(
                 n,
@@ -477,6 +512,44 @@ mod tests {
             "{:?}",
             abaco.notices
         );
+    }
+
+    /// Revisione del 2026-11-05: pareti di A con due vani, P1 completo e P2
+    /// (nel muro sud) senza altezza. Le pareti di A restano fuori dal CSV per
+    /// intero (né il lordo né il vano di P1); quelle di B, che hanno il solo
+    /// P1, ci sono con il loro vano; la demolizione D1 con P1 c'è.
+    #[test]
+    fn walls_with_one_vano_missing_stay_out_of_the_csv_whole() {
+        let mut scene = scene(Some(2.1));
+        let south = Aperture {
+            axis: ([1.0, -0.15], [1.9, -0.15]),
+            thickness: 0.30,
+            threshold: false,
+            ..door(None)
+        };
+        scene.add_entity(aperture_polyline(&south).unwrap());
+        let abaco = compute_abaco(&scene.document, &OPTS);
+        let walls = |code: &str| {
+            abaco
+                .aperture
+                .room_walls
+                .iter()
+                .find(|w| w.room_code == code)
+                .unwrap()
+        };
+        assert_eq!(walls("LF1").apertures, ["P1", "P2"]);
+        assert_eq!(walls("LF1").net_m2, None);
+        assert!(walls("LF2").net_m2.is_some());
+        let csv = to_csv(&abaco);
+        assert!(!csv.contains("LF1-PA"), "{csv}");
+        assert!(csv.contains(";LF2-PA;"), "{csv}");
+        assert!(csv.contains(";LF2-PA-P1;"), "{csv}");
+        assert!(csv.contains(";D1;") && csv.contains(";D1-P1;"), "{csv}");
+        assert!(abaco.notices.iter().any(|n| matches!(
+            n,
+            crate::bim::report::Notice::RigaIncompleta { code, reason }
+                if code == "LF1-PA" && reason.contains("P2")
+        )));
     }
 
     /// Il CSV: l'apertura (m²), la sua detrazione dalla demolizione (m³, a
