@@ -47,7 +47,7 @@ pub enum Tint {
 }
 
 impl Tint {
-    fn color(self) -> Color {
+    pub(super) fn color(self) -> Color {
         match self {
             Self::Plain => Color::ByLayer,
             Self::Demolished => Color::from_index(ACI_GIALLO),

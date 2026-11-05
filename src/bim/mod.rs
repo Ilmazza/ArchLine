@@ -14,6 +14,7 @@ pub mod clip;
 pub mod commands;
 pub mod cut;
 pub mod cut_command;
+pub mod elevation;
 pub mod extract;
 pub mod height;
 pub mod migrate;
