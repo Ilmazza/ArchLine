@@ -98,6 +98,8 @@ pub enum TableKind {
     Aperture,
     /// Pareti dei locali al netto dei vani (parte 3).
     Pareti,
+    /// Strati delle stratigrafie (parte 6).
+    Strati,
 }
 
 /// Il testo di una cella; `missing` = un dato che manca (`n.d.`), da
@@ -206,6 +208,10 @@ pub fn render_tables(abaco: &Abaco) -> Vec<TableText> {
     }
     if !abaco.aperture.room_walls.is_empty() {
         tables.push(super::abaco_aperture::walls_table(&abaco.aperture));
+    }
+    // Parte 6: gli strati delle stratigrafie assegnate.
+    if !abaco.strati.rows.is_empty() {
+        tables.push(super::abaco_strata::strata_table(&abaco.strati));
     }
     tables
 }
@@ -1461,6 +1467,7 @@ mod tests {
                     nuove: Vec::new(),
                     locali: Vec::new(),
                     aperture: Default::default(),
+                    strati: Default::default(),
                     notices: Vec::new(),
                 }
             );

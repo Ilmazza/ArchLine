@@ -5532,3 +5532,93 @@ fn al_particolare_places_and_replaces_the_details() {
     assert!((again[0] - anchor[0]).abs() < 1e-9 && (again[1] - anchor[1]).abs() < 1e-9);
     assert_eq!(undo_steps(&app), steps + 3);
 }
+
+// ------------------------------------------------- strati nell'abaco
+
+/// Parte 6, task 7: le righe di strato. Il tramezzo nuovo N1 (asse 3,00 m,
+/// spessore 0,12, H 2,70) con T12 dà tre righe da 3,00 × 2,70 = 8,10 m²; il
+/// locale di progetto «Studio» (11,70 m²) con P1 due righe da 11,70 m²; nessun
+/// avviso sugli strati. Il CSV ha le cinque righe con i fattori dell'elemento.
+#[test]
+fn strata_rows_carry_the_quantity_of_their_element() {
+    use crate::bim::abaco::{compute_abaco, to_csv, AbacoOptions};
+    use crate::bim::abaco_render::{render_tables, TableKind};
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    run(&mut app, "AL_NUOVO 2,0 2,3 0.12");
+    run(&mut app, "AL_LOCALE F 6,1.5 Studio");
+    run(&mut app, "AL_STRATIGRAFIA Nuova T12 Parete Intonaco 0.015; Laterizio forato 0.09; Intonaco 0.015");
+    run(&mut app, "AL_STRATIGRAFIA Nuova P1 Solaio Ceramica 0.01; Massetto 0.05");
+    run(&mut app, "AL_STRATIGRAFIA Assegna T12 2.0,1.5");
+    run(&mut app, "AL_STRATIGRAFIA Assegna P1 6,1.5");
+    let opts = AbacoOptions {
+        unit: DrawingUnit::Metri,
+        tol: 1e-6,
+        room_tol: 1e-6,
+    };
+    let abaco = compute_abaco(doc(&app), &opts);
+    let rows = &abaco.strati.rows;
+    let codes: Vec<&str> = rows.iter().map(|r| r.code.as_str()).collect();
+    assert_eq!(codes, ["N1-S1", "N1-S2", "N1-S3", "LP1-S1", "LP1-S2"], "{}", history(&app));
+    for row in &rows[..3] {
+        assert!((row.area_m2.unwrap() - 8.10).abs() < 1e-9, "{row:?}");
+    }
+    assert!((rows[1].volume_m3.unwrap() - 8.10 * 0.09).abs() < 1e-9);
+    for row in &rows[3..] {
+        assert!((row.area_m2.unwrap() - 11.70).abs() < 1e-9, "{row:?}");
+    }
+    assert!(abaco.strati.notices.is_empty(), "{:?}", abaco.strati.notices);
+    let table = render_tables(&abaco)
+        .into_iter()
+        .find(|t| t.kind == TableKind::Strati)
+        .expect("tabella Stratigrafie");
+    assert_eq!(table.rows.len(), 5);
+    // Totali per materiale: Intonaco (2 righe), Laterizio forato, Ceramica, Massetto.
+    assert_eq!(table.totals.len(), 4);
+    assert_eq!(table.totals[0][5].text, "16,20");
+    let csv = to_csv(&abaco);
+    let strata: Vec<&str> = csv.lines().filter(|l| l.starts_with("strato ")).collect();
+    assert_eq!(strata.len(), 5, "{csv}");
+    assert!(
+        strata[1].starts_with("strato parete;N1-S2;Laterizio forato;1,0000;3,0000;;2,7000;no;8,1000;m²;"),
+        "{}",
+        strata[1]
+    );
+    assert!(strata[3].starts_with("strato solaio;LP1-S1;Ceramica;1,0000;11,7000;;;no;11,7000;m²;"), "{}", strata[3]);
+    assert!(strata[1].contains("sp. 9,0 cm"));
+}
+
+/// Una parete con strati che non sommano lo spessore della muratura: avviso,
+/// righe comunque; una stratigrafia rimossa: avviso, nessuna riga.
+#[test]
+fn strata_warn_on_a_wrong_sum_and_on_a_missing_stratigraphy() {
+    use crate::bim::abaco::{compute_abaco, AbacoOptions};
+    use crate::bim::report::Notice;
+    let mut app = fresh_app();
+    load(&mut app, case_a(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    run(&mut app, "AL_NUOVO 2,0 2,3 0.12");
+    run(&mut app, "AL_STRATIGRAFIA Nuova T14 Parete Intonaco 0.015; Laterizio forato 0.10; Intonaco 0.015");
+    run(&mut app, "AL_STRATIGRAFIA Assegna T14 2.0,1.5");
+    let opts = AbacoOptions {
+        unit: DrawingUnit::Metri,
+        tol: 1e-6,
+        room_tol: 1e-6,
+    };
+    let abaco = compute_abaco(doc(&app), &opts);
+    assert_eq!(abaco.strati.rows.len(), 3);
+    assert!(
+        abaco.strati.notices.iter().any(|n| matches!(n, Notice::StratigrafiaDiversa { sum_cm, thickness_cm, .. }
+            if sum_cm == "13,0" && thickness_cm == "12,0")),
+        "{:?}",
+        abaco.strati.notices
+    );
+    run(&mut app, "AL_STRATIGRAFIA Rimuovi T14");
+    let abaco = compute_abaco(doc(&app), &opts);
+    assert!(abaco.strati.rows.is_empty());
+    assert!(abaco
+        .notices
+        .iter()
+        .any(|n| matches!(n, Notice::StratigrafiaMancante { what, .. } if what == "N1")));
+}

@@ -91,6 +91,7 @@ fn kind_key(kind: TableKind) -> &'static str {
         TableKind::Locali => "locali",
         TableKind::Aperture => "aperture",
         TableKind::Pareti => "pareti",
+        TableKind::Strati => "strati",
     }
 }
 
@@ -101,6 +102,7 @@ fn kind_from_key(text: &str) -> Option<TableKind> {
         "locali" => Some(TableKind::Locali),
         "aperture" => Some(TableKind::Aperture),
         "pareti" => Some(TableKind::Pareti),
+        "strati" => Some(TableKind::Strati),
         _ => None,
     }
 }
@@ -113,6 +115,7 @@ pub fn kind_name(kind: TableKind) -> &'static str {
         TableKind::Locali => "Locali",
         TableKind::Aperture => "Aperture",
         TableKind::Pareti => "Pareti dei locali",
+        TableKind::Strati => "Stratigrafie",
     }
 }
 

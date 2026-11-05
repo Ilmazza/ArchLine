@@ -122,6 +122,8 @@ pub struct Abaco {
     pub locali: Vec<LocaleLine>,
     /// Le aperture con le detrazioni e le pareti dei locali (parte 3).
     pub aperture: ApertureQuantities,
+    /// Gli strati delle stratigrafie assegnate (parte 6).
+    pub strati: super::strata_quantities::StrataQuantities,
     /// Un [`Notice::RigaIncompleta`] per riga incompleta (zone, poi locali di
     /// fatto, poi di progetto), poi gli avvisi delle zone, dei locali di fatto
     /// e di quelli di progetto (senza quelli del solo disegno,
@@ -181,12 +183,24 @@ pub fn compute_abaco(doc: &Document, opts: &AbacoOptions) -> Abaco {
     );
     push_unique(&mut notices, aperture.notices.clone());
 
+    // Parte 6: gli strati, sulle righe delle nuove murature e dei locali di
+    // progetto.
+    let nuove_rows: Vec<ZoneRow> = zones
+        .iter()
+        .filter(|row| row.kind == ZoneKind::Nuova)
+        .cloned()
+        .collect();
+    let strati =
+        super::strata_quantities::strata_quantities(doc, &nuove_rows, &progetto, opts.unit);
+    push_unique(&mut notices, strati.notices.clone());
+
     let mut abaco = Abaco {
         demolizioni: Vec::new(),
         varchi: Vec::new(),
         nuove: Vec::new(),
         locali: pair_rooms(fatto, progetto),
         aperture,
+        strati,
         notices,
     };
     for row in zones {
@@ -493,6 +507,7 @@ fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
         .chain(rooms(Phase::Fatto))
         .chain(rooms(Phase::Progetto))
         .chain(super::abaco_aperture::csv_records(&abaco.aperture))
+        .chain(super::abaco_strata::csv_records(abaco))
         .collect()
 }
 
@@ -501,7 +516,7 @@ fn csv_records(abaco: &Abaco) -> Vec<CsvRecord> {
 /// effettivo (area ÷ lunghezza) fa sì che lunghezza × spessore × altezza sia
 /// il volume anche con buchi o con l'asse accorciato, a meno
 /// dell'arrotondamento dei fattori scritti.
-fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
+pub(super) fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
     let finite = |value: Option<f64>| value.filter(|v| v.is_finite());
     // Solo le righe complete; la quantità si riscrive dai fattori (Ruling S).
     finite(row.main())?;
@@ -557,7 +572,7 @@ fn zone_record(row: &ZoneRow) -> Option<CsvRecord> {
 /// netta, un fattore solo. L'altezza non è un fattore, ma il suo stato resta:
 /// `n.d.` per un locale senza altezza, che è completo (Ruling O), con il
 /// motivo nelle note.
-fn room_record(row: &RoomRow, line_note: Option<&str>) -> Option<CsvRecord> {
+pub(super) fn room_record(row: &RoomRow, line_note: Option<&str>) -> Option<CsvRecord> {
     if !row.is_complete() {
         return None;
     }
