@@ -361,6 +361,7 @@ fn paper_space_is_refused() {
         ("AL_FINESTRA", 0),
         ("AL_TAGLIO 2,-1 2,4 3,1.5 A-A", 6),
         ("AL_SEZIONE", 6),
+        ("AL_PROSPETTO S", 6),
     ] {
         let mut app = fresh_app();
         load(
@@ -5243,4 +5244,74 @@ fn al_sezione_without_cuts_says_so() {
     assert!(history(&app).contains("nessun taglio nel disegno"), "{}", history(&app));
     assert!(sections_in(doc(&app)).is_empty());
     assert_eq!(undo_steps(&app), steps);
+}
+
+// -------------------------------------------------------- AL_PROSPETTO
+
+/// Parte 4, task 7: `AL_PROSPETTO` da script. Il caso A con la porta, i
+/// locali e l'altezza del livello: `S` dà tre prospetti (fatto, demolizioni e
+/// costruzioni, progetto) posati a destra del modello; `N` ne aggiunge altri
+/// senza toccare il sud; rilanciare `S` sostituisce solo quelli del sud; le
+/// sezioni (`AL_SEZIONE`) e i prospetti non si sostituiscono a vicenda.
+#[test]
+fn al_prospetto_places_three_drawings_per_view_and_replaces_by_name() {
+    use crate::bim::section_build::DrawingKind;
+    use crate::bim::section_place::{drawings_in, sections_in};
+    let mut app = fresh_app();
+    load(&mut app, case_a_with_door(Form::Continua, DrawingUnit::Metri), 6);
+    run(&mut app, "AL_ALTEZZA L 2.70");
+    run(&mut app, "AL_PORTA 4.05,1 4.05,1.9 E 2.1");
+    run(&mut app, "AL_LOCALE 2,1.5 A");
+    run(&mut app, "AL_LOCALE 6,1.5 B");
+    let survey = rilievo_snapshot(&app);
+    let handles_of = |app: &OpenCADStudio, name: &str| -> Vec<Handle> {
+        let mut found: Vec<Handle> = drawings_in(doc(app), DrawingKind::Prospetto)
+            .into_iter()
+            .filter(|(_, cut, _)| cut == name)
+            .map(|(handle, _, _)| handle)
+            .collect();
+        found.sort_by_key(|h| h.value());
+        found
+    };
+
+    run(&mut app, "AL_PROSPETTO S");
+    let south = handles_of(&app, "Sud");
+    assert!(!south.is_empty(), "storia: {}", history(&app));
+    let mut phases: Vec<String> = drawings_in(doc(&app), DrawingKind::Prospetto)
+        .into_iter()
+        .map(|(_, _, phase)| phase)
+        .collect();
+    phases.sort();
+    phases.dedup();
+    assert_eq!(phases, ["demolizioni-costruzioni", "fatto", "progetto"]);
+    assert_eq!(rilievo_snapshot(&app), survey, "il rilievo non si tocca");
+    assert!(sections_in(doc(&app)).is_empty(), "un prospetto non è una sezione");
+
+    run(&mut app, "AL_PROSPETTO N");
+    let north = handles_of(&app, "Nord");
+    assert!(!north.is_empty());
+    assert_eq!(handles_of(&app, "Sud"), south, "il sud non si tocca");
+
+    run(&mut app, "AL_PROSPETTO S");
+    let south_again = handles_of(&app, "Sud");
+    assert_eq!(south_again.len(), south.len());
+    assert!(south_again.iter().all(|h| !south.contains(h)), "sostituito");
+    assert_eq!(handles_of(&app, "Nord"), north, "il nord non si tocca");
+
+    // Una sezione non cancella i prospetti, né il contrario.
+    run(&mut app, "AL_TAGLIO -1,1.5 9,1.5 4,3 A-A");
+    run(&mut app, "AL_SEZIONE");
+    assert!(!sections_in(doc(&app)).is_empty(), "storia: {}", history(&app));
+    assert_eq!(handles_of(&app, "Sud"), south_again);
+    assert_eq!(handles_of(&app, "Nord"), north);
+
+    // Direzione sconosciuta: errore, niente cambia.
+    dispatch_line(&mut app, "AL_PROSPETTO nordest");
+    assert!(history(&app).contains("direzione \"nordest\" sconosciuta"), "{}", history(&app));
+    assert_eq!(handles_of(&app, "Sud"), south_again);
+
+    // Un nome proprio e un angolo, digitati sulla riga di comando (il runner degli
+    // script passa le parole una a una alla scelta Nord/Sud/Est/Ovest).
+    dispatch_line(&mut app, "AL_PROSPETTO 180 Fronte strada");
+    assert!(!handles_of(&app, "Fronte strada").is_empty(), "storia: {}", history(&app));
 }

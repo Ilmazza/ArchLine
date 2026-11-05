@@ -56,6 +56,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "AL_APERTURA_DATI",
         "AL_TAGLIO",
         "AL_SEZIONE",
+        "AL_PROSPETTO",
     ]
 });
 
@@ -107,6 +108,7 @@ impl OpenCADStudio {
             // Parte 4: in `bim_taglio.rs`.
             "AL_TAGLIO" => Some(self.bim_taglio(i)),
             "AL_SEZIONE" => Some(self.bim_sezione(i, cmd)),
+            "AL_PROSPETTO" => Some(self.bim_prospetto(i, cmd)),
             _ => None,
         }
     }

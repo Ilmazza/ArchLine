@@ -18,13 +18,14 @@ use codec::xdata::{ExtendedDataRecord, XDataValue};
 use codec::{Color, Document, EntityType, Handle};
 use glam::DVec3;
 
-use super::section_build::SectionDrawing;
+use super::section_build::{DrawingKind, SectionDrawing};
 use super::section_draw::LAYER_SEZIONI;
 use super::APP_SEZIONE;
 
 const VERSION: i16 = 1;
 const KEY_CUT: &str = "taglio";
 const KEY_PHASE: &str = "fase";
+const KEY_KIND: &str = "tipo";
 const ACI_BIANCO: i16 = 7;
 
 /// Distanza verticale tra due disegni, in altezze di testo.
@@ -33,10 +34,12 @@ pub const GAP_TEXTS: f64 = 4.0;
 /// testo, in altezze di testo: tre righe al più (R117).
 const LIMITS_DEPTH_TEXTS: f64 = 3.0;
 
-fn record(cut: &str, phase: &str) -> ExtendedDataRecord {
+fn record(kind: DrawingKind, cut: &str, phase: &str) -> ExtendedDataRecord {
     let mut rec = ExtendedDataRecord::new(APP_SEZIONE);
     for value in [
         XDataValue::Integer16(VERSION),
+        XDataValue::String(KEY_KIND.into()),
+        XDataValue::String(kind.key().into()),
         XDataValue::String(KEY_CUT.into()),
         XDataValue::String(cut.into()),
         XDataValue::String(KEY_PHASE.into()),
@@ -47,13 +50,22 @@ fn record(cut: &str, phase: &str) -> ExtendedDataRecord {
     rec
 }
 
-/// Taglio e fase di un record `ARCHLINE_SEZIONE`.
+/// Taglio (o prospetto) e fase di un record `ARCHLINE_SEZIONE`.
 pub fn decode(rec: &ExtendedDataRecord) -> Option<(String, String)> {
-    let (mut cut, mut phase) = (None, None);
+    decode_with_kind(rec).map(|(_, cut, phase)| (cut, phase))
+}
+
+/// Tipo, nome e fase; senza `tipo` (record di prima) è una sezione.
+pub fn decode_with_kind(rec: &ExtendedDataRecord) -> Option<(DrawingKind, String, String)> {
+    let (mut kind, mut cut, mut phase) = (DrawingKind::Sezione, None, None);
     let values = &rec.values;
     let mut i = 0;
     while i + 1 < values.len() {
         match (&values[i], &values[i + 1]) {
+            (XDataValue::String(k), XDataValue::String(v)) if k == KEY_KIND => {
+                kind = DrawingKind::from_key(v).unwrap_or(kind);
+                i += 2;
+            }
             (XDataValue::String(k), XDataValue::String(v)) if k == KEY_CUT => {
                 cut = Some(v.clone());
                 i += 2;
@@ -65,7 +77,7 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(String, String)> {
             _ => i += 1,
         }
     }
-    Some((cut?, phase?))
+    Some((kind, cut?, phase?))
 }
 
 /// L'angolo in basso a sinistra e in alto a destra delle entità (linee,
@@ -109,7 +121,7 @@ pub fn place(drawings: Vec<SectionDrawing>, anchor: [f64; 2], text_height: f64) 
         // l'inserimento dei limiti, e il loro testo scende ancora di qualche riga.
         let bottom = lo[1] - LIMITS_DEPTH_TEXTS * text_height;
         let shift = DVec3::new(anchor[0] - lo[0], top - hi[1], 0.0);
-        let rec = record(&drawing.cut_name, drawing.phase.key());
+        let rec = record(drawing.kind, &drawing.cut_name, drawing.phase.key());
         for mut entity in drawing.entities {
             crate::entities::traits::EntityTypeOps::apply_transform(
                 &mut entity,
@@ -123,29 +135,40 @@ pub fn place(drawings: Vec<SectionDrawing>, anchor: [f64; 2], text_height: f64) 
     out
 }
 
-/// Le entità delle sezioni già posate (taglio e fase di ognuna), nello spazio
-/// modello.
-pub fn sections_in(doc: &Document) -> Vec<(Handle, String, String)> {
+/// Le entità già posate di un tipo (taglio o prospetto e fase di ognuna), nello
+/// spazio modello.
+pub fn drawings_in(doc: &Document, kind: DrawingKind) -> Vec<(Handle, String, String)> {
     doc.block_records
         .iter()
         .filter(|record| record.is_model_space())
         .flat_map(|record| record.entity_handles.iter().copied())
         .filter_map(|handle| {
             let rec = doc.get_entity(handle)?.common().extended_data.get_record(APP_SEZIONE)?;
-            let (cut, phase) = decode(rec)?;
-            Some((handle, cut, phase))
+            let (found, cut, phase) = decode_with_kind(rec)?;
+            (found == kind).then_some((handle, cut, phase))
         })
         .collect()
 }
 
-/// L'angolo in alto a sinistra dell'insieme delle sezioni già posate.
-pub fn existing_anchor(doc: &Document) -> Option<[f64; 2]> {
-    let handles: Vec<Handle> = sections_in(doc).into_iter().map(|(h, _, _)| h).collect();
-    let entities: Vec<EntityType> = handles
-        .iter()
-        .filter_map(|h| doc.get_entity(*h).cloned())
+/// Le entità delle sezioni già posate.
+pub fn sections_in(doc: &Document) -> Vec<(Handle, String, String)> {
+    drawings_in(doc, DrawingKind::Sezione)
+}
+
+/// L'angolo in alto a sinistra delle entità già posate di un tipo, e di un
+/// solo nome se dato.
+pub fn existing_anchor_of(doc: &Document, kind: DrawingKind, name: Option<&str>) -> Option<[f64; 2]> {
+    let entities: Vec<EntityType> = drawings_in(doc, kind)
+        .into_iter()
+        .filter(|(_, cut, _)| name.map_or(true, |n| n == cut))
+        .filter_map(|(handle, _, _)| doc.get_entity(handle).cloned())
         .collect();
     bbox(&entities).map(|(lo, hi)| [lo[0], hi[1]])
+}
+
+/// L'angolo in alto a sinistra dell'insieme delle sezioni già posate.
+pub fn existing_anchor(doc: &Document) -> Option<[f64; 2]> {
+    existing_anchor_of(doc, DrawingKind::Sezione, None)
 }
 
 /// Manca il layer o l'APPID delle sezioni?
@@ -197,6 +220,7 @@ mod tests {
             Tint::Plain,
         )];
         SectionDrawing {
+            kind: DrawingKind::Sezione,
             cut_name: name.into(),
             phase,
             entities: draw_section(&format!("Sezione {name}"), &list, [0.0, 0.0], 1.0, 0.25),

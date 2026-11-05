@@ -28,6 +28,7 @@ use super::project::project_geometry;
 use super::quantities_rooms::{fatto_room_rows, project_room_rows, RoomRow};
 use super::record;
 use super::report::Notice;
+use super::elevation::{draw_elevation, elevation, ElevationAperture};
 use super::section::{elements, profile, Element, SectionAperture, Span};
 use super::section_draw::{draw_section, Tint};
 use super::units::DrawingUnit;
@@ -71,9 +72,35 @@ pub struct SectionOptions {
     pub room_tol: f64,
 }
 
-/// Un disegno di sezione, con le entità già a partire da `(0; 0)`.
+/// Che cosa disegna un [`SectionDrawing`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawingKind {
+    Sezione,
+    Prospetto,
+}
+
+impl DrawingKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Sezione => "sezione",
+            Self::Prospetto => "prospetto",
+        }
+    }
+
+    pub fn from_key(text: &str) -> Option<Self> {
+        match text {
+            "sezione" => Some(Self::Sezione),
+            "prospetto" => Some(Self::Prospetto),
+            _ => None,
+        }
+    }
+}
+
+/// Un disegno di sezione o di prospetto, con le entità già a partire da
+/// `(0; 0)`. `cut_name` è il nome del taglio o del prospetto.
 #[derive(Clone, Debug)]
 pub struct SectionDrawing {
+    pub kind: DrawingKind,
     pub cut_name: String,
     pub phase: SectionPhase,
     pub entities: Vec<EntityType>,
@@ -337,11 +364,111 @@ pub fn build_sections(doc: &Document, cuts: &[CutGeom], opts: &SectionOptions) -
             let entities = draw_section(&title, &list, [0.0, 0.0], per_metre, text_height);
             if !entities.is_empty() {
                 build.drawings.push(SectionDrawing {
+                    kind: DrawingKind::Sezione,
                     cut_name: name.clone(),
                     phase,
                     entities,
                 });
             }
+        }
+    }
+    build
+}
+
+fn elevation_apertures(
+    found: &[ApertureGeom],
+    keep: impl Fn(ApertureState) -> bool,
+    per_metre: f64,
+) -> Vec<ElevationAperture> {
+    codes_of(found)
+        .into_iter()
+        .filter(|(i, _)| keep(found[*i].aperture.state))
+        .map(|(i, code)| {
+            let a = &found[i].aperture;
+            ElevationAperture {
+                code,
+                kind: a.kind,
+                state: a.state,
+                axis: a.axis,
+                thickness: a.thickness,
+                height_m: a.height.map(|h| h / per_metre),
+                sill_m: a.sill.map(|s| s / per_metre),
+            }
+        })
+        .collect()
+}
+
+/// I tre prospetti con normale uscente `normal` e nome `name` (R120): fatto
+/// (facciate del rilievo, aperture esistenti e da demolire), progetto
+/// (facciate di progetto, aperture esistenti e nuove) e demolizioni e
+/// costruzioni (le facciate del fatto con **tutte** le aperture, le demolite in
+/// giallo e le nuove in rosso). Un prospetto senza facciate disegnabili non dà
+/// il disegno di quella fase.
+pub fn build_elevations(
+    doc: &Document,
+    name: &str,
+    normal: [f64; 2],
+    opts: &SectionOptions,
+) -> SectionBuild {
+    let mut build = SectionBuild::default();
+    let per_metre = opts.unit.per_metre();
+    let text_height = TEXT_HEIGHT_M * per_metre;
+    let (fatto, progetto) = plans(doc, opts);
+    let found = apertures_in(doc);
+    let sets = [
+        (
+            SectionPhase::Fatto,
+            &fatto,
+            elevation_apertures(
+                &found,
+                |s| matches!(s, ApertureState::Esistente | ApertureState::Demolita),
+                per_metre,
+            ),
+        ),
+        (
+            SectionPhase::Comparativa,
+            &fatto,
+            elevation_apertures(&found, |_| true, per_metre),
+        ),
+        (
+            SectionPhase::Progetto,
+            &progetto,
+            elevation_apertures(
+                &found,
+                |s| matches!(s, ApertureState::Esistente | ApertureState::Nuova),
+                per_metre,
+            ),
+        ),
+    ];
+    for (phase, plan, apertures) in sets {
+        let (result, notices) = elevation(
+            &plan.faces,
+            &plan.outlines,
+            &plan.rooms,
+            &apertures,
+            normal,
+            per_metre,
+            opts.tol,
+        );
+        for notice in notices {
+            let notice = match notice {
+                Notice::SezioneEsclusa { what, reason } => Notice::SezioneEsclusa {
+                    what: format!("{what} (prospetto {name})"),
+                    reason,
+                },
+                other => other,
+            };
+            push_unique(&mut build.notices, vec![notice]);
+        }
+        let title = format!("Prospetto {name} - {}", phase.label());
+        let entities = draw_elevation(&title, &result, [0.0, 0.0], per_metre, text_height);
+        if !entities.is_empty() {
+            build.drawings.push(SectionDrawing {
+                kind: DrawingKind::Prospetto,
+                cut_name: name.to_string(),
+                phase,
+                entities,
+            });
         }
     }
     build
@@ -623,5 +750,51 @@ mod tests {
         let mut theirs: Vec<String> = abaco.aperture.rows.iter().map(|r| r.code.clone()).collect();
         theirs.sort();
         assert_eq!(mine, theirs);
+    }
+
+    /// I tre prospetti del fronte sud del caso A con la porta: la facciata, la
+    /// porta non cade sul fronte; nessun avviso. Il nord ha la stessa
+    /// larghezza; con un'apertura nuova sul fronte, nella comparativa è rossa.
+    #[test]
+    fn elevations_come_in_three_phases() {
+        let mut scene = scene();
+        let south = build_elevations(&scene.document, "Sud", [0.0, -1.0], &OPTS);
+        let phases: Vec<SectionPhase> = south.drawings.iter().map(|d| d.phase).collect();
+        assert_eq!(
+            phases,
+            [SectionPhase::Fatto, SectionPhase::Comparativa, SectionPhase::Progetto]
+        );
+        assert!(south.drawings.iter().all(|d| d.kind == DrawingKind::Prospetto && d.cut_name == "Sud"));
+        assert!(south.notices.is_empty(), "{:?}", south.notices);
+
+        scene.add_entity(
+            aperture_polyline(&Aperture {
+                kind: ApertureKind::Finestra,
+                axis: ([1.0, -0.15], [2.2, -0.15]),
+                thickness: 0.30,
+                height: Some(1.2),
+                sill: Some(0.9),
+                threshold: false,
+                ..door(ApertureState::Nuova)
+            })
+            .unwrap(),
+        );
+        let with_window = build_elevations(&scene.document, "Sud", [0.0, -1.0], &OPTS);
+        let red = |phase: SectionPhase| -> usize {
+            with_window
+                .drawings
+                .iter()
+                .find(|d| d.phase == phase)
+                .map(|d| {
+                    d.entities
+                        .iter()
+                        .filter(|e| matches!(e, EntityType::LwPolyline(p) if p.common.color == codec::Color::from_index(1)))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(red(SectionPhase::Fatto), 0, "la nuova non c'è nel fatto");
+        assert_eq!(red(SectionPhase::Comparativa), 1, "nella comparativa è rossa");
+        assert_eq!(red(SectionPhase::Progetto), 1, "nel progetto c'è, rossa");
     }
 }
