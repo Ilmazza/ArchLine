@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Prospetto">
+  <rect x="2.25" y="4.5" width="19.5" height="15.75" stroke="#B4B6B9" stroke-width="1.5" stroke-linejoin="miter"/>
+  <rect x="5.25" y="8.25" width="5.25" height="5.25" stroke="#6DB7ED" stroke-width="2" stroke-linejoin="miter"/>
+  <rect x="14.25" y="11.25" width="4.5" height="9" stroke="#6DB7ED" stroke-width="2" stroke-linejoin="miter"/>
+  <path d="M0.75 20.25H23.25" stroke="#B4B6B9" stroke-width="2.25"/>
+</svg>

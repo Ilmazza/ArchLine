@@ -1,5 +1,5 @@
 //! Scheda «Ristrutturazione» del ribbon (workspace OpenCAD Studio): gli stessi
-//! dodici comandi `AL_*` di Tools > Ristrutturazione e della barra omonima del
+//! quindici comandi `AL_*` di Tools > Ristrutturazione e della barra omonima del
 //! workspace AutoCAD Classic, con le stesse icone (`assets/icons/ristr_*.svg`).
 //! Modulo proprio di ArchLine: nessun comando nuovo, solo l'accesso dal ribbon.
 
@@ -7,7 +7,7 @@ use crate::modules::{CadModule, IconKind, ModuleEvent, RibbonGroup, RibbonItem, 
 
 pub struct RistrutturazioneModule;
 
-/// I dodici comandi in ordine di gruppo: id, etichetta, icona.
+/// I quindici comandi in ordine di gruppo: id, etichetta, icona.
 fn command(id: &'static str, label: &'static str, icon: &'static [u8]) -> RibbonItem {
     RibbonItem::LargeTool(ToolDef {
         id,
@@ -91,6 +91,26 @@ impl CadModule for RistrutturazioneModule {
                     ],
                 },
                 RibbonGroup {
+                    title: "Sezioni",
+                    tools: vec![
+                        command(
+                            "AL_TAGLIO",
+                            "Taglio",
+                            include_bytes!("../../../assets/icons/ristr_taglio.svg"),
+                        ),
+                        command(
+                            "AL_SEZIONE",
+                            "Sezione",
+                            include_bytes!("../../../assets/icons/ristr_sezione.svg"),
+                        ),
+                        command(
+                            "AL_PROSPETTO",
+                            "Prospetto",
+                            include_bytes!("../../../assets/icons/ristr_prospetto.svg"),
+                        ),
+                    ],
+                },
+                RibbonGroup {
                     title: "Elaborati",
                     tools: vec![
                         command(
@@ -120,7 +140,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tab_carries_the_twelve_commands_of_the_menu() {
+    fn the_tab_carries_the_fifteen_commands_of_the_menu() {
         let ids: Vec<&str> = RistrutturazioneModule
             .ribbon_groups()
             .iter()
@@ -142,6 +162,9 @@ mod tests {
                 "AL_PORTA",
                 "AL_FINESTRA",
                 "AL_APERTURA_DATI",
+                "AL_TAGLIO",
+                "AL_SEZIONE",
+                "AL_PROSPETTO",
                 "AL_ESTRAI",
                 "AL_ABACO",
                 "AL_ABACO_CSV",
