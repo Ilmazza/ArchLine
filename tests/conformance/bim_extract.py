@@ -39,6 +39,12 @@ si duplicano), `AL_PROSPETTO S` e `AL_ESTRAI`. Nei tre DWG: due titoli (sezione 
 dell'elaborato, il poche' del muro d'ambito 0,30 x 2,70 su AL-SEZIONI, campiture solide, il taglio su AL-TAGLI, nessun
 XDATA ne' APPID ARCHLINE.
 
+Modello 3D (BIM parte 5), quinto giro (righe con il prefisso "modello 3D, "): il caso A con la porta, l'altezza del
+livello, i locali A e B, `AL_MODELLO3D` (due volte: i modelli si sostituiscono, non si duplicano) e `AL_ESTRAI`. Nel
+DWG di fatto solo 3DFACE su AL-3D-FATTO, in quello di progetto solo su AL-3D-PROGETTO, nella comparativa nessuna;
+coperchi a quota 2,70 per 7,26 m2 (7,17 di muro e 0,09 di testa della porta) e pavimenti a quota 0 per 23,70 m2
+(A 12,00 + B 11,70), calcolati a mano; nessun XDATA ne' APPID ARCHLINE.
+
 Uso: bim_extract.py [PATH_ESEGUIBILE] [--keep DIR]
      (default: target\\release\\ArchLine.exe nella radice del repo)
 Exit: 0 tutti i controlli OK, 1 almeno un controllo FALLITO, 2 errore del banco (eseguibile mancante,
@@ -1037,6 +1043,87 @@ def run_section_case(rep, exe, env, work):
     check_section_extract(rep, docs)
 
 
+MODEL3D_PREFIX = "modello 3D, "
+MODEL3D_BASE = "casoAmodello3d"
+MODEL3D_CMDS = (
+    "AL_ALTEZZA L 2.70",
+    "AL_PORTA 4.05,1 4.05,1.9 E 2.1",
+    "AL_LOCALE 2,1.5 A",
+    "AL_LOCALE 6,1.5 B",
+    "AL_MODELLO3D",
+    "AL_MODELLO3D",
+)
+LAYER_3D = {"fatto": "AL-3D-FATTO", "progetto": "AL-3D-PROGETTO"}
+# Calcolati a mano dal caso A con la porta 0,90 x 2,10 (spec parte 5 §7).
+MODEL3D_TOP_M2 = 7.26
+MODEL3D_FLOOR_M2 = 23.70
+
+
+def face_area_at(face, z, tol=1e-6):
+    """L'area in pianta di una 3DFACE orizzontale a quota `z` (triangolo se il quarto punto ripete il terzo), None se
+    non e' orizzontale a quella quota."""
+    pts = [face.dxf.vtx0, face.dxf.vtx1, face.dxf.vtx2, face.dxf.vtx3]
+    if any(abs(p[2] - z) > tol for p in pts):
+        return None
+    if (pts[3] - pts[2]).magnitude < tol:
+        pts = pts[:3]
+    area = 0.0
+    for a, b in zip(pts, pts[1:] + pts[:1]):
+        area += a[0] * b[1] - b[0] * a[1]
+    return abs(area) / 2.0
+
+
+def check_model3d_extract(rep, docs):
+    """Le 3DFACE di ogni DWG: solo quelle della sua fase, nessuna nella comparativa; coperchi e pavimenti con le aree
+    attese (un modello solo: AL_MODELLO3D rilanciato non duplica); nessun XDATA ne' APPID ARCHLINE."""
+    for key, doc in docs.items():
+        faces = list(doc.modelspace().query("3DFACE"))
+        by_layer = {layer: [f for f in faces if f.dxf.layer == layer] for layer in LAYER_3D.values()}
+        if key == "comparativa":
+            rep.check(not faces, f"{key}: nessuna 3DFACE", f"{len(faces)} 3DFACE")
+        else:
+            mine = LAYER_3D[key]
+            other = [layer for layer in LAYER_3D.values() if layer != mine][0]
+            good = bool(by_layer[mine]) and not by_layer[other] and len(by_layer[mine]) == len(faces)
+            rep.check(good, f"{key}: 3DFACE della sola fase",
+                      f"{len(by_layer[mine])} su {mine}, {len(by_layer[other])} su {other}, {len(faces)} in tutto")
+            top = sum(a for a in (face_area_at(f, 2.7) for f in by_layer[mine]) if a is not None)
+            rep.check(abs(top - MODEL3D_TOP_M2) < 1e-6, f"{key}: coperchi a 2,70",
+                      f"{top:.4f} m2 (attesi {MODEL3D_TOP_M2:.2f})")
+            floor = sum(a for a in (face_area_at(f, 0.0) for f in by_layer[mine]) if a is not None)
+            rep.check(abs(floor - MODEL3D_FLOOR_M2) < 1e-6, f"{key}: pavimenti a quota 0",
+                      f"{floor:.4f} m2 (attesi {MODEL3D_FLOOR_M2:.2f})")
+        xdata, table = arch_xdata_appids(doc)
+        rep.check(not xdata and not table, f"{key}: niente ARCHLINE",
+                  "nessun XDATA ne' APPID ARCHLINE*" if not xdata and not table else f"XDATA {xdata}, APPID {table}")
+
+
+def run_model3d_case(rep, exe, env, work):
+    """Il caso A con la porta: altezza, locali, `AL_MODELLO3D` due volte e `AL_ESTRAI`; poi i tre DWG riconvertiti si
+    controllano con ezdxf."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    out_dir = work / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = build_case_a_door(work / f"{MODEL3D_BASE}.dxf")
+    before = sha256_of(src)
+    session = Session([exe, "--serve"], env, work, work / "serve.stderr.txt")
+    try:
+        resp = session.request({"op": "open", "path": str(src)})
+        rep.check(bool(resp.get("ok")), "open", f"disegno aperto, entita': {resp.get('total')}" if resp.get("ok") else str(resp))
+        for cmd in (*MODEL3D_CMDS, f"AL_ESTRAI {out_dir}"):
+            run_ok(rep, session, cmd)
+    except BaseException:
+        session.kill()
+        raise
+    code = session.close()
+    rep.check(code == 0, "sessione: chiusura", "exit 0" if code == 0 else f"exit {code}. {session.stderr_tail()}")
+    after = sha256_of(src)
+    rep.check(after == before, "sorgente intatta", "DXF di partenza identico byte per byte (SHA-256)"
+              if after == before else "il DXF di partenza e' cambiato")
+    docs = read_extracts(rep, exe, env, work, out_dir, work, base=MODEL3D_BASE)
+    check_model3d_extract(rep, docs)
+
 def run_bim_extract(exe, work, rep):
     """Tutto il banco in `work` (percorso senza spazi): il giro con l'asse esatto in `work`, quello con l'asse
     oltre le facce in `work/asse-oltre` (stessi controlli, nomi col prefisso). Ritorna l'oggetto Report."""
@@ -1051,6 +1138,7 @@ def run_bim_extract(exe, work, rep):
     run_case(Prefixed(rep, PAST_PREFIX), exe, env, work / "asse-oltre", src, src_doc, before, AXIS_PAST)
     run_door_case(Prefixed(rep, DOOR_PREFIX), exe, env, work / "porta")
     run_section_case(Prefixed(rep, SECTION_PREFIX), exe, env, work / "sezione")
+    run_model3d_case(Prefixed(rep, MODEL3D_PREFIX), exe, env, work / "modello3d")
     return rep
 
 

@@ -17,8 +17,25 @@ Spec: `docs/superpowers/specs/2026-11-05-bim-modello-3d-design.md`. Piano:
 
 ## Da confermare con Mauro
 
-Le scelte del §9 della spec.
+Le sette scelte del §9 della spec (spaccato senza tetto né solai, solo `3DFACE`, due modelli e nessun 3D delle
+demolizioni, quattro assonometrie e una prospettiva SE 30° 50 mm, colori grigi senza colore per stato, nessuna
+immagine, dipendenza dalle parti 3 e 4 non ancora unite), più le scelte numeriche di R128 (rapporto 16/9, margine
+1,15) e di R129 (5 m di stacco la prima volta).
 
 ## Da vedere a schermo / in AutoCAD
 
-Da compilare a fine implementazione.
+- Su Windows: `AL_MODELLO3D` sul caso A, i due modelli affiancati, le cinque viste con VIEW (l'inquadratura e la
+  prospettiva vera: ArchLine ricava la distanza dall'altezza della vista), l'icona e la barra a sedici comandi dopo
+  aver riselezionato AutoCAD Classic, il gruppo «Sezioni» del ribbon.
+- In AutoCAD vero: le `3DFACE` nei DWG di fatto e di progetto (stile visivo ombreggiato), le viste con nome
+  (`VIEW`), AUDIT.
+
+## Verifica (2026-11-05, build release del branch)
+
+- `cargo test --locked --lib bim::` 459 ok; `--lib app::bim_tests` 118 ok; tutta la libreria 5198 ok, 0 falliti,
+  33 ignorati.
+- Banco `bim_extract.py`: 240 controlli su 240 (quinto giro «modello 3D, »: 26 controlli; nei DWG di fatto e di
+  progetto 46 `3DFACE` ciascuno, coperchi 7,2600 m² a 2,70 e pavimenti 23,7000 m² a quota 0, calcolati a mano;
+  comparativa senza `3DFACE`; `AL_MODELLO3D` rilanciato non duplica). `unittest` del banco 106 ok.
+- Limite: un solo caso sintetico, senza lavori (i due modelli sono uguali); il caso con il tramezzo demolito è
+  provato solo nei test Rust (`model3d.rs`).
