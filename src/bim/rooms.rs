@@ -10,8 +10,31 @@
 //! porta un record XDATA `ARCHLINE_LOCALE`, in quest'ordine: `Integer16(1)`
 //! (versione), `"fase"`, `"fatto"|"progetto"`, `"parte"`,
 //! `"contorno"|"testo"|"seme"`, `"nome"`, `<nome>`, `"numero"`, `<numero>`
-//! (anche vuoto), `"punto"`, `Point3D(seme)`, `"origine"`, `"punto-interno"`.
-//! La lettura va per chiave e salta ciò che non conosce. Le entità nascono con
+//! (anche vuoto), `"punto"`, `Position3D(seme)`, `"origine"`, `"punto-interno"`,
+//! `"ancora"`, `Point3D(ancora)`. La lettura va per chiave e salta ciò che non
+//! conosce.
+//!
+//! **Identità, punto di calcolo, posizione dell'etichetta.** Il seme è una
+//! posizione (1011) perché il codec la porta dietro all'entità in MOVE, COPY,
+//! ROTATE, SCALE e MIRROR: con `Point3D` (1010) una copia traslata teneva il
+//! seme dell'originale e `same_room` la prendeva per lo stesso locale. Ma il
+//! contorno e il testo di un locale di fatto portano ognuno il proprio seme, e
+//! spostando il solo testo (o il solo contorno) i due semi si separano. Per
+//! questo c'è l'**ancora**: il punto in cui il locale è nato, scritto come
+//! 1010 e quindi fermo qualunque cosa si trasformi. [`rooms_in`] riabbina un
+//! testo staccato al suo contorno solo dove l'abbinamento è certo, famiglia
+//! per famiglia (stessa ancora): un contorno e un testo soli sono la coppia
+//! anche se un pezzo è stato spostato, e il testo prende il seme del contorno;
+//! con più contorni o più testi (c'è stata una copia) ogni testo deve avere
+//! esattamente un contorno dallo stesso seme, altrimenti tutta la famiglia è
+//! ambigua ([`ambiguous_parts`]): `AL_ALTEZZA` la rifiuta e le misure la
+//! segnalano con `Notice::LocaleAmbiguo`. Un record copiato è identico
+//! all'originale, quindi nel disegno non c'è un dato che separi due etichette
+//! finite sullo stesso seme, né che dica se un'etichetta rimasta senza
+//! contorno per esclusione sia la sua: la scelta silenziosa sarebbe una
+//! scommessa. Tutti gli altri (`same_room`, `AL_AGGIORNA`, abaco) leggono da
+//! `rooms_in`. I record senza ancora (scritti prima) la prendono dal seme, e
+//! all'apertura del disegno [`super::migrate`] li porta al formato corrente. Le entità nascono con
 //! handle `NULL`: chi le inserisce chiama prima `zone::ensure_layers`, che crea
 //! i layer e l'APPID.
 //!
@@ -104,6 +127,7 @@ use crate::command::WorkingPlane;
 use crate::scene::{boundary_polyline_entities, BoundarySource};
 
 use super::report::Notice;
+use crate::scene::view::dispatch::set_entity_xdata;
 use super::units::{area_m2, format_m2, DrawingUnit};
 use super::walls::{face_regions, faces as wall_faces, net_area, region_at, Region};
 use super::zone::{ZoneGeom, ZoneState};
@@ -117,6 +141,7 @@ const KEY_PART: &str = "parte";
 const KEY_NAME: &str = "nome";
 const KEY_NUMBER: &str = "numero";
 const KEY_POINT: &str = "punto";
+const KEY_ANCHOR: &str = "ancora";
 const KEY_ORIGIN: &str = "origine";
 const KEY_HEIGHT: &str = "altezza";
 /// L'unica origine di un locale nel primo giro.
@@ -251,9 +276,11 @@ pub fn encode(room: &Room, part: RoomPart) -> Vec<XDataValue> {
         key(KEY_NUMBER),
         key(&room.number),
         key(KEY_POINT),
-        XDataValue::Point3D(Vector3::new(room.seed[0], room.seed[1], 0.0)),
+        XDataValue::Position3D(Vector3::new(room.seed[0], room.seed[1], 0.0)),
         key(KEY_ORIGIN),
         key(ORIGIN_POINT),
+        key(KEY_ANCHOR),
+        XDataValue::Point3D(Vector3::new(room.seed[0], room.seed[1], 0.0)),
     ];
     if let Some(height) = room.height {
         values.push(key(KEY_HEIGHT));
@@ -265,6 +292,15 @@ pub fn encode(room: &Room, part: RoomPart) -> Vec<XDataValue> {
 /// Legge il record per chiave, saltando ciò che non conosce. `None` senza una
 /// fase, una parte e un punto leggibili; nome e numero assenti valgono vuoti.
 pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
+    let (room, part, _) = decode_with_anchor(rec)?;
+    Some((room, part))
+}
+
+/// Come [`decode`], più l'ancora del record: il punto in cui il locale è nato,
+/// scritto come `Point3D` (1010) perché non si trasforma. I record senza
+/// ancora (scritti prima) hanno per ancora il seme.
+fn decode_with_anchor(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart, [f64; 2])> {
+    let mut anchor = None;
     let (mut phase, mut part, mut seed) = (None, None, None);
     let (mut name, mut number) = (String::new(), String::new());
     let mut height = None;
@@ -292,8 +328,12 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
                 number = text.clone();
                 2
             }
-            (KEY_POINT, Some(XDataValue::Point3D(p))) => {
+            (KEY_POINT, Some(XDataValue::Position3D(p) | XDataValue::Point3D(p))) => {
                 seed = Some([p.x, p.y]);
+                2
+            }
+            (KEY_ANCHOR, Some(XDataValue::Point3D(p) | XDataValue::Position3D(p))) => {
+                anchor = Some([p.x, p.y]);
                 2
             }
             (KEY_HEIGHT, Some(XDataValue::Real(h))) => {
@@ -304,31 +344,234 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<(Room, RoomPart)> {
         };
         i += used;
     }
+    let seed = seed?;
     Some((
         Room {
             phase: phase?,
             name,
             number,
-            seed: seed?,
+            seed,
             height,
         },
         part?,
+        anchor.unwrap_or(seed),
     ))
 }
 
+/// Il record portato al formato corrente, o `None` se lo è già (o non si
+/// legge): il seme da `Point3D` a `Position3D` e l'ancora, se manca, uguale al
+/// seme. Il resto dei valori resta com'è, chiavi sconosciute comprese.
+pub fn migrated_values(rec: &ExtendedDataRecord) -> Option<Vec<XDataValue>> {
+    let (_, _, anchor) = decode_with_anchor(rec)?;
+    let mut values = rec.values.clone();
+    let mut changed = false;
+    let mut has_anchor = false;
+    for i in 0..values.len() {
+        match (&values[i], values.get(i + 1)) {
+            (XDataValue::String(field), Some(XDataValue::Point3D(p))) if field == KEY_POINT => {
+                values[i + 1] = XDataValue::Position3D(*p);
+                changed = true;
+            }
+            (XDataValue::String(field), _) if field == KEY_ANCHOR => has_anchor = true,
+            _ => {}
+        }
+    }
+    if !has_anchor {
+        values.push(key(KEY_ANCHOR));
+        values.push(XDataValue::Point3D(Vector3::new(anchor[0], anchor[1], 0.0)));
+        changed = true;
+    }
+    changed.then_some(values)
+}
+
 /// Le entità di locale dello spazio modello (non quelle in carta o dentro i
-/// blocchi), in ordine di disegno.
+/// blocchi), in ordine di disegno. Il testo di un locale di fatto staccato dal
+/// suo contorno (uno dei due spostato) torna con il seme del contorno, ma solo
+/// dove l'abbinamento è certo ([`pair_fatto`]); gli ambigui restano con il
+/// loro seme ([`ambiguous_parts`]).
 pub fn rooms_in(doc: &Document) -> Vec<(Handle, Room, RoomPart)> {
+    resolved_parts(doc)
+        .into_iter()
+        .map(|(handle, room, part, _)| (handle, room, part))
+        .collect()
+}
+
+/// Le parti di locale con i semi dei testi staccati già riportati a quelli dei
+/// loro contorni ([`pair_fatto`]).
+fn resolved_parts(doc: &Document) -> Vec<Part> {
+    let mut found = collect_parts(doc);
+    for (index, seed) in pair_fatto(&found).repaired {
+        found[index].1.seed = seed;
+    }
+    found
+}
+
+/// Una parte di locale come sta nel disegno: l'entità, il suo record e
+/// l'ancora.
+type Part = (Handle, Room, RoomPart, [f64; 2]);
+
+fn collect_parts(doc: &Document) -> Vec<Part> {
     doc.block_records
         .iter()
         .filter(|record| record.is_model_space())
         .flat_map(|record| record.entity_handles.iter())
         .filter_map(|&handle| {
             let entity = doc.get_entity(handle)?;
-            let (room, part) = decode(entity.common().extended_data.get_record(APP_LOCALE)?)?;
-            Some((handle, room, part))
+            let (room, part, anchor) =
+                decode_with_anchor(entity.common().extended_data.get_record(APP_LOCALE)?)?;
+            Some((handle, room, part, anchor))
         })
         .collect()
+}
+
+/// Le parti dei locali di fatto il cui abbinamento contorno/etichetta non è
+/// certo, con il nome del locale, in ordine di disegno. Succede quando due
+/// etichette (o due contorni) hanno lo stesso seme, per esempio dopo la copia
+/// di un locale e lo spostamento di un'etichetta sul seme dell'altra, oppure
+/// quando più etichette staccate dal loro contorno potrebbero appartenere a
+/// più contorni. Chi modifica il disegno (`AL_ALTEZZA`) le rifiuta; chi misura
+/// ([`super::refresh::measure_fatto`]) lo dice con [`super::report::Notice::LocaleAmbiguo`].
+pub fn ambiguous_parts(doc: &Document) -> Vec<(Handle, String)> {
+    let found = collect_parts(doc);
+    pair_fatto(&found)
+        .ambiguous
+        .into_iter()
+        .map(|index| (found[index].0, found[index].1.name.clone()))
+        .collect()
+}
+
+/// Distanza sotto cui due semi (o due ancore) sono lo stesso punto: copie
+/// dello stesso valore passate dalla stessa trasformazione.
+const SAME_POINT_EPS: f64 = 1.0e-6;
+
+fn same_point(a: [f64; 2], b: [f64; 2]) -> bool {
+    (a[0] - b[0]).hypot(a[1] - b[1]) <= SAME_POINT_EPS
+}
+
+/// L'esito dell'abbinamento dei locali di fatto.
+struct Pairing {
+    /// I testi che prendono il seme del loro contorno: (indice, seme).
+    repaired: Vec<(usize, [f64; 2])>,
+    /// Le parti (indici, in ordine di disegno) il cui abbinamento non è certo.
+    ambiguous: Vec<usize>,
+}
+
+/// Abbina i testi ai contorni dei locali di fatto, solo dove è certo.
+///
+/// Si lavora per **famiglia**: le parti con la stessa ancora. Una famiglia
+/// nasce con `AL_LOCALE` e ogni copia fatta da ArchLine ne apre una nuova
+/// ([`renew_anchors`]), quindi una famiglia di un contorno e un testo è un
+/// locale, e l'etichetta gli appartiene dovunque la si sposti.
+///
+/// * Un contorno e un testo soli: sono la coppia, anche se un pezzo è stato
+///   spostato; il testo prende il seme del contorno.
+/// * Più contorni o più testi insieme a almeno uno dell'altro tipo: ambigua.
+///   Sono copie fatte fuori da ArchLine (o da versioni precedenti), con record
+///   identici all'originale. Neanche semi che coincidono 1:1 provano
+///   l'appartenenza: due etichette con lo stesso nome possono essere state
+///   scambiate, o una cancellata e l'altra portata sul suo posto, senza che il
+///   disegno lo dica. Si ripara cancellando le parti sbagliate e rifacendole
+///   con `AL_LOCALE`.
+/// * Solo contorni o solo testi: niente da abbinare (lo dicono gli avvisi di
+///   contorno o testo mancante).
+fn pair_fatto(found: &[Part]) -> Pairing {
+    let mut families: Vec<([f64; 2], Vec<usize>)> = Vec::new();
+    for (index, part) in found.iter().enumerate() {
+        if part.1.phase != Phase::Fatto || part.2 == RoomPart::Seme {
+            continue;
+        }
+        match families.iter_mut().find(|(anchor, _)| same_point(*anchor, part.3)) {
+            Some((_, members)) => members.push(index),
+            None => families.push((part.3, vec![index])),
+        }
+    }
+    let mut repaired = Vec::new();
+    let mut ambiguous = Vec::new();
+    for (_, members) in families {
+        let outlines: Vec<usize> =
+            members.iter().copied().filter(|&i| found[i].2 == RoomPart::Contorno).collect();
+        let texts: Vec<usize> =
+            members.iter().copied().filter(|&i| found[i].2 == RoomPart::Testo).collect();
+        match (outlines.as_slice(), texts.as_slice()) {
+            ([], _) | (_, []) => {}
+            ([o], [t]) => {
+                if !same_point(found[*o].1.seed, found[*t].1.seed) {
+                    repaired.push((*t, found[*o].1.seed));
+                }
+            }
+            _ => ambiguous.extend(members),
+        }
+    }
+    ambiguous.sort_unstable();
+    Pairing { repaired, ambiguous }
+}
+
+/// Dà alle parti di locale appena copiate (`copies`) una famiglia nuova, la
+/// loro, distinta da quella dell'originale e da quella di ogni altra copia.
+/// Lo chiamano `Scene::copy_entities` e l'incolla, cioè COPY, MIRROR con copia,
+/// ARRAY e incolla. Nel gruppo copiato, per ogni famiglia d'origine: un
+/// contorno e un testo soli restano insieme (ancora = seme del contorno, anche
+/// se il testo era staccato); con più parti, ogni contorno apre la sua famiglia
+/// (ancora = suo seme) e un testo entra in quella del contorno che ha il suo
+/// stesso seme, altrimenti ne apre una sua. Una copia del solo testo è un
+/// testo senza contorno, e viceversa: copie parziali, mai agganciate
+/// all'originale. Il resto del record non cambia.
+pub fn renew_anchors(doc: &mut Document, copies: &[Handle]) {
+    struct Copy {
+        handle: Handle,
+        part: RoomPart,
+        old_anchor: [f64; 2],
+        seed: [f64; 2],
+        values: Vec<XDataValue>,
+        anchor: [f64; 2],
+    }
+    let mut parts: Vec<Copy> = copies
+        .iter()
+        .filter(|handle| !handle.is_null())
+        .filter_map(|&handle| {
+            let record = doc.get_entity(handle)?.common().extended_data.get_record(APP_LOCALE)?;
+            let (room, part, old_anchor) = decode_with_anchor(record)?;
+            Some(Copy {
+                handle,
+                part,
+                old_anchor,
+                seed: room.seed,
+                values: record.values.clone(),
+                anchor: room.seed,
+            })
+        })
+        .collect();
+    for i in 0..parts.len() {
+        if parts[i].part != RoomPart::Testo {
+            continue;
+        }
+        let family = |c: &Copy, part: RoomPart| c.part == part && same_point(c.old_anchor, parts[i].old_anchor);
+        let outlines: Vec<usize> =
+            (0..parts.len()).filter(|&o| family(&parts[o], RoomPart::Contorno)).collect();
+        let texts = (0..parts.len()).filter(|&t| family(&parts[t], RoomPart::Testo)).count();
+        let owner = match outlines.as_slice() {
+            [o] if texts == 1 => Some(*o),
+            many => many.iter().copied().find(|&o| same_point(parts[o].seed, parts[i].seed)),
+        };
+        if let Some(o) = owner {
+            parts[i].anchor = parts[o].seed;
+        }
+    }
+    for copy in parts {
+        let mut values = copy.values;
+        let anchor = XDataValue::Point3D(Vector3::new(copy.anchor[0], copy.anchor[1], 0.0));
+        match values
+            .iter()
+            .position(|value| matches!(value, XDataValue::String(field) if field == KEY_ANCHOR))
+        {
+            Some(at) if at + 1 < values.len() => values[at + 1] = anchor,
+            _ => {
+                values.push(key(KEY_ANCHOR));
+                values.push(anchor);
+            }
+        }
+        set_entity_xdata(doc, copy.handle, APP_LOCALE, Some(values));
+    }
 }
 
 /// Lo stesso locale: stessa fase e seme entro `tol`. Il contorno e il testo
@@ -348,27 +591,95 @@ pub fn room_height_edits(
     doc: &Document,
     selected: &[Handle],
     height: Option<f64>,
-    tol: f64,
+    _tol: f64,
 ) -> Vec<(Handle, Room, RoomPart)> {
-    let all = rooms_in(doc);
-    let picked: Vec<&Room> = all
-        .iter()
-        .filter(|(handle, _, _)| selected.contains(handle))
-        .map(|(_, room, _)| room)
+    room_height_groups(doc, selected, height)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Come [`room_height_edits`], un gruppo per locale: la **famiglia** (stessa
+/// ancora) delle parti selezionate, non le parti che hanno lo stesso seme. Il
+/// seme non è l'identità: una copia riportata sul seme dell'originale lo ha
+/// uguale, e non per questo ne fa parte. Il seme di un locale di progetto è il
+/// locale. I gruppi, e le parti in ognuno, sono in ordine di disegno.
+pub fn room_height_groups(
+    doc: &Document,
+    selected: &[Handle],
+    height: Option<f64>,
+) -> Vec<Vec<(Handle, Room, RoomPart)>> {
+    #[derive(PartialEq)]
+    enum Family {
+        Anchor([f64; 2]),
+        Alone(usize),
+    }
+    let all = resolved_parts(doc);
+    let family = |index: usize| match &all[index] {
+        (_, room, RoomPart::Contorno | RoomPart::Testo, anchor) if room.phase == Phase::Fatto => {
+            Family::Anchor(*anchor)
+        }
+        _ => Family::Alone(index),
+    };
+    let same = |a: &Family, b: &Family| match (a, b) {
+        (Family::Anchor(x), Family::Anchor(y)) => same_point(*x, *y),
+        (Family::Alone(x), Family::Alone(y)) => x == y,
+        _ => false,
+    };
+    let picked: Vec<Family> = (0..all.len())
+        .filter(|&index| selected.contains(&all[index].0))
+        .map(family)
         .collect();
-    all.iter()
-        .filter(|(_, room, _)| picked.iter().any(|seen| same_room(seen, room, tol)))
-        .map(|(handle, room, part)| {
-            (
+    let mut grouped = vec![false; all.len()];
+    let mut groups = Vec::new();
+    for first in 0..all.len() {
+        if grouped[first] || !picked.iter().any(|seen| same(seen, &family(first))) {
+            continue;
+        }
+        let this = family(first);
+        let members: Vec<usize> = (first..all.len())
+            .filter(|&index| !grouped[index] && same(&this, &family(index)))
+            .collect();
+        let mut group = Vec::with_capacity(members.len());
+        for index in members {
+            grouped[index] = true;
+            let (handle, room, part, _) = &all[index];
+            group.push((
                 *handle,
                 Room {
                     height,
                     ..room.clone()
                 },
                 *part,
-            )
-        })
-        .collect()
+            ));
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+/// Il record `rec` con la sola chiave `altezza` cambiata (`None` la toglie):
+/// tutto il resto, ancora compresa, resta com'è. `AL_ALTEZZA` riscrive così,
+/// mai con [`encode`], che rifarebbe l'ancora dal seme e unirebbe di nuovo una
+/// copia all'originale.
+pub fn with_height(rec: &ExtendedDataRecord, height: Option<f64>) -> Vec<XDataValue> {
+    let mut values = Vec::with_capacity(rec.values.len() + 2);
+    let mut i = 0;
+    while i < rec.values.len() {
+        let is_height = matches!(&rec.values[i], XDataValue::String(field) if field == KEY_HEIGHT)
+            && matches!(rec.values.get(i + 1), Some(XDataValue::Real(_)));
+        if is_height {
+            i += 2;
+            continue;
+        }
+        values.push(rec.values[i].clone());
+        i += 1;
+    }
+    if let Some(height) = height {
+        values.push(key(KEY_HEIGHT));
+        values.push(XDataValue::Real(height));
+    }
+    values
 }
 
 /// Il testo di un locale: `A\PS = 12,00 m²` (`\P` è l'a capo dell'MTEXT),
@@ -1579,9 +1890,11 @@ mod tests {
                 text("numero"),
                 text("1"),
                 text("punto"),
-                XDataValue::Point3D(Vector3::new(2.0, 1.5, 0.0)),
+                XDataValue::Position3D(Vector3::new(2.0, 1.5, 0.0)),
                 text("origine"),
                 text("punto-interno"),
+                text("ancora"),
+                XDataValue::Point3D(Vector3::new(2.0, 1.5, 0.0)),
             ]
         );
         let keys = |room: &Room, part| match &encode(room, part)[..] {
@@ -2583,6 +2896,318 @@ mod tests {
         // Nessuna parte di locale selezionata: niente.
         assert!(room_height_edits(&doc, &[line], Some(3.0), TOL).is_empty());
         assert!(room_height_edits(&doc, &[], Some(3.0), TOL).is_empty());
+    }
+
+    fn moved(entity: &mut EntityType, transform: crate::command::EntityTransform) {
+        crate::entities::traits::EntityTypeOps::apply_transform(entity, &transform);
+    }
+
+    fn seed_of(entity: &EntityType) -> [f64; 2] {
+        decode(entity.common().extended_data.get_record(APP_LOCALE).unwrap())
+            .unwrap()
+            .0
+            .seed
+    }
+
+    /// Il seme segue l'entità in MOVE/COPY/ROTATE/SCALE/MIRROR: è una posizione
+    /// (1011), che il codec trasforma come in AutoCAD.
+    #[test]
+    fn the_seed_follows_the_entity_through_transforms() {
+        use crate::command::EntityTransform as T;
+        use glam::DVec3;
+        let base = seed_entity(&progetto("Soggiorno", [2.0, 1.5]), 0.25);
+        let near = |got: [f64; 2], want: [f64; 2]| {
+            assert!(
+                (got[0] - want[0]).hypot(got[1] - want[1]) < 1e-9,
+                "{got:?} != {want:?}"
+            );
+        };
+        let mut e = base.clone();
+        moved(&mut e, T::Translate(DVec3::new(4.1, 0.0, 0.0)));
+        near(seed_of(&e), [6.1, 1.5]);
+        let mut e = base.clone();
+        moved(
+            &mut e,
+            T::Scale {
+                center: DVec3::ZERO,
+                factor: 2.0,
+            },
+        );
+        near(seed_of(&e), [4.0, 3.0]);
+        let mut e = base.clone();
+        moved(
+            &mut e,
+            T::Rotate {
+                center: DVec3::ZERO,
+                axis: DVec3::Z,
+                angle_rad: FRAC_PI_2,
+            },
+        );
+        near(seed_of(&e), [-1.5, 2.0]);
+        let mut e = base;
+        moved(
+            &mut e,
+            T::Mirror {
+                p1: DVec3::ZERO,
+                p2: DVec3::X,
+                working_normal: DVec3::Z,
+            },
+        );
+        near(seed_of(&e), [2.0, -1.5]);
+    }
+
+    /// Il caso del rapporto del 2026-11-02: una copia traslata di un locale,
+    /// selezionata da sola, non cambia l'altezza dell'originale.
+    #[test]
+    fn height_edit_on_a_moved_copy_leaves_the_original_alone() {
+        use crate::command::EntityTransform as T;
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let original = seed_entity(&progetto("Soggiorno", [2.0, 1.5]), 0.25);
+        let mut copy = original.clone();
+        moved(&mut copy, T::Translate(glam::DVec3::new(4.1, 0.0, 0.0)));
+        let original = doc.add_entity(original).unwrap();
+        let copy = doc.add_entity(copy).unwrap();
+
+        let edits = room_height_edits(&doc, &[copy], Some(3.2), TOL);
+        assert_eq!(
+            edits.iter().map(|(handle, ..)| *handle).collect::<Vec<_>>(),
+            [copy]
+        );
+        assert!(!edits.iter().any(|(handle, ..)| *handle == original));
+    }
+
+    /// Il caso del secondo rapporto del 2026-11-02: spostare il solo testo di
+    /// un locale (o il solo contorno) non lo spezza in due locali; e la copia
+    /// pura di un locale resta un locale a sé, senza ambiguità.
+    #[test]
+    fn moving_only_the_label_keeps_the_room_in_one_piece() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts: Vec<EntityType> = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let (outline, label) = (parts[0].clone(), parts[1].clone());
+        let outline_handle = doc.add_entity(outline.clone()).unwrap();
+        let mut label_moved = label.clone();
+        moved(&mut label_moved, T::Translate(glam::DVec3::new(0.0, 1.0, 0.0)));
+        let label_handle = doc.add_entity(label_moved).unwrap();
+
+        let found = rooms_in(&doc);
+        let seeds: Vec<[f64; 2]> = found.iter().map(|(_, room, _)| room.seed).collect();
+        assert_eq!(seeds[0], seeds[1], "{found:?}");
+        let edits = room_height_edits(&doc, &[label_handle], Some(3.0), TOL);
+        assert_eq!(
+            edits.iter().map(|(handle, ..)| *handle).collect::<Vec<_>>(),
+            [outline_handle, label_handle]
+        );
+
+    }
+
+    /// La copia pura di un locale (contorno ed etichetta insieme) è un locale a
+    /// sé: nessuna ambiguità, e l'altezza della copia non tocca l'originale.
+    #[test]
+    fn a_plain_copy_of_a_room_is_a_room_of_its_own() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let outline = doc.add_entity(parts[0].clone()).unwrap();
+        let label = doc.add_entity(parts[1].clone()).unwrap();
+        let shifted = |entity: &EntityType| {
+            let mut copy = entity.clone();
+            moved(&mut copy, T::Translate(glam::DVec3::new(10.0, 0.0, 0.0)));
+            copy
+        };
+        let copy_outline = doc.add_entity(shifted(&parts[0])).unwrap();
+        let copy_label = doc.add_entity(shifted(&parts[1])).unwrap();
+        renew_anchors(&mut doc, &[copy_outline, copy_label]);
+        assert!(ambiguous_parts(&doc).is_empty(), "copia pura: nessuna ambiguità");
+        let edits = room_height_edits(&doc, &[copy_label], Some(3.2), TOL);
+        assert_eq!(
+            edits.iter().map(|(handle, ..)| *handle).collect::<Vec<_>>(),
+            [copy_outline, copy_label],
+            "la copia è un locale a sé"
+        );
+        let edits = room_height_edits(&doc, &[outline], Some(3.2), TOL);
+        assert_eq!(
+            edits.iter().map(|(handle, ..)| *handle).collect::<Vec<_>>(),
+            [outline, label],
+            "e l'originale non la include"
+        );
+    }
+
+    /// Il caso del terzo rapporto del 2026-11-02: copia di un locale, poi
+    /// l'etichetta dell'originale portata sul seme della copia. Due etichette
+    /// con lo stesso seme: il disegno non dice quale va con quale, quindi le
+    /// parti sono ambigue e non si sceglie.
+    #[test]
+    fn a_label_moved_onto_the_copys_seed_is_reported_not_guessed() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let shifted = |entity: &EntityType| {
+            let mut copy = entity.clone();
+            moved(&mut copy, T::Translate(glam::DVec3::new(10.0, 0.0, 0.0)));
+            copy
+        };
+        let outline = doc.add_entity(parts[0].clone()).unwrap();
+        let label = doc.add_entity(shifted(&parts[1])).unwrap();
+        let copy_outline = doc.add_entity(shifted(&parts[0])).unwrap();
+        let copy_label = doc.add_entity(shifted(&parts[1])).unwrap();
+
+        let ambiguous: Vec<Handle> = ambiguous_parts(&doc).into_iter().map(|(h, _)| h).collect();
+        for handle in [label, copy_outline, copy_label] {
+            assert!(ambiguous.contains(&handle), "{handle:?} in {ambiguous:?}");
+        }
+        assert!(ambiguous.contains(&outline), "tutta la famiglia è ambigua");
+    }
+
+    /// La variante del quarto rapporto: etichetta della copia spostata di un
+    /// metro, etichetta dell'originale portata sul seme della copia. Una
+    /// corrispondenza esatta più un'etichetta staccata: per esclusione
+    /// resterebbe un solo contorno, ma l'esclusione nasce da un'associazione
+    /// per coincidenza di seme che può essere quella sbagliata.
+    #[test]
+    fn an_exact_match_plus_a_detached_label_is_still_ambiguous() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let shift = |entity: &EntityType, by: [f64; 2]| {
+            let mut copy = entity.clone();
+            moved(&mut copy, T::Translate(glam::DVec3::new(by[0], by[1], 0.0)));
+            copy
+        };
+        let handles = [
+            doc.add_entity(parts[0].clone()).unwrap(),
+            doc.add_entity(shift(&parts[1], [10.0, 0.0])).unwrap(),
+            doc.add_entity(shift(&parts[0], [10.0, 0.0])).unwrap(),
+            doc.add_entity(shift(&parts[1], [10.0, 1.0])).unwrap(),
+        ];
+        let ambiguous: Vec<Handle> = ambiguous_parts(&doc).into_iter().map(|(h, _)| h).collect();
+        assert_eq!(ambiguous, handles);
+        // Nessun testo è stato riabbinato "per esclusione".
+        let seeds: Vec<[f64; 2]> = rooms_in(&doc).into_iter().map(|(_, room, _)| room.seed).collect();
+        assert_eq!(seeds[1], [12.0, 1.5]);
+        assert_eq!(seeds[3], [12.0, 2.5]);
+    }
+
+    /// Le due riproduzioni del quinto rapporto: con la copia fatta da ArchLine
+    /// (`renew_anchors`) contorno ed etichetta di ogni copia sono una famiglia
+    /// a sé, e l'etichetta resta del suo locale dovunque la si porti.
+    #[test]
+    fn labels_stay_with_their_own_room_after_a_copy() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let shift = |entity: &EntityType, by: [f64; 2]| {
+            let mut copy = entity.clone();
+            moved(&mut copy, T::Translate(glam::DVec3::new(by[0], by[1], 0.0)));
+            copy
+        };
+        let build = |label_orig_at: [f64; 2], label_copy_at: Option<[f64; 2]>| {
+            let mut doc = Document::new();
+            ensure_layers(&mut doc);
+            let outline = doc.add_entity(parts[0].clone()).unwrap();
+            let label = doc.add_entity(shift(&parts[1], label_orig_at)).unwrap();
+            let copy_outline = doc.add_entity(shift(&parts[0], [10.0, 0.0])).unwrap();
+            let mut copies = vec![copy_outline];
+            let copy_label = label_copy_at.map(|at| doc.add_entity(shift(&parts[1], at)).unwrap());
+            copies.extend(copy_label);
+            renew_anchors(&mut doc, &copies);
+            (doc, outline, label, copy_outline, copy_label)
+        };
+        let ids = |edits: Vec<(Handle, Room, RoomPart)>| edits.into_iter().map(|(h, ..)| h).collect::<Vec<_>>();
+
+        // 1. Etichetta della copia eliminata, quella originale sul seme della copia.
+        let (doc, outline, label, copy_outline, _) = build([10.0, 0.0], None);
+        assert!(ambiguous_parts(&doc).is_empty());
+        let edits = ids(room_height_edits(&doc, &[label], Some(3.2), TOL));
+        assert_eq!(edits, [outline, label], "il contorno originale, non quello della copia");
+        assert!(!edits.contains(&copy_outline));
+
+        // 2. Etichette scambiate.
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let outline = doc.add_entity(parts[0].clone()).unwrap();
+        let label = doc.add_entity(shift(&parts[1], [10.0, 0.0])).unwrap();
+        let copy_outline = doc.add_entity(shift(&parts[0], [10.0, 0.0])).unwrap();
+        let copy_label = doc.add_entity(shift(&parts[1], [0.0, 0.0])).unwrap();
+        // La copia nasce con le etichette al loro posto; poi le si scambia.
+        renew_anchors(&mut doc, &[copy_outline, copy_label]);
+        assert!(ambiguous_parts(&doc).is_empty());
+        let edits = ids(room_height_edits(&doc, &[label], Some(3.2), TOL));
+        assert_eq!(edits, [outline, label]);
+        let edits = ids(room_height_edits(&doc, &[copy_label], Some(3.2), TOL));
+        assert_eq!(edits, [copy_outline, copy_label]);
+    }
+
+    /// Una copia parziale (solo l'etichetta) non si aggancia all'originale.
+    #[test]
+    fn a_partial_copy_is_not_attached_to_the_original() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let outline = doc.add_entity(parts[0].clone()).unwrap();
+        let label = doc.add_entity(parts[1].clone()).unwrap();
+        let mut copy = parts[1].clone();
+        moved(&mut copy, T::Translate(glam::DVec3::new(10.0, 0.0, 0.0)));
+        let copy_label = doc.add_entity(copy).unwrap();
+        renew_anchors(&mut doc, &[copy_label]);
+        assert!(ambiguous_parts(&doc).is_empty(), "il testo copiato è un orfano, non un'ambiguità");
+        let edits = room_height_edits(&doc, &[copy_label], Some(3.2), TOL);
+        assert_eq!(edits.into_iter().map(|(h, ..)| h).collect::<Vec<_>>(), [copy_label]);
+        let edits = room_height_edits(&doc, &[outline], Some(3.2), TOL);
+        assert_eq!(edits.into_iter().map(|(h, ..)| h).collect::<Vec<_>>(), [outline, label]);
+    }
+
+    /// Due etichette staccate che potrebbero andare con due contorni (copia, poi
+    /// spostate tutte e due): ambigue, non indovinate dalla distanza.
+    #[test]
+    fn two_detached_labels_and_two_outlines_are_ambiguous() {
+        use crate::command::EntityTransform as T;
+        let (faces, sources) = survey(case_a(Form::Continua, M), TOL);
+        let a = computed(&faces, &sources, "A", [2.0, 1.5]);
+        let mut doc = Document::new();
+        ensure_layers(&mut doc);
+        let parts = room_entities(&a, Phase::Fatto, &sources, 0.25, TOL);
+        let shift = |entity: &EntityType, by: [f64; 2]| {
+            let mut copy = entity.clone();
+            moved(&mut copy, T::Translate(glam::DVec3::new(by[0], by[1], 0.0)));
+            copy
+        };
+        doc.add_entity(parts[0].clone()).unwrap();
+        doc.add_entity(shift(&parts[1], [0.0, 1.0])).unwrap();
+        doc.add_entity(shift(&parts[0], [10.0, 0.0])).unwrap();
+        doc.add_entity(shift(&parts[1], [10.0, 1.0])).unwrap();
+        assert_eq!(ambiguous_parts(&doc).len(), 4);
+    }
+
+    /// I record scritti prima della correzione (seme `Point3D`, 1010) si
+    /// leggono ancora, e alla prima riscrittura passano alla posizione.
+    #[test]
+    fn a_seed_written_as_a_plain_point_is_still_read() {
+        let mut values = encode(&progetto("Bagno", [1.0, 2.0]), RoomPart::Seme);
+        for value in &mut values {
+            if let XDataValue::Position3D(p) = value {
+                *value = XDataValue::Point3D(*p);
+            }
+        }
+        let (room, part) = decode(&record(values)).unwrap();
+        assert_eq!((room, part), (progetto("Bagno", [1.0, 2.0]), RoomPart::Seme));
     }
 
     // -----------------------------------------------------------------------

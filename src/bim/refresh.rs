@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 
 use super::report::Notice;
 use super::rooms::{
-    label, measure_at, quality_notices, region_holds, room_entities, rooms_in, Computed, Measured,
+    ambiguous_parts, label, measure_at, quality_notices, region_holds, room_entities, rooms_in, Computed, Measured,
     Phase, Room, RoomPart,
 };
 use super::units::DrawingUnit;
@@ -242,6 +242,15 @@ pub(crate) fn measure_fatto(doc: &Document, unit: DrawingUnit, tol: f64) -> Fatt
         notices.push(Notice::FuoriPiano {
             count: walls.off_plane,
         });
+    }
+    let mut ambiguous: Vec<String> = Vec::new();
+    for (_, name) in ambiguous_parts(doc) {
+        if !ambiguous.contains(&name) {
+            ambiguous.push(name);
+        }
+    }
+    if !ambiguous.is_empty() {
+        notices.push(Notice::LocaleAmbiguo { names: ambiguous });
     }
     let found: Vec<Option<Measured>> = parts
         .iter()

@@ -1142,6 +1142,10 @@ pub(crate) fn paste_entities_kernel(
         })
         .collect();
 
+    // ArchLine: pasted BIM rooms start families of their own
+    // (`bim::rooms::renew_anchors`).
+    crate::bim::rooms::renew_anchors(doc, &by_index);
+
     // Port of `merge_clipboard_ext_objects` minus the trailing `bump_entities`
     // (render cache — caller-side): recreate each captured xdictionary graph
     // with fresh handles and re-point the pasted entity at its new root.

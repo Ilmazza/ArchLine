@@ -10,6 +10,7 @@ pub mod clip;
 pub mod commands;
 pub mod extract;
 pub mod height;
+pub mod migrate;
 pub mod project;
 pub mod quantities;
 pub mod quantities_rooms;

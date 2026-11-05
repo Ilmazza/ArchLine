@@ -145,6 +145,61 @@ pub fn elapsed_ms(start: Option<iced::time::Instant>) -> f64 {
     start.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// Splits one stretch of work into named steps for the `[perf]` trace. A
+/// disabled clock never reads the time and keeps nothing.
+pub struct StageClock {
+    started: Option<iced::time::Instant>,
+    last: Option<iced::time::Instant>,
+    steps: Vec<(&'static str, f64)>,
+}
+
+impl StageClock {
+    pub fn new() -> Self {
+        let now = enabled().then(iced::time::Instant::now);
+        Self {
+            started: now,
+            last: now,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Closes the step that began at the previous mark (or at `new`).
+    pub fn mark(&mut self, name: &'static str) {
+        if let Some(last) = self.last {
+            let now = iced::time::Instant::now();
+            self.steps.push((name, (now - last).as_secs_f64() * 1000.0));
+            self.last = Some(now);
+        }
+    }
+
+    /// The steps of at least `min_ms`, summed by name, plus whatever time no
+    /// step claimed (early exits, the ViewCube, work after the last mark).
+    pub fn summary(&self, min_ms: f64) -> String {
+        let Some(started) = self.started else {
+            return String::new();
+        };
+        let mut sums: Vec<(&'static str, f64)> = Vec::new();
+        for &(name, ms) in &self.steps {
+            match sums.iter_mut().find(|(known, _)| *known == name) {
+                Some((_, total)) => *total += ms,
+                None => sums.push((name, ms)),
+            }
+        }
+        let claimed: f64 = sums.iter().map(|(_, ms)| ms).sum();
+        let total = started.elapsed().as_secs_f64() * 1000.0;
+        let mut parts: Vec<String> = sums
+            .iter()
+            .filter(|(_, ms)| *ms >= min_ms)
+            .map(|(name, ms)| format!("{name}={ms:.1}ms"))
+            .collect();
+        let other = total - claimed;
+        if other >= min_ms {
+            parts.push(format!("other={other:.1}ms"));
+        }
+        parts.join(" ")
+    }
+}
+
 /// Enable or disable collection driven by the in-app `PERF` command.
 pub fn set_ui_enabled(enabled: bool) {
     UI_ENABLED.store(enabled, Ordering::Relaxed);

@@ -5503,7 +5503,7 @@ pub enum Message {
     DataExtractionBrowseOutput,
     DataExtractionBrowseOutputResult(Option<std::path::PathBuf>),
     /// TABLEEXPORT: the save dialog's answer for the table with this handle.
-    TableExportPath(codec::Handle, Option<std::path::PathBuf>),
+    TableExportPath(String, Option<std::path::PathBuf>),
     DataExtractionFinish,
     /// Save the never-saved drawing so the extraction can start.
     DataExtractionSaveDrawing,

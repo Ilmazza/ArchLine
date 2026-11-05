@@ -4,8 +4,18 @@
 //!
 //! Sequenza XDATA, in quest'ordine: `Integer16(1)` (versione), `"stato"`,
 //! `"demolito"|"nuovo"`, `"origine"`, `<origine>`, `"varco"`, `Integer16(0|1)`,
-//! poi le chiavi facoltative presenti: `"asse"` + due `Point3D`, `"spessore"` +
-//! `Real`, `"altezza"` + `Real`. La lettura va per chiave e salta le sconosciute.
+//! poi le chiavi facoltative presenti: `"asse"` + due `Position3D`, `"spessore"` +
+//! `Distance`, `"altezza"` + `Real`. La lettura va per chiave e salta le
+//! sconosciute.
+//!
+//! Asse e spessore sono scritti come posizione (1011) e distanza (1041) perché
+//! sono i tipi che il codec porta dietro all'entità in MOVE, COPY, ROTATE,
+//! SCALE e MIRROR (`ExtendedData::apply_transform`, come in AutoCAD): con
+//! `Point3D` (1010) e `Real` (1040), che non si trasformano, una zona copiata o
+//! scalata avrebbe tenuto l'asse e lo spessore di prima. I record scritti dalle
+//! versioni precedenti si leggono ancora (1010 e 1040) e passano ai tipi nuovi
+//! alla prima riscrittura. L'altezza resta `Real`: è un dato dichiarato, non una
+//! misura del disegno, e non cambia con la scala in pianta.
 //!
 //! Qui non c'è undo: lo apre il comando che crea o cambia le zone.
 
@@ -154,7 +164,16 @@ fn key(text: &str) -> XDataValue {
 }
 
 fn point(p: [f64; 2]) -> XDataValue {
-    XDataValue::Point3D(Vector3::new(p[0], p[1], 0.0))
+    XDataValue::Position3D(Vector3::new(p[0], p[1], 0.0))
+}
+
+/// Un punto del piano, scritto come 1011 (versione corrente) o come 1010
+/// (record precedenti).
+fn read_point(value: Option<&XDataValue>) -> Option<[f64; 2]> {
+    match value? {
+        XDataValue::Position3D(p) | XDataValue::Point3D(p) => Some([p.x, p.y]),
+        _ => None,
+    }
 }
 
 /// La sequenza dei valori del record `ARCHLINE_ZONA`.
@@ -172,12 +191,44 @@ pub fn encode(zone: &Zone) -> Vec<XDataValue> {
         values.extend([key(KEY_AXIS), point(a), point(b)]);
     }
     if let Some(t) = zone.thickness {
-        values.extend([key(KEY_THICKNESS), XDataValue::Real(t)]);
+        values.extend([key(KEY_THICKNESS), XDataValue::Distance(t)]);
     }
     if let Some(h) = zone.height {
         values.extend([key(KEY_HEIGHT), XDataValue::Real(h)]);
     }
     values
+}
+
+/// Il record portato al formato corrente, o `None` se lo è già (o non si
+/// legge): i due punti dell'asse da `Point3D` a `Position3D` e lo spessore da
+/// `Real` a `Distance`. Il resto dei valori resta com'è.
+pub fn migrated_values(rec: &ExtendedDataRecord) -> Option<Vec<XDataValue>> {
+    decode(rec)?;
+    let mut values = rec.values.clone();
+    let mut changed = false;
+    for i in 0..values.len() {
+        let XDataValue::String(name) = &values[i] else {
+            continue;
+        };
+        match name.as_str() {
+            KEY_AXIS => {
+                for at in [i + 1, i + 2] {
+                    if let Some(XDataValue::Point3D(p)) = values.get(at).cloned() {
+                        values[at] = XDataValue::Position3D(p);
+                        changed = true;
+                    }
+                }
+            }
+            KEY_THICKNESS => {
+                if let Some(XDataValue::Real(t)) = values.get(i + 1).cloned() {
+                    values[i + 1] = XDataValue::Distance(t);
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    changed.then_some(values)
 }
 
 /// Legge il record per chiave, saltando ciò che non conosce. `None` senza uno
@@ -206,14 +257,14 @@ pub fn decode(rec: &ExtendedDataRecord) -> Option<Zone> {
                 varco = *v != 0;
                 2
             }
-            (KEY_AXIS, Some(XDataValue::Point3D(a))) => match values.get(i + 2) {
-                Some(XDataValue::Point3D(b)) => {
-                    axis = Some(([a.x, a.y], [b.x, b.y]));
+            (KEY_AXIS, Some(first)) => match (read_point(Some(first)), read_point(values.get(i + 2))) {
+                (Some(a), Some(b)) => {
+                    axis = Some((a, b));
                     3
                 }
                 _ => 1,
             },
-            (KEY_THICKNESS, Some(XDataValue::Real(t))) => {
+            (KEY_THICKNESS, Some(XDataValue::Distance(t) | XDataValue::Real(t))) => {
                 thickness = Some(*t);
                 2
             }
@@ -452,13 +503,13 @@ mod tests {
             ]
         );
         assert_eq!(v[7], s("asse"));
-        assert!(matches!(v[8], XDataValue::Point3D(p) if p.x == 1.0 && p.y == 2.0 && p.z == 0.0));
-        assert!(matches!(v[9], XDataValue::Point3D(p) if p.x == 3.0 && p.y == 4.0 && p.z == 0.0));
+        assert!(matches!(v[8], XDataValue::Position3D(p) if p.x == 1.0 && p.y == 2.0 && p.z == 0.0));
+        assert!(matches!(v[9], XDataValue::Position3D(p) if p.x == 3.0 && p.y == 4.0 && p.z == 0.0));
         assert_eq!(
             v[10..],
             [
                 s("spessore"),
-                XDataValue::Real(0.3),
+                XDataValue::Distance(0.3),
                 s("altezza"),
                 XDataValue::Real(2.7)
             ]
@@ -468,6 +519,69 @@ mod tests {
             encode(&plain(ZoneState::Nuovo, ZoneOrigin::Poligono)).len(),
             7
         );
+    }
+
+    /// Caso del rapporto del 2026-11-02: asse e spessore seguono la zona in
+    /// SCALE e MOVE (1011 e 1041); l'altezza dichiarata no.
+    #[test]
+    fn axis_and_thickness_follow_the_zone_through_transforms() {
+        use crate::command::EntityTransform as T;
+        let z = Zone {
+            state: ZoneState::Nuovo,
+            origin: ZoneOrigin::LineaSpessore,
+            axis: Some(([0.0, 0.05], [2.0, 0.05])),
+            thickness: Some(0.1),
+            height: Some(3.0),
+            varco: false,
+        };
+        let line = || {
+            let mut line = codec::entities::Line::from_points(
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(2.0, 0.0, 0.0),
+            );
+            line.common.extended_data.add_record(zone_record(&z));
+            EntityType::Line(line)
+        };
+        let read = |entity: &EntityType| decode(entity.common().extended_data.get_record(APP_ZONA).unwrap()).unwrap();
+        let apply = |entity: &mut EntityType, t: T| crate::entities::traits::EntityTypeOps::apply_transform(entity, &t);
+
+        let mut scaled = line();
+        apply(&mut scaled, T::Scale { center: glam::DVec3::ZERO, factor: 2.0 });
+        let back = read(&scaled);
+        assert_eq!(back.axis, Some(([0.0, 0.1], [4.0, 0.1])));
+        assert!((back.thickness.unwrap() - 0.2).abs() < 1e-12, "{:?}", back.thickness);
+        assert_eq!(back.height, Some(3.0), "l'altezza dichiarata non si scala");
+
+        let mut moved = line();
+        apply(&mut moved, T::Translate(glam::DVec3::new(10.0, 0.0, 0.0)));
+        let back = read(&moved);
+        assert_eq!(back.axis, Some(([10.0, 0.05], [12.0, 0.05])));
+        assert_eq!(back.thickness, Some(0.1));
+    }
+
+    /// I record scritti prima della correzione (asse `Point3D`, spessore `Real`)
+    /// si leggono ancora.
+    #[test]
+    fn a_record_with_plain_points_and_a_real_thickness_is_still_read() {
+        let s = |t: &str| XDataValue::String(t.to_string());
+        let mut rec = ExtendedDataRecord::new(APP_ZONA);
+        for v in [
+            XDataValue::Integer16(1),
+            s("stato"),
+            s("nuovo"),
+            s("origine"),
+            s("linea-spessore"),
+            s("asse"),
+            XDataValue::Point3D(Vector3::new(1.0, 2.0, 0.0)),
+            XDataValue::Point3D(Vector3::new(3.0, 4.0, 0.0)),
+            s("spessore"),
+            XDataValue::Real(0.3),
+        ] {
+            rec.add_value(v);
+        }
+        let z = decode(&rec).unwrap();
+        assert_eq!(z.axis, Some(([1.0, 2.0], [3.0, 4.0])));
+        assert_eq!(z.thickness, Some(0.3));
     }
 
     #[test]

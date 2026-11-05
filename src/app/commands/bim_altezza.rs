@@ -10,11 +10,11 @@
 //! `height_echo`, `bim_height_range_warning`) sta in `bim.rs`, la stessa per
 //! `AL_STATO Altezza`. Prima di leggere un numero serve l'unità del disegno,
 //! chiesta come negli altri comandi `AL_*` (`AL_UNITA`). La logica pura sta in
-//! `crate::bim` (`height::range_warning`, `rooms::room_height_edits`).
+//! `crate::bim` (`height::range_warning`, `rooms::room_height_groups`).
 
 use crate::app::{Message, OpenCADStudio};
 use crate::bim::record;
-use crate::bim::rooms::{self, room_height_edits, rooms_in, same_room, Room};
+use crate::bim::rooms::{self, rooms_in};
 use crate::bim::units::DrawingUnit;
 use crate::bim::zone::{self, Zone};
 use crate::bim::{APP_LOCALE, APP_ZONA};
@@ -146,6 +146,15 @@ impl OpenCADStudio {
     /// restano, il rilievo e ciò che non è zona né locale non si toccano.
     fn bim_altezza_selezione(&mut self, i: usize, height: Option<f64>, unit: DrawingUnit) {
         let plan = altezza_plan(&self.tabs[i].scene, height, unit.tolerance());
+        if !plan.ambiguous.is_empty() {
+            self.command_line.push_error(&format!(
+                "AL_ALTEZZA: nessuna modifica. Contorno ed etichetta dei locali {} non si abbinano \
+                 con certezza (copia o spostamento delle etichette): riporta le etichette ai loro \
+                 locali o ricreale con AL_LOCALE.",
+                plan.ambiguous.join(" + ")
+            ));
+            return;
+        }
         if !plan.records.is_empty() {
             let mut handles: Vec<Handle> = plan.records.keys().copied().collect();
             handles.sort_by_key(|handle| handle.value());
@@ -269,26 +278,38 @@ struct AltezzaPlan {
     /// Locali con almeno una parte su un layer bloccato: non si toccano
     /// affatto, così contorno e testo non dicono altezze diverse.
     locked_rooms: usize,
+    /// Nomi dei locali di fatto coinvolti il cui abbinamento contorno/etichetta
+    /// non è certo (`rooms::ambiguous_parts`): se ce n'è uno, non si cambia
+    /// niente.
+    ambiguous: Vec<String>,
 }
 
 /// Il piano di `AL_ALTEZZA S|R` con altezza `height` (`None` = togliere). Di
-/// un locale basta una parte selezionata: cambiano tutte le sue parti
-/// ([`room_height_edits`]).
-fn altezza_plan(scene: &Scene, height: Option<f64>, tol: f64) -> AltezzaPlan {
+/// un locale basta una parte selezionata: cambiano tutte le parti della sua
+/// famiglia ([`rooms::room_height_groups`]), non quelle che per caso hanno lo
+/// stesso seme. Si riscrive solo la chiave `altezza` del record esistente
+/// ([`rooms::with_height`]): l'identità del locale resta com'è.
+fn altezza_plan(scene: &Scene, height: Option<f64>, _tol: f64) -> AltezzaPlan {
     let doc = &scene.document;
     let selected: Vec<Handle> = scene
         .selected_entities()
         .into_iter()
         .map(|(handle, _)| handle)
         .collect();
-    let edits = room_height_edits(doc, &selected, height, tol);
+    let groups = rooms::room_height_groups(doc, &selected, height);
+    let in_a_room = |handle: Handle| groups.iter().flatten().any(|(part, _, _)| *part == handle);
     let mut plan = AltezzaPlan::default();
+    for (handle, name) in rooms::ambiguous_parts(doc) {
+        if (selected.contains(&handle) || in_a_room(handle)) && !plan.ambiguous.contains(&name) {
+            plan.ambiguous.push(name);
+        }
+    }
     for &handle in &selected {
         let found = doc
             .get_entity(handle)
             .and_then(|entity| zone::read_zone(handle, entity));
         let Some(found) = found else {
-            if !edits.iter().any(|(part, _, _)| *part == handle) {
+            if !in_a_room(handle) {
                 plan.not_ours += 1;
             }
             continue;
@@ -306,40 +327,35 @@ fn altezza_plan(scene: &Scene, height: Option<f64>, tol: f64) -> AltezzaPlan {
             plan.zones += 1;
         }
     }
-    let locked: Vec<&Room> = edits
-        .iter()
-        .filter(|(handle, _, _)| scene.is_layer_locked(*handle))
-        .map(|(_, room, _)| room)
-        .collect();
-    plan.locked_rooms = count_rooms(&locked, tol);
     let current: HashMap<Handle, Option<f64>> = rooms_in(doc)
         .into_iter()
         .map(|(handle, room, _)| (handle, room.height))
         .collect();
-    let mut changed: Vec<&Room> = Vec::new();
-    for (handle, room, part) in &edits {
-        if locked.iter().any(|seen| same_room(seen, room, tol))
-            || current.get(handle) == Some(&height)
-        {
+    for group in &groups {
+        // Un locale con una parte su un layer bloccato non si tocca affatto,
+        // così contorno e testo non dicono altezze diverse.
+        if group.iter().any(|(handle, _, _)| scene.is_layer_locked(*handle)) {
+            plan.locked_rooms += 1;
             continue;
         }
-        plan.records
-            .insert(*handle, (APP_LOCALE, rooms::encode(room, *part)));
-        changed.push(room);
-    }
-    plan.rooms = count_rooms(&changed, tol);
-    plan
-}
-
-/// Quanti locali diversi ([`same_room`]) ci sono in `rooms`.
-fn count_rooms(rooms: &[&Room], tol: f64) -> usize {
-    let mut kept: Vec<&Room> = Vec::new();
-    for room in rooms {
-        if !kept.iter().any(|seen| same_room(seen, room, tol)) {
-            kept.push(room);
+        let mut changed = false;
+        for (handle, _, _) in group {
+            if current.get(handle) == Some(&height) {
+                continue;
+            }
+            let Some(record) = doc
+                .get_entity(*handle)
+                .and_then(|entity| entity.common().extended_data.get_record(APP_LOCALE))
+            else {
+                continue;
+            };
+            plan.records
+                .insert(*handle, (APP_LOCALE, rooms::with_height(record, height)));
+            changed = true;
         }
+        plan.rooms += usize::from(changed);
     }
-    kept.len()
+    plan
 }
 
 #[cfg(test)]

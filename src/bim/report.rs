@@ -50,6 +50,13 @@ pub enum Notice {
         names: Vec<String>,
         area_m2: f64,
     },
+    /// Contorno ed etichetta di questi locali di fatto non si abbinano con
+    /// certezza: dopo una copia, due parti con lo stesso record non si
+    /// distinguono più (`rooms::ambiguous_parts`). Nomi e altezze vengono dal
+    /// primo abbinamento possibile: da verificare.
+    LocaleAmbiguo {
+        names: Vec<String>,
+    },
     /// Locali di fatto fusi in una regione sola (R55): non si aggiornano.
     LocaliFusiLasciati {
         names: Vec<String>,
@@ -201,6 +208,11 @@ impl Notice {
             Self::LocaliFusiLasciati { names } => {
                 format!("Locali {} lasciati com'erano.", names.join(" + "))
             }
+            Self::LocaleAmbiguo { names } => format!(
+                "Locali {}: contorno ed etichetta non si abbinano con certezza (copia o spostamento \
+                 delle etichette). Nome e altezza da verificare; AL_ALTEZZA li rifiuta.",
+                names.join(" + ")
+            ),
             Self::LocaleSenzaNome { area_m2 } => {
                 format!("Locale senza nome ({}).", format_m2(*area_m2))
             }
@@ -388,6 +400,13 @@ mod tests {
                     area_m2: 11.905,
                 },
                 "Locali Cucina + Pranzo fusi in uno (11,91 m²): nome da confermare.",
+            ),
+            (
+                Notice::LocaleAmbiguo {
+                    names: vec!["Camera".into()],
+                },
+                "Locali Camera: contorno ed etichetta non si abbinano con certezza (copia o spostamento \
+                 delle etichette). Nome e altezza da verificare; AL_ALTEZZA li rifiuta.",
             ),
             (
                 Notice::LocaliFusiLasciati {

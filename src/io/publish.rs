@@ -38,7 +38,12 @@ pub fn sheet_file_names(base: &Path, layouts: &[String]) -> Vec<String> {
 }
 
 /// Writes each page to its own PDF beside `base`, returning the layout and the
-/// file written for each. Stops at the first failure.
+/// file written for each.
+///
+/// The save dialog only confirmed `base` itself, which is never written here,
+/// so no sheet is written if any of the files it would replace already exists:
+/// the error names them all, and nothing on disk changes. Stops at the first
+/// write failure, and then says which sheets were already written.
 pub fn export_sheets(
     sheets: &[(String, PdfPageInput)],
     base: &Path,
@@ -49,11 +54,29 @@ pub fn export_sheets(
     }
     let layouts: Vec<String> = sheets.iter().map(|(layout, _)| layout.clone()).collect();
     let folder = base.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut written = Vec::with_capacity(sheets.len());
-    for ((layout, page), name) in sheets.iter().zip(sheet_file_names(base, &layouts)) {
-        let file = folder.join(name);
-        crate::io::pdf_export::export_pdf_pages(std::slice::from_ref(page), &file, plot_style)
-            .map_err(|error| format!("{}: {error}", file.display()))?;
+    let files: Vec<PathBuf> = sheet_file_names(base, &layouts).into_iter().map(|name| folder.join(name)).collect();
+    let existing: Vec<String> = files
+        .iter()
+        .filter(|file| file.exists())
+        .map(|file| file.display().to_string())
+        .collect();
+    if !existing.is_empty() {
+        return Err(crate::tf!(
+            "These files already exist and were not replaced; nothing was written. Choose another name or move them: {}",
+            existing.join(", ")
+        )
+        .into_owned());
+    }
+    let mut written: Vec<(String, PathBuf)> = Vec::with_capacity(sheets.len());
+    for ((layout, page), file) in sheets.iter().zip(files) {
+        if let Err(error) = crate::io::pdf_export::export_pdf_pages(std::slice::from_ref(page), &file, plot_style) {
+            let mut message = format!("{}: {error}", file.display());
+            if !written.is_empty() {
+                let done: Vec<String> = written.iter().map(|(_, done)| done.display().to_string()).collect();
+                message.push_str(&crate::tf!(" (already written: {})", done.join(", ")));
+            }
+            return Err(message);
+        }
         written.push((layout.clone(), file));
     }
     Ok(written)
@@ -174,6 +197,22 @@ mod tests {
         assert!(base.with_file_name("progetto-A2.pdf").exists());
         assert!(message.contains('2'), "{message}");
         let _ = std::fs::remove_dir_all(base.parent().unwrap());
+    }
+
+    /// Il caso del rapporto del 2026-11-02: `progetto.pdf` non esiste (il
+    /// dialogo non ha niente da confermare) ma `progetto-A1.pdf` sì.
+    #[test]
+    fn an_existing_sheet_file_stops_the_whole_batch_untouched() {
+        let base = temp_base("exists");
+        let dir = base.parent().unwrap().to_path_buf();
+        let existing = dir.join("progetto-A2.pdf");
+        std::fs::write(&existing, b"da non toccare").unwrap();
+        let sheets = vec![("A1".to_string(), page()), ("A2".to_string(), page())];
+        let error = export_sheets(&sheets, &base, None).unwrap_err();
+        assert!(error.contains("progetto-A2.pdf"), "{error}");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"da non toccare");
+        assert!(!dir.join("progetto-A1.pdf").exists(), "nessun foglio scritto prima del controllo");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

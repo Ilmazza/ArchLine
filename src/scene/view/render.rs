@@ -377,6 +377,7 @@ impl shader::Primitive for Primitive {
         viewport: &Viewport,
     ) {
         let nav_prepare_started = iced::time::Instant::now();
+        let mut stages = crate::perf::StageClock::new();
         if let Some(gap_ms) = crate::perf::take_view_to_prepare_ms() {
             if gap_ms >= 1.0 && crate::perf::has_pending_pointer_moves() {
                 crate::perf_record!("[perf] view-to-prepare {:>7.1}ms", gap_ms);
@@ -394,6 +395,7 @@ impl shader::Primitive for Primitive {
         DEVICE_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let instance_ids: Vec<u64> = self.viewports.iter().map(|vp| vp.instance_id).collect();
         let slots = pipeline.resolve_slots(device, queue, &instance_ids);
+        stages.mark("slots");
         for (i, vp) in self.viewports.iter().enumerate() {
             let inner = &mut pipeline.inners[slots[i]];
             inner.sync_gpu_error_epoch();
@@ -446,6 +448,7 @@ impl shader::Primitive for Primitive {
                 *value /= scale.max(1e-3);
             }
             inner.upload_uniforms(device, queue, &uniforms);
+            stages.mark("setup");
 
             // ── Scene-render cache ────────────────────────────────────────
             // A pure cursor move — or any frame where the view, geometry,
@@ -498,6 +501,7 @@ impl shader::Primitive for Primitive {
             } else {
                 inner.preview_overlay_direct = false;
             }
+            stages.mark("preview-wires");
             let sig = render_signature(vp, &placement, inner.preview_overlay_direct);
             // REDRAW bypass: pin render_sig to force a full pass this frame
             // even if the signature is otherwise unchanged. The request is
@@ -635,6 +639,7 @@ impl shader::Primitive for Primitive {
                 })
                 .collect();
             inner.set_point_cloud_view(queue, vp.point_cloud_light, &clip);
+            stages.mark("hatch-images-clouds");
             let text_source_changed = inner
                 .cached_text_source
                 .as_ref()
@@ -659,6 +664,7 @@ impl shader::Primitive for Primitive {
             inner.cached_text_source = Some(Arc::clone(&vp.text_verts));
             inner.cached_fill_mode = fill_mode;
             inner.cached_epoch = cur_key;
+            stages.mark("text");
             // Face3D edge/fill buffers are world-space and selection-independent
             // (upload_face3d takes no selection input), so they only change with
             // the geometry or the 3D-fill toggle — never on a pan/orbit. Gating
@@ -724,6 +730,7 @@ impl shader::Primitive for Primitive {
                 solid_fill_active,
                 solid_visibility_key,
             );
+            stages.mark("face3d");
             // Wire buffers are world-space, so a camera move alone doesn't
             // change them — only the view_proj uniform (uploaded every frame).
             // Gate the upload on the wire content id instead of the camera tick:
@@ -1141,6 +1148,7 @@ retained_contributors={}",
             // underlying wires changed. A pick bumps only selection_generation,
             // so this refreshes without re-tessellating or re-uploading the main
             // wire buffers.
+            stages.mark("wires");
             let sel_key = (vp.wire_content_id, vp.selection_generation);
             let highlighted_geometry_unchanged = vp.selected_handles.is_empty()
                 && vp.hover_handles.is_empty()
@@ -1249,6 +1257,7 @@ retained_contributors={}",
                 vp.uniforms.eye_high[1] as f64 + vp.uniforms.eye_low[1] as f64,
                 vp.uniforms.eye_high[2] as f64 + vp.uniforms.eye_low[2] as f64,
             );
+            stages.mark("selection-meshes");
             let silhouette_enabled =
                 vp.display_silhouette && (vp.view_wireframe || vp.show_3d_edges);
             let silhouette_key = (
@@ -1272,6 +1281,7 @@ retained_contributors={}",
                 inner.silhouette_key = silhouette_key;
             }
             inner.upload_clip_boundary(device, queue, &vp.clip_boundary_ndc);
+            stages.mark("silhouette-clip");
             let hatch_lod_key = (
                 Arc::as_ptr(&vp.hatches) as usize,
                 vp.camera_generation,
@@ -1294,6 +1304,7 @@ retained_contributors={}",
                 inner.compute_wipeout_lod(view_rot, eye, clip_size.width, clip_size.height);
                 inner.wipeout_lod_key = wipeout_lod_key;
             }
+            stages.mark("hatch-wipeout-lod");
             let cull_key = (
                 vp.wire_content_id,
                 vp.camera_generation,
@@ -1339,6 +1350,7 @@ retained_contributors={}",
                 inner.gpu_wires = std::sync::Arc::new(visible);
                 inner.wire_cull_key = cull_key;
             }
+            stages.mark("wire-cull");
             if vp.show_viewcube {
                 inner.viewcube.upload(
                     queue,
@@ -1359,6 +1371,14 @@ retained_contributors={}",
             }
         }
         let prepare_ms = nav_prepare_started.elapsed().as_secs_f64() * 1000.0;
+        // A slow frame says which stretch of `prepare` it spent the time in.
+        if prepare_ms >= 15.0 {
+            crate::perf_record!(
+                "[perf] prepare-stages {:.1}ms: {}",
+                prepare_ms,
+                stages.summary(1.0)
+            );
+        }
         if let Some(sample) = self.nav_perf {
             crate::perf::record(format_args!(
                 "[perf] nav-prepare op={} cause={} space={} mode={} input={:.2}ms build={:.2}ms prepare={:.2}ms elapsed={:.2}ms viewports={}",

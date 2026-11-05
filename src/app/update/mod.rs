@@ -2357,7 +2357,7 @@ impl OpenCADStudio {
                 self.data_extraction.source_files.clear();
                 Task::none()
             }
-            Message::TableExportPath(handle, path) => self.on_table_export_result(handle, path),
+            Message::TableExportPath(csv, path) => self.on_table_export_result(csv, path),
             Message::DataExtractionBrowseOutput => self.on_data_extraction_browse_output(),
             Message::DataExtractionBrowseOutputResult(path) => {
                 self.on_data_extraction_browse_output_result(path)

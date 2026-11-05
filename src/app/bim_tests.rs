@@ -4643,3 +4643,268 @@ fn abaco_refuses_paper_space() {
         assert_eq!(rilievo_snapshot(&app), before);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Record BIM scritti prima del 2026-11-02 (seme/asse 1010, spessore 1040)
+// ---------------------------------------------------------------------------
+
+/// Un seme di progetto con il record come lo scriveva la versione precedente.
+fn old_format_seed(name: &str, at: [f64; 2]) -> EntityType {
+    let mut text = MText::new();
+    text.value = name.into();
+    text.insertion_point = Vector3::new(at[0], at[1], 0.0);
+    text.height = 0.25;
+    let mut record = ExtendedDataRecord::new(APP_LOCALE);
+    let key = |t: &str| XDataValue::String(t.to_string());
+    for value in [
+        XDataValue::Integer16(1),
+        key("fase"),
+        key("progetto"),
+        key("parte"),
+        key("seme"),
+        key("nome"),
+        key(name),
+        key("numero"),
+        key(""),
+        key("punto"),
+        XDataValue::Point3D(Vector3::new(at[0], at[1], 0.0)),
+        key("origine"),
+        key("punto-interno"),
+    ] {
+        record.add_value(value);
+    }
+    text.common.extended_data.add_record(record);
+    EntityType::MText(Box::new(text))
+}
+
+/// Aprire un disegno con record vecchi li porta al formato corrente: poi una
+/// copia traslata è un altro locale e `AL_ALTEZZA` non tocca l'originale.
+#[test]
+fn opening_a_drawing_with_old_records_migrates_them_before_any_copy() {
+    let mut source = Document::new();
+    source.header.insertion_units = 6;
+    source.add_entity(old_format_seed("Camera", [2.0, 1.5])).unwrap();
+    let dir = std::env::temp_dir().join(format!("archline-migrate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("vecchio.dxf");
+    std::fs::write(&path, codec::DxfWriter::new(&source).write_to_vec().unwrap()).unwrap();
+
+    let mut app = fresh_app();
+    let p = path.to_string_lossy().replace('\\', "\\\\");
+    let opened = app.automation_op(&format!(r#"{{"op":"open","path":"{p}"}}"#));
+    assert_eq!(opened["ok"], true, "{}", opened["error"]);
+
+    let found = rooms_in(doc(&app));
+    assert_eq!(found.len(), 1, "storia: {}", history(&app));
+    let handle = found[0].0;
+    let record = doc(&app)
+        .get_entity(handle)
+        .unwrap()
+        .common()
+        .extended_data
+        .get_record(APP_LOCALE)
+        .unwrap()
+        .clone();
+    assert!(
+        record.values.contains(&XDataValue::Position3D(Vector3::new(2.0, 1.5, 0.0))),
+        "il seme è una posizione dopo l'apertura: {:?}",
+        record.values
+    );
+
+    // Una copia traslata del locale, selezionata da sola: altezza solo sua.
+    let mut copy = doc(&app).get_entity(handle).unwrap().clone();
+    crate::entities::traits::EntityTypeOps::apply_transform(
+        &mut copy,
+        &crate::command::EntityTransform::Translate(glam::DVec3::new(4.1, 0.0, 0.0)),
+    );
+    copy.common_mut().handle = Handle::NULL;
+    let i = app.active_tab;
+    let copy = app.tabs[i].scene.add_entity(copy);
+    select(&mut app, &[copy]);
+    run(&mut app, "AL_ALTEZZA S 3.2");
+    let heights: Vec<(Handle, Option<f64>)> =
+        rooms_in(doc(&app)).into_iter().map(|(h, room, _)| (h, room.height)).collect();
+    assert!(heights.contains(&(copy, Some(3.2))), "{heights:?} {}", history(&app));
+    assert!(heights.contains(&(handle, None)), "l'originale resta com'era: {heights:?}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Una parte di locale di fatto (contorno o testo) con il suo record corrente.
+fn fatto_part(part: RoomPart, seed: [f64; 2]) -> EntityType {
+    let room = Room {
+        phase: Phase::Fatto,
+        name: "Camera".into(),
+        number: String::new(),
+        seed,
+        height: None,
+    };
+    let values = crate::bim::rooms::encode(&room, part);
+    let mut record = ExtendedDataRecord::new(APP_LOCALE);
+    for value in values {
+        record.add_value(value);
+    }
+    let mut entity = match part {
+        RoomPart::Testo => {
+            let mut text = MText::new();
+            text.value = "Camera".into();
+            text.insertion_point = Vector3::new(seed[0], seed[1], 0.0);
+            text.height = 0.25;
+            EntityType::MText(Box::new(text))
+        }
+        _ => {
+            let mut outline = LwPolyline::new();
+            outline.is_closed = true;
+            for (x, y) in [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)] {
+                outline.vertices.push(codec::entities::LwVertex::new(codec::Vector2::new(
+                    seed[0] - 2.0 + x,
+                    seed[1] - 1.5 + y,
+                )));
+            }
+            EntityType::LwPolyline(outline)
+        }
+    };
+    entity.common_mut().extended_data.add_record(record);
+    entity
+}
+
+/// Il caso del terzo rapporto del 2026-11-02: copia di un locale, etichetta
+/// dell'originale portata sul seme della copia, `AL_ALTEZZA S` sull'etichetta
+/// originale. Il disegno non dice quale contorno è suo: il comando si rifiuta,
+/// non cambia niente e dice perché.
+#[test]
+fn altezza_refuses_a_label_that_cannot_be_matched_with_certainty() {
+    let mut app = fresh_app();
+    load(&mut app, vec![], 6);
+    let shift = |entity: &EntityType| {
+        let mut copy = entity.clone();
+        crate::entities::traits::EntityTypeOps::apply_transform(
+            &mut copy,
+            &crate::command::EntityTransform::Translate(glam::DVec3::new(10.0, 0.0, 0.0)),
+        );
+        copy
+    };
+    let (outline, label) =
+        (fatto_part(RoomPart::Contorno, [2.0, 1.5]), fatto_part(RoomPart::Testo, [2.0, 1.5]));
+    let i = app.active_tab;
+    app.tabs[i].scene.add_entity(outline.clone());
+    let original_label = app.tabs[i].scene.add_entity(shift(&label));
+    app.tabs[i].scene.add_entity(shift(&outline));
+    app.tabs[i].scene.add_entity(shift(&label));
+    forget_history(&mut app);
+
+    select(&mut app, &[original_label]);
+    run(&mut app, "AL_ALTEZZA S 3.2");
+    let text = history(&app);
+    assert!(text.contains("non si abbinano con certezza"), "{text}");
+    assert!(
+        rooms_in(doc(&app)).iter().all(|(_, room, _)| room.height.is_none()),
+        "nessuna altezza scritta"
+    );
+}
+
+/// La variante del quarto rapporto: etichetta della copia spostata di un metro
+/// e etichetta dell'originale portata sul seme del contorno della copia.
+/// Una corrispondenza esatta più un'etichetta staccata non è certa: rifiuto.
+#[test]
+fn altezza_refuses_an_exact_match_plus_a_detached_label() {
+    let mut app = fresh_app();
+    load(&mut app, vec![], 6);
+    let shift = |entity: &EntityType, by: [f64; 2]| {
+        let mut copy = entity.clone();
+        crate::entities::traits::EntityTypeOps::apply_transform(
+            &mut copy,
+            &crate::command::EntityTransform::Translate(glam::DVec3::new(by[0], by[1], 0.0)),
+        );
+        copy
+    };
+    let (outline, label) =
+        (fatto_part(RoomPart::Contorno, [2.0, 1.5]), fatto_part(RoomPart::Testo, [2.0, 1.5]));
+    let i = app.active_tab;
+    app.tabs[i].scene.add_entity(outline.clone());
+    let original_label = app.tabs[i].scene.add_entity(shift(&label, [10.0, 0.0]));
+    app.tabs[i].scene.add_entity(shift(&outline, [10.0, 0.0]));
+    app.tabs[i].scene.add_entity(shift(&label, [10.0, 1.0]));
+    forget_history(&mut app);
+
+    select(&mut app, &[original_label]);
+    run(&mut app, "AL_ALTEZZA S 3.2");
+    assert!(history(&app).contains("non si abbinano con certezza"), "{}", history(&app));
+    assert!(
+        rooms_in(doc(&app)).iter().all(|(_, room, _)| room.height.is_none()),
+        "nessuna altezza scritta"
+    );
+}
+
+/// Le due riproduzioni del quinto rapporto sul percorso reale: la copia si fa
+/// con `Scene::copy_entities` (come COPY), poi si porta un'etichetta sul seme
+/// dell'altro locale. L'etichetta resta del suo locale e `AL_ALTEZZA` cambia il
+/// contorno giusto.
+#[test]
+fn a_copy_made_by_the_app_keeps_each_label_with_its_own_room() {
+    let mut app = fresh_app();
+    load(&mut app, vec![], 6);
+    let i = app.active_tab;
+    let outline = app.tabs[i].scene.add_entity(fatto_part(RoomPart::Contorno, [2.0, 1.5]));
+    let label = app.tabs[i].scene.add_entity(fatto_part(RoomPart::Testo, [2.0, 1.5]));
+    let copies = app.tabs[i].scene.copy_entities(
+        &[outline, label],
+        &crate::command::EntityTransform::Translate(glam::DVec3::new(10.0, 0.0, 0.0)),
+    );
+    let (copy_outline, copy_label) = (copies[0], copies[1]);
+    assert!(crate::bim::rooms::ambiguous_parts(doc(&app)).is_empty());
+
+    // Etichetta dell'originale sul seme della copia, e quella della copia
+    // sul seme dell'originale.
+    for (handle, by) in [(label, 10.0), (copy_label, -10.0)] {
+        app.tabs[i].scene.transform_entities(
+            &[handle],
+            &crate::command::EntityTransform::Translate(glam::DVec3::new(by, 0.0, 0.0)),
+        );
+    }
+    select(&mut app, &[label]);
+    run(&mut app, "AL_ALTEZZA S 3.2");
+    let heights: std::collections::HashMap<Handle, Option<f64>> =
+        rooms_in(doc(&app)).into_iter().map(|(h, room, _)| (h, room.height)).collect();
+    assert_eq!(heights[&outline], Some(3.2), "{} {heights:?}", history(&app));
+    assert_eq!(heights[&label], Some(3.2));
+    assert_eq!(heights[&copy_outline], None, "la copia non cambia");
+    assert_eq!(heights[&copy_label], None);
+}
+
+/// Il caso del sesto rapporto: si copia la sola etichetta, la si riporta sul
+/// seme dell'originale e si cambia l'altezza della copia. L'identità non è il
+/// seme: l'originale non cambia, e l'ancora della copia sopravvive alla
+/// riscrittura (altrimenti la copia verrebbe riunita all'originale).
+#[test]
+fn altezza_on_a_copied_label_moved_back_leaves_the_original_alone() {
+    let mut app = fresh_app();
+    load(&mut app, vec![], 6);
+    let i = app.active_tab;
+    let outline = app.tabs[i].scene.add_entity(fatto_part(RoomPart::Contorno, [2.0, 1.5]));
+    let label = app.tabs[i].scene.add_entity(fatto_part(RoomPart::Testo, [2.0, 1.5]));
+    let copy = app.tabs[i].scene.copy_entities(
+        &[label],
+        &crate::command::EntityTransform::Translate(glam::DVec3::new(10.0, 0.0, 0.0)),
+    )[0];
+    app.tabs[i].scene.transform_entities(
+        &[copy],
+        &crate::command::EntityTransform::Translate(glam::DVec3::new(-10.0, 0.0, 0.0)),
+    );
+    select(&mut app, &[copy]);
+    run(&mut app, "AL_ALTEZZA S 3.2");
+    let heights: std::collections::HashMap<Handle, Option<f64>> =
+        rooms_in(doc(&app)).into_iter().map(|(h, room, _)| (h, room.height)).collect();
+    assert_eq!(heights[&copy], Some(3.2), "{}", history(&app));
+    assert_eq!(heights[&outline], None, "il contorno originale non cambia");
+    assert_eq!(heights[&label], None, "l'etichetta originale non cambia");
+
+    // Dopo la riscrittura le famiglie sono ancora due: cambiare l'altezza
+    // dell'originale non tocca la copia.
+    select(&mut app, &[label]);
+    run(&mut app, "AL_ALTEZZA S 2.9");
+    let heights: std::collections::HashMap<Handle, Option<f64>> =
+        rooms_in(doc(&app)).into_iter().map(|(h, room, _)| (h, room.height)).collect();
+    assert_eq!((heights[&outline], heights[&label]), (Some(2.9), Some(2.9)));
+    assert_eq!(heights[&copy], Some(3.2), "la copia resta com'era");
+}

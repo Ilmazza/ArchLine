@@ -11,12 +11,17 @@ use glam::DVec3;
 use iced::Task;
 use std::path::{Path, PathBuf};
 
-/// Writes the table `handle` to `path`.
-pub(crate) fn export_table(doc: &Document, handle: Handle, path: &Path) -> Result<(), String> {
+/// The CSV text of the table `handle`.
+fn table_csv(doc: &Document, handle: Handle) -> Result<String, String> {
     let Some(EntityType::Table(table)) = doc.get_entity(handle) else {
         return Err(crate::t!("TABLEEXPORT: the object is not a table.").into_owned());
     };
-    std::fs::write(path, super::display::table_to_csv(table)).map_err(|error| error.to_string())
+    Ok(super::display::table_to_csv(table))
+}
+
+/// Writes the table `handle` to `path`.
+pub(crate) fn export_table(doc: &Document, handle: Handle, path: &Path) -> Result<(), String> {
+    std::fs::write(path, table_csv(doc, handle)?).map_err(|error| error.to_string())
 }
 
 /// Waits for the user to pick the table to export.
@@ -64,11 +69,15 @@ impl OpenCADStudio {
             return Some(Task::none());
         }
         let handle = Handle::new(cmd.strip_prefix("TABLEEXPORT_BEGIN:")?.parse().ok()?);
-        if !matches!(self.tabs[i].scene.document.get_entity(handle), Some(EntityType::Table(_))) {
-            self.command_line
-                .push_error(crate::t!("TABLEEXPORT: the object is not a table.").as_ref());
-            return Some(Task::none());
-        }
+        // The text is taken now: handles belong to one document, and the tab
+        // that is active when the dialog answers may be another one.
+        let csv = match table_csv(&self.tabs[i].scene.document, handle) {
+            Ok(csv) => csv,
+            Err(error) => {
+                self.command_line.push_error(&error);
+                return Some(Task::none());
+            }
+        };
         Some(Task::perform(
             async {
                 crate::sys::file_dialog()
@@ -79,21 +88,22 @@ impl OpenCADStudio {
                     .await
                     .map(|file| crate::sys::handle_path(&file))
             },
-            move |path| Message::TableExportPath(handle, path),
+            move |path| Message::TableExportPath(csv.clone(), path),
         ))
     }
 
-    /// The save dialog answered: write the table, or say nothing was written.
-    pub(crate) fn on_table_export_result(&mut self, handle: Handle, path: Option<PathBuf>) -> Task<Message> {
+    /// The save dialog answered: write the CSV taken when the command started,
+    /// or say nothing was written.
+    pub(crate) fn on_table_export_result(&mut self, csv: String, path: Option<PathBuf>) -> Task<Message> {
         let Some(path) = path else {
             self.command_line.push_info(crate::t!("TABLEEXPORT: cancelled.").as_ref());
             return Task::none();
         };
-        match export_table(&self.tabs[self.active_tab].scene.document, handle, &path) {
+        match std::fs::write(&path, csv) {
             Ok(()) => self
                 .command_line
                 .push_output(crate::tf!("TABLEEXPORT: wrote {}.", path.display()).as_ref()),
-            Err(error) => self.command_line.push_error(&error),
+            Err(error) => self.command_line.push_error(&error.to_string()),
         }
         Task::none()
     }
@@ -157,19 +167,39 @@ mod tests {
         let handle = add_table(&mut app);
         let path = temp_csv("result");
         let from = app.command_line.history.len();
-        let _ = app.on_table_export_result(handle, Some(path.clone()));
+        let csv = table_csv(&app.tabs[app.active_tab].scene.document, handle).unwrap();
+        let _ = app.on_table_export_result(csv, Some(path.clone()));
         let written = path.exists();
         let _ = std::fs::remove_file(&path);
         assert!(written);
         assert!(output(&app, from).contains("TABLEEXPORT"), "got {:?}", output(&app, from));
     }
 
+    /// The CSV is the one of the document the command started in, even when
+    /// another tab is active by the time the dialog answers.
+    #[test]
+    fn the_csv_is_the_one_taken_when_the_command_started() {
+        let mut app = fresh_app();
+        let handle = add_table(&mut app);
+        let csv = table_csv(&app.tabs[app.active_tab].scene.document, handle).unwrap();
+        app.automation_op(r#"{"op":"new"}"#);
+        assert!(
+            !matches!(app.tabs[app.active_tab].scene.document.get_entity(handle), Some(EntityType::Table(_))),
+            "the new tab must not hold the table"
+        );
+        let path = temp_csv("othertab");
+        let _ = app.on_table_export_result(csv, Some(path.clone()));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(text, "Porta,90\r\n\"a,b\",\"dice \"\"x\"\"\"");
+    }
+
     #[test]
     fn a_cancelled_dialog_writes_nothing() {
         let mut app = fresh_app();
-        let handle = add_table(&mut app);
+        add_table(&mut app);
         let from = app.command_line.history.len();
-        let _ = app.on_table_export_result(handle, None);
+        let _ = app.on_table_export_result(String::new(), None);
         assert!(output(&app, from).to_lowercase().contains("cancel"), "got {:?}", output(&app, from));
     }
 
