@@ -41,6 +41,14 @@ use crate::scene::BoundarySource;
 pub struct VanoRing {
     pub code: String,
     pub ring: Vec<[f64; 2]>,
+    /// I due lati che il vano attraversa (le facce del muro), paralleli
+    /// all'asse dell'apertura: lungo questi il muro si apre.
+    pub through: Vec<([f64; 2], [f64; 2])>,
+    /// Quota del bordo basso in metri: 0 per porte e portefinestre, il davanzale
+    /// per le finestre; `None` se manca.
+    pub bottom_m: Option<f64>,
+    /// Altezza del vano in metri; `None` se manca.
+    pub height_m: Option<f64>,
 }
 
 /// Di che cosa è fatta una faccia.
@@ -274,6 +282,9 @@ mod tests {
             vani.push(VanoRing {
                 code: "P1".into(),
                 ring,
+                through: Vec::new(),
+                bottom_m: Some(0.0),
+                height_m: Some(2.1),
             });
         }
         let all = faces(&sources, TOL);

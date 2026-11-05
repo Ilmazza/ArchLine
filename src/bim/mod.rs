@@ -18,6 +18,7 @@ pub mod elevation;
 pub mod extract;
 pub mod height;
 pub mod mass3d;
+pub mod mass3d_prism;
 pub mod migrate;
 pub mod project;
 pub mod quantities;
