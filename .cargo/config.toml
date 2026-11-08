@@ -28,6 +28,11 @@ rustflags = [
 [target.x86_64-pc-windows-msvc]
 rustflags = [
     "-Clink-arg=/STACK:16777216",
+    # ArchLine: runtime C di Microsoft incorporato (CRT statica), così
+    # l'eseguibile e la DLL delle miniature non chiedono VCRUNTIME140.dll e la
+    # CRT universale a un PC senza il Visual C++ Redistributable (2026-11-08:
+    # installazione pulita fallita su un altro PC).
+    "-Ctarget-feature=+crt-static",
 ]
 
 # Also sizes rustc's own threads: rustc 1.99 overflows the default 8 MB
