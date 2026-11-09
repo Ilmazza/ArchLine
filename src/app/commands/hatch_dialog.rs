@@ -1134,6 +1134,42 @@ mod tests {
     use crate::command::StepInput;
     use crate::ui::window::hatch_dialog::{AddKind, Flow};
 
+    /// The split agreed for v2026.45: the ribbon workspace keeps upstream's
+    /// HATCH / GRADIENT with its Hatch panel, and a double-click on a hatch
+    /// keeps upstream's HATCHEDIT; the classic workspace opens the window.
+    #[test]
+    fn the_ribbon_workspace_keeps_upstreams_hatch_panel() {
+        // A new app sets the interface from its settings: switch after it.
+        for (command, name) in [("HATCH", "HATCH"), ("GRADIENT", "GRADIENT")] {
+            let mut app = app_with_rectangle();
+            crate::workspace::set_classic(false);
+            let _ = app.dispatch_command(command);
+            assert!(app.hatch_dialog.is_none(), "{command}: no window with the ribbon");
+            let active = app.tabs[app.active_tab].active_cmd.as_ref();
+            assert_eq!(active.map(|c| c.name()), Some(name), "{command} runs upstream's command");
+            assert!(
+                active.and_then(|c| c.hatch_settings()).is_some(),
+                "{command}: the Hatch panel has settings to show"
+            );
+        }
+        let mut app = app_with_rectangle();
+        crate::workspace::set_classic(false);
+        let _ = app.dispatch_command("-HATCH");
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_point(glam::DVec3::new(10.0, 5.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let handle = *app.tabs[i].scene.hatches.keys().next().expect("a hatch");
+        assert!(app.hatch_double_click(handle).is_none(), "double-click stays upstream's");
+        let mut app = app_with_rectangle();
+        crate::workspace::set_classic(true);
+        open_dialog(&mut app);
+    }
+
     fn open_dialog(app: &mut OpenCADStudio) {
         let _ = app.dispatch_command("HATCH");
         assert!(app.hatch_dialog.is_some());
