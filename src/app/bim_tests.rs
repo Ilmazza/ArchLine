@@ -3871,6 +3871,28 @@ fn has(texts: &[String], text: &str) -> bool {
 /// progetto 4,10 × 3,00 = 12,30, variazione +0,60) e non c'è il 12,00 di A di
 /// prima, in memoria e nel DWG salvato. Un altro lancio senza cambi non lascia
 /// passi; annullando, la tabella e il blocco di prima.
+/// Da upstream v2026.45 il testo di una cella va a capo dentro la colonna
+/// (con i margini dello stile tabella) e la riga cresce: nelle tabelle
+/// d'abaco nessuna riga deve crescere, né per i margini dello stile Standard
+/// (1,5 unità, in un disegno in metri) né per una colonna stretta.
+#[test]
+fn abaco_rows_keep_their_height_no_cell_wraps() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let tables = abaco_tables(&app);
+    assert!(!tables.is_empty());
+    for (_, kind, table) in tables {
+        let first = table.rows[0].height;
+        for (index, row) in table.rows.iter().enumerate() {
+            assert!(
+                (row.height - first).abs() < 1e-9,
+                "{kind:?}, riga {index}: alta {} invece di {first}",
+                row.height
+            );
+        }
+    }
+}
+
 #[test]
 fn abaco_replacement_redraws_the_table_block() {
     let mut app = app_with_abaco_input();

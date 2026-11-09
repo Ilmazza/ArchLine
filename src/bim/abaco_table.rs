@@ -46,7 +46,8 @@
 //!   niente XDATA.
 
 use document::entities::table::{
-    legacy_override_properties, CellRange, CellStyle, CellStylePropertyFlags, Table,
+    legacy_override_properties, CellRange, CellStyle, CellStylePropertyFlags,
+    LegacyTableStyleOverride, Table,
 };
 use document::entities::{AttachmentPoint, Entity, EntityCommon, Line, MText, TableBuilder};
 use document::objects::ObjectType;
@@ -66,8 +67,12 @@ const KEY_TABLE: &str = "tabella";
 const ACI_BIANCO: i16 = 7;
 /// Colore ACI del testo di un `n.d.`.
 const ACI_ND: i16 = 1;
-/// Larghezza stimata di un carattere, in altezze del testo.
-const CHAR_WIDTH: f64 = 0.75;
+/// Larghezza stimata di un carattere, in altezze del testo. Misurata col
+/// font `txt` (quello di ripiego dello stile Standard) sui testi d'abaco:
+/// fino a 0,94; Arial sta sotto. Da upstream v2026.45 il testo di una cella
+/// va a capo dentro la colonna e la riga cresce, quindi la stima non deve
+/// stare sotto il vero (con 0,75 andavano a capo le intestazioni e i codici).
+const CHAR_WIDTH: f64 = 1.0;
 /// Margine orizzontale di una cella, per lato, in altezze del testo.
 const MARGIN: f64 = 0.5;
 /// Altezza di una riga, in altezze del testo.
@@ -234,6 +239,18 @@ fn build_table(text: &TableText, at: [f64; 2], unit: DrawingUnit) -> Table {
         .row_height(ROW_HEIGHT * h)
         .layer(LAYER_ABACO)
         .build();
+    // I margini delle celle sono della tabella, alti quanto il testo chiede
+    // (`MARGIN` × h): quelli dello stile tabella sono nelle sue unità (lo
+    // Standard ha 1,5, i millimetri di AutoCAD) e da upstream v2026.45 il
+    // testo va a capo dentro di loro, quindi in un disegno in metri le righe
+    // crescevano fino a 14 linee. Override della tabella (DXF 40/41, bit 0x08
+    // e 0x10), scritto in DXF e DWG.
+    table.legacy_style_override = Some(LegacyTableStyleOverride {
+        flags: 0x0008 | 0x0010,
+        horizontal_cell_margin: Some(MARGIN * h),
+        vertical_cell_margin: Some(MARGIN * h),
+        ..LegacyTableStyleOverride::default()
+    });
     for (col, width) in widths.iter().enumerate() {
         table.set_column_width(col, *width);
     }

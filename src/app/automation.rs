@@ -5384,7 +5384,8 @@ mod tests {
         type_line(&mut app, "Nope");
         let said: String = app.command_line.history[start..].iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("
 ");
-        assert!(said.to_uppercase().contains("NOPE"), "got: {said:?}");
+        // Upstream v2026.45 answers as the reference does, and asks again.
+        assert!(said.contains("Invalid group name"), "got: {said:?}");
         assert!(app.tabs[0].scene.selected_entities().is_empty());
         assert_eq!(entity_count(&app), 3);
     }

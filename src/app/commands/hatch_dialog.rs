@@ -2063,6 +2063,11 @@ mod tests {
         let mut app = app_on_a_tilted_plane();
         let i = app.active_tab;
         assert!(app.tabs[i].scene.document.set_hatch_origin(origin));
+        // Upstream v2026.45: -HATCH starts with HPNAME (`_SOLID`); the window
+        // starts with its own default pattern, so the command line gets it too.
+        crate::modules::draw::draw::hatch::set_hpname(
+            &crate::modules::draw::draw::hatch_settings::HatchSettings::default().pattern,
+        );
         let _ = app.dispatch_command("-HATCH");
         let result = app.tabs[i]
             .active_cmd

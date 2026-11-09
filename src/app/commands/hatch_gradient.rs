@@ -678,16 +678,18 @@ mod tests {
             .expect("-GRADIENT runs")
             .on_point(glam::DVec3::new(10.0, 5.0, 0.0));
         let _ = app.apply_cmd_result(result);
+        // Upstream v2026.45: GRADIENT is HATCH with a gradient; Enter commits.
+        let _ = app.feed_command(crate::command::StepInput::Enter);
         let hatch = the_hatch(&app);
         let g = &hatch.gradient_color;
         assert!(g.enabled && !g.is_single_color);
         assert_eq!(g.name, "LINEAR");
+        // Upstream v2026.45: -GRADIENT starts from GFCLR1 / GFCLR2 (ACI 5 and
+        // 2, blue and yellow, as the reference does), stored as their RGB;
+        // the window keeps its own defaults.
         assert_eq!(
             g.colors.iter().map(|stop| stop.color).collect::<Vec<_>>(),
-            vec![
-                crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR1,
-                crate::entities::hatch_fill::DEFAULT_GRADIENT_COLOR2,
-            ]
+            vec![Color::Rgb { r: 0, g: 0, b: 255 }, Color::Rgb { r: 255, g: 255, b: 0 }]
         );
         assert_eq!(hatch.common.color, Color::ByLayer, "the command line keeps ByLayer");
         assert_eq!(hatch.normal, document::types::Vector3::new(0.0, 0.0, 1.0));

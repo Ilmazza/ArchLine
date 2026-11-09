@@ -2469,14 +2469,14 @@ mod tests {
         let _ = run(&mut app, "LAYERP");
         assert!(!walls(&app).is_locked(), "second step undoes the lock");
         let out = run(&mut app, "LAYERP");
-        assert!(out.contains("no previous layer settings"), "got: {out:?}");
+        assert!(out.contains("No previous layer state"), "got: {out:?}");
     }
 
     #[test]
     fn layerp_with_nothing_to_restore_is_an_error() {
         let (mut app, _line) = app_with_line();
         let out = run(&mut app, "LAYERP");
-        assert!(out.contains("no previous layer settings"), "got: {out:?}");
+        assert!(out.contains("No previous layer state"), "got: {out:?}");
     }
 
     #[test]
@@ -2487,7 +2487,7 @@ mod tests {
         let _ = run(&mut app, "LAYERP");
         assert!(!walls(&app).is_frozen());
         let out = run(&mut app, "LAYERP");
-        assert!(out.contains("no previous layer settings"), "a second LAYERP must not re-apply the freeze; got: {out:?}");
+        assert!(out.contains("No previous layer state"), "a second LAYERP must not re-apply the freeze; got: {out:?}");
         assert!(!walls(&app).is_frozen());
     }
 

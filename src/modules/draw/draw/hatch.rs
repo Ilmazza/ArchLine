@@ -1385,10 +1385,8 @@ impl HatchCommand {
         self.step = HatchStep::Main;
         CmdResult::CommitHatchContinue {
             hatch,
-            entity_style: self
-                .inherited
-                .as_ref()
-                .map(|(_, color, transparency)| (color.clone(), *transparency)),
+            // ArchLine: the window's creation style, else the inherited one.
+            entity_style: self.entity_style(),
             message: self.current_mode_text(),
         }
     }
@@ -3166,6 +3164,30 @@ mod tests {
         assert!(again.angle_override.is_none() && again.scale_override.is_none());
     }
 
+    /// Upstream's Hatch panel sets what the old command line typed (`P`, `A`,
+    /// `L`, `N`, `D`, `B`, `Y`): the window must commit what the panel commits.
+    fn set_like_the_panel(
+        command: &mut HatchCommand,
+        pattern: &str,
+        associative: bool,
+        shape: &str,
+        islands: HatchStyleType,
+    ) {
+        let mut panel = command.hatch_settings().expect("the panel's settings");
+        panel.fill = if pattern.eq_ignore_ascii_case("SOLID") {
+            HatchFill::Solid
+        } else {
+            HatchFill::Pattern(pattern.to_string())
+        };
+        panel.angle_deg = 30.0;
+        panel.scale = 2.0;
+        panel.associative = associative;
+        panel.separate = shape == "separate";
+        panel.keep_boundaries = shape == "retain";
+        panel.islands = islands;
+        command.set_hatch_settings(panel);
+    }
+
     #[test]
     fn settings_and_regions_commit_like_the_interactive_command() {
         let rings = vec![rect(-10.0, -10.0, 10.0, 10.0)];
@@ -3178,9 +3200,7 @@ mod tests {
             None,
             WorkingPlane::default(),
         );
-        let _ = interactive.on_text_input(&format!("P {pattern}"));
-        let _ = interactive.on_text_input("A 30");
-        let _ = interactive.on_text_input("L 2");
+        set_like_the_panel(&mut interactive, &pattern, true, "plain", HatchStyleType::Normal);
         let _ = interactive.on_point(DVec3::new(0.0, 0.0, 0.0));
         let expected = committed(interactive.on_enter());
 
@@ -3273,7 +3293,8 @@ mod tests {
             WorkingPlane::default(),
         )
         .with_regions(Vec::new());
-        assert!(matches!(command.on_enter(), CmdResult::Cancel));
+        // Upstream v2026.45: Enter with nothing to hatch ends the command.
+        assert!(matches!(command.on_enter(), CmdResult::Done));
     }
 
     #[test]
@@ -3284,9 +3305,10 @@ mod tests {
             WorkingPlane::default(),
             false,
         );
+        // Upstream reports the boundary search; the area is collected.
         assert!(matches!(
             command.on_point(DVec3::new(0.0, 0.0, 0.0)),
-            CmdResult::NeedPoint
+            CmdResult::ReportMeasurement(_)
         ));
         match command.on_enter() {
             CmdResult::HatchBoundariesPicked { regions, objects } => {
@@ -3419,12 +3441,12 @@ mod tests {
             );
             let before = command.mode;
             assert!(
-                command.options().iter().all(|option| option.keyword != "S"),
-                "S offered (select_objects={select_objects})"
+                command.options().iter().all(|option| option.keyword != "D"),
+                "D offered (select_objects={select_objects})"
             );
-            assert!(command.on_text_input("S").is_none());
-            assert!(command.on_text_input("s").is_none());
-            assert!(command.mode == before, "S changed the mode");
+            assert!(command.on_text_input("D").is_none());
+            assert!(command.on_text_input("d").is_none());
+            assert!(command.mode == before, "D changed the mode");
             assert!(!matches!(command.mode, HatchMode::Manual));
         }
     }
@@ -3437,8 +3459,9 @@ mod tests {
             None,
             WorkingPlane::default(),
         );
-        assert!(command.options().iter().any(|option| option.keyword == "S"));
-        assert!(command.on_text_input("S").is_some());
+        // Upstream v2026.45: Draw is `D`.
+        assert!(command.options().iter().any(|option| option.keyword == "D"));
+        assert!(command.on_text_input("D").is_some());
         assert!(matches!(command.mode, HatchMode::Manual));
     }
 
@@ -3868,7 +3891,7 @@ mod tests {
             2,
             "two regions, two hatches"
         );
-        assert!(command.on_text_input("S").is_some());
+        assert!(command.on_text_input("D").is_some());
         for point in [[60.0, 0.0], [70.0, 0.0], [70.0, 10.0]] {
             let _ = command.on_point(DVec3::new(point[0], point[1], 0.0));
         }
@@ -3877,7 +3900,8 @@ mod tests {
             1,
             "Manual mode commits one hatch, so the preview shows one"
         );
-        assert!(matches!(command.on_enter(), CmdResult::CommitHatch(_)));
+        // Upstream v2026.45: a drawn boundary commits and the command goes on.
+        assert!(matches!(command.on_enter(), CmdResult::CommitHatchContinue { .. }));
     }
 
     #[test]
@@ -3895,10 +3919,10 @@ mod tests {
                 command
                     .options()
                     .iter()
-                    .all(|option| option.keyword != "O" && option.keyword != "I"),
+                    .all(|option| !["S", "K", "D", "T"].contains(&option.keyword.as_str())),
                 "a mode switch is offered (select_objects={select_objects})"
             );
-            for text in ["O", "o", "OBJECTS", "I", "i", "INTERNAL"] {
+            for text in ["S", "s", "SELECT", "K", "k", "PICK", "D", "DRAW", "T"] {
                 assert!(command.on_text_input(text).is_none(), "{text}");
             }
             assert!(command.mode == before, "the mode changed");
@@ -3913,11 +3937,12 @@ mod tests {
             None,
             WorkingPlane::default(),
         );
-        assert!(command.options().iter().any(|option| option.keyword == "O"));
-        assert!(command.on_text_input("O").is_some());
+        // Upstream v2026.45: Select objects is `S`, picK internal point `K`.
+        assert!(command.options().iter().any(|option| option.keyword == "S"));
+        assert!(command.on_text_input("S").is_some());
         assert!(matches!(command.mode, HatchMode::SelectObjects));
-        assert!(command.options().iter().any(|option| option.keyword == "I"));
-        assert!(command.on_text_input("I").is_some());
+        assert!(command.options().iter().any(|option| option.keyword == "K"));
+        assert!(command.on_text_input("K").is_some());
         assert!(matches!(command.mode, HatchMode::PickInside));
     }
 
@@ -3999,7 +4024,7 @@ mod tests {
                             HatchStyleType::Ignore
                         };
 
-                        // The command line, with the keywords a user types.
+                        // Upstream's command, set as its Hatch panel sets it.
                         let mut interactive = HatchCommand::new(
                             sources.clone(),
                             Vec::new(),
@@ -4007,29 +4032,13 @@ mod tests {
                             plane,
                         )
                         .with_origin(origin);
-                        let _ = interactive.on_text_input(&format!("P {pattern}"));
-                        let _ = interactive.on_text_input("A 30");
-                        let _ = interactive.on_text_input("L 2");
-                        if !associative {
-                            let _ = interactive.on_text_input("N");
-                        }
-                        match shape {
-                            "separate" => {
-                                let _ = interactive.on_text_input("D");
-                            }
-                            "retain" => {
-                                let _ = interactive.on_text_input("B");
-                            }
-                            _ => {}
-                        }
-                        let turns = match effective {
-                            HatchStyleType::Normal => 0,
-                            HatchStyleType::Outer => 1,
-                            HatchStyleType::Ignore => 2,
-                        };
-                        for _ in 0..turns {
-                            let _ = interactive.on_text_input("Y");
-                        }
+                        set_like_the_panel(
+                            &mut interactive,
+                            &pattern,
+                            associative,
+                            shape,
+                            effective,
+                        );
                         for click in clicks {
                             let _ = interactive
                                 .on_point(plane.to_world(DVec3::new(click[0], click[1], 0.0)));
@@ -4284,12 +4293,8 @@ mod tests {
             command.manual_pts.push(DVec3::new(point.0, point.1, 0.0));
         }
         match command.on_enter() {
-            CmdResult::CommitStyledHatch {
-                color,
-                transparency,
-                ..
-            } => {
-                assert_eq!((color, transparency), style)
+            CmdResult::CommitHatchContinue { entity_style, .. } => {
+                assert_eq!(entity_style, Some(style))
             }
             _ => panic!("a styled manual hatch"),
         }

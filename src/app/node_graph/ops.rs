@@ -1197,7 +1197,11 @@ impl AppHost<'_> {
             })
             .map(|(handle, _)| (*handle, app.tabs[i].scene.solid_history_objects(*handle)))
             .collect();
+        // ArchLine: a programmatic channel runs the command-line version
+        // (HATCH opens no Hatch and Gradient window here).
+        let scripted = std::mem::replace(&mut app.scripted_dispatch, true);
         self.tasks.push(app.run_command_line(name));
+        app.scripted_dispatch = scripted;
         for step in steps {
             if app.tabs[i].active_cmd.is_none() {
                 break;
