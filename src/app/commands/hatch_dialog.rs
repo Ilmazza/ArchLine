@@ -9,7 +9,7 @@ use crate::modules::draw::draw::hatch::HatchCommand;
 use crate::modules::draw::draw::hatch_settings::{add_region, FillTab, OriginMode, RegionOrigin};
 use crate::ui::window::hatch_dialog::{Field, State};
 use crate::ui::window::hatch_palette::{Palette, PaletteAction, PALETTE_SEARCH_ID};
-use codec::Handle;
+use document::Handle;
 
 /// A `HatchCommand` that would create what the dialog describes, or `None`
 /// while a field is unusable or nothing is collected.
@@ -43,7 +43,7 @@ pub(in crate::app) fn hatch_command_from_state(
 }
 
 /// The plane a hatch lies in: where HATCHEDIT measures its pattern origin.
-fn hatch_plane(hatch: &codec::entities::Hatch) -> WorkingPlane {
+fn hatch_plane(hatch: &document::entities::Hatch) -> WorkingPlane {
     let storage = crate::entities::curve::ocs_plane(hatch.normal, hatch.elevation);
     WorkingPlane::new(
         glam::DVec3::from_array(storage.origin),
@@ -72,7 +72,7 @@ impl OpenCADStudio {
         let normal = working_plane.z.normalize_or(glam::DVec3::Z);
         let elevation = working_plane.origin.dot(normal);
         let storage = crate::entities::curve::ocs_plane(
-            codec::types::Vector3::new(normal.x, normal.y, normal.z),
+            document::types::Vector3::new(normal.x, normal.y, normal.z),
             elevation,
         );
         let plane = WorkingPlane::new(
@@ -155,7 +155,7 @@ impl OpenCADStudio {
         self.hatch_dialog_cancel();
         let i = self.active_tab;
         let (target, plane) = match self.tabs[i].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) => {
+            Some(document::EntityType::Hatch(hatch)) => {
                 (EditTarget::from_hatch(handle, hatch), hatch_plane(hatch))
             }
             _ => return Task::none(),
@@ -187,7 +187,7 @@ impl OpenCADStudio {
             return None;
         };
         match self.tabs[i].scene.document.get_entity(*handle) {
-            Some(codec::EntityType::Hatch(_)) => Some(*handle),
+            Some(document::EntityType::Hatch(_)) => Some(*handle),
             _ => None,
         }
     }
@@ -196,10 +196,14 @@ impl OpenCADStudio {
     /// `None` for any other object, which keeps its own double-click.
     #[inline(never)]
     pub(in crate::app) fn hatch_double_click(&mut self, handle: Handle) -> Option<Task<Message>> {
+        // The ribbon workspace keeps upstream's double-click (HATCHEDIT).
+        if !crate::workspace::is_classic() {
+            return None;
+        }
         let i = self.active_tab;
         matches!(
             self.tabs[i].scene.document.get_entity(handle),
-            Some(codec::EntityType::Hatch(_))
+            Some(document::EntityType::Hatch(_))
         )
         .then(|| self.hatch_dialog_open_edit(handle))
     }
@@ -219,13 +223,16 @@ impl OpenCADStudio {
         handle: Handle,
         cursor: iced::Point,
     ) -> Option<Task<Message>> {
+        if !crate::workspace::is_classic() {
+            return None;
+        }
         if self.tabs[i].active_cmd.is_some() || self.tabs[i].scene.current_layout != "Model" {
             return None;
         }
         let double = self.second_click_of_a_double_click(cursor);
         let is_hatch = matches!(
             self.tabs[i].scene.document.get_entity(handle),
-            Some(codec::EntityType::Hatch(_))
+            Some(document::EntityType::Hatch(_))
         );
         if !double || !is_hatch {
             return None;
@@ -275,7 +282,7 @@ impl OpenCADStudio {
         }
         let handle = self.tabs[i].active_grip.as_ref()?.handle;
         match self.tabs[i].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(_)) => Some(handle),
+            Some(document::EntityType::Hatch(_)) => Some(handle),
             _ => None,
         }
     }
@@ -304,6 +311,9 @@ impl OpenCADStudio {
         i: usize,
         canvas: iced::Point,
     ) -> Option<Task<Message>> {
+        if !crate::workspace::is_classic() {
+            return None;
+        }
         let handle = self.hot_hatch_grip(i)?;
         let double = self.second_click_of_a_double_click(self.tile_point(i, canvas));
         // Paired or not, the recorded click is used up.
@@ -323,30 +333,6 @@ impl OpenCADStudio {
             .borrow_mut()
             .clear_left_selection_gesture();
         Some(self.hatch_dialog_open_edit(handle))
-    }
-
-    /// The hatch whose fill is under `cursor`, for a double-click that hit
-    /// no wire. A hatch carries no wire (`scene::convert::tessellate`), so
-    /// the wire pick never finds one; the fill test is the one single clicks
-    /// use to select it.
-    #[inline(never)]
-    pub(in crate::app) fn hatch_double_click_hit(
-        &self,
-        i: usize,
-        cursor: iced::Point,
-        view_rot: glam::Mat4,
-        eye: glam::DVec3,
-        bounds: iced::Rectangle,
-        candidates: Option<&rustc_hash::FxHashSet<Handle>>,
-    ) -> Option<Handle> {
-        crate::scene::pick::hit_test::click_hit_hatch(
-            cursor,
-            &self.tabs[i].scene.visible_hatches_for_click(candidates),
-            view_rot,
-            eye,
-            bounds,
-            candidates,
-        )
     }
 
     /// The window's title: "Hatch Edit" on an existing hatch.
@@ -398,7 +384,7 @@ impl OpenCADStudio {
         // what they left alone is the hatch as it is now (it may have changed
         // while the window was hidden for the origin pick).
         let current = match self.tabs[i].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) => {
+            Some(document::EntityType::Hatch(hatch)) => {
                 crate::modules::draw::draw::hatch_edit_settings::EditTarget::from_hatch(
                     handle, hatch,
                 )
@@ -870,15 +856,15 @@ mod tests {
     use crate::app::{Message, ModalKind, OpenCADStudio};
     use crate::modules::draw::draw::hatch_settings::{HatchRegion, RegionOrigin};
     use crate::ui::window::hatch_dialog::Field;
-    use codec::Handle;
+    use document::Handle;
 
     fn add_line(app: &mut OpenCADStudio, x1: f64, y1: f64, x2: f64, y2: f64) -> Handle {
         let i = app.active_tab;
         app.tabs[i]
             .scene
-            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
-                codec::types::Vector3::new(x1, y1, 0.0),
-                codec::types::Vector3::new(x2, y2, 0.0),
+            .add_entity(document::EntityType::Line(document::entities::Line::from_points(
+                document::types::Vector3::new(x1, y1, 0.0),
+                document::types::Vector3::new(x2, y2, 0.0),
             )))
     }
 
@@ -1147,6 +1133,42 @@ mod tests {
 
     use crate::command::StepInput;
     use crate::ui::window::hatch_dialog::{AddKind, Flow};
+
+    /// The split agreed for v2026.45: the ribbon workspace keeps upstream's
+    /// HATCH / GRADIENT with its Hatch panel, and a double-click on a hatch
+    /// keeps upstream's HATCHEDIT; the classic workspace opens the window.
+    #[test]
+    fn the_ribbon_workspace_keeps_upstreams_hatch_panel() {
+        // A new app sets the interface from its settings: switch after it.
+        for (command, name) in [("HATCH", "HATCH"), ("GRADIENT", "GRADIENT")] {
+            let mut app = app_with_rectangle();
+            crate::workspace::set_classic(false);
+            let _ = app.dispatch_command(command);
+            assert!(app.hatch_dialog.is_none(), "{command}: no window with the ribbon");
+            let active = app.tabs[app.active_tab].active_cmd.as_ref();
+            assert_eq!(active.map(|c| c.name()), Some(name), "{command} runs upstream's command");
+            assert!(
+                active.and_then(|c| c.hatch_settings()).is_some(),
+                "{command}: the Hatch panel has settings to show"
+            );
+        }
+        let mut app = app_with_rectangle();
+        crate::workspace::set_classic(false);
+        let _ = app.dispatch_command("-HATCH");
+        let i = app.active_tab;
+        let result = app.tabs[i]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_point(glam::DVec3::new(10.0, 5.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        let _ = app.feed_command(crate::command::StepInput::Enter);
+        let handle = *app.tabs[i].scene.hatches.keys().next().expect("a hatch");
+        assert!(app.hatch_double_click(handle).is_none(), "double-click stays upstream's");
+        let mut app = app_with_rectangle();
+        crate::workspace::set_classic(true);
+        open_dialog(&mut app);
+    }
 
     fn open_dialog(app: &mut OpenCADStudio) {
         let _ = app.dispatch_command("HATCH");
@@ -1603,9 +1625,9 @@ mod tests {
     fn add_selected_line(app: &mut OpenCADStudio, tab: usize, y: f64) -> Handle {
         let handle = app.tabs[tab]
             .scene
-            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
-                codec::types::Vector3::new(100.0, y, 0.0),
-                codec::types::Vector3::new(110.0, y, 0.0),
+            .add_entity(document::EntityType::Line(document::entities::Line::from_points(
+                document::types::Vector3::new(100.0, y, 0.0),
+                document::types::Vector3::new(110.0, y, 0.0),
             )));
         app.tabs[tab].scene.select_entity(handle, false);
         handle
@@ -2004,12 +2026,12 @@ mod tests {
         }
     }
 
-    fn tilted_ucs(y: f64) -> codec::tables::Ucs {
+    fn tilted_ucs(y: f64) -> document::tables::Ucs {
         // The XZ plane at height y: local x along world X, local y along world Z.
-        let mut ucs = codec::tables::Ucs::new("*ACTIVE*");
-        ucs.origin = codec::types::Vector3::new(0.0, y, 0.0);
-        ucs.x_axis = codec::types::Vector3::new(1.0, 0.0, 0.0);
-        ucs.y_axis = codec::types::Vector3::new(0.0, 0.0, 1.0);
+        let mut ucs = document::tables::Ucs::new("*ACTIVE*");
+        ucs.origin = document::types::Vector3::new(0.0, y, 0.0);
+        ucs.x_axis = document::types::Vector3::new(1.0, 0.0, 0.0);
+        ucs.y_axis = document::types::Vector3::new(0.0, 0.0, 1.0);
         ucs
     }
 
@@ -2017,9 +2039,9 @@ mod tests {
         let i = app.active_tab;
         app.tabs[i]
             .scene
-            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
-                codec::types::Vector3::new(from[0], from[1], from[2]),
-                codec::types::Vector3::new(to[0], to[1], to[2]),
+            .add_entity(document::EntityType::Line(document::entities::Line::from_points(
+                document::types::Vector3::new(from[0], from[1], from[2]),
+                document::types::Vector3::new(to[0], to[1], to[2]),
             )));
     }
 
@@ -2062,7 +2084,7 @@ mod tests {
             .document
             .entities()
             .filter_map(|entity| match entity {
-                codec::EntityType::Hatch(hatch) => Some(hatch),
+                document::EntityType::Hatch(hatch) => Some(hatch),
                 _ => None,
             })
             .collect();
@@ -2077,6 +2099,11 @@ mod tests {
         let mut app = app_on_a_tilted_plane();
         let i = app.active_tab;
         assert!(app.tabs[i].scene.document.set_hatch_origin(origin));
+        // Upstream v2026.45: -HATCH starts with HPNAME (`_SOLID`); the window
+        // starts with its own default pattern, so the command line gets it too.
+        crate::modules::draw::draw::hatch::set_hpname(
+            &crate::modules::draw::draw::hatch_settings::HatchSettings::default().pattern,
+        );
         let _ = app.dispatch_command("-HATCH");
         let result = app.tabs[i]
             .active_cmd
@@ -2491,7 +2518,7 @@ mod tests {
     // ── Hatch Edit: the window on an existing hatch ────────────────────────
 
     use crate::modules::draw::draw::hatch_settings::{HatchSettings, OriginMode};
-    use codec::entities::HatchStyleType;
+    use document::entities::HatchStyleType;
 
     /// The rectangle hatched through the window with `edit` applied to its
     /// fields first; nothing stays selected and `hatch_last` is put back to
@@ -2517,17 +2544,17 @@ mod tests {
         (app, hatch)
     }
 
-    fn stored(app: &OpenCADStudio, handle: Handle) -> codec::entities::Hatch {
+    fn stored(app: &OpenCADStudio, handle: Handle) -> document::entities::Hatch {
         match app.tabs[app.active_tab].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(hatch)) => (**hatch).clone(),
+            Some(document::EntityType::Hatch(hatch)) => (**hatch).clone(),
             other => panic!("not a hatch: {other:?}"),
         }
     }
 
-    fn set_stored(app: &mut OpenCADStudio, handle: Handle, edit: impl FnOnce(&mut codec::entities::Hatch)) {
+    fn set_stored(app: &mut OpenCADStudio, handle: Handle, edit: impl FnOnce(&mut document::entities::Hatch)) {
         let i = app.active_tab;
         match app.tabs[i].scene.document.get_entity_mut(handle) {
-            Some(codec::EntityType::Hatch(hatch)) => edit(hatch),
+            Some(document::EntityType::Hatch(hatch)) => edit(hatch),
             other => panic!("not a hatch: {other:?}"),
         }
     }
@@ -2611,7 +2638,7 @@ mod tests {
         assert!(app.hatch_dialog.is_none() && app.active_modal.is_none());
         assert!(app.tabs[first].active_cmd.is_none(), "the owner's pick is stopped");
         assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
-            Some(codec::EntityType::Hatch(Box::new(before))));
+            Some(document::EntityType::Hatch(Box::new(before))));
     }
 
     #[test]
@@ -2638,8 +2665,8 @@ mod tests {
     fn ok_changes_only_the_touched_fields_and_one_undo_puts_everything_back() {
         let (mut app, hatch) = app_with_hatch();
         set_stored(&mut app, hatch, |h| {
-            h.common.color = codec::types::Color::Index(3);
-            h.common.transparency = codec::types::Transparency::T_20;
+            h.common.color = document::types::Color::Index(3);
+            h.common.transparency = document::types::Transparency::T_20;
         });
         let before = stored(&app, hatch);
         let depth = undo_depth(&app);
@@ -2672,7 +2699,7 @@ mod tests {
         app: &mut OpenCADStudio,
         hatch: Handle,
         fields: &[Field],
-        expected: impl FnOnce(&mut codec::entities::Hatch),
+        expected: impl FnOnce(&mut document::entities::Hatch),
     ) {
         let before = stored(app, hatch);
         let depth = undo_depth(app);
@@ -2692,7 +2719,7 @@ mod tests {
 
     #[test]
     fn each_gradient_field_changes_only_itself() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut app = app_with_rectangle();
         let hatch = gradient_made(&mut app, &[]);
         edit_one(&mut app, hatch, &[Field::GradientShape(5)], |h| {
@@ -2741,9 +2768,9 @@ mod tests {
             &mut app,
             solid,
             &[Field::Color(crate::modules::draw::draw::hatch_settings::HatchColor::Color(
-                codec::types::Color::Index(1),
+                document::types::Color::Index(1),
             ))],
-            |h| h.common.color = codec::types::Color::Index(1),
+            |h| h.common.color = document::types::Color::Index(1),
         );
     }
 
@@ -2755,7 +2782,7 @@ mod tests {
         hatch: Handle,
         fields: &[Field],
         to: crate::entities::hatch_fill::FillKind,
-    ) -> codec::entities::Hatch {
+    ) -> document::entities::Hatch {
         let before = stored(app, hatch);
         let depth = undo_depth(app);
         let _ = app.hatch_dialog_open_edit(hatch);
@@ -2801,7 +2828,7 @@ mod tests {
         use crate::entities::hatch_fill::{read_gradient, FillKind};
         use crate::modules::draw::draw::hatch_settings::{FillTab, GradientSettings, HatchColor};
         use crate::scene::model::hatch_model::GradientKind;
-        let red = || Field::Color(HatchColor::Color(codec::types::Color::Index(1)));
+        let red = || Field::Color(HatchColor::Color(document::types::Color::Index(1)));
         let outer = || Field::IslandStyle(HatchStyleType::Outer);
 
         // pattern -> solid, pattern -> gradient
@@ -2813,7 +2840,7 @@ mod tests {
             &[Field::Pattern("SOLID".into()), red(), outer()],
             FillKind::Solid,
         );
-        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.color, document::types::Color::Index(1));
         assert_eq!(after.style, HatchStyleType::Outer);
         assert!(after.is_solid && after.pattern.lines.is_empty());
         assert_eq!(after.pattern.name, "SOLID");
@@ -2834,7 +2861,7 @@ mod tests {
             FillKind::Pattern,
         );
         assert_eq!(after.pattern.name, "ANSI31");
-        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.color, document::types::Color::Index(1));
         assert!(!after.pattern.lines.is_empty(), "real pattern lines");
         let after = convert(
             &mut app,
@@ -2856,7 +2883,7 @@ mod tests {
             FillKind::Pattern,
         );
         assert!(!after.gradient_color.enabled);
-        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.color, document::types::Color::Index(1));
         assert_eq!(after.style, HatchStyleType::Outer);
         assert_eq!(after.pattern.name, "ANSI31");
         assert!(!after.pattern.lines.is_empty());
@@ -2868,9 +2895,9 @@ mod tests {
             FillKind::Solid,
         );
         assert!(!after.gradient_color.enabled && after.is_solid);
-        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.color, document::types::Color::Index(1));
         assert!(after.pattern.lines.is_empty());
-        assert_eq!(after.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
+        assert_eq!(after.gradient_color, document::entities::hatch::HatchGradientPattern::new());
     }
 
     #[test]
@@ -2932,7 +2959,7 @@ mod tests {
                 h.pattern_angle = angle;
             });
             // NaN is not equal to itself: compare the whole entity as text.
-            let text = |h: &codec::entities::Hatch| format!("{h:?}");
+            let text = |h: &document::entities::Hatch| format!("{h:?}");
             let before = stored(&app, solid);
 
             // Opening and OK: nothing to apply, nothing written.
@@ -2950,12 +2977,12 @@ mod tests {
 
             // The colour alone: the entity differs from before only there.
             let _ = app.hatch_dialog_open_edit(solid);
-            field(&mut app, Field::Color(HatchColor::Color(codec::types::Color::Index(1))));
+            field(&mut app, Field::Color(HatchColor::Color(document::types::Color::Index(1))));
             assert!(app.hatch_dialog.as_ref().unwrap().can_ok(), "scale {scale}");
             let _ = app.update(Message::HatchDialogOk);
             assert!(app.hatch_dialog.is_none(), "closed");
             let mut want = before.clone();
-            want.common.color = codec::types::Color::Index(1);
+            want.common.color = document::types::Color::Index(1);
             assert_eq!(text(&stored(&app, solid)), text(&want), "scale {scale}: only the colour");
             let _ = app.update(Message::Undo);
             assert_eq!(text(&stored(&app, solid)), text(&before));
@@ -3039,11 +3066,11 @@ mod tests {
         let depth = undo_depth(&app);
         let _ = app.hatch_dialog_open_edit(hatch);
         field(&mut app, Field::Pattern("SOLID".into()));
-        field(&mut app, Field::Color(HatchColor::Color(codec::types::Color::Index(1))));
+        field(&mut app, Field::Color(HatchColor::Color(document::types::Color::Index(1))));
         let _ = app.update(Message::HatchDialogOk);
         let after = stored(&app, hatch);
         assert_eq!(FillKind::of(&after), FillKind::Solid);
-        assert_eq!(after.common.color, codec::types::Color::Index(1));
+        assert_eq!(after.common.color, document::types::Color::Index(1));
         assert_eq!(after.common.layer, before.common.layer);
         assert_eq!(after.paths, before.paths);
         assert_eq!(after.style, before.style);
@@ -3061,7 +3088,7 @@ mod tests {
         set_stored(&mut app, hatch, |h| {
             h.pattern_scale = 0.1;
             h.pattern_angle = 0.1;
-            assert!(h.set_pattern_origin(codec::types::Vector2::new(1.234_567_8, 5.678_912_3)));
+            assert!(h.set_pattern_origin(document::types::Vector2::new(1.234_567_8, 5.678_912_3)));
         });
         let before = stored(&app, hatch);
         let _ = app.hatch_dialog_open_edit(hatch);
@@ -3125,7 +3152,7 @@ mod tests {
         set_stored(&mut app, hatch, |h| {
             h.pattern_scale = 0.1;
             h.pattern_angle = 0.1;
-            assert!(h.set_pattern_origin(codec::types::Vector2::new(1.234_567_8, 5.678_912_3)));
+            assert!(h.set_pattern_origin(document::types::Vector2::new(1.234_567_8, 5.678_912_3)));
         });
         let before = stored(&app, hatch);
         select_only(&mut app, hatch);
@@ -3389,7 +3416,7 @@ mod tests {
             } else {
                 let _ = app.update(Message::TabSwitch(second));
                 assert_eq!(app.tabs[first].scene.document.get_entity(hatch).cloned(),
-                    Some(codec::EntityType::Hatch(Box::new(before.clone()))), "untouched");
+                    Some(document::EntityType::Hatch(Box::new(before.clone()))), "untouched");
             }
             assert!(app.hatch_dialog.is_none(), "close={close}");
             assert!(app.active_modal.is_none(), "close={close}");
@@ -3441,7 +3468,7 @@ mod tests {
             &mut app,
             &[
                 Field::GradientShape(3),
-                Field::GradientColor1(codec::types::Color::Index(1)),
+                Field::GradientColor1(document::types::Color::Index(1)),
                 Field::GradientAngle("30".into()),
             ],
         );
@@ -3451,7 +3478,7 @@ mod tests {
         assert_eq!(settings.tab, FillTab::Gradient);
         assert_eq!(settings.gradient.shape, 3);
         // Creation stores the true colour of ACI 1; the window shows what is stored.
-        assert_eq!(settings.gradient.color1, codec::types::Color::Rgb { r: 255, g: 0, b: 0 });
+        assert_eq!(settings.gradient.color1, document::types::Color::Rgb { r: 255, g: 0, b: 0 });
         assert_eq!(settings.gradient.angle, "30");
         assert_eq!(app.tabs[app.active_tab].last_cmd.as_deref(), Some("HATCHEDIT"));
     }
@@ -3635,7 +3662,7 @@ mod tests {
         let i = app.active_tab;
         let mut copy = stored(&app, hatch);
         copy.common.handle = Handle::NULL;
-        let second = app.tabs[i].scene.add_entity(codec::EntityType::Hatch(Box::new(copy)));
+        let second = app.tabs[i].scene.add_entity(document::EntityType::Hatch(Box::new(copy)));
         assert!(app.tabs[i].scene.hatches.contains_key(&second), "a second hatch");
         select_only(&mut app, hatch);
         app.tabs[i].scene.select_entity(second, false);
@@ -3730,7 +3757,7 @@ mod tests {
             .scene
             .document
             .entities()
-            .filter(|entity| matches!(entity, codec::EntityType::Line(_)))
+            .filter(|entity| matches!(entity, document::EntityType::Line(_)))
             .map(|entity| entity.common().handle)
             .collect();
         assert_eq!(lines.len(), 4);
@@ -3812,7 +3839,7 @@ mod tests {
             .scene
             .document
             .entities()
-            .filter(|entity| matches!(entity, codec::EntityType::Line(_)))
+            .filter(|entity| matches!(entity, document::EntityType::Line(_)))
             .map(|entity| entity.common().handle)
             .collect();
         app.tabs[i].scene.erase_entities(&lines);

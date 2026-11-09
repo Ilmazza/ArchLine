@@ -1,6 +1,6 @@
-use codec::objects::{Material, MaterialColor, MaterialMap, ObjectType};
-use codec::xdata::XDataValue;
-use codec::{Document, EntityType, Handle};
+use document::objects::{Material, MaterialColor, MaterialMap, ObjectType};
+use document::xdata::XDataValue;
+use document::{Document, EntityType, Handle};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -205,8 +205,10 @@ impl MeshMaterial {
             diffuse: color,
             diffuse_by_object: true,
             ambient: [color[0], color[1], color[2]],
-            specular: [0.08; 3],
-            gloss: 0.5,
+            // A dull, broad highlight: an object's colour is not a polished
+            // material.
+            specular: [0.03; 3],
+            gloss: 0.25,
             reflectivity: 0.0,
             self_illumination: 0.0,
             translucence: 0.0,
@@ -257,7 +259,9 @@ impl MeshMaterial {
         // the missing asset's intended appearance.
         let diffuse = material_color(&material.diffuse_color, entity_color);
         let ambient = material_color(&material.ambient_color, entity_color);
-        let specular = material_color(&material.specular_color, [1.0; 4]);
+        // Without its own specular colour a material gets a soft sheen, not a
+        // white hotspot.
+        let specular = material_color(&material.specular_color, [0.2, 0.2, 0.2, 1.0]);
         let opacity = material.opacity_percent.clamp(0.0, 1.0) as f32;
         Self {
             handle: Some(handle),
@@ -574,10 +578,10 @@ fn load_map_image(_map: &MaterialMap, _base_dir: Option<&Path>) -> Option<Arc<Ma
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::Line;
-    use codec::objects::MaterialTexture;
-    use codec::types::Vector3;
-    use codec::xdata::{ExtendedDataRecord, XDataValue};
+    use document::entities::Line;
+    use document::objects::MaterialTexture;
+    use document::types::Vector3;
+    use document::xdata::{ExtendedDataRecord, XDataValue};
 
     #[test]
     fn procedural_checker_is_one_repeatable_two_by_two_tile() {

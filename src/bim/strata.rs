@@ -13,8 +13,8 @@
 //! dall'alto (la finitura) in basso. Logica pura: niente undo, lo apre il
 //! comando.
 
-use codec::objects::{XRecordEntry, XRecordValue};
-use codec::Document;
+use document::objects::{XRecordEntry, XRecordValue};
+use document::Document;
 
 use super::abaco::format_fixed;
 use super::record::{named_xrecord_entries, write_named_xrecord};
@@ -312,11 +312,11 @@ mod tests {
         use std::io::Cursor;
         let mut doc = Document::new();
         write_all(&mut doc, &[t12()]);
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
         assert_eq!(read_all(&read), vec![t12()], "DXF");
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
         assert_eq!(read_all(&read), vec![t12()], "DWG");
     }
 }

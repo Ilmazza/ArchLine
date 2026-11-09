@@ -9,11 +9,12 @@
 //
 // Workflow: select objects then press Enter to join.
 
-use codec::types::{Vector2, Vector3};
-use codec::{EntityType, Handle};
+use document::types::{Vector2, Vector3};
+use document::{EntityType, Handle};
 use glam::DVec3;
 
 use crate::command::{CadCommand, CmdResult};
+use crate::t;
 
 // ── Command ────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,11 @@ pub struct JoinCommand {
     source: Option<(Handle, EntityType)>,
     picked: Option<EntityType>,
     handles: Vec<Handle>,
+    /// The objects of the selection gathered so far.
+    entities: Vec<(Handle, EntityType)>,
+    /// One unsupported object was the whole selection: ask for a supported
+    /// source instead.
+    needs_supported: bool,
 }
 impl JoinCommand {
     pub fn new() -> Self {
@@ -28,6 +34,8 @@ impl JoinCommand {
             source: None,
             picked: None,
             handles: Vec::new(),
+            entities: Vec::new(),
+            needs_supported: false,
         }
     }
     pub fn with_source(mut self, handle: Handle, entity: EntityType) -> Self {
@@ -39,23 +47,35 @@ impl JoinCommand {
         matches!(&self.source, Some((_, EntityType::Arc(_))))
     }
 }
+
+/// An object JOIN can start from.
+fn joinable_source(entity: &EntityType) -> bool {
+    match entity {
+        EntityType::Line(_) | EntityType::Arc(_) => true,
+        EntityType::LwPolyline(p) => !p.is_closed,
+        EntityType::Polyline2D(p) => !p.is_closed(),
+        EntityType::Spline(p) => !p.flags.closed && !p.flags.periodic,
+        _ => false,
+    }
+}
+
 impl CadCommand for JoinCommand {
     fn name(&self) -> &'static str {
         "JOIN"
     }
     fn prompt(&self) -> String {
         match self.source.as_ref().map(|(_, entity)| entity) {
-            None => "JOIN  Select source object:".into(),
-            Some(EntityType::Line(_)) => {
-                "JOIN  Select lines to join to source (Enter to apply):".into()
+            None if self.needs_supported => t!(
+                "JOIN  Line, open polyline, arc, elliptical arc, or open spline expected.  Select a supported object:"
+            )
+            .into_owned(),
+            None if self.handles.is_empty() => {
+                t!("JOIN  Select source object or multiple objects to join at once:").into_owned()
             }
-            Some(EntityType::Arc(_)) => {
-                "JOIN  Select arcs to join to source or [cLose] (Enter to apply):".into()
-            }
-            Some(EntityType::Spline(_)) => {
-                "JOIN  Select open curves to join to source (Enter to apply):".into()
-            }
-            _ => "JOIN  Select objects to join to source (Enter to apply):".into(),
+            None => t!("JOIN  Select objects to join:").into_owned(),
+            Some(EntityType::Arc(_)) => t!("JOIN  Select arcs to join to source or [cLose]:").into_owned(),
+            Some(EntityType::Line(_)) => t!("JOIN  Select lines to join to source:").into_owned(),
+            Some(_) => t!("JOIN  Select objects to join to source:").into_owned(),
         }
     }
     fn options(&self) -> Vec<crate::command::CmdOption> {
@@ -74,7 +94,7 @@ impl CadCommand for JoinCommand {
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         if matches!(text.trim().to_ascii_uppercase().as_str(), "L" | "CLOSE") {
             if let Some((handle, EntityType::Arc(arc))) = &self.source {
-                let mut circle = codec::entities::Circle::new();
+                let mut circle = document::entities::Circle::new();
                 circle.common = arc.common.clone();
                 circle.common.handle = Handle::NULL;
                 circle.center = arc.center.clone();
@@ -89,9 +109,6 @@ impl CadCommand for JoinCommand {
         }
         None
     }
-    fn needs_entity_pick(&self) -> bool {
-        self.source.is_none()
-    }
     fn inject_before_entity_pick(&self) -> bool {
         true
     }
@@ -103,23 +120,30 @@ impl CadCommand for JoinCommand {
             return CmdResult::NeedPoint;
         }
         if let Some(entity) = self.picked.take() {
-            let supported = match &entity {
-                EntityType::Line(_) | EntityType::Arc(_) => true,
-                EntityType::LwPolyline(p) => !p.is_closed,
-                EntityType::Polyline2D(p) => !p.is_closed(),
-                EntityType::Spline(p) => !p.flags.closed && !p.flags.periodic,
-                _ => false,
-            };
-            if supported {
+            if joinable_source(&entity) {
                 self.source = Some((handle, entity));
             }
         }
         CmdResult::NeedPoint
     }
+    // Both the first prompt (one source or many objects at once) and the
+    // source's own prompt gather a selection.
     fn is_selection_gathering(&self) -> bool {
-        self.source.is_some()
+        true
+    }
+    fn inject_selection_entities(&mut self, entities: Vec<crate::command::SelectionEntity>) {
+        self.entities = entities.into_iter().map(|e| (e.handle, e.entity)).collect();
     }
     fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
+        if self.needs_supported {
+            // The asked-for supported object becomes the source.
+            if let Some((handle, entity)) = self.entities.iter().find(|(_, e)| joinable_source(e)) {
+                self.source = Some((*handle, entity.clone()));
+                self.needs_supported = false;
+                self.handles.clear();
+            }
+            return CmdResult::NeedPoint;
+        }
         self.handles = handles
             .into_iter()
             .filter(|handle| {
@@ -135,7 +159,29 @@ impl CadCommand for JoinCommand {
     }
     fn on_enter(&mut self) -> CmdResult {
         let Some((source, _)) = self.source.as_ref() else {
-            return CmdResult::Cancel;
+            // Many objects at once are joined together; a lone one becomes
+            // the source the rest are then joined to.
+            return match self.handles.len() {
+                0 => CmdResult::Done,
+                1 => {
+                    let handle = self.handles[0];
+                    let entity = self
+                        .entities
+                        .iter()
+                        .find(|(h, _)| *h == handle)
+                        .map(|(_, e)| e.clone());
+                    match entity.filter(joinable_source) {
+                        Some(entity) => {
+                            self.source = Some((handle, entity));
+                            self.needs_supported = false;
+                        }
+                        None => self.needs_supported = true,
+                    }
+                    self.handles.clear();
+                    CmdResult::NeedPoint
+                }
+                _ => CmdResult::JoinEntities(std::mem::take(&mut self.handles)),
+            };
         };
         if self.handles.is_empty() {
             return CmdResult::Cancel;
@@ -176,7 +222,7 @@ pub fn join_to_source(
                     })
                 }
                 (EntityType::Arc(a), EntityType::Arc(b)) => {
-                    let data = |a: &codec::entities::Arc| {
+                    let data = |a: &document::entities::Arc| {
                         (
                             [a.center.x, a.center.y, a.center.z],
                             [a.normal.x, a.normal.y, a.normal.z],
@@ -187,7 +233,7 @@ pub fn join_to_source(
                     kernel::space::source_join::join_cocircular_arcs(data(a), data(b), JOIN_EPS)
                         .map(|span| {
                             if span[1] - span[0] >= std::f64::consts::TAU {
-                                let mut circle = codec::entities::Circle::new();
+                                let mut circle = document::entities::Circle::new();
                                 circle.common = a.common.clone();
                                 circle.center = a.center.clone();
                                 circle.normal = a.normal.clone();
@@ -203,7 +249,7 @@ pub fn join_to_source(
                         })
                 }
                 (EntityType::Spline(source), candidate) => {
-                    let curve = |s: &codec::entities::Spline| {
+                    let curve = |s: &document::entities::Spline| {
                         if s.flags.closed || s.flags.periodic {
                             return None;
                         }
@@ -500,7 +546,7 @@ fn endpoints(entity: &EntityType) -> Option<Vec<DVec3>> {
 }
 
 fn join_touching(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<EntityType>)> {
-    if let Some(joined) = join_chain(entities) {
+    if let Some(joined) = join_chain(entities, true) {
         return Some(joined);
     }
     let ends: Vec<Option<Vec<DVec3>>> =
@@ -540,7 +586,7 @@ fn join_touching(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec
     }
     let (mut removed, mut merged) = (Vec::new(), Vec::new());
     for chain in chains.values().filter(|chain| chain.len() < entities.len()) {
-        if let Some((gone, made)) = join_chain(chain) {
+        if let Some((gone, made)) = join_chain(chain, false) {
             removed.extend(gone);
             merged.extend(made);
         }
@@ -554,7 +600,12 @@ fn join_touching(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec
 /// becomes an `LwPolyline` (arcs kept as bulges); a chain with varying Z
 /// becomes a `Polyline3D` (straight segments only). `None` when the
 /// selection isn't a single connected chain or holds an unsupported entity.
-fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<EntityType>)> {
+/// `whole` is false for one chain of a larger selection: the reference then
+/// converts even a collinear run to a polyline.
+fn join_chain(
+    entities: &[(Handle, &EntityType)],
+    whole: bool,
+) -> Option<(Vec<Handle>, Vec<EntityType>)> {
     if entities.len() < 2 {
         return None;
     }
@@ -594,7 +645,8 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
     let planar = verts.iter().all(|(p, _)| (p.z - z0).abs() <= JOIN_EPS);
 
     // An open run of collinear straight segments collapses back to one Line.
-    if !closed
+    if whole
+        && !closed
         && !has_arc
         && chain
             .iter()
@@ -605,7 +657,7 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
         )
         && is_collinear(&verts)
     {
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common = common;
         line.common.handle = Handle::NULL;
         line.start = v3(verts.first().unwrap().0);
@@ -620,11 +672,11 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
             return None;
         }
         let flipped = thickness != 0.0 && normal.z < 0.0;
-        let lw_verts: Vec<codec::entities::LwVertex> = verts
+        let lw_verts: Vec<document::entities::LwVertex> = verts
             .iter()
             .enumerate()
             .map(|(index, (p, bulge))| {
-                let mut v = codec::entities::LwVertex::new(Vector2::new(
+                let mut v = document::entities::LwVertex::new(Vector2::new(
                     if flipped { -p.x } else { p.x },
                     p.y,
                 ));
@@ -644,7 +696,7 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
                 v
             })
             .collect();
-        let mut pl = codec::entities::LwPolyline::new();
+        let mut pl = document::entities::LwPolyline::new();
         pl.common = common;
         pl.common.handle = Handle::NULL;
         pl.vertices = lw_verts;
@@ -664,7 +716,7 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
                 .map(|vertex| {
                     let point =
                         output.project(input.point_at([vertex.location.x, vertex.location.y]))?;
-                    let mut result = codec::entities::polyline::Vertex2D::new(Vector3::new(
+                    let mut result = document::entities::polyline::Vertex2D::new(Vector3::new(
                         point[0],
                         point[1],
                         source.elevation,
@@ -709,12 +761,12 @@ fn join_chain(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec<En
     if thickness != 0.0 {
         return None;
     }
-    let mut pl = codec::entities::Polyline3D::new();
+    let mut pl = document::entities::Polyline3D::new();
     pl.common = common;
     pl.common.handle = Handle::NULL;
     pl.vertices = verts
         .iter()
-        .map(|(p, _)| codec::entities::Vertex3DPolyline::new(v3(*p)))
+        .map(|(p, _)| document::entities::Vertex3DPolyline::new(v3(*p)))
         .collect();
     if closed {
         pl.close();
@@ -772,8 +824,8 @@ fn stitch(mut segs: Vec<Seg>) -> Option<(Vec<Seg>, bool)> {
 #[cfg(test)]
 mod join_tests {
     use super::*;
-    use codec::entities::{Line as LineEnt, LwVertex};
-    use codec::Handle;
+    use document::entities::{Line as LineEnt, LwVertex};
+    use document::Handle;
 
     fn line(x0: f64, y0: f64, x1: f64, y1: f64, thickness: f64) -> EntityType {
         let mut l = LineEnt::new();
@@ -784,7 +836,7 @@ mod join_tests {
     }
 
     fn lw_2pts(p0: (f64, f64), p1: (f64, f64), thickness: f64) -> EntityType {
-        let mut pl = codec::entities::LwPolyline::new();
+        let mut pl = document::entities::LwPolyline::new();
         pl.vertices = vec![
             LwVertex::new(Vector2::new(p0.0, p0.1)),
             LwVertex::new(Vector2::new(p1.0, p1.1)),
@@ -912,7 +964,7 @@ mod join_tests {
     fn source_join_elevates_splines_and_clears_fit_representation() {
         let source_handle = Handle::new(21);
         let candidate_handle = Handle::new(22);
-        let mut source = codec::entities::Spline::new();
+        let mut source = document::entities::Spline::new();
         source.common.handle = source_handle;
         source.degree = 1;
         source.control_points = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)];
@@ -920,7 +972,7 @@ mod join_tests {
         source.fit_points = vec![Vector3::new(0.0, 0.0, 0.0)];
         source.dwg_flags1 = 1;
         source.dxf_flags = 32 | 1024;
-        let mut candidate = codec::entities::Spline::new();
+        let mut candidate = document::entities::Spline::new();
         candidate.degree = 3;
         candidate.control_points = vec![
             Vector3::new(1.0, 0.0, 0.0),
@@ -950,7 +1002,7 @@ mod join_tests {
     #[test]
     fn arc_source_accepts_the_typed_close_option() {
         let handle = Handle::new(31);
-        let mut arc = codec::entities::Arc::new();
+        let mut arc = document::entities::Arc::new();
         arc.common.handle = handle;
         arc.center = Vector3::new(2.0, 3.0, 4.0);
         arc.radius = 5.0;

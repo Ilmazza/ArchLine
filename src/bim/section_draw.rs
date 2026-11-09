@@ -21,11 +21,11 @@
 //! Colori (decisione di Mauro, parte 1): le parti demolite in giallo (ACI 2),
 //! le nuove in rosso (ACI 1), le altre `ByLayer`.
 
-use codec::entities::hatch::BoundaryPathFlags;
-use codec::entities::{
+use document::entities::hatch::BoundaryPathFlags;
+use document::entities::{
     AttachmentPoint, BoundaryEdge, BoundaryPath, Hatch, Line, LwPolyline, MText, PolylineEdge,
 };
-use codec::{Color, EntityType, Vector2, Vector3};
+use document::{Color, EntityType, Vector2, Vector3};
 
 use super::section::{Element, Hole, Span};
 use super::{ACI_GIALLO, ACI_ROSSO};

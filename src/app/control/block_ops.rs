@@ -5,9 +5,9 @@ use crate::app::control::text_ops::decode_dxf_escapes;
 use crate::app::OpenCADStudio;
 use crate::scene::block_authoring::{definition_dictionary, DictionaryOwners};
 use crate::scene::model::object::PropValue;
-use codec::objects::{DynamicBlockData, ObjectType};
-use codec::xdata::XDataValue;
-use codec::{Document, EntityType, Handle};
+use document::objects::{DynamicBlockData, ObjectType};
+use document::xdata::XDataValue;
+use document::{Document, EntityType, Handle};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Map, Value};
 
@@ -163,7 +163,7 @@ pub(crate) fn build_block_members_map(doc: &Document) -> FxHashMap<Handle, Vec<H
 /// and evaluated representation `BlockRecord` handle (e.g. `*U12`).
 pub(crate) fn resolve_effective_block(
     doc: &Document,
-    insert: &codec::entities::Insert,
+    insert: &document::entities::Insert,
 ) -> (String, Option<Handle>, Option<Handle>) {
     let insert_handle = insert.common.handle;
     let raw_name = &insert.block_name;
@@ -283,6 +283,62 @@ pub(crate) fn resolve_effective_block(
     (raw_name.clone(), evaluated_handle, evaluated_handle)
 }
 
+/// Drop the evaluated-copy link an INSERT carries, so it resolves through the
+/// block record its name points at again. Both readers rebuild the link from
+/// the representation-data objects reachable through the insert's extension
+/// dictionary, so the link has to leave the drawing as well as the in-memory
+/// resolution map; the insert's own copy of the reference tag goes too. The
+/// rest of the extension data is left alone.
+pub(crate) fn detach_representation(doc: &mut Document, insert: Handle) {
+    let app = doc
+        .app_ids
+        .get(REPRESENTATION_TAG)
+        .map(|app| app.handle.value());
+    if let Some(EntityType::Insert(reference)) = doc.get_entity_mut(insert) {
+        reference
+            .common
+            .extended_data
+            .remove_record(REPRESENTATION_TAG);
+        if let Some(app) = app {
+            reference
+                .common
+                .extended_data
+                .raw_dwg_eed
+                .retain(|(owner, _)| *owner != app);
+        }
+    }
+    let Some(holder) = doc.extension_dictionary_handle(insert) else {
+        return;
+    };
+    let link = match doc.objects.get(&holder) {
+        Some(ObjectType::Dictionary(dictionary)) => dictionary
+            .entries
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("AcDbBlockRepresentation"))
+            .map(|(_, handle)| *handle),
+        _ => None,
+    };
+    if let Some(link) = link {
+        let owned: Vec<Handle> = doc
+            .objects
+            .keys()
+            .copied()
+            .filter(|handle| *handle != link && doc.owner_chain_reaches(*handle, link))
+            .collect();
+        for handle in owned {
+            doc.block_representations.remove(&handle);
+            doc.objects.remove(&handle);
+        }
+        doc.block_representations.remove(&link);
+        doc.objects.remove(&link);
+        if let Some(ObjectType::Dictionary(dictionary)) = doc.objects.get_mut(&holder) {
+            dictionary
+                .entries
+                .retain(|(key, _)| !key.eq_ignore_ascii_case("AcDbBlockRepresentation"));
+        }
+    }
+}
+
 /// Case-insensitive wildcard glob matcher supporting `*` and `?`.
 pub(crate) fn glob_match_ci(pattern: &str, text: &str) -> bool {
     if pattern == "*" {
@@ -321,7 +377,7 @@ pub(crate) fn glob_match_ci(pattern: &str, text: &str) -> bool {
 
 fn clean_text(raw: &str, is_mtext: bool) -> String {
     let base = if is_mtext {
-        codec::entities::mtext_format::parse_mtext(raw, true).to_plain_text()
+        document::entities::mtext_format::parse_mtext(raw, true).to_plain_text()
     } else {
         raw.replace("\\P", "\n").replace("\\p", "\n")
     };
@@ -491,7 +547,7 @@ fn collect_definition_texts_and_nested_attrs(
 pub(crate) fn extract_block_attributes(
     doc: &Document,
     block_members: &FxHashMap<Handle, Vec<Handle>>,
-    insert: &codec::entities::Insert,
+    insert: &document::entities::Insert,
     effective_def: Option<Handle>,
     evaluated_def: Option<Handle>,
 ) -> Map<String, Value> {
@@ -631,7 +687,7 @@ fn clean_float(v: f64) -> f64 {
 fn insert_world_xy_bounds(
     doc: &Document,
     block_members: &FxHashMap<Handle, Vec<Handle>>,
-    insert: &codec::entities::Insert,
+    insert: &document::entities::Insert,
     active_def: Option<Handle>,
 ) -> ([f64; 2], [f64; 2]) {
     let mut min_x = insert.insert_point.x;
@@ -682,7 +738,7 @@ fn insert_world_xy_bounds(
             (emax[0], emin[1]),
             (emax[0], emax[1]),
         ] {
-            let wp = transform.apply(codec::types::Vector3::new(px, py, 0.0));
+            let wp = transform.apply(document::types::Vector3::new(px, py, 0.0));
             if wp.x.is_finite() && wp.y.is_finite() {
                 any_member = true;
                 b_min_x = b_min_x.min(wp.x);
@@ -1084,8 +1140,8 @@ impl OpenCADStudio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::{AttributeDefinition, AttributeEntity, Circle, Insert, Line, Text};
-    use codec::types::Vector3;
+    use document::entities::{AttributeDefinition, AttributeEntity, Circle, Insert, Line, Text};
+    use document::types::Vector3;
 
     #[test]
     fn extracts_schedule_tags_attributes_dynamic_properties_and_filters_anonymous_blocks() {

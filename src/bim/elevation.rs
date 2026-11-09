@@ -27,8 +27,8 @@
 //!
 //! Distanze in unità del disegno, quote in metri.
 
-use codec::entities::{LwPolyline, MText, AttachmentPoint};
-use codec::{Color, EntityType, Vector2, Vector3};
+use document::entities::{LwPolyline, MText, AttachmentPoint};
+use document::{Color, EntityType, Vector2, Vector3};
 
 use super::aperture::{ApertureKind, ApertureState};
 use super::height::Height;
@@ -381,7 +381,7 @@ pub fn draw_elevation(
         hi = hi.max(facade.x1);
     }
     let mut ground =
-        codec::entities::Line::from_points(Vector3::new(x_of(lo), y_of(0.0), 0.0), Vector3::new(x_of(hi), y_of(0.0), 0.0));
+        document::entities::Line::from_points(Vector3::new(x_of(lo), y_of(0.0), 0.0), Vector3::new(x_of(hi), y_of(0.0), 0.0));
     ground.common.layer = LAYER_SEZIONI.to_string();
     let mut out = vec![EntityType::Line(ground)];
     for facade in &elevation.facades {

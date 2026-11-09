@@ -5,9 +5,9 @@
 
 use super::{Message, OpenCADStudio};
 use crate::ui::window::field_dialog::FieldDialogMsg;
-use codec::entities::{Insert, LwPolyline};
-use codec::types::{Vector2, Vector3};
-use codec::EntityType;
+use document::entities::{Insert, LwPolyline};
+use document::types::{Vector2, Vector3};
+use document::EntityType;
 
 fn fresh_app() -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
@@ -122,8 +122,8 @@ fn print_all_without_the_option_writes_a_single_pdf() {
 
 #[test]
 fn attsync_gives_a_new_attribute_the_definitions_place_and_height() {
-    use codec::entities::{AttributeDefinition, Line};
-    use codec::types::Transform;
+    use document::entities::{AttributeDefinition, Line};
+    use document::types::Transform;
     let mut app = fresh_app();
     let i = app.active_tab;
     let scene = &mut app.tabs[i].scene;

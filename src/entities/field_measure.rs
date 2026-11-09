@@ -12,10 +12,10 @@
 //! It is consulted only after the codec answered `None`; what the codec does
 //! evaluate is never touched.
 
-use codec::entities::table::CellValue;
-use codec::fields::FieldContext;
-use codec::objects::ObjectType;
-use codec::{Document, EntityType, Handle};
+use document::entities::table::CellValue;
+use document::fields::FieldContext;
+use document::objects::ObjectType;
+use document::{Document, EntityType, Handle};
 
 /// The value of `prop` (`Area`, `Length`, `Perimeter`) of `entity`, for the
 /// kinds of object the codec leaves out. `None` for any other combination.
@@ -79,7 +79,7 @@ pub(crate) fn evaluate(doc: &Document, code: &str, objects: &[Handle], ctx: &dyn
         Some(picture) => format!("\\AcExpr ({value:.15}) \\f {picture}"),
         None => format!("\\AcExpr ({value:.15})"),
     };
-    codec::fields::evaluate_code(doc, &formula, &[], None, ctx)
+    document::fields::evaluate_code(doc, &formula, &[], None, ctx)
 }
 
 /// Owner of an object handle (a field or a dictionary); `None` for an entity.
@@ -243,12 +243,12 @@ pub(crate) fn update(doc: &mut Document, event: i32, only: Option<&[Handle]>, ct
 #[cfg(test)]
 mod tests {
     use crate::entities::field::{evaluate, update_fields};
-    use codec::entities::{
+    use document::entities::{
         BoundaryEdge, BoundaryPath, Ellipse, Hatch, Line, LwPolyline, MText, PolylineEdge, Polyline3D, Spline,
         Vertex3DPolyline,
     };
-    use codec::types::{Vector2, Vector3};
-    use codec::{Document, EntityType, Handle};
+    use document::types::{Vector2, Vector3};
+    use document::{Document, EntityType, Handle};
 
     const AREA: &str = "\\AcObjProp Object(%<\\_ObjIdx 0>%).Area";
     const LENGTH: &str = "\\AcObjProp Object(%<\\_ObjIdx 0>%).Length";

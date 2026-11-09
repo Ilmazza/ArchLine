@@ -1,8 +1,8 @@
 // Interactive kernel primitives stored as ACIS Solid3D entities.
 
-use codec::entities::Solid3D;
-use codec::objects::SolidHistoryOperation;
-use codec::EntityType;
+use document::entities::Solid3D;
+use document::objects::SolidHistoryOperation;
+use document::EntityType;
 use glam::DVec3;
 use kernel::brep::Body;
 use kernel::geom2d::{
@@ -3673,7 +3673,6 @@ fn wire(name: &str, points: Vec<[f32; 3]>) -> WireModel {
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
         dash_from_start: false,
-        dash_align_end: None,
         text_verts: Vec::new(),
         name: name.into(),
         points,

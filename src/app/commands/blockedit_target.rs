@@ -4,8 +4,8 @@
 //! (`*U1`), a snapshot made for that one instance; the definition the user
 //! means to change is the block the copy was made from.
 
-use codec::entities::Insert;
-use codec::Document;
+use document::entities::Insert;
+use document::Document;
 
 /// The name of the block to edit for `insert`: its dynamic definition when it
 /// refers to an evaluated copy, otherwise the block it names.

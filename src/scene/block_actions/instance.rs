@@ -1,9 +1,9 @@
 //! Saved INSERT evaluation: definition geometry stays immutable; parameter
 //! values live in the native per-reference AppDataCache.
 use super::*;
-use codec::objects::{Dictionary, XRecord, XRecordEntry, XRecordValue};
+use document::objects::{Dictionary, XRecord, XRecordEntry, XRecordValue};
 
-fn entry(doc: &Document, owner: Handle, key: &str) -> Result<Option<Handle>, &'static str> {
+pub(super) fn entry(doc: &Document, owner: Handle, key: &str) -> Result<Option<Handle>, &'static str> {
     let Some(ObjectType::Dictionary(d)) = doc.objects.get(&owner) else {
         return Err("The reference contains an invalid parameter dictionary.");
     };
@@ -13,7 +13,7 @@ fn entry(doc: &Document, owner: Handle, key: &str) -> Result<Option<Handle>, &'s
         .map(|(_, h)| *h))
 }
 
-fn cache(doc: &Document, insert: Handle, id: i32) -> Result<Option<Handle>, &'static str> {
+pub(super) fn cache(doc: &Document, insert: Handle, id: i32) -> Result<Option<Handle>, &'static str> {
     let Some(mut owner) = doc.extension_dictionary_handle(insert) else {
         return Ok(None);
     };
@@ -38,6 +38,26 @@ fn cache(doc: &Document, insert: Handle, id: i32) -> Result<Option<Handle>, &'st
         return Err("The reference parameter record has an invalid owner.");
     }
     Ok(result)
+}
+
+pub(super) fn remove_cache(doc: &mut Document, insert: Handle, id: i32) -> Result<(), &'static str> {
+    let Some(handle) = cache(doc, insert, id)? else {
+        return Ok(());
+    };
+    let Some(ObjectType::XRecord(record)) = doc.objects.get(&handle) else {
+        return Err("The reference contains an invalid parameter record.");
+    };
+    let owner = record.owner;
+    let Some(ObjectType::Dictionary(owner)) = doc.objects.get_mut(&owner) else {
+        return Err("The reference contains an invalid parameter dictionary.");
+    };
+    owner.entries.retain(|(_, entry)| *entry != handle);
+    doc.objects.remove(&handle);
+    Ok(())
+}
+
+pub(crate) fn clear_canonical_inputs(doc: &mut Document, insert: Handle) {
+    crate::scene::view::dispatch::set_entity_xdata(doc, insert, super::flip_graph::INPUTS, None);
 }
 
 /// Evaluated definition-plane coordinates, independent of display grip locations.
@@ -166,6 +186,38 @@ pub(crate) fn test_value(
     }
 }
 
+/// Use the reference's resolved reflection line for Flip grip presentation.
+pub(crate) fn grip_parameter(
+    doc: &Document,
+    insert: Handle,
+    p: &Parameter,
+    testing: bool,
+) -> Result<Parameter, &'static str> {
+    let mut result = p.clone();
+    if p.flip {
+        let frame = if testing { test_frame(doc, insert, p)? } else { frame(doc, insert, p)? };
+        let delta = frame.base - p.base;
+        result.base = frame.base;
+        result.end = frame.end;
+        result.reference += delta;
+        result.grip_location = result.grip_location.map(|position| position + delta);
+    }
+    Ok(result)
+}
+
+pub(crate) fn action_grips(
+    doc: &Document, baseline: &Document, definition: Handle, insert: Handle,
+    parameter: &Parameter, value: Value, testing: bool,
+) -> Vec<crate::scene::block_grips::runtime::Grip> {
+    let mut grips = crate::scene::block_grips::runtime::action_grips(baseline, definition, parameter, value);
+    if let Some(plan) = super::flip_graph::Plan::new(baseline, definition) {
+        if plan.present_grips(doc, baseline, definition, insert, parameter, value, testing, &mut grips).is_err() {
+            return Vec::new();
+        }
+    }
+    grips
+}
+
 pub(crate) fn value(
     doc: &Document,
     insert: Handle,
@@ -193,8 +245,8 @@ pub(crate) fn value(
     if points.len() < 2
         || !points[0].is_finite()
         || !points[1].is_finite()
-        || points[0].distance(p.base) > 1e-8
-        || points[1].distance(p.end) > 1e-8
+        || (points[0].z - p.base.z).abs() > 1e-8
+        || (points[1].z - p.end.z).abs() > 1e-8
     {
         return Err("This reference uses an unsupported Flip reflection line.");
     }
@@ -205,11 +257,11 @@ pub(crate) fn value(
     match state {
         Some(0) => Ok(Value::Flip(false)),
         Some(1) => Ok(Value::Flip(true)),
-        _ => Err("The Flip state is not zero or one."),
+        _ => Ok(Value::Flip(false)),
     }
 }
 
-fn ensure_dictionary(
+pub(crate) fn ensure_dictionary(
     doc: &mut Document,
     owner: Handle,
     key: &str,
@@ -286,9 +338,6 @@ pub(crate) fn save_frame(
     p: &Parameter,
     frame: ParameterFrame,
 ) -> Result<(), &'static str> {
-    if p.flip {
-        return Err("Use the Flip state for this parameter.");
-    }
     let frame = frame.validate(p)?;
     // Validate existing metadata before allocating or modifying owned records.
     self::frame(doc, insert, p)?;
@@ -318,18 +367,257 @@ pub(crate) fn save_frame(
         put(frame.end)?;
     }
     if p.rotation {
-        let reference = r
-            .entries
-            .iter_mut()
-            .filter(|entry| matches!(entry.value, XRecordValue::Point3D(..)))
-            .nth(3)
-            .ok_or("The rotation parameter cache has no reference point.")?;
-        let point = p.reference + frame.base - p.base;
-        reference.value = XRecordValue::Point3D(point.x, point.y, point.z);
+        write_rotation_reference(r, p.reference + frame.base - p.base)?;
     }
     r.raw_data.clear();
     r.raw_dwg_data = None;
     *doc = staged;
+    Ok(())
+}
+
+pub(crate) fn action_base(
+    doc: &Document,
+    insert: Handle,
+    node_id: i32,
+) -> Result<Option<DVec3>, &'static str> {
+    let Some(h) = cache(doc, insert, node_id)? else {
+        return Ok(None);
+    };
+    let Some(ObjectType::XRecord(record)) = doc.objects.get(&h) else {
+        return Err("The reference action cache is unavailable.");
+    };
+    for entry in &record.entries {
+        if let Some((x, y, z)) = entry.value.as_point3d() {
+            let pt = DVec3::new(x, y, z);
+            if pt.is_finite() {
+                return Ok(Some(pt));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn save_action_base(
+    doc: &mut Document,
+    insert: Handle,
+    node_id: i32,
+    base: DVec3,
+) -> Result<(), &'static str> {
+    if !base.is_finite() {
+        return Err("The action base point must be finite.");
+    }
+    let mut owner = doc.ensure_extension_dictionary(insert);
+    for key in [
+        "AcDbBlockRepresentation",
+        "AppDataCache",
+        "ACAD_ENHANCEDBLOCKDATA",
+    ] {
+        owner = ensure_dictionary(doc, owner, key)?;
+    }
+    let key = node_id.to_string();
+    if let Some(h) = entry(doc, owner, &key)? {
+        let Some(ObjectType::XRecord(record)) = doc.objects.get_mut(&h) else {
+            return Err("The reference action cache is unavailable.");
+        };
+        if let Some(entry) = record.entries.iter_mut().find(|e| matches!(e.value, XRecordValue::Point3D(..))) {
+            entry.value = XRecordValue::Point3D(base.x, base.y, base.z);
+        } else {
+            record.entries.push(XRecordEntry::new(10, XRecordValue::Point3D(base.x, base.y, base.z)));
+        }
+        record.raw_data.clear();
+        record.raw_dwg_data = None;
+    } else {
+        let h = doc.allocate_handle();
+        let mut r = XRecord::named(&key);
+        r.handle = h;
+        r.owner = owner;
+        r.reactors.push(owner);
+        r.cloning_flags = document::objects::DictionaryCloningFlags::KeepExisting;
+        r.entries = vec![
+            XRecordEntry::int32(1071, 0),
+            XRecordEntry::int32(1071, 0),
+            XRecordEntry::int16(70, 25),
+            XRecordEntry::int16(70, 104),
+            XRecordEntry::new(10, XRecordValue::Point3D(base.x, base.y, base.z)),
+        ];
+        doc.objects.insert(h, ObjectType::XRecord(r));
+        if let Some(ObjectType::Dictionary(d)) = doc.objects.get_mut(&owner) {
+            d.add_entry(&key, h);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn load_action_bases(
+    doc: &Document,
+    insert: Handle,
+    definition: Handle,
+) -> Result<std::collections::BTreeMap<Handle, DVec3>, &'static str> {
+    let mut bases = std::collections::BTreeMap::new();
+    for (handle, _, kind, _) in super::actions(doc, definition) {
+        if kind != Kind::Scale {
+            continue;
+        }
+        if !super::options::base(doc, handle).is_some_and(|a| a.dependent) {
+            continue;
+        }
+        let Some(node_id) = super::action_node_id(doc, handle) else {
+            continue;
+        };
+        if let Some(base) = action_base(doc, insert, node_id)? {
+            bases.insert(handle, base);
+        }
+    }
+    Ok(bases)
+}
+
+pub(crate) fn save_action_bases(
+    doc: &mut Document,
+    insert: Handle,
+    _definition: Handle,
+    bases: &std::collections::BTreeMap<Handle, DVec3>,
+) -> Result<(), &'static str> {
+    for (&handle, &base) in bases {
+        let Some(node_id) = super::action_node_id(doc, handle) else {
+            continue;
+        };
+        save_action_base(doc, insert, node_id, base)?;
+    }
+    Ok(())
+}
+
+/// Preserve accumulated displacement while an authored pivot moves; caches
+/// belonging to a new association or an independent action cannot be reused.
+fn migrate_action_bases(doc: &mut Document, before: &Document, insert: Handle, definition: Handle) -> Result<(), &'static str> {
+    let parameters = all_parameters(doc, definition);
+    let previous_parameters = all_parameters(before, definition);
+    let actions: Vec<_> = super::actions(doc, definition).into_iter()
+        .filter(|(_, _, kind, _)| *kind == Kind::Scale)
+        .map(|(handle, _, _, code)| (handle, code)).collect();
+    for (handle, code) in actions {
+        let Some(id) = super::action_node_id(doc, handle) else { continue };
+        let current = super::options::base(doc, handle).cloned();
+        let previous = super::options::base(before, handle);
+        let old_code = super::actions(before, definition).into_iter()
+            .find(|(h, _, kind, _)| *h == handle && *kind == Kind::Scale).map(|(_, _, _, code)| code);
+        let parameter = parameters.iter().find(|p| p.id == code);
+        let old_parameter = previous_parameters.iter().find(|p| Some(p.id) == old_code);
+        match (current, previous, parameter, old_parameter) {
+            (Some(current), Some(previous), Some(p), Some(old))
+                if current.dependent && previous.dependent && p.handle == old.handle => {
+                if let Some(base) = action_base(doc, insert, id)? {
+                    let delta = super::options::pivot(&current, p.base)? - super::options::pivot(previous, old.base)?;
+                    if delta.length_squared() > 0. {
+                        save_action_base(doc, insert, id, base + delta)?;
+                    }
+                }
+            }
+            _ => remove_cache(doc, insert, id)?,
+        }
+    }
+    Ok(())
+}
+
+/// Reset discards per-reference dependent pivots along with parameter frames.
+fn clear_action_bases(doc: &mut Document, insert: Handle, definition: Handle) -> Result<(), &'static str> {
+    let ids: Vec<_> = super::actions(doc, definition).into_iter()
+        .filter(|(handle, _, kind, _)| *kind == Kind::Scale && super::options::base(doc, *handle).is_some_and(|a| a.dependent))
+        .filter_map(|(handle, _, _, _)| super::action_node_id(doc, handle))
+        .collect();
+    for id in ids {
+        remove_cache(doc, insert, id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn update_action_bases(
+    doc: &Document,
+    insert: Handle,
+    definition: Handle,
+    parameters: &[Parameter],
+    previous_frames: &std::collections::BTreeMap<Handle, ParameterFrame>,
+    current_frames: &std::collections::BTreeMap<Handle, ParameterFrame>,
+    parameter_edited: Handle,
+) -> Result<std::collections::BTreeMap<Handle, DVec3>, &'static str> {
+    let mut bases = load_action_bases(doc, insert, definition)?;
+    let actions = super::actions(doc, definition);
+    for &(handle, _, kind, code) in &actions {
+        if kind != Kind::Scale {
+            continue;
+        }
+        let Some(action_with_base) = super::options::base(doc, handle) else {
+            continue;
+        };
+        if !action_with_base.dependent {
+            continue;
+        }
+        let Some(p) = parameters.iter().find(|p| p.id == code) else {
+            continue;
+        };
+        let prev_frame = previous_frames
+            .get(&p.handle)
+            .copied()
+            .unwrap_or(ParameterFrame { base: p.base, end: p.end });
+        let pivot_def = super::options::pivot(action_with_base, p.base)?;
+        let prev_act_base = bases
+            .get(&handle)
+            .copied()
+            .unwrap_or(prev_frame.base + (pivot_def - p.base));
+
+        if p.handle == parameter_edited {
+            let mut new_frame = current_frames.get(&p.handle).copied().unwrap_or(prev_frame);
+            let mut p_with_base = p.clone();
+            p_with_base.end += new_frame.base - p_with_base.base;
+            p_with_base.base = new_frame.base;
+            if let Ok(constrained) = super::constrain_parameter_position(doc, &p_with_base, new_frame.end) {
+                new_frame.end = constrained;
+            }
+            let prev_dist = prev_frame.end.distance(prev_frame.base);
+            let new_dist = new_frame.end.distance(new_frame.base);
+            let def_dist = p.end.distance(p.base);
+            if new_frame.base.distance(p.base) < 1e-9 && (new_dist - def_dist).abs() < 1e-9 {
+                bases.insert(handle, pivot_def);
+            } else if prev_dist > 1e-9 && new_dist > 1e-9 {
+                let pivot = new_frame.base + (pivot_def - p.base);
+                let delta = prev_act_base - pivot;
+                let new_act_base = pivot + delta * (new_dist / prev_dist);
+                bases.insert(handle, new_act_base);
+            } else {
+                bases.insert(handle, prev_act_base);
+            }
+        } else {
+            bases.insert(handle, prev_act_base);
+        }
+    }
+    Ok(bases)
+}
+
+fn write_rotation_reference(record: &mut XRecord, point: DVec3) -> Result<(), &'static str> {
+    let entry = record.entries.iter_mut()
+        .filter(|entry| matches!(entry.value, XRecordValue::Point3D(..)))
+        .nth(3)
+        .ok_or("The rotation parameter cache has no reference point.")?;
+    entry.value = XRecordValue::Point3D(point.x, point.y, point.z);
+    Ok(())
+}
+
+pub(super) fn migrate_rotation_reference(
+    doc: &mut Document,
+    insert: Handle,
+    old: &Parameter,
+    new: &Parameter,
+) -> Result<(), &'static str> {
+    let Some(handle) = cache(doc, insert, old.id)? else {
+        return Ok(());
+    };
+    // A live edit may already have updated the cache when BSAVE sees it again.
+    let stored = frame(doc, insert, old).or_else(|_| frame(doc, insert, new))?;
+    let Some(ObjectType::XRecord(record)) = doc.objects.get_mut(&handle) else {
+        return Err("The reference contains an invalid parameter record.");
+    };
+    write_rotation_reference(record, new.reference + stored.base - new.base)?;
+    record.raw_data.clear();
+    record.raw_dwg_data = None;
     Ok(())
 }
 
@@ -364,7 +652,7 @@ fn ensure_cache(
         r.handle = h;
         r.owner = owner;
         r.reactors.push(owner);
-        r.cloning_flags = codec::objects::DictionaryCloningFlags::KeepExisting;
+        r.cloning_flags = document::objects::DictionaryCloningFlags::KeepExisting;
         r.entries = vec![
             XRecordEntry::int32(1071, 0),
             XRecordEntry::int32(1071, 0),
@@ -476,16 +764,128 @@ pub(crate) fn load_frames(
 ) -> Result<std::collections::BTreeMap<Handle, ParameterFrame>, &'static str> {
     let mut frames = std::collections::BTreeMap::new();
     for p in parameters {
-        let value = if p.flip {
-            value(doc, insert, p)?
+        let (frame, value) = if p.flip {
+            let f = frame(doc, insert, p).unwrap_or(ParameterFrame {
+                base: p.base,
+                end: p.end,
+            });
+            let v = value(doc, insert, p).unwrap_or(Value::Flip(false));
+            (f, v)
         } else {
-            let frame = frame(doc, insert, p)?;
-            frames.insert(p.handle, frame);
-            Value::Point(frame.end)
+            let frame = frame(doc, insert, p).unwrap_or(ParameterFrame {
+                base: p.base,
+                end: p.end,
+            });
+            (frame, Value::Point(frame.end))
         };
+        frames.insert(p.handle, frame);
         super::set_value(evaluated, p, value)?;
     }
     Ok(frames)
+}
+
+pub(super) fn canonical_flip_input(
+    plan: &super::flip_frames::Plan,
+    doc: &Document,
+    staged: &mut Document,
+    insert: Handle,
+    definition: Handle,
+    parameters: &[Parameter],
+    frames: &mut std::collections::BTreeMap<Handle, ParameterFrame>,
+    parameter: Handle,
+    input: Value,
+    testing: bool,
+) -> Result<Value, &'static str> {
+    let axis = parameters
+        .iter()
+        .find(|p| p.handle == plan.axis())
+        .ok_or("The block parameter frame is unavailable.")?;
+    let old = if testing {
+        test_value(doc, insert, axis)?
+    } else {
+        value(doc, insert, axis)?
+    };
+    let axis_frame = if testing {
+        test_frame(doc, insert, axis)?
+    } else {
+        frame(doc, insert, axis)?
+    };
+    frames.insert(axis.handle, axis_frame);
+    for handle in plan.targets() {
+        let p = parameters
+            .iter()
+            .find(|p| p.handle == handle)
+            .ok_or("The block parameter frame is unavailable.")?;
+        if cache(doc, insert, p.id)?.is_none() {
+            if old == Value::Flip(true) {
+                return Err("The block parameter frame is unavailable.");
+            }
+        } else {
+            let actual = if testing {
+                test_frame(doc, insert, p)?
+            } else {
+                frame(doc, insert, p)?
+            };
+            frames.insert(handle, actual);
+            super::set_value(staged, p, Value::Point(actual.end))?;
+        }
+    }
+    if old != Value::Flip(true) {
+        return Ok(input);
+    }
+    let graph = super::chains::Graph::new(staged, definition)?;
+    let values = frames.iter().map(|(h, frame)| (*h, frame.end)).collect();
+    let bases = frames.iter().map(|(h, frame)| (*h, frame.base)).collect();
+    let autonomous = graph.autonomous(staged, Some(&values), Some(&bases))?;
+    let active_axis = graph.active_frame(axis.handle, axis_frame, &autonomous);
+    let input = plan.reflect_input(parameter, input, active_axis)?;
+    plan.reflect_frames(frames, active_axis)?;
+    for handle in plan.targets() {
+        let p = parameters
+            .iter()
+            .find(|p| p.handle == handle)
+            .ok_or("The block parameter frame is unavailable.")?;
+        super::set_value(staged, p, Value::Point(frames[&handle].end))?;
+    }
+    Ok(input)
+}
+
+fn publish_flip_frames(
+    plan: &super::flip_frames::Plan,
+    staged: &Document,
+    parameters: &[Parameter],
+    selected: &Parameter,
+    frames: &std::collections::BTreeMap<Handle, ParameterFrame>,
+    resolved: &mut std::collections::BTreeMap<Handle, ParameterFrame>,
+    active: &std::collections::BTreeMap<Handle, ParameterFrame>,
+) -> Result<(), &'static str> {
+    let mut output = frames.clone();
+    output.extend(resolved.iter().map(|(h, frame)| (*h, *frame)));
+    if plan.contains(selected.handle) {
+        let Value::Point(end) = super::value(staged, selected)? else {
+            return Err("The block parameter frame is unavailable.");
+        };
+        output
+            .get_mut(&selected.handle)
+            .ok_or("The block parameter frame is unavailable.")?
+            .end = end;
+    }
+    let axis = parameters
+        .iter()
+        .find(|p| p.handle == plan.axis())
+        .ok_or("The block parameter frame is unavailable.")?;
+    if super::value(staged, axis)? == Value::Flip(true) {
+        let axis_frame = active
+            .get(&axis.handle)
+            .or_else(|| output.get(&axis.handle))
+            .copied()
+            .ok_or("The block parameter frame is unavailable.")?;
+        plan.reflect_frames(&mut output, axis_frame)?;
+    }
+    for handle in plan.targets() {
+        resolved.insert(handle, output[&handle]);
+    }
+    Ok(())
 }
 
 fn evaluate_input(
@@ -497,6 +897,10 @@ fn evaluate_input(
 ) -> Result<Option<Document>, &'static str> {
     let def =
         definition(doc, insert).ok_or("Select a uniformly scaled dynamic block reference.")?;
+    if let Some(plan) = super::flip_graph::Plan::new(doc, def) {
+        let input = requested.map_or(input, |f| Value::Frame { base: f.base, end: f.end });
+        return plan.evaluate(doc, doc, def, insert, parameter, input, false);
+    }
     let parameters = all_parameters(doc, def);
     let selected = parameters
         .iter()
@@ -504,18 +908,55 @@ fn evaluate_input(
         .ok_or("The reference parameter is unavailable.")?;
     let mut evaluated = doc.clone();
     let mut frames = load_frames(doc, &mut evaluated, insert, &parameters)?;
+    let plan = super::flip_frames::Plan::new(doc, def);
+    let mut input = requested.map_or(input, |frame| Value::Frame {
+        base: frame.base,
+        end: frame.end,
+    });
+    if let Some(plan) = &plan {
+        input = canonical_flip_input(
+            plan,
+            doc,
+            &mut evaluated,
+            insert,
+            def,
+            &parameters,
+            &mut frames,
+            parameter,
+            input,
+            false,
+        )?;
+    }
+    let previous_frames = frames.clone();
     let mut base_changed = false;
-    if let Some(requested) = requested {
+    if let Value::Frame { base, end } = input {
         if selected.flip {
             return Err("Use the Flip state for this parameter.");
         }
-        let requested = requested.validate(selected)?;
+        let requested = ParameterFrame { base, end }.validate(selected)?;
         let previous = frames
             .get_mut(&parameter)
             .ok_or("The parameter frame is unavailable.")?;
         base_changed = requested.base.distance(previous.base) > 1e-10;
         previous.base = requested.base;
+        previous.end = requested.end;
+        input = Value::Point(requested.end);
+    } else if let Value::Point(end) = input {
+        if let Some(frame) = frames.get_mut(&parameter) {
+            frame.end = end;
+        }
     }
+    let action_bases = update_action_bases(
+        doc,
+        insert,
+        def,
+        &parameters,
+        &previous_frames,
+        &frames,
+        parameter,
+    )?;
+    let mut resolved_frames = std::collections::BTreeMap::new();
+    let mut resolved_active = std::collections::BTreeMap::new();
     if !super::evaluate_framed(
         &mut evaluated,
         doc,
@@ -523,14 +964,39 @@ fn evaluate_input(
         parameter,
         input,
         &frames,
+        Some(&action_bases),
         base_changed,
+        &previous_frames,
+        &mut resolved_frames,
+        &mut resolved_active,
+        plan.as_ref().map(|p| p.action),
+        &[],
     )? {
         return Ok(None);
     }
     let value = super::value(&evaluated, selected)?;
+    if let Some(plan) = &plan {
+        publish_flip_frames(
+            plan,
+            &evaluated,
+            &parameters,
+            selected,
+            &frames,
+            &mut resolved_frames,
+            &resolved_active,
+        )?;
+    }
     let mut result = materialize(doc, insert, def, &evaluated)?;
+    save_resolved_frames(&mut result, &parameters, insert, &resolved_frames)?;
+    save_action_bases(&mut result, insert, def, &action_bases)?;
     if let Value::Point(end) = value {
-        let base = frames[&parameter].base;
+        if plan.as_ref().is_some_and(|p| p.contains(parameter)) {
+            return Ok(Some(result));
+        }
+        let base = resolved_frames
+            .get(&parameter)
+            .unwrap_or(&frames[&parameter])
+            .base;
         save_frame(&mut result, insert, selected, ParameterFrame { base, end })?;
     } else {
         save(&mut result, insert, selected, value)?;
@@ -546,13 +1012,21 @@ pub(crate) fn load_test_frames(
 ) -> Result<std::collections::BTreeMap<Handle, ParameterFrame>, &'static str> {
     let mut frames = std::collections::BTreeMap::new();
     for p in parameters {
-        let value = if p.flip {
-            test_value(doc, insert, p)?
+        let (frame, value) = if p.flip {
+            let f = test_frame(doc, insert, p).unwrap_or(ParameterFrame {
+                base: p.base,
+                end: p.end,
+            });
+            let v = test_value(doc, insert, p).unwrap_or(Value::Flip(false));
+            (f, v)
         } else {
-            let frame = test_frame(doc, insert, p)?;
-            frames.insert(p.handle, frame);
-            Value::Point(frame.end)
+            let frame = test_frame(doc, insert, p).unwrap_or(ParameterFrame {
+                base: p.base,
+                end: p.end,
+            });
+            (frame, Value::Point(frame.end))
         };
+        frames.insert(p.handle, frame);
         super::set_value(evaluated, p, value)?;
     }
     Ok(frames)
@@ -567,6 +1041,9 @@ pub(crate) fn evaluate_test_value(
     parameter: Handle,
     input: Value,
 ) -> Result<Option<Document>, &'static str> {
+    if let Some(plan) = super::flip_graph::Plan::new(baseline, definition) {
+        return plan.evaluate(doc, baseline, definition, insert, parameter, input, true);
+    }
     let parameters = all_parameters(baseline, definition);
     let selected = parameters
         .iter()
@@ -574,6 +1051,24 @@ pub(crate) fn evaluate_test_value(
         .ok_or("The test parameter is unavailable.")?;
     let mut staged = doc.clone();
     let mut frames = load_test_frames(doc, &mut staged, insert, &parameters)?;
+    let plan = super::flip_frames::Plan::new(baseline, definition);
+    let input = if let Some(plan) = &plan {
+        canonical_flip_input(
+            plan,
+            doc,
+            &mut staged,
+            insert,
+            definition,
+            &parameters,
+            &mut frames,
+            parameter,
+            input,
+            true,
+        )?
+    } else {
+        input
+    };
+    let previous_frames = frames.clone();
     let mut base_changed = false;
     let input = match input {
         Value::Frame { base, end } => {
@@ -586,10 +1081,28 @@ pub(crate) fn evaluate_test_value(
                 .ok_or("The test frame is unavailable.")?;
             base_changed = previous.base.distance(requested.base) > 1e-10;
             previous.base = requested.base;
+            previous.end = requested.end;
             Value::Point(requested.end)
+        }
+        Value::Point(end) => {
+            if let Some(frame) = frames.get_mut(&parameter) {
+                frame.end = end;
+            }
+            Value::Point(end)
         }
         value => value,
     };
+    let action_bases = update_action_bases(
+        doc,
+        insert,
+        definition,
+        &parameters,
+        &previous_frames,
+        &frames,
+        parameter,
+    )?;
+    let mut resolved_frames = std::collections::BTreeMap::new();
+    let mut resolved_active = std::collections::BTreeMap::new();
     if !super::evaluate_framed(
         &mut staged,
         baseline,
@@ -597,21 +1110,45 @@ pub(crate) fn evaluate_test_value(
         parameter,
         input,
         &frames,
+        Some(&action_bases),
         base_changed,
+        &previous_frames,
+        &mut resolved_frames,
+        &mut resolved_active,
+        plan.as_ref().map(|p| p.action),
+        &[],
     )? {
         return Ok(None);
     }
     let value = super::value(&staged, selected)?;
-    if let Value::Point(end) = value {
-        save_frame(
-            &mut staged,
-            insert,
+    if let Some(plan) = &plan {
+        publish_flip_frames(
+            plan,
+            &staged,
+            &parameters,
             selected,
-            ParameterFrame {
-                base: frames[&parameter].base,
-                end,
-            },
+            &frames,
+            &mut resolved_frames,
+            &resolved_active,
         )?;
+    }
+    save_resolved_frames(&mut staged, &parameters, insert, &resolved_frames)?;
+    save_action_bases(&mut staged, insert, definition, &action_bases)?;
+    if let Value::Point(end) = value {
+        if !plan.as_ref().is_some_and(|p| p.contains(parameter)) {
+            save_frame(
+                &mut staged,
+                insert,
+                selected,
+                ParameterFrame {
+                    base: resolved_frames
+                        .get(&parameter)
+                        .unwrap_or(&frames[&parameter])
+                        .base,
+                    end,
+                },
+            )?;
+        }
     } else {
         save(&mut staged, insert, selected, value)?;
     }
@@ -648,10 +1185,21 @@ pub(crate) fn reset(
     };
     let unchanged = parameters
         .iter()
-        .all(|p| value(doc, insert, p).ok() == Some(default(p)))
+        .all(|p| {
+            if p.flip {
+                value(doc, insert, p).ok() == Some(default(p))
+                    && frame(doc, insert, p).ok() == Some(ParameterFrame { base: p.base, end: p.end })
+            } else {
+                frame(doc, insert, p).ok() == Some(ParameterFrame { base: p.base, end: p.end })
+            }
+        })
         && (crate::scene::block_visibility::parameter(doc, def).is_none()
             || super::representation::visibility_state(doc, doc, def, insert) == Some(0))
-        && history.is_none();
+        && history.is_none()
+        && load_action_bases(doc, insert, def)?.is_empty()
+        && doc.get_entity(insert).is_none_or(|entity| {
+            entity.common().extended_data.get_record(super::flip_graph::INPUTS).is_none()
+        });
     if unchanged {
         return Ok(None);
     }
@@ -664,6 +1212,7 @@ pub(crate) fn reset(
     for p in &parameters {
         if p.flip {
             save(&mut result, insert, p, default(p))?;
+            save_frame(&mut result, insert, p, ParameterFrame { base: p.base, end: p.end })?;
         } else {
             save_frame(
                 &mut result,
@@ -680,6 +1229,8 @@ pub(crate) fn reset(
         super::representation::apply_visibility(&mut result, def, insert, 0)?;
     }
     clear_table_history(&mut result, insert, history)?;
+    clear_canonical_inputs(&mut result, insert);
+    clear_action_bases(&mut result, insert, def)?;
     Ok(Some(result))
 }
 
@@ -706,6 +1257,7 @@ pub(crate) fn reset_test(
         if cache(doc, insert, p.id)?.is_some() {
             if p.flip {
                 save(&mut result, insert, p, value)?;
+                save_frame(&mut result, insert, p, ParameterFrame { base: p.base, end: p.end })?;
             } else {
                 save_frame(
                     &mut result,
@@ -721,6 +1273,8 @@ pub(crate) fn reset_test(
     }
     super::rebuild(&mut result, baseline, def)?;
     super::sync_representation(&mut result, def, &name)?;
+    clear_canonical_inputs(&mut result, insert);
+    clear_action_bases(&mut result, insert, def)?;
     if let Some(parameter) =
         crate::scene::block_visibility::parameter(&result, def).map(|p| p.handle)
     {
@@ -749,43 +1303,47 @@ fn clear_table_history(
         if let Some(ObjectType::Dictionary(dictionary)) = result.objects.get_mut(&owner) {
             dictionary.entries.retain(|(_, h)| *h != history);
         }
-        let mut owned = std::collections::BTreeSet::from([history]);
-        loop {
-            let children = result
-                .objects
-                .keys()
-                .copied()
-                .filter(|h| {
-                    !owned.contains(h)
-                        && result
-                            .object_owner(*h)
-                            .is_some_and(|owner| owned.contains(&owner))
-                })
-                .collect::<Vec<_>>();
-            if children.is_empty() {
-                break;
-            }
-            owned.extend(children);
-        }
-        for handle in owned {
-            let applications = result
-                .object_xdata(handle)
-                .map(|data| {
-                    data.records()
-                        .iter()
-                        .map(|record| record.application_name.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            for application in applications {
-                result.remove_object_xdata_record(handle, &application);
-            }
-            result.block_representations.remove(&handle);
-            result.block_visibility_params.remove(&handle);
-            result.objects.remove(&handle);
-        }
+        remove_owned_cache(result, history);
     }
     Ok(())
+}
+
+pub(super) fn remove_owned_cache(result: &mut Document, root: Handle) {
+    let mut owned = std::collections::BTreeSet::from([root]);
+    loop {
+        let children = result
+            .objects
+            .keys()
+            .copied()
+            .filter(|h| {
+                !owned.contains(h)
+                    && result
+                        .object_owner(*h)
+                        .is_some_and(|owner| owned.contains(&owner))
+            })
+            .collect::<Vec<_>>();
+        if children.is_empty() {
+            break;
+        }
+        owned.extend(children);
+    }
+    for handle in owned {
+        let applications = result
+            .object_xdata(handle)
+            .map(|data| {
+                data.records()
+                    .iter()
+                    .map(|record| record.application_name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for application in applications {
+            result.remove_object_xdata_record(handle, &application);
+        }
+        result.block_representations.remove(&handle);
+        result.block_visibility_params.remove(&handle);
+        result.objects.remove(&handle);
+    }
 }
 
 fn table_history_owner(doc: &Document, insert: Handle) -> Result<Option<Handle>, &'static str> {
@@ -854,6 +1412,7 @@ fn evaluate_table_row_context(
         .rows
         .get(row)
         .ok_or("The selected table row is unavailable.")?;
+    let reflects_parameters = super::flip_graph::Plan::for_rebuild(baseline.unwrap_or(doc), def).is_some();
     let mut staged = doc.clone();
     for (column, value) in columns.iter().zip(values) {
         let p = all_parameters(&staged, def)
@@ -869,7 +1428,7 @@ fn evaluate_table_row_context(
         let input = if column.connection_name.eq_ignore_ascii_case("UpdatedAngle") {
             Value::Point(base + DVec3::new(value.cos(), value.sin(), 0.0) * current_frame.end.distance(base))
         } else {
-            let axis = if p.polar { (current_frame.end - base).normalize() }
+            let axis = if p.polar || (p.linear && reflects_parameters) { (current_frame.end - base).normalize() }
                 else { (p.end - p.base).normalize() };
             Value::Point(base + axis * *value)
         };
@@ -931,7 +1490,7 @@ fn write_table_history(
     rec.handle = h;
     rec.owner = owner;
     rec.reactors.push(owner);
-    rec.cloning_flags = codec::objects::DictionaryCloningFlags::KeepExisting;
+    rec.cloning_flags = document::objects::DictionaryCloningFlags::KeepExisting;
     rec.entries = entries;
     doc.objects.insert(h, ObjectType::XRecord(rec));
     if let Some(ObjectType::Dictionary(d)) = doc.objects.get_mut(&owner) {
@@ -976,13 +1535,80 @@ pub(crate) fn refresh_after_edit(
             _ => None,
         })
         .collect::<Vec<_>>();
+    for &insert in &inserts {
+        migrate_action_bases(&mut staged, before, insert, def)?;
+    }
+    let previous_plan = super::flip_graph::Plan::for_rebuild(before, def);
+    let plan = super::flip_graph::Plan::for_rebuild(&staged, def);
+    if plan.is_some() || previous_plan.is_some() && !inserts.is_empty() {
+        let plan = match plan {
+            Some(plan) => plan,
+            None => super::flip_graph::Plan::exit(&staged, def)?,
+        };
+        let leaving = !plan.retains_inputs();
+        for insert in inserts {
+            let state = super::representation::visibility_state(&staged, before, def, insert);
+            let has_inputs = |doc: &Document| {
+                doc.get_entity(insert).is_some_and(|entity| {
+                    entity.common().extended_data.get_record(super::flip_graph::INPUTS).is_some()
+                })
+            };
+            staged = if leaving && !has_inputs(&staged) && has_inputs(before) {
+                // A live editor edit already published native frames.
+                plan.refresh(&staged, &staged, def, insert, None)?
+            } else {
+                plan.refresh(&staged, before, def, insert, previous_plan.as_ref())?
+            };
+            if let Some(state) = state {
+                super::representation::apply_visibility(&mut staged, def, insert, state)?;
+            }
+        }
+        return Ok(staged);
+    }
+    if inserts.iter().any(|insert| {
+        doc.get_entity(*insert).is_some_and(|entity| {
+            entity.common().extended_data.get_record(super::flip_graph::INPUTS).is_some()
+        })
+    }) {
+        return Err(super::flip_graph::FRAME_ERROR);
+    }
+    let has_chain = super::chains::Graph::new(before, def)?.receivers().next().is_some()
+        || super::chains::Graph::new(doc, def)?.receivers().next().is_some();
+    let previous_parameters = if has_chain { all_parameters(before, def) } else { Vec::new() };
     for insert in inserts {
         let mut evaluated = staged.clone();
         let parameters = all_parameters(&staged, def);
         let frames = load_frames(&staged, &mut evaluated, insert, &parameters)?;
-        super::rebuild_framed(&mut evaluated, &staged, def, &frames)?;
+        let previous_frames = previous_parameters
+            .iter()
+            .map(|p| {
+                let previous = match frame(before, insert, p) {
+                    Err(_) if p.flip => Ok(ParameterFrame { base: p.base, end: p.end }),
+                    previous => previous,
+                };
+                previous.map(|frame| (p.handle, frame))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        let previous_values = previous_frames.iter().map(|(h, f)| (*h, f.end)).collect();
+        let action_bases = load_action_bases(&staged, insert, def)?;
+        let resolved_frames = super::rebuild_framed(
+            &mut evaluated,
+            &staged,
+            def,
+            &frames,
+            Some(&action_bases),
+            has_chain.then_some(super::RebuildInputs {
+                document: before,
+                frames: &previous_frames,
+                values: &previous_values,
+                requested: &std::collections::BTreeSet::new(),
+                migrated_inputs: None,
+            }),
+        )?;
         let state = super::representation::visibility_state(&staged, before, def, insert);
         staged = materialize(&staged, insert, def, &evaluated)?;
+        save_resolved_frames(&mut staged, &parameters, insert, &resolved_frames)?;
+        save_action_bases(&mut staged, insert, def, &action_bases)?;
         if let Some(state) = state {
             super::representation::apply_visibility(&mut staged, def, insert, state)?;
         }
@@ -1013,5 +1639,64 @@ pub(crate) fn materialize(
         return Err("Could not isolate the dynamic block reference.");
     }
     super::representation::reconcile(&mut scene, def, &name, evaluated)?;
+    if let Some((_, basepoint)) = crate::scene::block_basepoint::parameter(evaluated, def)
+        .filter(|(handle, basepoint)| {
+            let id = basepoint.parameter.parameter.element.eval.node_id;
+            super::actions(evaluated, def).iter().any(|(_, action, kind, _)| {
+                matches!(kind, Kind::Stretch | Kind::Flip)
+                    && action.dependencies.contains(handle)
+                    && action.action_ids.contains(&id)
+            })
+        })
+    {
+        let Some(EntityType::Insert(original)) = doc.get_entity(insert) else {
+            unreachable!()
+        };
+        let old = crate::scene::render_graph::block_base_point(doc, &original.block_name);
+        let location = basepoint.point;
+        let delta = v(location - old);
+        let scale = DVec3::new(original.x_scale(), original.y_scale(), original.z_scale());
+        // The INSERT point is stored in its own OCS. Moving it with the
+        // evaluated origin keeps the transformed block geometry in place.
+        let position = v(original.insert_point)
+            + glam::DQuat::from_rotation_z(original.rotation) * (scale * delta);
+        if !position.is_finite() {
+            return Err("The parameter value produces non-finite geometry.");
+        }
+        let Some(EntityType::Insert(reference)) = scene.document.get_entity_mut(insert) else {
+            unreachable!()
+        };
+        reference.insert_point = native(position);
+        let id = basepoint.parameter.parameter.element.eval.node_id;
+        if let Some(handle) = cache(&scene.document, insert, id)? {
+            let Some(ObjectType::XRecord(record)) = scene.document.objects.get_mut(&handle) else {
+                return Err("The reference contains an invalid parameter record.");
+            };
+            let mut points = record.entries.iter_mut()
+                .filter(|entry| matches!(entry.value, XRecordValue::Point3D(..)));
+            let point = points.next().filter(|_| record.entries_complete && points.next().is_none())
+                .ok_or("The reference parameter cache has no finite endpoint.")?;
+            let value = XRecordValue::Point3D(location.x, location.y, location.z);
+            if point.value != value {
+                point.value = value;
+                record.raw_data.clear();
+                record.raw_dwg_data = None;
+            }
+        }
+    }
     Ok(scene.document)
+}
+
+pub(super) fn save_resolved_frames(
+    doc: &mut Document,
+    parameters: &[Parameter],
+    insert: Handle,
+    frames: &std::collections::BTreeMap<Handle, ParameterFrame>,
+) -> Result<(), &'static str> {
+    for p in parameters {
+        if let Some(frame) = frames.get(&p.handle) {
+            save_frame(doc, insert, p, *frame)?;
+        }
+    }
+    Ok(())
 }

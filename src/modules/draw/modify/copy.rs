@@ -5,7 +5,7 @@
 //   Step 1: pick base point
 //   Step 2+: each click makes another copy at (click - base); Enter to finish.
 
-use codec::Handle;
+use document::Handle;
 use glam::DVec3;
 
 use crate::command::{CadCommand, CmdResult, EntityTransform};
@@ -39,12 +39,16 @@ pub struct CopyCommand {
     count: usize,
     /// Number of items for an Array copy (None = place copies one at a time).
     array_count: Option<usize>,
+    /// Array Fit: the picked point is the last item, not the second.
+    array_fit: bool,
     /// True while the next typed value is captured as the array item count.
     awaiting_count: bool,
     /// True while the mOde prompt (Single / Multiple) is up.
     awaiting_mode: bool,
     /// COPYMODE: Single ends the command after the first copy.
     single: bool,
+    /// COPYTOLAYER already created these handles in its single undo snapshot.
+    moving_layer_copies: bool,
 }
 
 impl CopyCommand {
@@ -55,19 +59,55 @@ impl CopyCommand {
             step: Step::Base,
             count: 0,
             array_count: None,
+            array_fit: false,
             awaiting_count: false,
             awaiting_mode: false,
             single: false,
+            moving_layer_copies: false,
         }
+    }
+
+    pub fn move_layer_copies(handles: Vec<Handle>, wire_models: Vec<WireModel>) -> Self {
+        let mut cmd = Self::new(handles, wire_models);
+        cmd.moving_layer_copies = true;
+        cmd
+    }
+}
+
+impl CopyCommand {
+    /// Where an Array puts its copies for a pick `delta` from the base: one
+    /// step of `delta` apart, or with Fit spread so the last lands on it.
+    fn array_offsets(&self, delta: DVec3) -> Vec<DVec3> {
+        let n = self.array_count.unwrap_or(2).max(2);
+        let step = if self.array_fit { delta / (n - 1) as f64 } else { delta };
+        (1..n).map(|k| step * k as f64).collect()
     }
 }
 
 impl CadCommand for CopyCommand {
     fn name(&self) -> &'static str {
-        "COPY"
+        if self.moving_layer_copies {
+            "COPYTOLAYER"
+        } else {
+            "COPY"
+        }
     }
 
     fn prompt(&self) -> String {
+        if self.moving_layer_copies {
+            return match self.step {
+                Step::Base => {
+                    crate::t!("Specify base point or [Displacement/eXit] <eXit>:").into_owned()
+                }
+                Step::Placing(_) => crate::t!(
+                    "Specify second point of displacement or <use first point as displacement>:"
+                )
+                .into_owned(),
+                Step::Displacement => {
+                    crate::t!("Specify displacement <0.0000,0.0000,0.0000>:").into_owned()
+                }
+            };
+        }
         if self.awaiting_count {
             return crate::tr!("command-copy", "array-count");
         }
@@ -101,6 +141,15 @@ impl CadCommand for CopyCommand {
 
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
+        if self.moving_layer_copies {
+            return match self.step {
+                Step::Base => vec![
+                    CmdOption::new("Displacement", "D"),
+                    CmdOption::new("eXit", "X"),
+                ],
+                _ => Vec::new(),
+            };
+        }
         if self.awaiting_count {
             return Vec::new();
         }
@@ -115,6 +164,13 @@ impl CadCommand for CopyCommand {
                 CmdOption::new("Displacement", "D"),
                 CmdOption::new("mOde", "O"),
             ],
+            Step::Placing(_) if self.array_count.is_some() => {
+                if self.array_fit {
+                    Vec::new()
+                } else {
+                    vec![CmdOption::new("Fit", "F")]
+                }
+            }
             Step::Placing(_) => {
                 let mut opts = vec![CmdOption::new("Array", "A")];
                 if self.count > 0 {
@@ -128,6 +184,17 @@ impl CadCommand for CopyCommand {
     }
 
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        if self.moving_layer_copies {
+            let delta = match self.step {
+                Step::Base => {
+                    self.step = Step::Placing(pt);
+                    return CmdResult::NeedPoint;
+                }
+                Step::Placing(base) => pt - base,
+                Step::Displacement => pt,
+            };
+            return CmdResult::MoveLayerCopies(self.handles.clone(), delta);
+        }
         match &self.step {
             Step::Base => {
                 self.step = Step::Placing(pt);
@@ -138,11 +205,13 @@ impl CadCommand for CopyCommand {
             }
             Step::Placing(base) => {
                 let delta = pt - *base;
-                if let Some(n) = self.array_count {
+                if self.array_count.is_some() {
                     // Array: place n-1 copies at delta, 2·delta, … so the result
                     // is n evenly spaced items including the original. Ends here.
-                    let transforms: Vec<EntityTransform> = (1..n)
-                        .map(|k| EntityTransform::Translate(delta * k as f64))
+                    let transforms: Vec<EntityTransform> = self
+                        .array_offsets(delta)
+                        .into_iter()
+                        .map(EntityTransform::Translate)
                         .collect();
                     CmdResult::BatchCopy(self.handles.clone(), transforms)
                 } else if self.single {
@@ -164,6 +233,13 @@ impl CadCommand for CopyCommand {
     }
 
     fn on_enter(&mut self) -> CmdResult {
+        if self.moving_layer_copies {
+            return match self.step {
+                Step::Base => CmdResult::Cancel,
+                Step::Placing(base) => CmdResult::MoveLayerCopies(self.handles.clone(), base),
+                Step::Displacement => CmdResult::MoveLayerCopies(self.handles.clone(), DVec3::ZERO),
+            };
+        }
         // Cancel an in-progress Array count / mode entry; otherwise finish.
         if self.awaiting_count {
             self.awaiting_count = false;
@@ -192,6 +268,16 @@ impl CadCommand for CopyCommand {
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        if self.moving_layer_copies {
+            return match (&self.step, text.trim().to_uppercase().as_str()) {
+                (Step::Base, "D" | "DISPLACEMENT") => {
+                    self.step = Step::Displacement;
+                    Some(CmdResult::NeedPoint)
+                }
+                (Step::Base, "X" | "EXIT") => Some(CmdResult::Cancel),
+                _ => None,
+            };
+        }
         if self.awaiting_count {
             if let Ok(n) = text.trim().parse::<usize>() {
                 if !super::array::array_items_within_limit(&[n as u64]) {
@@ -223,6 +309,10 @@ impl CadCommand for CopyCommand {
                 self.awaiting_mode = true;
                 Some(CmdResult::NeedPoint)
             }
+            (Step::Placing(_), "F" | "FIT") if self.array_count.is_some() => {
+                self.array_fit = true;
+                Some(CmdResult::NeedPoint)
+            }
             (Step::Placing(_), "A" | "ARRAY") => {
                 self.awaiting_count = true;
                 Some(CmdResult::NeedPoint)
@@ -236,6 +326,10 @@ impl CadCommand for CopyCommand {
         }
     }
 
+    fn groups_undo(&self) -> bool {
+        self.moving_layer_copies
+    }
+
     fn on_undo_step(&mut self) -> Option<CmdResult> {
         if matches!(self.step, Step::Placing(_)) && self.count > 0 {
             self.on_text_input("U")
@@ -244,15 +338,28 @@ impl CadCommand for CopyCommand {
         }
     }
 
+    fn preview_hidden_handles(&self) -> &[Handle] {
+        if self.moving_layer_copies && matches!(self.step, Step::Placing(_)) {
+            &self.handles
+        } else {
+            &[]
+        }
+    }
+
     fn on_preview_wires(&mut self, pt: DVec3) -> Vec<WireModel> {
         let Step::Placing(base) = &self.step else {
             return vec![];
         };
         let delta = pt - *base;
-        let mut out: Vec<WireModel> = self
-            .wire_models
+        // An Array shows every item it will place along the cursor.
+        let offsets = if self.array_count.is_some() {
+            self.array_offsets(delta)
+        } else {
+            vec![delta]
+        };
+        let mut out: Vec<WireModel> = offsets
             .iter()
-            .map(|w| w.translated(delta.as_vec3()))
+            .flat_map(|offset| self.wire_models.iter().map(move |w| w.translated(offset.as_vec3())))
             .collect();
         out.push(WireModel::solid(
             "rubber_band".into(),
@@ -273,6 +380,44 @@ mod tests {
 
     fn keywords(cmd: &CopyCommand) -> Vec<String> {
         cmd.options().into_iter().map(|o| o.keyword).collect()
+    }
+
+    #[test]
+    fn array_preview_shows_every_item_and_fit_spreads_them_to_the_point() {
+        let square = WireModel::solid(
+            "sq".into(),
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            WireModel::CYAN,
+            false,
+        );
+        let mut cmd = CopyCommand::new(vec![Handle::new(1)], vec![square]);
+        let _ = cmd.on_point(DVec3::ZERO);
+        let _ = cmd.on_text_input("A");
+        let _ = cmd.on_text_input("4");
+        let starts = |cmd: &mut CopyCommand, pt: DVec3| -> Vec<f32> {
+            cmd.on_preview_wires(pt)
+                .iter()
+                .filter(|w| w.name == "preview_sq")
+                .map(|w| w.points[0][0])
+                .collect()
+        };
+        assert_eq!(starts(&mut cmd, DVec3::new(10.0, 0.0, 0.0)), vec![10.0, 20.0, 30.0]);
+        assert!(keywords(&cmd).contains(&"F".to_string()));
+        let _ = cmd.on_text_input("F");
+        assert_eq!(starts(&mut cmd, DVec3::new(30.0, 0.0, 0.0)), vec![10.0, 20.0, 30.0]);
+        match cmd.on_point(DVec3::new(30.0, 0.0, 0.0)) {
+            CmdResult::BatchCopy(_, transforms) => {
+                let xs: Vec<f64> = transforms
+                    .iter()
+                    .map(|t| match t {
+                        EntityTransform::Translate(d) => d.x,
+                        _ => panic!("translate"),
+                    })
+                    .collect();
+                assert_eq!(xs, vec![10.0, 20.0, 30.0], "Fit: the last copy on the picked point");
+            }
+            _ => panic!("the array places its copies"),
+        }
     }
 
     #[test]

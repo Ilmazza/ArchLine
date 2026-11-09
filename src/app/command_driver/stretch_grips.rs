@@ -5,7 +5,7 @@
 
 use crate::scene::model::object::{GripApply, GripDef, GripShape};
 use crate::scene::view::dispatch;
-use codec::EntityType;
+use document::EntityType;
 use glam::DVec3;
 
 /// The grips of `entity` that stand for one of its vertices, leaving out the
@@ -58,11 +58,11 @@ pub(super) fn stretch_by_grips(
 #[cfg(test)]
 mod tests {
     use crate::app::OpenCADStudio;
-    use codec::{EntityType, Handle};
-    use codec::entities::{
+    use document::{EntityType, Handle};
+    use document::entities::{
         BoundaryEdge, BoundaryPath, Hatch, Leader, MLine, Point, PolylineEdge, Spline, Wipeout,
     };
-    use codec::types::{Vector2, Vector3};
+    use document::types::{Vector2, Vector3};
     use glam::DVec3;
 
     fn app() -> OpenCADStudio {

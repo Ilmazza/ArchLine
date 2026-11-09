@@ -10,8 +10,8 @@
 //! `update_xrecord` (`src/app/plugin_host.rs`). Niente undo qui: lo apre il
 //! comando che chiama `write`.
 
-use codec::objects::{ObjectType, XRecord, XRecordEntry, XRecordValue};
-use codec::{Document, Handle};
+use document::objects::{ObjectType, XRecord, XRecordEntry, XRecordValue};
+use document::{Document, Handle};
 
 use super::units::DrawingUnit;
 use super::RECORD_PROGETTO;
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn record_roundtrip_and_update() {
-        let mut doc = codec::Document::new();
+        let mut doc = document::Document::new();
         assert_eq!(read(&doc), ProjectRecord::default());
         write(
             &mut doc,
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn record_roundtrips_default_height() {
-        let mut doc = codec::Document::new();
+        let mut doc = document::Document::new();
         let rec = ProjectRecord {
             unit: Some(DrawingUnit::Metri),
             new_walls_layer: None,
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn record_without_height_entry_still_reads() {
-        let mut doc = codec::Document::new();
+        let mut doc = document::Document::new();
         let root = doc.header.named_objects_dict_handle;
         let handle = doc.allocate_handle();
         let mut xrecord = XRecord::named(RECORD_PROGETTO);

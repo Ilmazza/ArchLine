@@ -15,8 +15,8 @@ use crate::scene::{
 };
 use crate::ui::window::graphic_attributes::GraphicAttributesMsg;
 use crate::ui::PropertiesPanel;
-use codec::types::Color as AcadColor;
-use codec::{EntityType as AcadEntityType, Handle};
+use document::types::Color as AcadColor;
+use document::{EntityType as AcadEntityType, Handle};
 use iced::time::Instant;
 use iced::{mouse, Point, Task};
 
@@ -36,8 +36,8 @@ impl OpenCADStudio {
     pub(in crate::app) fn mlstyle_mut(
         &mut self,
         tab: usize,
-    ) -> Option<&mut codec::objects::MLineStyle> {
-        use codec::objects::ObjectType;
+    ) -> Option<&mut document::objects::MLineStyle> {
+        use document::objects::ObjectType;
         let name = self.mlstyle_selected.clone();
         self.tabs[tab]
             .scene
@@ -51,7 +51,7 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn load_mlstyle_bufs(&mut self, tab: usize) {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let name = self.mlstyle_selected.clone();
         let Some((description, start_angle, end_angle, fill_color, elements)) = self.tabs[tab]
             .scene
@@ -104,14 +104,14 @@ impl OpenCADStudio {
                 style.end_angle = value.to_radians();
             }
             if let Some(value) = fill_color {
-                style.fill_color = codec::types::Color::from_index(value);
+                style.fill_color = document::types::Color::from_index(value);
             }
             for (element, values) in style.elements.iter_mut().zip(elements) {
                 if let Ok(value) = values[0].trim().parse::<f64>() {
                     element.offset = value;
                 }
                 if let Ok(value) = values[1].trim().parse::<i16>() {
-                    element.color = codec::types::Color::from_index(value);
+                    element.color = document::types::Color::from_index(value);
                 }
                 element.linetype = values[2].clone();
             }
@@ -121,8 +121,8 @@ impl OpenCADStudio {
     pub(in crate::app) fn tablestyle_mut(
         &mut self,
         tab: usize,
-    ) -> Option<&mut codec::objects::TableStyle> {
-        use codec::objects::ObjectType;
+    ) -> Option<&mut document::objects::TableStyle> {
+        use document::objects::ObjectType;
         let name = self.tablestyle_selected.clone();
         self.tabs[tab]
             .scene
@@ -135,91 +135,75 @@ impl OpenCADStudio {
             })
     }
 
-    /// Mutable access to a table style's cell style by row (0=Data,1=Header,2=Title).
-
-    pub(in crate::app) fn ts_cell_of(
-        s: &mut codec::objects::TableStyle,
-        row: u8,
-    ) -> Option<&mut codec::objects::RowCellStyle> {
-        match row {
-            0 => Some(&mut s.data_row_style),
-            1 => Some(&mut s.header_row_style),
-            2 => Some(&mut s.title_row_style),
-            _ => None,
-        }
-    }
-
-    /// Mutable access to a cell's border by index
-    /// (0=left 1=right 2=top 3=bottom 4=horizontal-inside 5=vertical-inside).
-
-    pub(in crate::app) fn ts_border_of(
-        c: &mut codec::objects::RowCellStyle,
-        border: u8,
-    ) -> Option<&mut codec::objects::TableCellBorder> {
-        match border {
-            0 => Some(&mut c.left_border),
-            1 => Some(&mut c.right_border),
-            2 => Some(&mut c.top_border),
-            3 => Some(&mut c.bottom_border),
-            4 => Some(&mut c.horizontal_inside_border),
-            5 => Some(&mut c.vertical_inside_border),
-            _ => None,
-        }
-    }
-
-    /// Populate margin + per-cell edit buffers from the selected table style.
-
+    /// Gives the selected table style its named cell styles (a style made
+    /// here or read from an older file only has its three rows) and fills
+    /// the editor buffers from the edited cell style.
     pub(in crate::app) fn load_tablestyle_bufs(&mut self, tab: usize) {
-        use codec::objects::ObjectType;
-        let name = self.tablestyle_selected.clone();
-        let Some(s) = self.tabs[tab]
+        let text_styles: Vec<(String, document::Handle)> = self.tabs[tab]
             .scene
             .document
-            .objects
-            .values()
-            .find_map(|o| match o {
-                ObjectType::TableStyle(s) if s.name == name => Some(s),
-                _ => None,
-            })
-        else {
+            .text_styles
+            .iter()
+            .map(|style| (style.name.clone(), style.handle))
+            .collect();
+        let wanted = self.ts_cell.clone();
+        let Some(style) = self.tablestyle_mut(tab) else {
             return;
         };
-        self.ts_hmargin = format!("{:.4}", s.horizontal_margin);
-        self.ts_vmargin = format!("{:.4}", s.vertical_margin);
-        self.ts_description = s.description.clone();
-        for (r, c) in [&s.data_row_style, &s.header_row_style, &s.title_row_style]
-            .into_iter()
-            .enumerate()
-        {
-            self.ts_cell_textstyle[r] = c.text_style_name.clone();
-            self.ts_cell_height[r] = format!("{:.4}", c.text_height);
-            self.ts_cell_textcolor[r] = c
-                .text_color
-                .index()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            self.ts_cell_fillcolor[r] = c
-                .fill_color
-                .index()
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            self.ts_cell_datatype[r] = c.data_type.to_string();
-            self.ts_cell_unittype[r] = c.unit_type.to_string();
-            self.ts_cell_format[r] = c.format_string.clone();
-            let borders = [
-                &c.left_border,
-                &c.right_border,
-                &c.top_border,
-                &c.bottom_border,
-                &c.horizontal_inside_border,
-                &c.vertical_inside_border,
-            ];
-            for (b, bd) in borders.into_iter().enumerate() {
-                self.ts_border_lw[r][b] = bd.line_weight.value().to_string();
-                self.ts_border_color[r][b] =
-                    bd.color.index().map(|v| v.to_string()).unwrap_or_default();
-                self.ts_border_spacing[r][b] = format!("{:.4}", bd.double_line_spacing);
+        style.ensure_cell_styles(|row| {
+            row.text_style_handle
+                .or_else(|| {
+                    text_styles
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(&row.text_style_name))
+                        .or_else(|| text_styles.iter().find(|(name, _)| name == "Standard"))
+                        .map(|(_, handle)| *handle)
+                })
+                .unwrap_or(document::Handle::NULL)
+        });
+        let description = style.description.clone();
+        let margins = (style.horizontal_margin, style.vertical_margin);
+        let cell = style
+            .cell_style(&wanted)
+            .or_else(|| style.cell_style(document::objects::DATA_CELL_STYLE))
+            .cloned();
+        self.ts_description = description;
+        let Some(cell) = cell else {
+            return;
+        };
+        let data = &cell.cell_style;
+        let format = &data.content_format;
+        self.ts_cell = cell.name.clone();
+        self.ts_cell_name.clear();
+        self.ts_cell_height = crate::entities::common::format_length(format.text_height);
+        self.ts_cell_angle =
+            crate::entities::common::format_length(format.rotation.to_degrees());
+        let (horizontal, vertical) = data.margins().unwrap_or(margins);
+        self.ts_cell_hmargin = crate::entities::common::format_length(horizontal);
+        self.ts_cell_vmargin = crate::entities::common::format_length(vertical);
+        self.ts_cell_format = format.value_format_string.clone();
+        for (slot, edge) in document::objects::TABLE_GRID_EDGES.iter().enumerate() {
+            let spacing = data.grid(*edge).map_or(
+                0.25 * format.text_height,
+                |grid| grid.border.double_line_spacing,
+            );
+            self.ts_edge_spacing[slot] = crate::entities::common::format_length(spacing);
+        }
+    }
+
+    /// Edits the cell style the table style editor shows, then refreshes
+    /// the style's row projection (DXF groups, older files).
+    pub(in crate::app) fn edit_table_cell_style(
+        &mut self,
+        edit: impl FnOnce(&mut document::objects::NamedTableCellStyle),
+    ) {
+        let i = self.active_tab;
+        let name = self.ts_cell.clone();
+        if let Some(style) = self.tablestyle_mut(i) {
+            if let Some(cell) = style.cell_style_mut(&name) {
+                edit(cell);
             }
+            style.sync_rows_from_cell_styles();
         }
     }
 
@@ -228,8 +212,8 @@ impl OpenCADStudio {
     pub(in crate::app) fn mleaderstyle_mut(
         &mut self,
         tab: usize,
-    ) -> Option<&mut codec::objects::MultiLeaderStyle> {
-        use codec::objects::ObjectType;
+    ) -> Option<&mut document::objects::MultiLeaderStyle> {
+        use document::objects::ObjectType;
         let name = self.mleaderstyle_selected.clone();
         self.tabs[tab]
             .scene
@@ -245,7 +229,7 @@ impl OpenCADStudio {
     /// Populate all edit buffers from the currently selected multileader style.
 
     pub(in crate::app) fn load_mleaderstyle_bufs(&mut self, tab: usize) {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let name = self.mleaderstyle_selected.clone();
         let Some(s) = self.tabs[tab]
             .scene
@@ -391,7 +375,7 @@ impl OpenCADStudio {
             .text_styles
             .get(&self.ds_dimtxsty)
             .map(|style| style.handle)
-            .unwrap_or(codec::types::Handle::NULL);
+            .unwrap_or(document::types::Handle::NULL);
         let Some(ds) = doc.dim_styles.get_mut(&self.dimstyle_selected) else {
             return;
         };
@@ -493,12 +477,12 @@ impl OpenCADStudio {
         // pictures are stale. Drop them and let each be drawn again. Without
         // this an edit here would move the numbers and leave the drawing alone.
         let edited = self.dimstyle_selected.clone();
-        let stale: Vec<codec::Handle> = self.tabs[tab]
+        let stale: Vec<document::Handle> = self.tabs[tab]
             .scene
             .document
             .entities()
             .filter_map(|entity| match entity {
-                codec::EntityType::Dimension(dim)
+                document::EntityType::Dimension(dim)
                     if dim.base().style_name.eq_ignore_ascii_case(&edited) =>
                 {
                     Some(entity.common().handle)
@@ -507,7 +491,7 @@ impl OpenCADStudio {
             })
             .collect();
         for handle in stale {
-            if let Some(codec::EntityType::Dimension(dimension)) =
+            if let Some(document::EntityType::Dimension(dimension)) =
                 self.tabs[tab].scene.document.get_entity_mut(handle)
             {
                 crate::entities::dimension::reset_automatic_text_position(dimension.base_mut());
@@ -627,18 +611,66 @@ impl OpenCADStudio {
         }
     }
 
-    /// Populate edit buffers from the currently selected text style.
+    /// An external-reference text style: flagged, or merged in as
+    /// `XREF|Name` (the merge does not set the flag).
+    pub(in crate::app) fn selected_textstyle_is_read_only(&self) -> bool {
+        self.tabs[self.active_tab]
+            .scene
+            .document
+            .text_styles
+            .get(&self.textstyle_selected)
+            .is_none_or(|style| style.xref_dependent || style.name.contains('|'))
+    }
 
-    pub(in crate::app) fn load_textstyle_bufs(&mut self, tab: usize) {
+    /// Load the selected text style into the editor's draft.
+    pub(in crate::app) fn load_textstyle_draft(&mut self, tab: usize) {
         let doc = &self.tabs[tab].scene.document;
+        // One walk of the drawing gives the list's counts and the texts of
+        // every style.
+        let users = crate::app::text_style_users::users_by_style(doc);
+        self.textstyle_counts = users
+            .iter()
+            .map(|(name, texts)| (name.clone(), texts.len()))
+            .collect();
         if let Some(s) = doc.text_styles.get(&self.textstyle_selected) {
-            self.textstyle_font = s.font_file.clone();
-            self.textstyle_width = format!("{:.4}", s.width_factor);
-            self.textstyle_oblique = format!("{:.2}", s.oblique_angle.to_degrees());
-            self.textstyle_height = format!("{:.4}", s.height);
-            self.textstyle_bigfont = s.big_font_file.clone();
-            self.textstyle_ttf = s.true_type_font.clone();
+            self.textstyle_draft = crate::app::text_style_draft::TextStyleDraft::load(s);
         }
+        self.textstyle_users = users;
+    }
+
+    /// What Apply would change now: every staged text style, with the draft
+    /// written over the selected one as Apply writes it.
+    pub(in crate::app) fn textstyle_pending_changes(
+        &self,
+    ) -> Vec<crate::app::text_style_users::StyleChange> {
+        let edited = self.textstyle_draft.resolved();
+        let read_only = self.selected_textstyle_is_read_only();
+        crate::app::text_style_users::pending_changes(
+            |handle| self.text_style_baseline(handle),
+            self.tabs[self.active_tab]
+                .scene
+                .document
+                .text_styles
+                .iter()
+                .map(|s| {
+                    if !read_only && s.handle == edited.handle {
+                        &edited
+                    } else {
+                        s
+                    }
+                }),
+            &self.textstyle_users,
+        )
+    }
+
+    /// The texts that use the selected text style.
+    pub(in crate::app) fn selected_textstyle_users(
+        &self,
+    ) -> &[crate::app::text_style_users::TextUser] {
+        self.textstyle_users
+            .get(&self.textstyle_selected.to_ascii_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub(super) fn on_text_style_dialog_open(&mut self) -> Task<Message> {
@@ -662,126 +694,481 @@ impl OpenCADStudio {
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| "Standard".to_string())
         };
-        self.load_textstyle_bufs(i);
+        self.load_textstyle_draft(i);
+        // The head marks a missing font before the list is first opened.
+        self.textstyle_font_picker.open = false;
+        self.textstyle_font_picker
+            .refresh(&self.tabs[i].scene.document, false);
         self.active_modal = Some(crate::app::ModalKind::TextStyle);
         self.style_stage_begin();
         Task::none()
     }
 
-    /// Write the editor buffers into the selected text style (staged, no
-    /// commit), so edits survive switching to another style as well as Apply.
-    pub(super) fn stage_textstyle_bufs(&mut self) {
+    /// Write the draft into the selected text style (staged, no commit), so
+    /// edits survive switching to another style as well as Apply. Values the
+    /// user did not change stay exactly as stored.
+    pub(in crate::app) fn flush_textstyle_draft(&mut self) {
+        if self.selected_textstyle_is_read_only() {
+            return;
+        }
         let i = self.active_tab;
-        let name = self.textstyle_selected.clone();
-        let font = self.textstyle_font.clone();
-        let width_str = self.textstyle_width.clone();
-        let oblique_str = self.textstyle_oblique.clone();
-        let height_str = self.textstyle_height.clone();
-        let bigfont = self.textstyle_bigfont.clone();
-        let ttf = self.textstyle_ttf.clone();
-        if let Some(s) = self.tabs[i].scene.document.text_styles.get_mut(&name) {
-            if s.xref_dependent {
-                return;
+        let edited = self.textstyle_draft.resolved();
+        if let Some(s) = self.tabs[i]
+            .scene
+            .document
+            .text_styles
+            .get_mut(&self.textstyle_selected)
+        {
+            if *s != edited {
+                *s = edited;
             }
-            s.font_file = font;
-            s.big_font_file = bigfont;
-            s.true_type_font = ttf;
-            if let Ok(w) = width_str.trim().parse::<f64>() {
-                s.width_factor = w;
-            }
-            if let Ok(a) = oblique_str.trim().parse::<f64>() {
-                s.oblique_angle = a.to_radians();
-            }
-            if let Ok(h) = height_str.trim().parse::<f64>() {
-                s.height = h.max(0.0);
-            }
+        }
+    }
+
+    /// The text style manager's list: each style's text count and lock.
+    /// "Styles in use" keeps the used ones, the current and the selected. A
+    /// shape file entry (linetype symbols) has no name and is not listed.
+    pub(in crate::app) fn textstyle_list(
+        &self,
+    ) -> (Vec<String>, Vec<crate::ui::style::style_manager::StyleRow>) {
+        let doc = &self.tabs[self.active_tab].scene.document;
+        let current = &doc.header.current_text_style_name;
+        doc.text_styles
+            .iter()
+            .filter(|s| !s.is_shape_file)
+            .map(|s| {
+                let count = self
+                    .textstyle_counts
+                    .get(&s.name.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0);
+                let row = crate::ui::style::style_manager::StyleRow {
+                    count,
+                    locked: s.xref_dependent || s.name.contains('|'),
+                };
+                (s.name.clone(), row)
+            })
+            .filter(|(name, row)| {
+                !self.textstyle_in_use_only
+                    || row.count > 0
+                    || name.eq_ignore_ascii_case(current)
+                    || name.eq_ignore_ascii_case(&self.textstyle_selected)
+            })
+            .unzip()
+    }
+
+    /// What the text style manager's preview draws: `edited` resolved as the
+    /// drawing resolves a style (the SHX file on disk, its big font, the
+    /// TrueType face of the bold and italic flags).
+    pub(in crate::app) fn textstyle_preview(
+        &self,
+        edited: &document::tables::TextStyle,
+    ) -> crate::ui::style::textstyle::Preview {
+        let doc = &self.tabs[self.active_tab].scene.document;
+        let resolved = crate::entities::text_support::resolve_text_style_record(edited, doc);
+        let ttf = !edited.true_type_font.trim().is_empty();
+        let mut font_label = if ttf {
+            edited.true_type_font.clone()
+        } else {
+            edited.font_file.clone()
+        };
+        if self.textstyle_draft.big_font_on && !edited.big_font_file.trim().is_empty() {
+            font_label = format!("{font_label} + {}", edited.big_font_file);
+        }
+        if edited.height > 0.0 {
+            let mode = if edited.annotative {
+                crate::t!("Paper height")
+            } else {
+                crate::t!("Drawing height")
+            };
+            let height = crate::entities::common::format_length(edited.height);
+            font_label = format!("{font_label} · {mode} {height}");
+        }
+        crate::ui::style::textstyle::Preview {
+            font: resolved.font_name,
+            width_factor: if resolved.is_backward {
+                -resolved.width_factor
+            } else {
+                resolved.width_factor
+            },
+            oblique: resolved.oblique_angle,
+            upside_down: resolved.is_upside_down,
+            vertical: resolved.is_vertical && !ttf,
+            text: if self.textstyle_sample.trim().is_empty() {
+                crate::ui::style::textstyle::default_sample(self.textstyle_draft.big_font_on)
+                    .to_string()
+            } else {
+                self.textstyle_sample.clone()
+            },
+            caption: font_label,
         }
     }
 
     pub(super) fn on_text_style_apply(&mut self) -> Task<Message> {
-        self.stage_textstyle_bufs();
+        // A field that cannot be applied keeps Apply off (the window says
+        // which); nothing is written until it is fixed.
+        if self.textstyle_draft.invalid_fields() > 0 {
+            return Task::none();
+        }
+        self.flush_textstyle_draft();
         self.style_stage_commit();
+        // Re-base the draft on the stored values so a second Apply is a no-op.
+        self.load_textstyle_draft(self.active_tab);
         Task::none()
     }
 
-    pub(super) fn on_table_style_cell_apply(&mut self, row: u8) -> Task<Message> {
+    pub(super) fn on_table_cell_style_new(&mut self) -> Task<Message> {
         let i = self.active_tab;
-        let r = row as usize;
-        if r >= 3 {
+        let source = self.ts_cell.clone();
+        let typed = self.ts_cell_name.trim().to_string();
+        let Some(style) = self.tablestyle_mut(i) else {
+            return Task::none();
+        };
+        let name = if typed.is_empty() {
+            style.unique_cell_style_name(crate::t!("Cell style").as_ref())
+        } else {
+            typed
+        };
+        if style.create_cell_style(&name, Some(&source)).is_none() {
+            self.command_line
+                .push_error(crate::t!("A cell style with this name already exists.").as_ref());
             return Task::none();
         }
-        let ts = self.ts_cell_textstyle[r].trim().to_string();
-        let height: Option<f64> = self.ts_cell_height[r].trim().parse().ok();
-        let tc: Option<i16> = self.ts_cell_textcolor[r].trim().parse().ok();
-        let fc: Option<i16> = self.ts_cell_fillcolor[r].trim().parse().ok();
-        let dtype: Option<i32> = self.ts_cell_datatype[r].trim().parse().ok();
-        let utype: Option<i32> = self.ts_cell_unittype[r].trim().parse().ok();
-        let fmt = self.ts_cell_format[r].clone();
-        // Per-border numeric edits for this cell.
-        let border_vals: [(Option<i16>, Option<i16>, Option<f64>); 6] = std::array::from_fn(|b| {
-            (
-                self.ts_border_lw[r][b].trim().parse().ok(),
-                self.ts_border_color[r][b].trim().parse().ok(),
-                self.ts_border_spacing[r][b].trim().parse().ok(),
-            )
+        self.ts_cell = name;
+        self.load_tablestyle_bufs(i);
+        Task::none()
+    }
+
+    pub(super) fn on_table_cell_style_rename(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let name = self.ts_cell.clone();
+        let new_name = self.ts_cell_name.trim().to_string();
+        let Some(style) = self.tablestyle_mut(i) else {
+            return Task::none();
+        };
+        if style.rename_cell_style(&name, &new_name) {
+            style.sync_rows_from_cell_styles();
+            self.ts_cell = new_name;
+            self.load_tablestyle_bufs(i);
+        } else if !new_name.is_empty() && !document::objects::is_row_cell_style(&name) {
+            self.command_line
+                .push_error(crate::t!("A cell style with this name already exists.").as_ref());
+        }
+        Task::none()
+    }
+
+    pub(super) fn on_table_cell_style_delete(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let name = self.ts_cell.clone();
+        // A cell style tables of the style still use stays.
+        if self.table_cell_style_in_use(i, &name) {
+            self.command_line
+                .push_error(crate::t!("The cell style is in use and cannot be deleted.").as_ref());
+            return Task::none();
+        }
+        if let Some(style) = self.tablestyle_mut(i) {
+            if style.delete_cell_style(&name) {
+                style.sync_rows_from_cell_styles();
+                self.ts_cell = document::objects::DATA_CELL_STYLE.to_string();
+                self.load_tablestyle_bufs(i);
+            }
+        }
+        Task::none()
+    }
+
+    /// Whether a table of the selected style uses the named cell style.
+    fn table_cell_style_in_use(&self, tab: usize, name: &str) -> bool {
+        use document::objects::ObjectType;
+        let document = &self.tabs[tab].scene.document;
+        let found = document.objects.iter().find_map(|(handle, object)| match object {
+            ObjectType::TableStyle(style) if style.name == self.tablestyle_selected => style
+                .cell_style(name)
+                .map(|cell| (*handle, cell.id, style.template())),
+            _ => None,
         });
-        // Reject dangling references: a typo must not persist as a text
-        // style that does not exist (#53). Decided up front so the
-        // cell borrow below does not conflict with command-line I/O.
-        let ts_known = ts.is_empty()
-            || self.tabs[i]
-                .scene
-                .document
-                .text_styles
-                .iter()
-                .any(|s| s.name.eq_ignore_ascii_case(&ts));
-        let ts_rejected = !ts.is_empty() && !ts_known;
-        if let Some(c) = self
-            .tablestyle_mut(i)
-            .and_then(|s| Self::ts_cell_of(s, row))
-        {
-            if !ts.is_empty() && ts_known {
-                c.text_style_name = ts.clone();
+        let Some((handle, id, template)) = found else {
+            return false;
+        };
+        let uses = |table: &document::entities::Table| {
+            table.rows.iter().any(|row| {
+                row.style_id == id || row.cells.iter().any(|cell| cell.style_id == id)
+            }) || table.columns.iter().any(|column| column.style_id == id)
+        };
+        // The style's own starting table counts too.
+        let template_uses = template
+            .and_then(|template| match document.objects.get(&template) {
+                Some(ObjectType::TableTemplate(table)) => Some(uses(table)),
+                _ => None,
+            })
+            .unwrap_or(false);
+        template_uses
+            || document.entities().any(|entity| match entity {
+                document::EntityType::Table(table) if table.table_style_handle == Some(handle) => {
+                    uses(table)
+                }
+                _ => false,
+            })
+    }
+
+    pub(super) fn on_table_cell_style_edit(
+        &mut self,
+        field: &'static str,
+        value: String,
+    ) -> Task<Message> {
+        let number = || value.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+        match field {
+            "name" => self.ts_cell_name = value,
+            "height" => {
+                if let Some(height) = number().filter(|h| *h > 0.0) {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.content_format.text_height = height;
+                    });
+                }
+                self.ts_cell_height = value;
             }
-            if let Some(h) = height {
-                c.text_height = h;
+            "angle" => {
+                if let Some(angle) = number() {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.content_format.rotation = angle.to_radians();
+                    });
+                }
+                self.ts_cell_angle = value;
             }
-            if let Some(v) = tc {
-                c.text_color = codec::types::Color::from_index(v);
-            }
-            if let Some(v) = fc {
-                c.fill_color = codec::types::Color::from_index(v);
-            }
-            if let Some(v) = dtype {
-                c.data_type = v;
-            }
-            if let Some(v) = utype {
-                c.unit_type = v;
-            }
-            c.format_string = fmt;
-            for (b, (lw, color, spacing)) in border_vals.into_iter().enumerate() {
-                if let Some(bd) = Self::ts_border_of(c, b as u8) {
-                    if let Some(v) = lw {
-                        bd.line_weight = codec::types::LineWeight::from_value(v);
-                    }
-                    if let Some(v) = color {
-                        bd.color = codec::types::Color::from_index(v);
-                    }
-                    if let Some(v) = spacing {
-                        bd.double_line_spacing = v;
+            "hmargin" | "vmargin" => {
+                if field == "hmargin" {
+                    self.ts_cell_hmargin = value;
+                } else {
+                    self.ts_cell_vmargin = value;
+                }
+                let horizontal = self.ts_cell_hmargin.trim().parse::<f64>().ok();
+                let vertical = self.ts_cell_vmargin.trim().parse::<f64>().ok();
+                if let (Some(h), Some(v)) = (horizontal, vertical) {
+                    if h >= 0.0 && v >= 0.0 {
+                        self.edit_table_cell_style(|cell| cell.cell_style.set_margins(h, v));
                     }
                 }
             }
+            "format" => {
+                let format = value.clone();
+                self.edit_table_cell_style(|cell| {
+                    cell.cell_style.content_format.value_format_string = format;
+                });
+                self.ts_cell_format = value;
+            }
+            "align" => {
+                if let Ok(align) = value.parse::<i32>() {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.content_format.cell_alignment = align;
+                    });
+                }
+            }
+            "class" => {
+                if let Ok(class) = value.parse::<i32>() {
+                    self.edit_table_cell_style(|cell| cell.style_type = class);
+                }
+            }
+            "datatype" => {
+                let parsed = value
+                    .split_once('/')
+                    .and_then(|(d, u)| Some((d.parse::<i32>().ok()?, u.parse::<i32>().ok()?)));
+                if let Some((data, unit)) = parsed {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.content_format.value_data_type = data;
+                        cell.cell_style.content_format.value_unit_type = unit;
+                    });
+                }
+            }
+            "textstyle" => {
+                if let Ok(handle) = u64::from_str_radix(value.trim(), 16) {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.content_format.text_style = document::Handle::new(handle);
+                    });
+                }
+            }
+            "textcolor" | "fillcolor" => {
+                let color = match value.trim().parse::<i16>() {
+                    Ok(0) => document::types::Color::ByBlock,
+                    Ok(256) => document::types::Color::ByLayer,
+                    Ok(257) => document::types::Color::None,
+                    Ok(index @ 1..=255) => document::types::Color::Index(index as u8),
+                    _ => return Task::none(),
+                };
+                self.edit_table_cell_style(|cell| {
+                    if field == "textcolor" {
+                        cell.cell_style.content_format.content_color = color;
+                    } else {
+                        cell.cell_style.background_color = color;
+                    }
+                });
+            }
+            "merge" => {
+                let on = value == "1";
+                self.edit_table_cell_style(|cell| cell.cell_style.set_merge_all(on));
+            }
+            _ => {}
         }
-        if ts_rejected {
+        Task::none()
+    }
+
+    pub(super) fn on_table_cell_edge_edit(
+        &mut self,
+        edge: u8,
+        field: &'static str,
+        value: String,
+    ) -> Task<Message> {
+        use document::objects::TableBorderType;
+        let Some(mask) = document::objects::TABLE_GRID_EDGES.get(edge as usize).copied() else {
+            return Task::none();
+        };
+        match field {
+            "visible" => {
+                let hidden = value != "1";
+                self.edit_table_cell_style(|cell| cell.cell_style.set_edge_hidden(mask, hidden));
+            }
+            "lw" => {
+                if let Ok(weight) = value.parse::<i16>() {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.grid_mut(mask).border.line_weight =
+                            document::types::LineWeight::from_value(weight);
+                    });
+                }
+            }
+            "linetype" => {
+                let handle = u64::from_str_radix(value.trim(), 16)
+                    .map(document::Handle::new)
+                    .unwrap_or(document::Handle::NULL);
+                self.edit_table_cell_style(|cell| cell.cell_style.grid_mut(mask).line_type = handle);
+            }
+            "color" => {
+                let color = match value.trim().parse::<i16>() {
+                    Ok(0) => document::types::Color::ByBlock,
+                    Ok(256) => document::types::Color::ByLayer,
+                    Ok(index @ 1..=255) => document::types::Color::Index(index as u8),
+                    _ => return Task::none(),
+                };
+                self.edit_table_cell_style(|cell| cell.cell_style.grid_mut(mask).border.color = color);
+            }
+            "double" => {
+                let double = value == "1";
+                self.edit_table_cell_style(|cell| {
+                    cell.cell_style.grid_mut(mask).border.border_type = if double {
+                        TableBorderType::Double
+                    } else {
+                        TableBorderType::Single
+                    };
+                });
+            }
+            "spacing" => {
+                if let Some(spacing) = value.trim().parse::<f64>().ok().filter(|v| *v > 0.0) {
+                    self.edit_table_cell_style(|cell| {
+                        cell.cell_style.grid_mut(mask).border.double_line_spacing = spacing;
+                    });
+                }
+                if let Some(slot) = self.ts_edge_spacing.get_mut(edge as usize) {
+                    *slot = value;
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Select table to start from: the dialog waits while a table is picked.
+    pub(super) fn on_table_style_template_pick(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        self.active_modal = None;
+        let command = crate::modules::annotate::table_cmd::TableTemplatePickCommand;
+        self.command_line
+            .push_info(&crate::command::CadCommand::prompt(&command));
+        self.tabs[i].active_cmd = Some(Box::new(command));
+        Task::none()
+    }
+
+    /// The pick ended: a table becomes the starting table and the window
+    /// comes back; another object is refused and asked again.
+    pub(in crate::app) fn table_template_pick_done(&mut self, handle: Option<document::Handle>) {
+        let i = self.active_tab;
+        self.tabs[i].active_cmd = None;
+        self.tabs[i].snap_result = None;
+        self.tabs[i].scene.clear_preview_wire();
+        let is_table = handle.is_some_and(|handle| {
+            matches!(
+                self.tabs[i].scene.document.get_entity(handle),
+                Some(document::EntityType::Table(_))
+            )
+        });
+        if handle.is_some() && !is_table {
             self.command_line
-                .push_error(crate::tf!("Unknown text style '{ts}'.").as_ref());
+                .push_error(crate::t!("The object is not a table.").as_ref());
+            let _ = self.on_table_style_template_pick();
+            return;
+        }
+        self.table_style_template_picked(handle);
+    }
+
+    /// Back from the pick: the picked table becomes the starting table.
+    fn table_style_template_picked(&mut self, table: Option<document::Handle>) {
+        use document::objects::ObjectType;
+        let i = self.active_tab;
+        let picked = table.and_then(|handle| match self.tabs[i].scene.document.get_entity(handle) {
+            Some(document::EntityType::Table(table)) => Some(table.as_ref().clone()),
+            _ => None,
+        });
+        let selected = self.tablestyle_selected.clone();
+        if let Some(mut template) = picked {
+            let document = &mut self.tabs[i].scene.document;
+            let style_handle = document.objects.iter().find_map(|(handle, object)| match object {
+                ObjectType::TableStyle(style) if style.name == selected => Some(*handle),
+                _ => None,
+            });
+            if let Some(style_handle) = style_handle {
+                let handle = document.allocate_handle();
+                crate::entities::table::detach_fields(&mut template);
+                template.common = document::entities::EntityCommon::default();
+                template.common.handle = handle;
+                template.common.owner_handle = style_handle;
+                template.common.reactors = vec![style_handle];
+                template.table_style_handle = Some(style_handle);
+                template.block_record_handle = None;
+                template.block_name.clear();
+                template.insertion_point = document::types::Vector3::ZERO;
+                document
+                    .objects
+                    .insert(handle, ObjectType::TableTemplate(template));
+                let old = match document.objects.get_mut(&style_handle) {
+                    Some(ObjectType::TableStyle(style)) => {
+                        let old = style.template();
+                        style.modern_cell_style_handle = handle;
+                        style.raw_dxf_codes = None;
+                        old
+                    }
+                    _ => None,
+                };
+                if let Some(old) = old {
+                    document.objects.remove(&old);
+                }
+            }
+        }
+        self.active_modal = Some(crate::app::ModalKind::TableStyle);
+    }
+
+    /// Remove the starting table.
+    pub(super) fn on_table_style_template_remove(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let old = self.tablestyle_mut(i).and_then(|style| {
+            let old = style.template();
+            style.modern_cell_style_handle = document::Handle::NULL;
+            style.raw_dxf_codes = None;
+            old
+        });
+        if let Some(old) = old {
+            self.tabs[i].scene.document.objects.remove(&old);
         }
         Task::none()
     }
 
     pub(super) fn on_ml_style_dialog_open(&mut self) -> Task<Message> {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let i = self.active_tab;
         let cur = self.tabs[i].scene.document.header.multiline_style.clone();
         let exists = self.tabs[i]
@@ -814,7 +1201,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_mleader_style_dialog_open(&mut self) -> Task<Message> {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let i = self.active_tab;
         let cur = self.tabs[i].active_mleader_style.clone();
         let exists = self.tabs[i]
@@ -847,7 +1234,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_mleader_style_dialog_set_current(&mut self) -> Task<Message> {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let i = self.active_tab;
         let name = self.mleaderstyle_selected.clone();
         let exists = self.tabs[i]
@@ -908,7 +1295,7 @@ impl OpenCADStudio {
         field: &'static str,
         value: String,
     ) -> Task<Message> {
-        use codec::objects::{
+        use document::objects::{
             BlockContentConnectionType, LeaderContentType, LeaderDrawOrderType,
             MultiLeaderDrawOrderType, MultiLeaderPathType, TextAlignmentType, TextAngleType,
             TextAttachmentDirectionType, TextAttachmentType,
@@ -1017,7 +1404,7 @@ impl OpenCADStudio {
             return Task::none();
         }
         let doc = &self.tabs[i].scene.document;
-        let handle: Option<codec::types::Handle> =
+        let handle: Option<document::types::Handle> =
             if value == "None" || value == "ByBlock" || value == "Closed filled" {
                 None
             } else {
@@ -1107,17 +1494,17 @@ impl OpenCADStudio {
             }
             s.default_text = dt;
             if let Some(v) = lc {
-                s.line_color = codec::types::Color::from_index(v);
+                s.line_color = document::types::Color::from_index(v);
             }
             if let Some(v) = tc {
-                s.text_color = codec::types::Color::from_index(v);
+                s.text_color = document::types::Color::from_index(v);
             }
             s.description = desc;
             if let Some(v) = align {
                 s.align_space = v;
             }
             if let Some(v) = bclr {
-                s.block_content_color = codec::types::Color::from_index(v);
+                s.block_content_color = document::types::Color::from_index(v);
             }
             if let Some(v) = brot {
                 s.block_content_rotation = v.to_radians();
@@ -1179,7 +1566,7 @@ impl OpenCADStudio {
 
     pub(super) fn on_color_window_pick(
         &mut self,
-        color: codec::types::Color,
+        color: document::types::Color,
         name: Option<String>,
     ) -> Task<Message> {
         if let Some(crate::app::ColorPickTarget::Interface(target)) = self
@@ -1243,8 +1630,7 @@ impl OpenCADStudio {
             Some(crate::app::ColorPickTarget::MLeader(f)) => {
                 Some(Message::MLeaderStyleEdit { field: f, value: s })
             }
-            Some(crate::app::ColorPickTarget::Table(r, f)) => Some(Message::TableStyleCellEdit {
-                row: r,
+            Some(crate::app::ColorPickTarget::Table(f)) => Some(Message::TableStyleCellEdit {
                 field: f,
                 value: s,
             }),
@@ -1265,6 +1651,9 @@ impl OpenCADStudio {
                 let task = self.update(Message::RibbonColorChanged(color));
                 self.ribbon.active_color_book = name.map(|name| (color, name));
                 return task;
+            }
+            Some(crate::app::ColorPickTarget::RibbonLayer(layer)) => {
+                return self.set_ribbon_layer_color(&layer, color, name.as_deref());
             }
             Some(crate::app::ColorPickTarget::Layer(layer)) => {
                 let i = self.active_tab;
@@ -1317,16 +1706,16 @@ impl OpenCADStudio {
         );
         let doc = &mut self.tabs[i].scene.document;
         let handle = if value == "Default" || value == "ByBlock" {
-            codec::types::Handle::NULL
+            document::types::Handle::NULL
         } else if is_lt {
             doc.line_types
                 .iter()
                 .find(|lt| lt.name == value)
                 .map(|lt| lt.handle)
-                .unwrap_or(codec::types::Handle::NULL)
+                .unwrap_or(document::types::Handle::NULL)
         } else {
             // A standard arrowhead's block is created on first use.
-            crate::entities::arrowheads::resolve(doc, &value).unwrap_or(codec::types::Handle::NULL)
+            crate::entities::arrowheads::resolve(doc, &value).unwrap_or(document::types::Handle::NULL)
         };
         // Staged: persists on Apply.
         if let Some(ds) = self.tabs[i].scene.document.dim_styles.get_mut(&name) {
@@ -1355,7 +1744,7 @@ mod ds_set_handle_tests {
         app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
         for name in ["ARROW_A", "ARROW_B"] {
-            let mut br = codec::tables::BlockRecord::new(name);
+            let mut br = document::tables::BlockRecord::new(name);
             br.handle = app.tabs[i].scene.document.allocate_handle();
             app.tabs[i].scene.document.block_records.add(br).unwrap();
         }
@@ -1451,7 +1840,7 @@ mod ds_set_handle_tests {
                 .get(&name)
                 .unwrap()
                 .dimblk1,
-            codec::types::Handle::NULL
+            document::types::Handle::NULL
         );
     }
 

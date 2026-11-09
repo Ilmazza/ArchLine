@@ -7,8 +7,8 @@ use crate::scene::{ObjectIsolationState, Scene};
 use crate::snap::SnapResult;
 use crate::t;
 use crate::ui::{LayerPanel, PropertiesPanel};
-use codec::tables::{normalize_name, Ucs};
-use codec::{Document, EntityType, Handle};
+use document::tables::{normalize_name, Ucs};
+use document::{Document, EntityType, Handle};
 use iced;
 use std::any::Any;
 use std::collections::HashMap;
@@ -27,8 +27,8 @@ pub(super) enum LayisoMode {
 #[derive(Clone)]
 pub(super) struct LayisoLayerSnapshot {
     pub(super) name: String,
-    pub(super) before: codec::tables::Layer,
-    pub(super) after: codec::tables::Layer,
+    pub(super) before: document::tables::Layer,
+    pub(super) after: document::tables::Layer,
 }
 
 #[derive(Clone)]
@@ -137,7 +137,7 @@ pub(super) struct SketchSession {
     /// with snapping off gets that back rather than silently keeping it.
     pub(super) previous_snap_enabled: bool,
     /// Entity handles already present when the sketch opened.
-    pub(super) opened_with: std::collections::HashSet<codec::Handle>,
+    pub(super) opened_with: std::collections::HashSet<document::Handle>,
 }
 
 // ── Per-document tab state ─────────────────────────────────────────────────
@@ -164,6 +164,8 @@ pub(super) struct DocumentTab {
     /// Direct Save is redirected to Save As after open-time repairs so the
     /// source drawing cannot be overwritten accidentally.
     pub(super) recovery_save_as_required: bool,
+    /// Experimental IFCCAD consent belongs only to this open document session.
+    pub(super) ifccad_alpha_acknowledged: bool,
     /// Monotonic committed-edit/undo/redo revision. Background save completion
     /// uses it with scene epochs so an older snapshot never clears newer work.
     pub(super) edit_revision: u64,
@@ -176,6 +178,11 @@ pub(super) struct DocumentTab {
     pub(super) tab_title: String,
     pub(super) properties: PropertiesPanel,
     pub(super) layers: LayerPanel,
+    /// Which Parameters Manager cell the panel has open, what has been typed
+    /// into it, and what the row list is filtered and searched to. It belongs to
+    /// this tab's session, so another definition's rows are never what a typed
+    /// number lands on.
+    pub(super) parameters_panel: crate::ui::window::parameters_manager::Panel,
     /// The LAYWALK pallet session, while a walk is open on this drawing.
     pub(super) layer_walk: Option<crate::ui::window::layer_walk::LayerWalkSession>,
     /// Rows cached for that session, so the pallet and the pure logic agree on
@@ -189,10 +196,12 @@ pub(super) struct DocumentTab {
     /// Dropdown state for `layer_walk_filters`.
     pub(super) layer_walk_combo: iced::widget::combo_box::State<String>,
     pub(super) active_cmd: Option<Box<dyn CadCommand>>,
+    /// MATCHPROP's last source; Enter at the source prompt picks it again.
+    pub(super) last_matchprop_src: document::Handle,
     /// Follow-up command for a Parameter Set macro after parameter placement.
     pub(super) pending_parameter_set_follow_up: Option<&'static str>,
-    pub(super) pending_xy_box_set: Option<(codec::Handle, crate::scene::block_actions::Kind, u8)>,
-    pub(super) pending_action_pair: Option<(codec::Handle, crate::scene::block_actions::Kind, u8)>,
+    pub(super) pending_xy_box_set: Option<(document::Handle, crate::scene::block_actions::Kind, u8)>,
+    pub(super) pending_action_pair: Option<(document::Handle, crate::scene::block_actions::Kind, u8)>,
     pub(super) measurement: super::measurement::MeasurementDisplay,
     /// Remaining command tokens queued behind a PAUSE (or `\`) awaiting user interaction.
     pub(super) pending_pause_tokens: Option<Vec<String>>,
@@ -204,7 +213,7 @@ pub(super) struct DocumentTab {
     /// The selection set the most recent command worked on, captured when a
     /// finishing command drops the live selection — re-selectable with the
     /// "Previous" keyword at any Select objects prompt (#426).
-    pub(super) prev_selection: Vec<codec::Handle>,
+    pub(super) prev_selection: Vec<document::Handle>,
     pub(super) last_cmd: Option<String>,
     /// INSNAME: the last block inserted in this drawing, offered as `-INSERT`'s
     /// default. It belongs to the drawing, so a name remembered here is never
@@ -218,6 +227,13 @@ pub(super) struct DocumentTab {
     pub(super) selected_grips: Vec<GripDef>,
     /// Entity handle for each entry in `selected_grips`.
     pub(super) selected_grip_handles: Vec<Handle>,
+    /// The grips as they were when the active grip drag started (keyed by
+    /// the drag's handle, grip and start point): every grip stays drawn
+    /// there while the drag reshapes the object.
+    pub(super) drag_start_grips: Option<((Handle, usize, glam::DVec3), Vec<GripDef>, Vec<Handle>)>,
+    /// GROUPDISPLAYMODE 2: the box (min, max corners) round each group
+    /// picked whole.
+    pub(super) group_boxes: Vec<[glam::DVec3; 2]>,
     /// Plugin-declared custom grip points for this tab (API v11): session
     /// display state only — never persisted, never host-interpreted.
     #[cfg(not(target_arch = "wasm32"))]
@@ -234,9 +250,9 @@ pub(super) struct DocumentTab {
     /// not O(store). Cleared at each boundary; over the cap the sets
     /// degrade to empty (an honest full-walk signal).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(super) plugin_dirty_entities: rustc_hash::FxHashSet<codec::Handle>,
+    pub(super) plugin_dirty_entities: rustc_hash::FxHashSet<document::Handle>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(super) plugin_dirty_records: rustc_hash::FxHashSet<(codec::Handle, String)>,
+    pub(super) plugin_dirty_records: rustc_hash::FxHashSet<(document::Handle, String)>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) plugin_dirty_overflow: bool,
     /// Geometry epoch the last region set was published at; a plugin write
@@ -262,7 +278,7 @@ pub(super) struct DocumentTab {
     /// Dynamic-block visibility grip for the current single selection.
     pub(super) visibility_grip: Option<super::visibility::VisibilityGrip>,
     pub(super) wireframe: bool,
-    pub(super) render_mode: codec::entities::ViewportRenderMode,
+    pub(super) render_mode: document::entities::ViewportRenderMode,
     pub(super) visual_style: String,
     pub(super) last_cursor_world: glam::DVec3,
     pub(super) last_cursor_screen: iced::Point,
@@ -334,9 +350,6 @@ pub(super) struct DocumentTab {
     /// Session set of unloaded reference keys (Task 8b). Owns the set that
     /// `collect_entries` takes as `unloaded`, so CLI and palette agree.
     pub(super) xref_unloaded: crate::io::xref_model::UnloadSet,
-    /// LAYERP stack: for each recorded change to layer settings, the layers as they were before
-    /// (name, whole layer). Newest last; bounded by `LAYER_PREVIOUS_LIMIT`.
-    pub(super) layer_prev: Vec<Vec<(String, codec::tables::Layer)>>,
     /// Layers LAYISO turned off, so LAYUNISO turns back on exactly those (layers that were
     /// already off before LAYISO stay off). Empty when no isolation is active.
     /// References attached with a relative path while the drawing had no
@@ -377,6 +390,10 @@ pub(super) struct DocumentTab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) plugin_state: HashMap<&'static str, Box<dyn Any + Send + Sync>>,
     pub(super) suspended_cmd: Option<Box<dyn CadCommand>>,
+    /// LAYERP: the layers as they were before each layer-property change,
+    /// newest last (#2610). Only property changes; new, deleted and renamed
+    /// layers are the ordinary undo's.
+    pub(super) layer_previous: Vec<Vec<document::tables::Layer>>,
     /// `suspended_cmd` was parked by a transparent command (`'ZOOM`) and is
     /// restored as soon as the transparent one ends.
     pub(super) transparent_resume: bool,
@@ -384,7 +401,7 @@ pub(super) struct DocumentTab {
     /// running: STRETCH on that selection stretches through it (#1068).
     pub(super) last_crossing_window: Option<([f64; 2], [f64; 2])>,
     /// Colours picked in this drawing this session, newest first. Not saved.
-    pub(super) recent_colors: Vec<codec::types::Color>,
+    pub(super) recent_colors: Vec<document::types::Color>,
 }
 
 impl DocumentTab {
@@ -428,7 +445,7 @@ impl DocumentTab {
     /// Record one entity a plugin write touched (API v13 dirty regions).
     /// `epoch_before` is the geometry epoch before that write.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(super) fn mark_plugin_entity_dirty(&mut self, handle: codec::Handle, epoch_before: u64) {
+    pub(super) fn mark_plugin_entity_dirty(&mut self, handle: document::Handle, epoch_before: u64) {
         if !self.plugin_dirty_degraded(epoch_before) {
             self.plugin_dirty_entities.insert(handle);
         }
@@ -438,7 +455,7 @@ impl DocumentTab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) fn mark_plugin_record_dirty(
         &mut self,
-        handle: codec::Handle,
+        handle: document::Handle,
         app: String,
         epoch_before: u64,
     ) {
@@ -468,7 +485,7 @@ impl DocumentTab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) fn take_plugin_dirty(
         &mut self,
-    ) -> (Vec<codec::Handle>, Vec<(codec::Handle, String)>) {
+    ) -> (Vec<document::Handle>, Vec<(document::Handle, String)>) {
         let entities = std::mem::take(&mut self.plugin_dirty_entities);
         let records = std::mem::take(&mut self.plugin_dirty_records);
         let degraded = std::mem::replace(&mut self.plugin_dirty_overflow, false);
@@ -532,7 +549,7 @@ impl DocumentTab {
     /// when the viewport uses world coordinates or the handle is not a viewport.
     pub(super) fn ucs_from_viewport(&self, h: Handle) -> Option<Ucs> {
         let vp = match self.scene.document.get_entity(h) {
-            Some(codec::EntityType::Viewport(vp)) => vp,
+            Some(document::EntityType::Viewport(vp)) => vp,
             _ => return None,
         };
         if !vp.ucs_per_viewport {
@@ -561,7 +578,7 @@ impl DocumentTab {
 
     pub(super) fn ucs_from_layout(&self) -> Option<Ucs> {
         let layout = self.scene.document.objects.values().find_map(|object| {
-            let codec::objects::ObjectType::Layout(layout) = object else {
+            let document::objects::ObjectType::Layout(layout) = object else {
                 return None;
             };
             (layout.name == self.scene.current_layout).then_some(layout)
@@ -574,17 +591,17 @@ impl DocumentTab {
             .find(|ucs| ucs.handle == layout.named_ucs)
             .cloned()
             .unwrap_or_else(|| Ucs::new("*PAPERUCS*"));
-        ucs.origin = codec::types::Vector3::new(
+        ucs.origin = document::types::Vector3::new(
             layout.ucs_origin.0,
             layout.ucs_origin.1,
             layout.ucs_origin.2,
         );
-        ucs.x_axis = codec::types::Vector3::new(
+        ucs.x_axis = document::types::Vector3::new(
             layout.ucs_x_axis.0,
             layout.ucs_x_axis.1,
             layout.ucs_x_axis.2,
         );
-        ucs.y_axis = codec::types::Vector3::new(
+        ucs.y_axis = document::types::Vector3::new(
             layout.ucs_y_axis.0,
             layout.ucs_y_axis.1,
             layout.ucs_y_axis.2,
@@ -626,7 +643,7 @@ impl DocumentTab {
     }
 
     fn sync_paper_ucs_header(&mut self) {
-        use codec::types::Vector3;
+        use document::types::Vector3;
         let header = &mut self.scene.document.header;
         match &self.active_ucs {
             Some(ucs) => {
@@ -661,7 +678,7 @@ impl DocumentTab {
     /// entered viewport's per-viewport UCS fields, or the document header's
     /// model-space UCS in the Model tab, or the layout UCS. Call after a change.
     pub(super) fn persist_active_ucs(&mut self) {
-        use codec::types::Vector3;
+        use document::types::Vector3;
         if let Some(index) = self.active_block_edit {
             let active_ucs = self.active_ucs.clone();
             if let Some(session) = self.block_edits.get_mut(index) {
@@ -678,7 +695,7 @@ impl DocumentTab {
                     false,
                 ),
             };
-            if let Some(codec::EntityType::Viewport(vp)) = self.scene.document.get_entity_mut(h) {
+            if let Some(document::EntityType::Viewport(vp)) = self.scene.document.get_entity_mut(h) {
                 vp.ucs_origin = o;
                 vp.ucs_x_axis = x;
                 vp.ucs_y_axis = y;
@@ -727,7 +744,7 @@ impl DocumentTab {
                 ),
             };
             for object in self.scene.document.objects.values_mut() {
-                let codec::objects::ObjectType::Layout(layout) = object else {
+                let document::objects::ObjectType::Layout(layout) = object else {
                     continue;
                 };
                 if layout.name == self.scene.current_layout {
@@ -785,13 +802,16 @@ impl DocumentTab {
             disk_fingerprint: None,
             dirty: false,
             recovery_save_as_required: false,
+            ifccad_alpha_acknowledged: false,
             edit_revision: 0,
             document_opened_pending: true,
             prev_selection: Vec::new(),
             tab_title: format!("Drawing{}", n),
             properties: PropertiesPanel::empty(),
             layers: LayerPanel::default(),
+            parameters_panel: Default::default(),
             active_cmd: None,
+            last_matchprop_src: document::Handle::NULL,
             pending_parameter_set_follow_up: None,
             pending_xy_box_set: None,
             pending_action_pair: None,
@@ -806,6 +826,8 @@ impl DocumentTab {
             active_grip: None,
             selected_grips: vec![],
             selected_grip_handles: vec![],
+            drag_start_grips: None,
+            group_boxes: vec![],
             #[cfg(not(target_arch = "wasm32"))]
             plugin_grips: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -825,7 +847,7 @@ impl DocumentTab {
             visibility_grip: None,
             table_grip: None,
             wireframe: false,
-            render_mode: codec::entities::ViewportRenderMode::Wireframe2D,
+            render_mode: document::entities::ViewportRenderMode::Wireframe2D,
             visual_style: "Wireframe 2D".into(),
             last_cursor_world: glam::DVec3::ZERO,
             last_cursor_screen: iced::Point::ORIGIN,
@@ -857,7 +879,6 @@ impl DocumentTab {
             active_mleader_style: "Standard".to_string(),
             last_synced_camera_gen: 0,
             xref_unloaded: crate::io::xref_model::UnloadSet::default(),
-            layer_prev: Vec::new(),
             xref_relative_on_save: rustc_hash::FxHashSet::default(),
             xref_stat_cache: crate::io::xref_model::RefStatCache::default(),
             xref_missing: 0,
@@ -869,6 +890,7 @@ impl DocumentTab {
             zoom_dynamic_mode: false,
             plugin_state: HashMap::new(),
             suspended_cmd: None,
+            layer_previous: Vec::new(),
             transparent_resume: false,
             last_crossing_window: None,
             recent_colors: Vec::new(),
@@ -895,6 +917,10 @@ impl DocumentTab {
     /// `DocumentOpened` once for this load (API v9). Call after the document
     /// and its derived caches have settled.
     pub(super) fn note_document_loaded(&mut self) {
+        // The document this tab's identity remembers a placed position in is
+        // gone, and its coordinates are not the new document's.
+        crate::modules::draw::draw::attdef::session().forget_place_of(self.id);
+        crate::modules::annotate::text::forget_place_of(self.id);
         self.document_opened_pending = true;
     }
 
@@ -916,6 +942,95 @@ impl DocumentTab {
     }
 }
 
+/// History keeps application messages distinct from command and authored labels.
+/// Only explicitly marked messages participate in locale lookup at display time.
+#[derive(Clone, Debug)]
+pub(super) enum HistoryLabel {
+    Literal(String),
+    Message(&'static str),
+    Formatted {
+        source: String,
+        attribute: &'static str,
+        value: Box<HistoryLabel>,
+    },
+}
+
+impl HistoryLabel {
+    pub(super) fn as_str(&self) -> &str {
+        match self {
+            Self::Literal(value) => value,
+            Self::Message(source) => source,
+            Self::Formatted { source, .. } => source,
+        }
+    }
+
+    pub(super) fn formatted(source: String, attribute: &'static str, value: Self) -> Self {
+        Self::Formatted { source, attribute, value: Box::new(value) }
+    }
+
+    fn display_with<'a>(
+        &'a self,
+        translate: &dyn Fn(&'static str) -> std::borrow::Cow<'static, str>,
+        format: &dyn Fn(&str, &str) -> Option<String>,
+    ) -> std::borrow::Cow<'a, str> {
+        match self {
+            Self::Literal(value) => std::borrow::Cow::Borrowed(value),
+            Self::Message(source) => translate(source),
+            Self::Formatted { source, attribute, value } => {
+                format(attribute, &value.display_with(translate, format))
+                    .map(std::borrow::Cow::Owned)
+                    .unwrap_or_else(|| std::borrow::Cow::Borrowed(source.as_str()))
+            }
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Formatted { source, value, .. } => source.len()
+                .saturating_add(std::mem::size_of::<Self>())
+                .saturating_add(value.estimated_bytes()),
+            _ => self.as_str().len(),
+        }
+    }
+
+    pub(super) fn display(&self) -> std::borrow::Cow<'_, str> {
+        self.display_with(&|source| crate::i18n::translate(source), &|attribute, value| {
+            crate::i18n::format_attribute("block-formatted-history", attribute, &[("label", value)])
+        })
+    }
+
+}
+
+impl From<String> for HistoryLabel {
+    fn from(value: String) -> Self {
+        Self::Literal(value)
+    }
+}
+
+impl From<&str> for HistoryLabel {
+    fn from(value: &str) -> Self {
+        Self::Literal(value.to_owned())
+    }
+}
+
+impl From<&String> for HistoryLabel {
+    fn from(value: &String) -> Self {
+        Self::Literal(value.clone())
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for HistoryLabel {
+    fn from(value: std::borrow::Cow<'_, str>) -> Self {
+        Self::Literal(value.into_owned())
+    }
+}
+
+impl std::fmt::Display for HistoryLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// One undo/redo entry. Every edit is represented as a first-touch entity delta
 /// plus an optional structure-only document image, so history never clones the
 /// full entity store.
@@ -932,8 +1047,15 @@ pub(super) enum HistorySnapshot {
 impl HistorySnapshot {
     pub(super) fn label(&self) -> &str {
         match self {
-            HistorySnapshot::Delta(d) => &d.label,
-            HistorySnapshot::ObjectVisibility(v) => &v.label,
+            HistorySnapshot::Delta(d) => d.label.as_str(),
+            HistorySnapshot::ObjectVisibility(v) => v.label.as_str(),
+        }
+    }
+
+    pub(super) fn display_label(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Delta(delta) => delta.label.display(),
+            Self::ObjectVisibility(snapshot) => snapshot.label.display(),
         }
     }
 
@@ -976,7 +1098,7 @@ impl HistorySnapshot {
                     (before.len() + after.len()).saturating_mul(32)
                 }))
                 .saturating_add(d.reference_designations.len().saturating_mul(16))
-                .saturating_add(d.label.len()),
+                .saturating_add(d.label.estimated_bytes()),
             HistorySnapshot::ObjectVisibility(v) => v
                 .before
                 .hidden
@@ -987,7 +1109,7 @@ impl HistorySnapshot {
                 .saturating_add(v.selected_before.len())
                 .saturating_add(v.selected_after.len())
                 .saturating_mul(16)
-                .saturating_add(v.label.len()),
+                .saturating_add(v.label.estimated_bytes()),
         }
     }
 }
@@ -1000,7 +1122,7 @@ pub(super) struct ObjectVisibilitySnapshot {
     pub(super) after: ObjectIsolationState,
     pub(super) selected_before: Vec<Handle>,
     pub(super) selected_after: Vec<Handle>,
-    pub(super) label: String,
+    pub(super) label: HistoryLabel,
 }
 
 /// A transactional undo entry: for each touched handle, its before-image and
@@ -1023,6 +1145,9 @@ pub(super) struct DeltaSnapshot {
     pub(super) selected_after: Vec<Handle>,
     pub(super) dirty_before: bool,
     pub(super) dirty_after: bool,
+    /// The view when this step was made. Undo and redo bring it back, so
+    /// stepping through the history shows each change where it was made.
+    pub(super) view: Option<Box<crate::scene::view::camera::Camera>>,
     pub(super) active_layer: Option<(String, String)>,
     /// LAYISO state changed by this history entry, if any. Other commands leave
     /// the isolation state untouched, so their history entries keep this None.
@@ -1047,7 +1172,7 @@ pub(super) struct DeltaSnapshot {
         crate::scene::named_parameters::ParameterTable,
         crate::scene::named_parameters::ParameterTable,
     )>,
-    pub(super) label: String,
+    pub(super) label: HistoryLabel,
 }
 
 #[derive(Clone)]
@@ -1057,11 +1182,11 @@ pub(super) enum StructureSnapshot {
     /// Compatibility fallback for genuinely broad structural commands.
     Full(Document),
     /// Exact layer-table entries touched by one command.
-    Layers(Vec<TableEntryDelta<codec::tables::Layer>>),
+    Layers(Vec<TableEntryDelta<document::tables::Layer>>),
     /// Exact text-style entries touched by one command.
-    TextStyles(Vec<TableEntryDelta<codec::tables::TextStyle>>),
+    TextStyles(Vec<TableEntryDelta<document::tables::TextStyle>>),
     /// Exact dimension-style entries touched by one command.
-    DimStyles(Vec<TableEntryDelta<codec::tables::DimStyle>>),
+    DimStyles(Vec<TableEntryDelta<document::tables::DimStyle>>),
     /// Exact object-map entries touched by one command. This supports commands
     /// such as groups/dictionaries without retaining every unrelated object.
     Objects(Vec<ObjectEntryDelta>),
@@ -1107,8 +1232,8 @@ pub(super) struct TableEntryDelta<T> {
 #[derive(Clone)]
 pub(super) struct ObjectEntryDelta {
     pub(super) handle: Handle,
-    pub(super) before: Option<codec::objects::ObjectType>,
-    pub(super) after: Option<codec::objects::ObjectType>,
+    pub(super) before: Option<document::objects::ObjectType>,
+    pub(super) after: Option<document::objects::ObjectType>,
 }
 
 /// One parametric-constraint scope's before/after image within an entity delta.
@@ -1140,13 +1265,13 @@ pub(super) struct HistoryState {
 
 pub(super) struct PendingHistorySnapshot {
     pub(super) visibility_states_before: rustc_hash::FxHashMap<Handle, usize>,
-    pub(super) label: String,
+    pub(super) label: HistoryLabel,
     pub(super) current_layout: String,
     pub(super) active_layer: String,
     pub(super) selected_before: Vec<Handle>,
     pub(super) dirty_before: bool,
     pub(super) structure_before: Document,
-    pub(super) recorder: Arc<codec::document::EntityChangeRecorder>,
+    pub(super) recorder: Arc<document::document::EntityChangeRecorder>,
     /// First-touch before-values of reference-only designations (API v9)
     /// mutated inside this plugin scope (see `scene::reference_only`). Set
     /// mutations are not document writes, so the scope closes by reading the
@@ -1166,4 +1291,52 @@ pub(super) struct PendingHistorySnapshot {
     /// A plugin's undo group: message boundaries leave it open until the
     /// plugin ends it or the user runs a command.
     pub(super) held: bool,
+}
+
+
+#[cfg(test)]
+mod history_label_tests {
+    use super::HistoryLabel;
+    use std::borrow::Cow;
+
+    #[test]
+    fn history_literal_labels_bypass_translation_even_when_they_match_catalog_sources() {
+        for value in ["LINE", "PLUGIN: custom", "Revert", "Edit construction geometry"] {
+            let label = HistoryLabel::from(value);
+            assert_eq!(label.display_with(&|_| panic!("literal label was translated"), &|_, _| panic!("literal label was formatted")), value);
+            assert_eq!(label.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn formatted_history_retains_source_and_only_translates_marked_arguments() {
+        for value in [HistoryLabel::from("Revert"), HistoryLabel::Message("Revert")] {
+            let message = matches!(value, HistoryLabel::Message(_));
+            let label = HistoryLabel::formatted("Edit block Revert".into(), "edit-block", value);
+            let rendered = label.display_with(&|source| {
+                assert_eq!(source, "Revert");
+                Cow::Borrowed("translated kind")
+            }, &|attribute, value| {
+                assert_eq!(attribute, "edit-block");
+                assert_eq!(value, if message { "translated kind" } else { "Revert" });
+                Some(format!("localized template: {value}"))
+            });
+            assert!(rendered.starts_with("localized template:"));
+            assert_eq!(label.as_str(), "Edit block Revert");
+            assert_eq!(label.display_with(&|source| Cow::Borrowed(source), &|_, _| None), label.as_str());
+        }
+    }
+
+    #[test]
+    fn history_message_labels_render_again_without_mutating_the_stored_source() {
+        let label = HistoryLabel::Message("Edit construction geometry");
+        let retained = label.clone();
+        for translated in ["Modifier la géométrie de construction", "تحرير الهندسة الإنشائية"] {
+            assert_eq!(retained.display_with(&|source| {
+                assert_eq!(source, "Edit construction geometry");
+                Cow::Owned(translated.to_owned())
+            }, &|_, _| panic!("plain message was formatted")), translated);
+            assert_eq!(retained.as_str(), "Edit construction geometry");
+        }
+    }
 }

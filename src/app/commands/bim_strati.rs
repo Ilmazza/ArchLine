@@ -27,7 +27,7 @@ use crate::bim::units::DrawingUnit;
 use crate::bim::detail;
 use crate::bim::{APP_STRATIGRAFIA, LAYER_PARTICOLARI};
 use crate::scene::view::dispatch::set_entity_xdata;
-use codec::Handle;
+use document::Handle;
 use iced::Task;
 
 use super::bim::room_tolerance;

@@ -87,8 +87,8 @@
 //! sui vertici memorizzati, gli stessi che vedono i muri (`entity_curve`); i
 //! flag di adattamento restano quelli dell'originale.
 
-use codec::entities::{Arc, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
-use codec::{EntityType, Handle, Vector2, Vector3};
+use document::entities::{Arc, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
+use document::{EntityType, Handle, Vector2, Vector3};
 use kernel::geom2d::{arc_span, normalize_angle, BulgeArc};
 
 /// Lunghezza minima di un tratto, relativa alla lunghezza dell'intera
@@ -573,10 +573,10 @@ mod tests {
     use super::*;
     use crate::command::WorkingPlane;
     use crate::scene::entity_boundary_source_on_plane;
-    use codec::entities::polyline::VertexFlags;
-    use codec::entities::{Arc, EntityCommon, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
-    use codec::types::{Color, LineWeight, Transparency};
-    use codec::{Handle, Vector2, Vector3};
+    use document::entities::polyline::VertexFlags;
+    use document::entities::{Arc, EntityCommon, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
+    use document::types::{Color, LineWeight, Transparency};
+    use document::{Handle, Vector2, Vector3};
     use kernel::geom2d::{inside_spans, Curve, Line as KernelLine, Tolerance};
     use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -612,8 +612,8 @@ mod tests {
         common.handle = Handle::new(0x2A);
         common.reactors = vec![Handle::new(0x30)];
         common.xdictionary_handle = Some(Handle::new(0x31));
-        let mut record = codec::xdata::ExtendedDataRecord::new("ALTRA_APP");
-        record.add_value(codec::xdata::XDataValue::Integer16(7));
+        let mut record = document::xdata::ExtendedDataRecord::new("ALTRA_APP");
+        record.add_value(document::xdata::XDataValue::Integer16(7));
         common.extended_data.add_record(record);
     }
 

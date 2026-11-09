@@ -2,13 +2,13 @@
 //!
 //! At compile time `build.rs` writes a small JSON blob to
 //! `OUT_DIR/version_info.json` containing host version, `ocs_plugin_api`
-//! version, `opencadcodec` version and source, API version bounds, and a build
+//! version, codec (`acadrust`) version and source, API version bounds, and a build
 //! timestamp. The blob is embedded via `include_str!` and is available without
 //! enabling the `host` feature.
 //!
-//! The opencadcodec source string is used to detect binary-incompatible plugin
+//! The codec source string is used to detect binary-incompatible plugin
 //! builds. For API v4 and later the host compares the plugin's resolved
-//! `opencadcodec` source with its own via [`acadrust_sources_compatible`]. Two
+//! codec source with its own via [`acadrust_sources_compatible`]. Two
 //! sources are considered compatible only when they resolve to the same 40
 //! character git commit hash.
 //!
@@ -24,6 +24,12 @@
 //! sides still share is the shape of the codec types they exchange, which
 //! [`wire_schema`] fingerprints: codec commits that leave those shapes alone
 //! leave a plugin compatible.
+//!
+//! API v15 arc: quad panels + custom icons. The quad surface (`QuadPanelDef`,
+//! `PluginRequest::RegisterQuadPanels`, `HostNotification::QuadAction`) adds
+//! no *codec* shapes, so [`wire_schema`] — the codec-fingerprint hash — is
+//! unchanged by design; plugin-dialog/protocol evolution rides the append-only
+//! enum discipline (`docs/plugin-architecture.md`).
 
 use std::sync::OnceLock;
 
@@ -89,7 +95,7 @@ fn parsed_version_info() -> &'static VersionInfo {
     })
 }
 
-/// Returns the host's full `opencadcodec` Cargo source.
+/// Returns the host's full codec (`acadrust`) Cargo source.
 pub fn host_acadrust_source() -> &'static str {
     &parsed_version_info().acadrust_source
 }
@@ -186,10 +192,10 @@ mod tests {
         );
 
         // acadrust_version should have a patch component (e.g. "0.4.0").
-        let opencadcodec = value["acadrust_version"]
+        let codec = value["acadrust_version"]
             .as_str()
             .expect("acadrust_version string");
-        assert_eq!(opencadcodec.split('.').count(), 3);
+        assert_eq!(codec.split('.').count(), 3);
     }
 
     #[test]

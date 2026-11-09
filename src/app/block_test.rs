@@ -1,13 +1,13 @@
-use super::{document::DocumentTab, Message, OpenCADStudio};
-use codec::entities::{AttributeEntity, Entity, Insert};
-use codec::EntityType;
+use super::{tab_document::DocumentTab, Message, OpenCADStudio};
+use document::entities::{AttributeEntity, Entity, Insert};
+use document::EntityType;
 use iced::Task;
 
 pub(super) struct BlockTestSession {
     pub source_id: u64,
-    pub definition: codec::Handle,
-    pub insert: codec::Handle,
-    pub baseline: std::sync::Arc<codec::Document>,
+    pub definition: document::Handle,
+    pub insert: document::Handle,
+    pub baseline: std::sync::Arc<document::Document>,
 }
 
 impl OpenCADStudio {
@@ -71,19 +71,19 @@ impl OpenCADStudio {
         document.header.show_model_space = true;
         crate::scene::block_visibility::finish_editing(&mut document, definition);
         let base = crate::scene::render_graph::block_base_point(&document, &name);
-        let mut insert = Insert::new(&name, codec::types::Vector3::ZERO);
+        let mut insert = Insert::new(&name, document::types::Vector3::ZERO);
         insert.common.layer = self.tabs[i].active_layer.clone();
         insert.common.handle = document.allocate_handle();
         insert.common.owner_handle = document.header.model_space_block_handle;
         let transform = crate::scene::render_graph::insert_transform_with_base(&insert, base);
         for entity in document.entities_in_block(&name) {
             if let EntityType::AttributeDefinition(definition) = entity {
-                if !definition.flags.constant {
-                    let mut attribute = AttributeEntity::from_definition(definition, None);
-                    attribute.attdef_handle = definition.common.handle;
-                    attribute.apply_transform(&transform);
-                    insert.attributes.push(attribute);
-                }
+                // Constant included: the mode decides whether an attribute is
+                // asked for, not whether the reference carries it.
+                let mut attribute = AttributeEntity::from_definition(definition, None);
+                attribute.attdef_handle = definition.common.handle;
+                attribute.apply_transform(&transform);
+                insert.attributes.push(attribute);
             }
         }
         for attribute in &mut insert.attributes {
@@ -149,7 +149,7 @@ impl OpenCADStudio {
                     crate::scene::block_actions::all_parameters(&tab.scene.document, definition)
                         .into_iter()
                         .filter(|parameter| {
-                            parameter.grip != codec::Handle::NULL && actions
+                            parameter.grip != document::Handle::NULL && actions
                                 .iter()
                                 .any(|(_, _, _, parameter_id)| *parameter_id == parameter.id)
                         })
@@ -172,7 +172,6 @@ impl OpenCADStudio {
         self.discard_block_tests(source_id);
         self.visibility_popup = None;
         self.table_popup = None;
-        self.flip_popup = None;
         self.grip_popup = None;
         self.grip_hover = None;
         self.tabs.push(tab);

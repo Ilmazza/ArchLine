@@ -19,11 +19,11 @@
 //!
 //! Qui non c'è undo: lo apre il comando che crea o cambia le zone.
 
-use codec::entities::hatch::BoundaryPathFlags;
-use codec::entities::{BoundaryEdge, BoundaryPath, EntityCommon, Hatch, PolylineEdge};
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Document, Color, EntityType, Handle, Vector2, Vector3};
+use document::entities::hatch::BoundaryPathFlags;
+use document::entities::{BoundaryEdge, BoundaryPath, EntityCommon, Hatch, PolylineEdge};
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Document, Color, EntityType, Handle, Vector2, Vector3};
 use kernel::geom2d::signed_area;
 
 use super::{
@@ -556,7 +556,7 @@ mod tests {
             varco: false,
         };
         let line = || {
-            let mut line = codec::entities::Line::from_points(
+            let mut line = document::entities::Line::from_points(
                 Vector3::new(0.0, 0.0, 0.0),
                 Vector3::new(2.0, 0.0, 0.0),
             );
@@ -696,7 +696,7 @@ mod tests {
         assert!(h.is_solid);
         assert!(!h.is_associative);
         assert_eq!(h.common.layer, LAYER_DEMOLIZIONI);
-        assert_eq!(h.common.color, codec::Color::from_index(ACI_GIALLO));
+        assert_eq!(h.common.color, document::Color::from_index(ACI_GIALLO));
         assert!((crate::entities::hatch::boundary_area(&h) - 0.30).abs() < 1e-9);
         let n = Zone {
             state: ZoneState::Nuovo,
@@ -707,7 +707,7 @@ mod tests {
         };
         assert_eq!(
             (h.common.layer.as_str(), h.common.color),
-            (LAYER_NUOVE, codec::Color::from_index(ACI_ROSSO))
+            (LAYER_NUOVE, document::Color::from_index(ACI_ROSSO))
         );
     }
 
@@ -720,9 +720,9 @@ mod tests {
             ..plain(ZoneState::Demolito, ZoneOrigin::MuroDuePunti)
         };
         let entity = zone_hatch(&z, &[rect()]);
-        let zg = read_zone(codec::Handle::new(0x99), &entity).unwrap();
+        let zg = read_zone(document::Handle::new(0x99), &entity).unwrap();
         assert_eq!(zg.zone, z);
-        assert_eq!(zg.handle, codec::Handle::new(0x99));
+        assert_eq!(zg.handle, document::Handle::new(0x99));
     }
 
     #[test]
@@ -743,7 +743,7 @@ mod tests {
             "il buco non è esterno"
         );
         assert!((crate::entities::hatch::boundary_area(h) - 11.0).abs() < 1e-9);
-        let zg = read_zone(codec::Handle::new(1), &entity).unwrap();
+        let zg = read_zone(document::Handle::new(1), &entity).unwrap();
         assert_eq!(zg.rings.len(), 2);
         assert_eq!(zg.rings[0].len(), 4);
         assert_eq!(zg.rings[1].len(), 4);
@@ -764,13 +764,13 @@ mod tests {
             panic!()
         };
         h.paths.reverse();
-        let zg = read_zone(codec::Handle::new(1), &EntityType::Hatch(h)).unwrap();
+        let zg = read_zone(document::Handle::new(1), &EntityType::Hatch(h)).unwrap();
         assert_eq!(zg.rings.len(), 3);
         assert_eq!(zg.rings[0], outer, "l'esterno è il primo");
         assert_eq!(zg.rings[1], hole, "poi i buchi, dal più grande");
         // Nell'ordine giusto non cambia nulla.
         let entity = zone_hatch(&z, &[outer.clone(), hole.clone()]);
-        let zg = read_zone(codec::Handle::new(1), &entity).unwrap();
+        let zg = read_zone(document::Handle::new(1), &entity).unwrap();
         assert_eq!(zg.rings, vec![outer, hole]);
     }
 
@@ -778,10 +778,10 @@ mod tests {
     /// approssimata a corde; i lati dritti no.
     #[test]
     fn read_zone_marks_curved_outlines() {
-        use codec::entities::hatch::{CircularArcEdge, LineEdge};
+        use document::entities::hatch::{CircularArcEdge, LineEdge};
         use std::f64::consts::FRAC_PI_2;
         let z = plain(ZoneState::Demolito, ZoneOrigin::Rettangolo);
-        let straight = read_zone(codec::Handle::new(1), &zone_hatch(&z, &[rect()])).unwrap();
+        let straight = read_zone(document::Handle::new(1), &zone_hatch(&z, &[rect()])).unwrap();
         assert!(!straight.curved);
 
         // Polilinea con un bulge sul lato verso +x.
@@ -791,7 +791,7 @@ mod tests {
         let mut path = BoundaryPath::external();
         path.add_edge(BoundaryEdge::Polyline(bulged));
         let zg = read_zone(
-            codec::Handle::new(2),
+            document::Handle::new(2),
             &zone_hatch_from_paths(&z, vec![path]),
         )
         .unwrap();
@@ -816,7 +816,7 @@ mod tests {
         path.add_edge(line([2.0, 1.0], [0.0, 1.0]));
         path.add_edge(line([0.0, 1.0], [0.0, 0.0]));
         let zg = read_zone(
-            codec::Handle::new(3),
+            document::Handle::new(3),
             &zone_hatch_from_paths(&z, vec![path]),
         )
         .unwrap();
@@ -840,10 +840,10 @@ mod tests {
 
     #[test]
     fn read_zone_ignores_what_is_not_a_zone() {
-        let h = codec::Handle::new(5);
-        let line = EntityType::Line(codec::entities::Line::from_points(
-            codec::Vector3::ZERO,
-            codec::Vector3::UNIT_X,
+        let h = document::Handle::new(5);
+        let line = EntityType::Line(document::entities::Line::from_points(
+            document::Vector3::ZERO,
+            document::Vector3::UNIT_X,
         ));
         assert!(read_zone(h, &line).is_none());
         // Un tratteggio qualunque, senza record.
@@ -852,7 +852,7 @@ mod tests {
         else {
             panic!()
         };
-        hatch.common.extended_data = codec::xdata::ExtendedData::new();
+        hatch.common.extended_data = document::xdata::ExtendedData::new();
         assert!(read_zone(h, &EntityType::Hatch(hatch.clone())).is_none());
         // Record di un'altra applicazione.
         let mut other = ExtendedDataRecord::new("ALTRA_APP");
@@ -874,19 +874,19 @@ mod tests {
         assert!(!missing_layers(&doc));
         assert_eq!(
             doc.layers.get(LAYER_DEMOLIZIONI).unwrap().color,
-            codec::Color::from_index(2)
+            document::Color::from_index(2)
         );
         assert_eq!(
             doc.layers.get(LAYER_NUOVE).unwrap().color,
-            codec::Color::from_index(1)
+            document::Color::from_index(1)
         );
         assert_eq!(
             doc.layers.get(LAYER_LOCALI).unwrap().color,
-            codec::Color::from_index(7)
+            document::Color::from_index(7)
         );
         assert_eq!(
             doc.layers.get(LAYER_LOCALI_PROGETTO).unwrap().color,
-            codec::Color::from_index(7)
+            document::Color::from_index(7)
         );
         for name in [
             LAYER_DEMOLIZIONI,
@@ -926,19 +926,19 @@ mod tests {
         assert!(missing_layers(&no_layer));
         // Un layer già presente (di Mauro) non si tocca.
         let mut mine = Document::new();
-        let mut layer = codec::Layer::new(LAYER_NUOVE);
+        let mut layer = document::Layer::new(LAYER_NUOVE);
         layer.handle = mine.allocate_handle();
-        layer.color = codec::Color::from_index(30);
+        layer.color = document::Color::from_index(30);
         mine.layers.add(layer).unwrap();
         ensure_layers(&mut mine);
         assert_eq!(
             mine.layers.get(LAYER_NUOVE).unwrap().color,
-            codec::Color::from_index(30)
+            document::Color::from_index(30)
         );
         assert!(!missing_layers(&mine));
     }
 
-    fn doc_with(zones: &[(Zone, Vec<Vec<[f64; 2]>>)]) -> (Document, Vec<codec::Handle>) {
+    fn doc_with(zones: &[(Zone, Vec<Vec<[f64; 2]>>)]) -> (Document, Vec<document::Handle>) {
         let mut doc = Document::new();
         ensure_layers(&mut doc);
         let handles = zones
@@ -978,9 +978,9 @@ mod tests {
         in_paper.common_mut().owner_handle = doc.header.paper_space_block_handle;
         doc.add_entity(in_paper).unwrap();
         // Una linea e un tratteggio senza record non sono zone.
-        doc.add_entity(EntityType::Line(codec::entities::Line::from_points(
-            codec::Vector3::ZERO,
-            codec::Vector3::UNIT_X,
+        doc.add_entity(EntityType::Line(document::entities::Line::from_points(
+            document::Vector3::ZERO,
+            document::Vector3::UNIT_X,
         )))
         .unwrap();
         let EntityType::Hatch(mut bare) =
@@ -988,7 +988,7 @@ mod tests {
         else {
             panic!()
         };
-        bare.common.extended_data = codec::xdata::ExtendedData::new();
+        bare.common.extended_data = document::xdata::ExtendedData::new();
         doc.add_entity(EntityType::Hatch(bare)).unwrap();
 
         let found = zones_in(&doc);
@@ -1011,7 +1011,7 @@ mod tests {
 
         let common = entity.common();
         assert_eq!(common.layer, LAYER_NUOVE);
-        assert_eq!(common.color, codec::Color::from_index(ACI_ROSSO));
+        assert_eq!(common.color, document::Color::from_index(ACI_ROSSO));
         assert_eq!(common.extended_data.get_record("ALTRA_APP"), Some(&other));
         let zone_records = common
             .extended_data
@@ -1020,12 +1020,12 @@ mod tests {
             .filter(|r| r.application_name == APP_ZONA)
             .count();
         assert_eq!(zone_records, 1);
-        assert_eq!(read_zone(codec::Handle::new(1), &entity).unwrap().zone, new);
+        assert_eq!(read_zone(document::Handle::new(1), &entity).unwrap().zone, new);
 
         restyle(&mut entity, &z);
         assert_eq!(entity.common().layer, LAYER_DEMOLIZIONI);
-        assert_eq!(entity.common().color, codec::Color::from_index(ACI_GIALLO));
-        assert_eq!(read_zone(codec::Handle::new(1), &entity).unwrap().zone, z);
+        assert_eq!(entity.common().color, document::Color::from_index(ACI_GIALLO));
+        assert_eq!(read_zone(document::Handle::new(1), &entity).unwrap().zone, z);
     }
 
     #[test]
@@ -1038,8 +1038,8 @@ mod tests {
             ..plain(ZoneState::Demolito, ZoneOrigin::MuroDuePunti)
         };
         let (doc, _) = doc_with(&[(z.clone(), vec![rect()])]);
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes))
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes))
             .unwrap()
             .read()
             .unwrap();
@@ -1058,8 +1058,8 @@ mod tests {
             ..plain(ZoneState::Nuovo, ZoneOrigin::LineaSpessore)
         };
         let (doc, _) = doc_with(&[(z.clone(), vec![rect()])]);
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes))
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes))
             .read()
             .unwrap();
         let found = zones_in(&read);
@@ -1072,7 +1072,7 @@ mod tests {
         );
         assert_eq!(
             read.layers.get(LAYER_NUOVE).unwrap().color,
-            codec::Color::from_index(ACI_ROSSO)
+            document::Color::from_index(ACI_ROSSO)
         );
     }
 }

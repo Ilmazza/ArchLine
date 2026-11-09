@@ -5,8 +5,8 @@
 //! Nothing here touches the app, the scene or the GPU, so every rule can be
 //! tested with plain values.
 
-use codec::entities::HatchStyleType;
-use codec::types::Color as AcadColor;
+use document::entities::HatchStyleType;
+use document::types::Color as AcadColor;
 
 use crate::entities::hatch_fill::{GradientSpec, DEFAULT_GRADIENT_COLOR1, DEFAULT_GRADIENT_COLOR2};
 use crate::scene::model::hatch_model::GradientKind;
@@ -344,7 +344,7 @@ impl HatchSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::types::Color as AcadColor;
+    use document::types::Color as AcadColor;
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> HatchRing {
         vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]

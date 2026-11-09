@@ -308,7 +308,14 @@ const MENUS: &[(&str, &[Entry])] = &[
             Cmd("Clean Screen", "CLEANSCREEN", "Ctrl+0"),
             Sep,
             Cmd("Spelling", "SPELL", ""),
+            Sep,
+            // Selection (#2611 mockup, Menus): saved filters are in FILTER's
+            // list and the drawing's right-click menu.
             Cmd("Quick Select...", "QSELECT", ""),
+            Cmd("Filter...", "FILTER", ""),
+            Cmd("Select Similar", "SELECTSIMILAR", ""),
+            Cmd("Select All", "SELECTALL", "Ctrl+A"),
+            Sep,
             Sub(
                 "Draw Order",
                 &[
@@ -672,8 +679,6 @@ const ROW_SPACING: f32 = 8.0;
 const ROW_PAD: f32 = 8.0;
 const TAIL_GAP: f32 = 8.0;
 const ARROW: f32 = 8.0;
-/// The menu's own padding above and below its rows.
-const MENU_PAD: f32 = 2.0;
 /// The menus the Start tab keeps: it has no drawing for the others.
 const START_MENUS: [&str; 3] = ["File", "Window", "Help"];
 
@@ -714,7 +719,7 @@ pub fn view<'a>(context: MenuContext<'_>) -> Element<'a, Message> {
                         .center_y(TITLE_H)
                         .padding([0, 9]),
                 ),
-                menu(&rows),
+                menu(&rows, 0.0),
             )
         })
         .collect();
@@ -729,7 +734,9 @@ pub fn view<'a>(context: MenuContext<'_>) -> Element<'a, Message> {
             menu_background: Background::Color(chrome::panel(theme)),
             menu_border: Border {
                 color: chrome::border(theme),
-                width: 1.0,
+                // One physical pixel, as the padding and the submenu
+                // overlap it lines up with.
+                width: crate::ui::icons::hairline(),
                 radius: 0.0.into(),
             },
             menu_shadow: Default::default(),
@@ -748,6 +755,75 @@ pub fn view<'a>(context: MenuContext<'_>) -> Element<'a, Message> {
             ..Default::default()
         })
         .into()
+}
+
+/// The menu whose (translated) title starts with `letter`, for Alt+letter,
+/// and where its title sits along the bar.
+pub fn menu_for_letter(letter: char, is_start: bool) -> Option<(usize, f32)> {
+    let letter = letter.to_uppercase().next()?;
+    let mut x = 0.0;
+    for (index, (title, _)) in MENUS.iter().enumerate() {
+        if is_start && !START_MENUS.contains(title) {
+            continue;
+        }
+        let label = crate::t!(*title).into_owned();
+        if label.chars().next().and_then(|c| c.to_uppercase().next()) == Some(letter) {
+            return Some((index, x));
+        }
+        x += crate::ui::style::text_metrics::width(&label, 12.0, false) + 18.0;
+    }
+    None
+}
+
+/// Menu `index` as a keyboard-driven shortcut menu: its commands, its
+/// submenus (deeper levels flattened into them), every row with a letter.
+pub fn keyboard_menu(
+    index: usize,
+    aliases: &rustc_hash::FxHashMap<String, String>,
+    open: Option<crate::ui::popup::context_menu::SubmenuId>,
+) -> Option<crate::ui::popup::context_menu::ContextMenu> {
+    use crate::ui::popup::context_menu::{menu_line_item, ContextMenu, MenuRow, SubmenuId};
+    let menus = menu_rows(aliases);
+    let rows = menus.get(index)?;
+    fn item(row: &Row) -> Option<crate::ui::popup::context_menu::MenuItem> {
+        let Row::Cmd { icon, label, tail, on_press } = row else {
+            return None;
+        };
+        let line = match on_press.as_deref() {
+            Some(Message::MenuCommand(line)) => Some(line.clone()),
+            _ => None,
+        };
+        Some(menu_line_item(label.clone(), line, tail.clone(), *icon))
+    }
+    fn flatten(rows: &[Row], out: &mut Vec<crate::ui::popup::context_menu::MenuItem>) {
+        for row in rows {
+            match row {
+                Row::Sub(_, inner) => flatten(inner, out),
+                _ => out.extend(item(row)),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (n, row) in rows.iter().enumerate() {
+        match row {
+            Row::Sep => out.push(MenuRow::Separator),
+            Row::Sub(label, inner) => {
+                let id = SubmenuId::MenuBar(n as u16);
+                let mut items = Vec::new();
+                flatten(inner, &mut items);
+                out.push(MenuRow::Submenu {
+                    id,
+                    label: label.clone(),
+                    icon: None,
+                    items,
+                    open: open == Some(id),
+                });
+            }
+            _ => out.extend(item(row).map(MenuRow::Item)),
+        }
+    }
+    crate::ui::popup::context_menu::give_mnemonics(&mut out);
+    Some(ContextMenu::from_rows(out))
 }
 
 /// The rows of every menu, in `MENUS` order: built again only when the
@@ -804,7 +880,7 @@ fn group_aliases(
 }
 
 /// Whether OCS has the command a menu line starts.
-fn implemented(line: &str) -> bool {
+pub(crate) fn implemented(line: &str) -> bool {
     thread_local! {
         static KNOWN: rustc_hash::FxHashSet<&'static str> =
             crate::command::all_registered_command_names().into_iter().collect();
@@ -824,6 +900,23 @@ pub struct SearchEntry {
     /// Its command line.
     pub line: &'static str,
     pub icon: Option<&'static [u8]>,
+}
+
+/// The label and icon of the first menu item that runs the command line
+/// `line` (ignoring case), whether OCS has the command or not.
+pub fn entry_for_line(line: &str) -> Option<(String, Option<&'static [u8]>)> {
+    fn walk(entries: &'static [Entry], line: &str) -> Option<(String, Option<&'static [u8]>)> {
+        entries.iter().find_map(|entry| match *entry {
+            Cmd(label, cmd, _) if cmd.eq_ignore_ascii_case(line) => {
+                Some((crate::t!(label).into_owned(), command_icon(cmd)))
+            }
+            Sub(_, entries) => walk(entries, line),
+            _ => None,
+        })
+    }
+    MENUS
+        .iter()
+        .find_map(|(_, entries)| walk(entries, line.trim()))
 }
 
 /// Every menu item that runs a command, in menu order.
@@ -884,8 +977,9 @@ impl Row {
     }
 }
 
-/// A menu as wide as its widest row.
-fn menu<'a>(rows: &[&Row]) -> Menu<'a, Message, Theme, Renderer> {
+/// A menu as wide as its widest row, `offset` from its title or item: a
+/// submenu overlaps its parent by their border, so the two share one line.
+fn menu<'a>(rows: &[&Row], offset: f32) -> Menu<'a, Message, Theme, Renderer> {
     let width = rows.iter().map(|row| row.width()).fold(0.0, f32::max) + 2.0;
     let items = rows
         .iter()
@@ -905,19 +999,19 @@ fn menu<'a>(rows: &[&Row]) -> Menu<'a, Message, Theme, Renderer> {
             Row::Sep => Item::new(idle(separator())),
             Row::Sub(label, rows) => Item::with_menu(
                 entry(None, label.clone(), String::new(), None, true),
-                menu(&rows.iter().collect::<Vec<_>>()),
+                menu(
+                    &rows.iter().collect::<Vec<_>>(),
+                    -crate::ui::icons::hairline(),
+                ),
             ),
         })
         .collect();
-    // No side padding: the menu's edge lines up with its title.
+    // The rows sit just inside the one-pixel border, with no room above the
+    // first or below the last; the menu's edge lines up with its title.
     Menu::new(items)
         .width(width)
-        .padding(iced::Padding {
-            top: MENU_PAD,
-            bottom: MENU_PAD,
-            ..iced::Padding::ZERO
-        })
-        .offset(0.0)
+        .padding(crate::ui::icons::hairline())
+        .offset(offset)
 }
 
 fn rows(
@@ -1032,10 +1126,17 @@ fn entry_style(theme: &Theme, status: button::Status, submenu: bool) -> button::
     }
 }
 
-/// A 1 px line with 2 px above and below and 4 px at the sides.
+/// A line one physical pixel high, with 2 px above and below and 4 px at
+/// the sides: a logical pixel would draw one or two pixels high at a
+/// fractional scale.
 fn separator<'a>() -> Element<'a, Message> {
     container(
-        container(Space::new().width(Fill).height(1)).style(|theme: &Theme| container::Style {
+        container(
+            Space::new()
+                .width(Fill)
+                .height(crate::ui::icons::hairline()),
+        )
+        .style(|theme: &Theme| container::Style {
             background: Some(Background::Color(chrome::border(theme))),
             ..Default::default()
         }),

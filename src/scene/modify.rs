@@ -10,9 +10,9 @@ struct TextOrient {
 }
 
 pub(crate) fn inverse_affine(
-    transform: &codec::types::Transform,
-) -> Option<codec::types::Transform> {
-    use codec::types::{Matrix3, Matrix4, Transform, Vector3};
+    transform: &document::types::Transform,
+) -> Option<document::types::Transform> {
+    use document::types::{Matrix3, Matrix4, Transform, Vector3};
     let matrix = &transform.matrix.m;
     let linear = Matrix3::from_rows(
         [matrix[0][0], matrix[0][1], matrix[0][2]],
@@ -76,7 +76,7 @@ fn restore_text_orient(e: &mut EntityType, o: &TextOrient) {
         EntityType::Text(t) => {
             t.rotation = o.rotation;
             t.oblique_angle = o.oblique;
-            use codec::entities::TextHorizontalAlignment as HA;
+            use document::entities::TextHorizontalAlignment as HA;
             t.horizontal_alignment = match t.horizontal_alignment {
                 HA::Left => HA::Right,
                 HA::Right => HA::Left,
@@ -528,7 +528,7 @@ impl Scene {
     pub fn reframe_block_definition(
         &mut self,
         block_record: Handle,
-        local_from_old: &codec::types::Transform,
+        local_from_old: &document::types::Transform,
     ) -> usize {
         let Some(record) = self
             .document
@@ -546,8 +546,8 @@ impl Scene {
         let owned: HashSet<Handle> = handles.iter().copied().collect();
         let transform = EntityTransform::Affine(*local_from_old);
         let matrix = &local_from_old.matrix.m;
-        let dependent_transform = EntityTransform::Affine(codec::types::Transform::from_matrix(
-            codec::types::Matrix4 {
+        let dependent_transform = EntityTransform::Affine(document::types::Transform::from_matrix(
+            document::types::Matrix4 {
                 m: [
                     [matrix[0][0], matrix[0][1], matrix[0][2], 0.0],
                     [matrix[1][0], matrix[1][1], matrix[1][2], 0.0],
@@ -597,7 +597,7 @@ impl Scene {
         // the map the attribute positions on the INSERT were placed through;
         // the codec's base-ignoring transform would conjugate them through a
         // displaced frame whenever the definition has a non-zero base point.
-        let references: Vec<(Handle, codec::types::Transform)> = self
+        let references: Vec<(Handle, document::types::Transform)> = self
             .document
             .entities()
             .filter_map(|entity| match entity {
@@ -613,7 +613,7 @@ impl Scene {
                     let inverse = inverse_affine(&old_insertion)?;
                     Some((
                         reference.common.handle,
-                        codec::types::Transform::from_matrix(
+                        document::types::Transform::from_matrix(
                             insertion.matrix * local_from_old.matrix * inverse.matrix,
                         ),
                     ))
@@ -628,7 +628,7 @@ impl Scene {
             }
             if let Some(EntityType::Insert(reference)) = self.document.get_entity_mut(handle) {
                 for attribute in &mut reference.attributes {
-                    codec::Entity::apply_transform(attribute, &attribute_transform);
+                    document::Entity::apply_transform(attribute, &attribute_transform);
                 }
                 changed.push(handle);
             }
@@ -676,7 +676,7 @@ impl Scene {
     /// vertices, or drop them). Vertices that don't store a handle
     /// (LwPolyline / heavy 2D polyline) get one from the writer, so they need
     /// no fix-up here. Shared with the clipboard paste path. (#129)
-    pub(crate) fn reset_clone_subhandles(doc: &mut codec::Document, entity: &mut EntityType) {
+    pub(crate) fn reset_clone_subhandles(doc: &mut document::Document, entity: &mut EntityType) {
         match entity {
             EntityType::Table(table) => {
                 // A table exclusively owns its anonymous picture block. The
@@ -687,6 +687,14 @@ impl Scene {
             EntityType::Insert(ins) => {
                 for att in ins.attributes.iter_mut() {
                     att.common.handle = doc.allocate_handle();
+                    // The text of a multiline attribute is an object of its
+                    // own inside the reference, so the copy needs a fresh
+                    // handle for it and its new attribute as owner.
+                    let owner = att.common.handle;
+                    if let Some(model) = &mut att.embedded_mtext {
+                        model.common.handle = doc.allocate_handle();
+                        model.common.owner_handle = owner;
+                    }
                 }
                 if ins.seqend_handle.is_some() {
                     ins.seqend_handle = Some(doc.allocate_handle());
@@ -849,7 +857,7 @@ impl Scene {
                     continue;
                 };
                 match obj {
-                    codec::objects::ObjectType::Dictionary(d) => {
+                    document::objects::ObjectType::Dictionary(d) => {
                         for (_, child) in &d.entries {
                             stack.push(*child);
                         }
@@ -857,12 +865,12 @@ impl Scene {
                             stack.push(xd);
                         }
                     }
-                    codec::objects::ObjectType::XRecord(x) => {
+                    document::objects::ObjectType::XRecord(x) => {
                         if let Some(xd) = x.xdictionary_handle {
                             stack.push(xd);
                         }
                     }
-                    codec::objects::ObjectType::Field(f) => {
+                    document::objects::ObjectType::Field(f) => {
                         stack.extend(f.child_fields.iter().copied());
                     }
                     _ => {}
@@ -887,7 +895,7 @@ impl Scene {
     /// root returns `None` so the caller leaves the copy without an extension
     /// dictionary — never shared.
     pub(super) fn clone_xdict_tree(
-        doc: &mut codec::Document,
+        doc: &mut document::Document,
         src_owner: Handle,
         src_root: Handle,
         new_owner: Handle,
@@ -924,7 +932,7 @@ impl Scene {
             index.insert(h, order.len());
             order.push(h);
             match obj {
-                codec::objects::ObjectType::Dictionary(d) => {
+                document::objects::ObjectType::Dictionary(d) => {
                     for (_, child) in &d.entries {
                         stack.push(*child);
                     }
@@ -932,13 +940,13 @@ impl Scene {
                         stack.push(xd);
                     }
                 }
-                codec::objects::ObjectType::XRecord(x) => {
+                document::objects::ObjectType::XRecord(x) => {
                     if let Some(xd) = x.xdictionary_handle {
                         stack.push(xd);
                     }
                 }
                 // A text field's nested fields belong to the same tree.
-                codec::objects::ObjectType::Field(f) => {
+                document::objects::ObjectType::Field(f) => {
                     stack.extend(f.child_fields.iter().copied());
                 }
                 _ => {}
@@ -973,7 +981,7 @@ impl Scene {
             let obj = doc.objects.get(&h)?;
             let mut obj = obj.clone();
             match &mut obj {
-                codec::objects::ObjectType::Dictionary(d) => {
+                document::objects::ObjectType::Dictionary(d) => {
                     d.handle = new_h;
                     d.owner = rewrite(d.owner);
                     for (_, child) in &mut d.entries {
@@ -984,7 +992,7 @@ impl Scene {
                         *r = rewrite(*r);
                     }
                 }
-                codec::objects::ObjectType::XRecord(x) => {
+                document::objects::ObjectType::XRecord(x) => {
                     x.handle = new_h;
                     x.owner = rewrite(x.owner);
                     x.xdictionary_handle = x.xdictionary_handle.map(rewrite);
@@ -992,7 +1000,7 @@ impl Scene {
                         *r = rewrite(*r);
                     }
                     for entry in &mut x.entries {
-                        if let codec::objects::XRecordValue::Handle(h) = &mut entry.value {
+                        if let document::objects::XRecordValue::Handle(h) = &mut entry.value {
                             *h = rewrite(*h);
                         }
                     }
@@ -1007,7 +1015,7 @@ impl Scene {
                     x.preserve_object_reference_stream = false;
                 }
                 // A dynamic reference's AcDbRepData naming its definition.
-                codec::objects::ObjectType::DynamicBlock(b) => {
+                document::objects::ObjectType::DynamicBlock(b) => {
                     b.handle = new_h;
                     b.owner = rewrite(b.owner);
                     for r in &mut b.reactors {
@@ -1019,7 +1027,7 @@ impl Scene {
                 }
                 // A FIELD under ACAD_FIELD: the copy evaluates its own field
                 // tree, so its handle, owner and nested fields are remapped.
-                codec::objects::ObjectType::Field(f) => {
+                document::objects::ObjectType::Field(f) => {
                     f.handle = new_h;
                     f.owner = rewrite(f.owner);
                     for child in &mut f.child_fields {
@@ -1121,14 +1129,14 @@ impl Scene {
         let next = self.document.next_handle();
         let br_handle = Handle::new(next);
         let block_handle = Handle::new(next + 1);
-        let mut br = codec::tables::BlockRecord::new(&new_name);
+        let mut br = document::tables::BlockRecord::new(&new_name);
         br.handle = br_handle;
         br.block_entity_handle = block_handle;
         // The DWG writer takes the anonymous bit from the flag alone; without
         // it AutoCAD's audit reports `Invalid anonymous block "*D<n>"`.
         br.flags.anonymous = true;
         self.document.block_records.add(br).ok()?;
-        let mut block = Block::new(&new_name, codec::types::Vector3::ZERO);
+        let mut block = Block::new(&new_name, document::types::Vector3::ZERO);
         block.common.handle = block_handle;
         block.common.owner_handle = br_handle;
         self.document.add_entity(EntityType::Block(block)).ok()?;
@@ -1276,6 +1284,7 @@ impl Scene {
             self.ensure_image_definition(&mut entity);
             let h = self.document.add_entity(entity).unwrap_or(Handle::NULL);
             if !h.is_null() {
+                Self::adopt_attributes(&mut self.document, h);
                 // Deep-clone the extension-dictionary tree so edits on the
                 // copy never touch the source. A dangling or missing root
                 // leaves the copy without one — never shared.
@@ -1372,7 +1381,8 @@ impl Scene {
                 }
                 let rebuilt_history =
                     self.copy_solid_history(src_handle, h) && self.transform_solid_history(h, t);
-                if !rebuilt_history
+                // A moved history only moves a mesh the copy does not have yet.
+                if (!rebuilt_history || !self.meshes.contains_key(&h))
                     && self.document.get_entity(h).is_some_and(|entity| {
                         matches!(
                             entity,
@@ -1430,6 +1440,26 @@ impl Scene {
         // ArchLine: copies of BIM rooms start families of their own
         // (`bim::rooms::renew_anchors`).
         crate::bim::rooms::renew_anchors(&mut self.document, &new_handles);
+        // A copied associative array gets its own blocks and action, so
+        // editing one array leaves the other alone.
+        let arrays: Vec<(Handle, Handle)> = handle_map
+            .iter()
+            .filter(|(source, _)| {
+                self.document.get_entity(**source).is_some_and(|entity| {
+                    matches!(entity, EntityType::Insert(_))
+                        && entity.common().reactors.iter().any(|reactor| {
+                            matches!(
+                                self.document.objects.get(reactor),
+                                Some(document::objects::ObjectType::Associative(_))
+                            )
+                        })
+                })
+            })
+            .map(|(&source, &copy)| (source, copy))
+            .collect();
+        for (source, copy) in arrays {
+            super::assoc_array::clone_array_for_copy(self, source, copy, &handle_map);
+        }
         // The copies are new handles (natural memo misses, tessellated fresh)
         // and reference only already-cached blocks — no block defn changes.
         // Report them as additions so derived caches patch in exactly the copies.
@@ -1449,7 +1479,7 @@ impl Scene {
     pub(crate) fn solid_history_objects(
         &self,
         handle: Handle,
-    ) -> Vec<(Handle, codec::objects::ObjectType)> {
+    ) -> Vec<(Handle, document::objects::ObjectType)> {
         let Some(graph) = self.document.solid_history_graph(handle) else {
             return Vec::new();
         };
@@ -1478,7 +1508,7 @@ impl Scene {
     pub fn create_solid_history(
         &mut self,
         handle: Handle,
-        operation: codec::objects::SolidHistoryOperation,
+        operation: document::objects::SolidHistoryOperation,
     ) -> bool {
         let Some(graph) = self.document.create_solid_history(handle, operation) else {
             return false;
@@ -1494,7 +1524,7 @@ impl Scene {
     pub fn append_solid_history(
         &mut self,
         handle: Handle,
-        operation: codec::objects::SolidHistoryOperation,
+        operation: document::objects::SolidHistoryOperation,
     ) -> bool {
         let previous: Vec<Handle> = self
             .document
@@ -1620,7 +1650,7 @@ impl Scene {
         let Some(reference) = reference else {
             return;
         };
-        let point = codec::types::Vector3::new(reference.x, reference.y, reference.z);
+        let point = document::types::Vector3::new(reference.x, reference.y, reference.z);
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.point_of_reference = point,
             Some(EntityType::Surface(entity)) => entity.point_of_reference = point,
@@ -1653,9 +1683,9 @@ impl Scene {
     fn rebuild_history_body(
         &self,
         handle: Handle,
-        operation: &codec::objects::SolidHistoryOperation,
+        operation: &document::objects::SolidHistoryOperation,
     ) -> Option<kernel::brep::Body> {
-        use codec::objects::SolidHistoryOperation;
+        use document::objects::SolidHistoryOperation;
 
         match (self.document.get_entity(handle)?, operation) {
             (EntityType::Surface(_), SolidHistoryOperation::Extrusion(value)) => {
@@ -1676,9 +1706,9 @@ impl Scene {
     fn history_surface_data(
         &self,
         handle: Handle,
-        operation: &codec::objects::SolidHistoryOperation,
-    ) -> Option<Option<codec::entities::SurfaceData>> {
-        use codec::objects::SolidHistoryOperation;
+        operation: &document::objects::SolidHistoryOperation,
+    ) -> Option<Option<document::entities::SurfaceData>> {
+        use document::objects::SolidHistoryOperation;
 
         match (self.document.get_entity(handle)?, operation) {
             (EntityType::Surface(_), SolidHistoryOperation::Extrusion(value)) => {
@@ -1756,8 +1786,8 @@ impl Scene {
                 .map(std::sync::Arc::new);
             self.record_undo_before(handle, before);
             if let Some(EntityType::Surface(surface)) = self.document.get_entity_mut(handle) {
-                surface.acis_data = codec::entities::AcisData::from_sat(&document.to_sat_string());
-                if let codec::entities::SurfaceData::Swept { options, .. } =
+                surface.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
+                if let document::entities::SurfaceData::Swept { options, .. } =
                     &mut surface.surface_data
                 {
                     options.scale_factor = record.scale_factor;
@@ -1835,7 +1865,7 @@ impl Scene {
                 .map(std::sync::Arc::new);
             self.record_undo_before(handle, before);
             if let Some(EntityType::Surface(surface)) = self.document.get_entity_mut(handle) {
-                surface.acis_data = codec::entities::AcisData::from_sat(&document.to_sat_string());
+                surface.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
                 surface.surface_data = fresh.surface_data;
                 surface.point_of_reference = fresh.point_of_reference;
             }
@@ -1857,7 +1887,7 @@ impl Scene {
             axis_points, surface_sources, SurfaceSources, SURFACE_SOURCES_APP,
         };
         use crate::scene::model::sweep_model;
-        use codec::objects::SolidHistoryOperation;
+        use document::objects::SolidHistoryOperation;
         let changed = changes
             .iter()
             .filter(|(_, kind)| !matches!(kind, crate::scene::ChangeKind::Removed))
@@ -1886,7 +1916,7 @@ impl Scene {
             let source = |handle: Handle| self.document.get_entity(handle).cloned();
             // The surface made again: a history step, or a body with its data.
             let made: Option<
-                Result<SolidHistoryOperation, (kernel::brep::Body, codec::entities::SurfaceData)>,
+                Result<SolidHistoryOperation, (kernel::brep::Body, document::entities::SurfaceData)>,
             > = match &sources {
                 SurfaceSources::Extrude {
                     profile,
@@ -2000,7 +2030,7 @@ impl Scene {
                     if let Some(EntityType::Surface(surface)) = self.document.get_entity_mut(handle)
                     {
                         surface.acis_data =
-                            codec::entities::AcisData::from_sat(&document.to_sat_string());
+                            document::entities::AcisData::from_sat(&document.to_sat_string());
                         surface.surface_data = data;
                     }
                     self.register_prepared_solid_model(handle, body, display);
@@ -2016,7 +2046,7 @@ impl Scene {
     /// expression (an associative swept surface action whose value parameter
     /// depends on an expression variable) are linked the same way here.
     pub(crate) fn import_sweep_expression_links(&mut self) {
-        use codec::objects::{AssocSurfaceActionKind, AssociativeData, ObjectType};
+        use document::objects::{AssocSurfaceActionKind, AssociativeData, ObjectType};
         let object = |handle: Handle| match self.document.objects.get(&handle) {
             Some(ObjectType::Associative(object)) => Some(&object.data),
             _ => None,
@@ -2076,7 +2106,7 @@ impl Scene {
                     .find(|value| value.name == name)
                     .and_then(|value| value.variables.first())
                     .and_then(|variable| match variable.value.value {
-                        codec::objects::AssocEvalValue::Real(value) => Some(value),
+                        document::objects::AssocEvalValue::Real(value) => Some(value),
                         _ => None,
                     })
             };
@@ -2166,7 +2196,7 @@ impl Scene {
             if crate::scene::model::sweep_model::sweep_sources(entity).is_some() {
                 continue;
             }
-            let codec::entities::SurfaceData::Swept { options, .. } = &value.surface_data else {
+            let document::entities::SurfaceData::Swept { options, .. } = &value.surface_data else {
                 continue;
             };
             let linked = crate::command::SweepOptions {
@@ -2211,7 +2241,7 @@ impl Scene {
             let linked = match (kind, &value.surface_data) {
                 (
                     AssocSurfaceActionKind::Extruded,
-                    codec::entities::SurfaceData::Extruded { sweep_vector, .. },
+                    document::entities::SurfaceData::Extruded { sweep_vector, .. },
                 ) => {
                     let profile = handles[0];
                     let along = glam::DVec3::new(sweep_vector.x, sweep_vector.y, sweep_vector.z);
@@ -2243,7 +2273,7 @@ impl Scene {
                 }
                 (
                     AssocSurfaceActionKind::Revolved,
-                    codec::entities::SurfaceData::Revolved {
+                    document::entities::SurfaceData::Revolved {
                         axis_point,
                         axis_vector,
                         start_angle,
@@ -2270,7 +2300,7 @@ impl Scene {
     pub fn rebuild_solid_history(
         &mut self,
         handle: Handle,
-        operation: codec::objects::SolidHistoryOperation,
+        operation: document::objects::SolidHistoryOperation,
     ) -> bool {
         let Some(body) = self.rebuild_history_body(handle, &operation) else {
             return false;
@@ -2286,8 +2316,8 @@ impl Scene {
         };
         if matches!(
             &operation,
-            codec::objects::SolidHistoryOperation::Loft(_)
-                | codec::objects::SolidHistoryOperation::Extrusion(_)
+            document::objects::SolidHistoryOperation::Loft(_)
+                | document::objects::SolidHistoryOperation::Extrusion(_)
         ) && !display.0.complete
         {
             return false;
@@ -2303,10 +2333,10 @@ impl Scene {
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = codec::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
-                    if matches!(&data, codec::entities::SurfaceData::Extruded { .. }) {
-                        entity.kind = codec::entities::SurfaceKind::Extruded;
+                    if matches!(&data, document::entities::SurfaceData::Extruded { .. }) {
+                        entity.kind = document::entities::SurfaceKind::Extruded;
                     }
                     entity.surface_data = data;
                 }
@@ -2336,8 +2366,8 @@ impl Scene {
         };
         if matches!(
             &operation,
-            codec::objects::SolidHistoryOperation::Loft(_)
-                | codec::objects::SolidHistoryOperation::Extrusion(_)
+            document::objects::SolidHistoryOperation::Loft(_)
+                | document::objects::SolidHistoryOperation::Extrusion(_)
         ) && !display.0.complete
         {
             return false;
@@ -2345,10 +2375,10 @@ impl Scene {
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = codec::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
-                    if matches!(&data, codec::entities::SurfaceData::Extruded { .. }) {
-                        entity.kind = codec::entities::SurfaceKind::Extruded;
+                    if matches!(&data, document::entities::SurfaceData::Extruded { .. }) {
+                        entity.kind = document::entities::SurfaceKind::Extruded;
                     }
                     entity.surface_data = data;
                 }
@@ -2363,7 +2393,7 @@ impl Scene {
     fn preview_solid_history(
         &mut self,
         handle: Handle,
-        operation: codec::objects::SolidHistoryOperation,
+        operation: document::objects::SolidHistoryOperation,
     ) -> bool {
         let Some(body) = self.rebuild_history_body(handle, &operation) else {
             return false;
@@ -2418,7 +2448,7 @@ impl Scene {
         if let EntityTransform::Translate(delta) = transform {
             let surface_data = match (&operation, self.document.get_entity(handle)) {
                 (
-                    codec::objects::SolidHistoryOperation::Extrusion(value),
+                    document::objects::SolidHistoryOperation::Extrusion(value),
                     Some(EntityType::Surface(_)),
                 ) => {
                     let Some(data) =
@@ -2533,7 +2563,7 @@ impl Scene {
             return false;
         };
         if grip_id == crate::scene::model::solid_history::GRIP_FILLET_RADIUS {
-            let codec::objects::SolidHistoryOperation::Fillet(value) = &mut operation else {
+            let document::objects::SolidHistoryOperation::Fillet(value) = &mut operation else {
                 return false;
             };
             let Some(radius) = value.radii.first().copied() else {
@@ -2566,7 +2596,7 @@ impl Scene {
                 | crate::scene::model::solid_history::GRIP_CHAMFER_DISTANCE2
         ) {
             let definitions = {
-                let codec::objects::SolidHistoryOperation::Chamfer(value) = &operation else {
+                let document::objects::SolidHistoryOperation::Chamfer(value) = &operation else {
                     return false;
                 };
                 crate::scene::model::solid_history::chamfer_distance_grips(
@@ -2585,7 +2615,7 @@ impl Scene {
                 GripApply::Absolute(world) => (world - definition.world).dot(axis),
                 GripApply::Translate(delta) => delta.dot(axis),
             };
-            let codec::objects::SolidHistoryOperation::Chamfer(value) = &mut operation else {
+            let document::objects::SolidHistoryOperation::Chamfer(value) = &mut operation else {
                 return false;
             };
             let distance = if grip_id == crate::scene::model::solid_history::GRIP_CHAMFER_DISTANCE1
@@ -2662,7 +2692,7 @@ impl Scene {
         ) {
             return None;
         }
-        let codec::objects::SolidHistoryOperation::Sweep(record) = &operation else {
+        let document::objects::SolidHistoryOperation::Sweep(record) = &operation else {
             return None;
         };
         kernel::acis::sweep_history_refusal(record)
@@ -2760,6 +2790,12 @@ impl Scene {
     pub fn apply_grip(&mut self, handle: Handle, grip_id: usize, apply: GripApply) {
         // Objects on a locked layer can't be grip-edited.
         if self.is_layer_locked(handle) {
+            return;
+        }
+        if grip_id == GROUP_GRIP_ID {
+            if let GripApply::Translate(delta) = apply {
+                self.transform_entities(&[handle], &crate::command::EntityTransform::Translate(delta));
+            }
             return;
         }
         // An attribute grip sits on the displayed (annotation-scaled)
@@ -2928,9 +2964,9 @@ mod leader_annotation_reactor_tests {
     use super::*;
 
     fn add_pair(scene: &mut Scene) -> (Handle, Handle) {
-        let leader = scene.add_entity(EntityType::Leader(codec::entities::Leader::default()));
+        let leader = scene.add_entity(EntityType::Leader(document::entities::Leader::default()));
         let annotation = scene.add_entity(EntityType::MText(Box::new(
-            codec::entities::MText::with_value("note", codec::types::Vector3::new(10.0, 5.0, 0.0)),
+            document::entities::MText::with_value("note", document::types::Vector3::new(10.0, 5.0, 0.0)),
         )));
         (leader, annotation)
     }
@@ -3012,7 +3048,7 @@ mod leader_annotation_reactor_tests {
 /// association, group, associative hatch) are dropped. The association and
 /// group copies add their own reactors afterwards.
 pub(crate) fn remap_copied_reactors(
-    document: &mut codec::Document,
+    document: &mut document::Document,
     handle_map: &rustc_hash::FxHashMap<Handle, Handle>,
 ) {
     for &copy in handle_map.values() {
@@ -3033,7 +3069,7 @@ pub(crate) fn remap_copied_reactors(
 /// `drop_unmapped` (a paste, whose source handles may name anything in this
 /// drawing) a viewport whose boundary did not come along loses its clip.
 pub(crate) fn remap_copied_viewport_clips(
-    document: &mut codec::Document,
+    document: &mut document::Document,
     handle_map: &rustc_hash::FxHashMap<Handle, Handle>,
     drop_unmapped: bool,
 ) {
@@ -3059,7 +3095,7 @@ pub(crate) fn remap_copied_viewport_clips(
 /// rewrites refs to copied entities, which may not have existed yet when an
 /// earlier tree in the same call was cloned.
 pub(super) fn remap_copied_xdict_cross_refs(
-    document: &mut codec::Document,
+    document: &mut document::Document,
     handle_map: &rustc_hash::FxHashMap<Handle, Handle>,
     created: &[Handle],
 ) {
@@ -3072,7 +3108,7 @@ pub(super) fn remap_copied_xdict_cross_refs(
             continue;
         };
         match obj {
-            codec::objects::ObjectType::Dictionary(d) => {
+            document::objects::ObjectType::Dictionary(d) => {
                 d.owner = rewrite(d.owner);
                 for (_, child) in &mut d.entries {
                     *child = rewrite(*child);
@@ -3082,14 +3118,14 @@ pub(super) fn remap_copied_xdict_cross_refs(
                     *r = rewrite(*r);
                 }
             }
-            codec::objects::ObjectType::XRecord(x) => {
+            document::objects::ObjectType::XRecord(x) => {
                 x.owner = rewrite(x.owner);
                 x.xdictionary_handle = x.xdictionary_handle.map(rewrite);
                 for r in &mut x.reactors {
                     *r = rewrite(*r);
                 }
                 for entry in &mut x.entries {
-                    if let codec::objects::XRecordValue::Handle(h) = &mut entry.value {
+                    if let document::objects::XRecordValue::Handle(h) = &mut entry.value {
                         *h = rewrite(*h);
                     }
                 }
@@ -3116,7 +3152,7 @@ mod mirror_text_tests {
     }
 
     fn text(scene: &mut Scene, rotation_deg: f64) -> Handle {
-        let mut t = codec::entities::Text::new();
+        let mut t = document::entities::Text::new();
         t.value = "ABC".to_string();
         t.rotation = rotation_deg.to_radians();
         scene.document.add_entity(EntityType::Text(t)).unwrap()
@@ -3168,9 +3204,9 @@ mod define_transformed_block_xdict_tests {
     use super::*;
 
     /// No extension dictionary may be referenced by more than one entity.
-    fn assert_no_shared_xdicts(doc: &codec::Document) {
+    fn assert_no_shared_xdicts(doc: &document::Document) {
         use std::collections::HashMap;
-        let mut owners: HashMap<codec::Handle, usize> = HashMap::new();
+        let mut owners: HashMap<document::Handle, usize> = HashMap::new();
         for entity in doc.entities() {
             if let Some(xd) = entity.common().xdictionary_handle {
                 if !xd.is_null() {
@@ -3195,7 +3231,7 @@ mod define_transformed_block_xdict_tests {
         let mut scene = Scene::new();
         let line = scene
             .document
-            .add_entity(codec::EntityType::Line(codec::entities::Line::new()))
+            .add_entity(document::EntityType::Line(document::entities::Line::new()))
             .unwrap();
         let subs = vec![scene.document.get_entity(line).unwrap().clone()];
         let name = scene
@@ -3217,21 +3253,21 @@ mod define_transformed_block_xdict_tests {
         let mut scene = Scene::new();
 
         let dict_handle = scene.document.allocate_handle();
-        let mut dict = codec::objects::Dictionary::new();
+        let mut dict = document::objects::Dictionary::new();
         dict.handle = dict_handle;
         scene
             .document
             .objects
-            .insert(dict_handle, codec::objects::ObjectType::Dictionary(dict));
+            .insert(dict_handle, document::objects::ObjectType::Dictionary(dict));
 
-        let mut br = codec::tables::BlockRecord::new("SRC");
+        let mut br = document::tables::BlockRecord::new("SRC");
         br.handle = scene.document.allocate_handle();
         scene.document.block_records.add(br).unwrap();
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common.xdictionary_handle = Some(dict_handle);
         let src_handle = scene
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .unwrap();
         scene
             .document
@@ -3298,18 +3334,18 @@ mod add_entity_clone_xdict_tests {
         let mut source = Scene::new();
 
         let dict_handle = source.document.allocate_handle();
-        let mut dict = codec::objects::Dictionary::new();
+        let mut dict = document::objects::Dictionary::new();
         dict.handle = dict_handle;
         source
             .document
             .objects
-            .insert(dict_handle, codec::objects::ObjectType::Dictionary(dict));
+            .insert(dict_handle, document::objects::ObjectType::Dictionary(dict));
 
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common.xdictionary_handle = Some(dict_handle);
         let src_handle = source
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .unwrap();
 
         let cloned = source.document.get_entity(src_handle).unwrap().clone();
@@ -3341,7 +3377,7 @@ mod add_entity_clone_xdict_tests {
 mod copy_entities_xdict_tests {
     use super::*;
     use crate::command::EntityTransform;
-    use codec::objects::{
+    use document::objects::{
         Dictionary, ObjectType, ProxyObjectReference, ProxyReferenceKind, XRecord, XRecordValue,
     };
     use glam::DVec3;
@@ -3352,11 +3388,11 @@ mod copy_entities_xdict_tests {
     #[allow(clippy::type_complexity)]
     fn scene_with_xdict_tree() -> (
         Scene,
-        codec::Handle,
-        codec::Handle,
-        codec::Handle,
-        codec::Handle,
-        codec::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
+        document::Handle,
     ) {
         let mut scene = Scene::new();
         let root_h = scene.document.allocate_handle();
@@ -3398,11 +3434,11 @@ mod copy_entities_xdict_tests {
             .objects
             .insert(rec_h, ObjectType::XRecord(rec));
 
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common.xdictionary_handle = Some(root_h);
         let src = scene
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .expect("add source entity");
         if let Some(ObjectType::Dictionary(d)) = scene.document.objects.get_mut(&root_h) {
             d.owner = src;
@@ -3413,7 +3449,7 @@ mod copy_entities_xdict_tests {
 
     /// Every object reachable from `root` through dictionary entries and
     /// xdictionary links (cycle-safe).
-    fn tree_handles(doc: &codec::Document, root: codec::Handle) -> Vec<codec::Handle> {
+    fn tree_handles(doc: &document::Document, root: document::Handle) -> Vec<document::Handle> {
         let mut out = Vec::new();
         let mut stack = vec![root];
         let mut seen = std::collections::BTreeSet::new();
@@ -3445,9 +3481,9 @@ mod copy_entities_xdict_tests {
 
     /// Byte-for-byte image of a tree for source-unchanged assertions.
     fn tree_image(
-        doc: &codec::Document,
-        root: codec::Handle,
-    ) -> Vec<(codec::Handle, ObjectType)> {
+        doc: &document::Document,
+        root: document::Handle,
+    ) -> Vec<(document::Handle, ObjectType)> {
         tree_handles(doc, root)
             .into_iter()
             .map(|h| (h, doc.objects.get(&h).expect("tree object").clone()))
@@ -3579,10 +3615,10 @@ mod copy_entities_xdict_tests {
     #[test]
     fn copy_without_xdict_adds_no_objects_and_keeps_delta_undo() {
         let mut scene = Scene::new();
-        let line = codec::entities::Line::new();
+        let line = document::entities::Line::new();
         let src = scene
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .expect("add source entity");
         let objects_before = scene.document.objects.len();
 
@@ -3607,11 +3643,11 @@ mod copy_entities_xdict_tests {
     fn copy_with_dangling_xdict_root_leaves_copy_without_one() {
         let mut scene = Scene::new();
         let missing = scene.document.allocate_handle();
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common.xdictionary_handle = Some(missing);
         let src = scene
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .expect("add source entity");
         let objects_before = scene.document.objects.len();
 
@@ -3677,11 +3713,11 @@ mod copy_entities_xdict_tests {
         // An entity recorded inside the tree (e.g. a field pointing back at a
         // drawing entity) stays pointed at the original; entities are never
         // part of the object-tree clone.
-        let mut other_line = codec::entities::Line::new();
+        let mut other_line = document::entities::Line::new();
         other_line.common.handle = Handle::NULL;
         let other = scene
             .document
-            .add_entity(codec::EntityType::Line(other_line))
+            .add_entity(document::EntityType::Line(other_line))
             .expect("other entity");
         // An object outside the reachable closure, referenced only through
         // the XRecord handle stream, likewise stays pointed at the original.
@@ -3765,7 +3801,7 @@ mod copy_entities_xdict_tests {
 
     /// A line whose extension dictionary is a fresh single-root dictionary
     /// owned by (and reactor-linked to) that line.
-    fn add_line_with_root(scene: &mut Scene) -> (codec::Handle, codec::Handle) {
+    fn add_line_with_root(scene: &mut Scene) -> (document::Handle, document::Handle) {
         let root_h = scene.document.allocate_handle();
         let mut root = Dictionary::new();
         root.handle = root_h;
@@ -3773,11 +3809,11 @@ mod copy_entities_xdict_tests {
             .document
             .objects
             .insert(root_h, ObjectType::Dictionary(root));
-        let mut line = codec::entities::Line::new();
+        let mut line = document::entities::Line::new();
         line.common.xdictionary_handle = Some(root_h);
         let src = scene
             .document
-            .add_entity(codec::EntityType::Line(line))
+            .add_entity(document::EntityType::Line(line))
             .expect("add line");
         if let Some(ObjectType::Dictionary(d)) = scene.document.objects.get_mut(&root_h) {
             d.owner = src;
@@ -3786,7 +3822,7 @@ mod copy_entities_xdict_tests {
         (src, root_h)
     }
 
-    fn xdict_root_of(scene: &Scene, entity: codec::Handle) -> codec::Handle {
+    fn xdict_root_of(scene: &Scene, entity: document::Handle) -> document::Handle {
         scene
             .document
             .get_entity(entity)
@@ -4081,16 +4117,16 @@ mod copy_entities_xdict_tests {
 mod copy_entities_subhandle_tests {
     use super::*;
     use crate::command::EntityTransform;
-    use codec::entities::{
+    use document::entities::{
         AttributeEntity, Insert, PolyfaceFace, PolyfaceMesh, PolyfaceVertex, PolygonMeshEntity,
         PolygonMeshVertex,
     };
-    use codec::types::Vector3;
+    use document::types::Vector3;
     use glam::DVec3;
 
     /// A polyface mesh as the DWG reader returns it: every vertex, face and
     /// the SEQEND carry their own handle.
-    fn loaded_polyface(doc: &mut codec::Document) -> PolyfaceMesh {
+    fn loaded_polyface(doc: &mut document::Document) -> PolyfaceMesh {
         let mut mesh = PolyfaceMesh::new();
         for (x, y) in [(20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0)] {
             let mut v = PolyfaceVertex::new(Vector3::new(x, y, 0.0));
@@ -4104,7 +4140,7 @@ mod copy_entities_subhandle_tests {
         mesh
     }
 
-    fn sub_handles(e: &EntityType) -> Vec<codec::Handle> {
+    fn sub_handles(e: &EntityType) -> Vec<document::Handle> {
         match e {
             EntityType::Insert(ins) => ins
                 .attributes
@@ -4147,7 +4183,7 @@ mod copy_entities_subhandle_tests {
         ins.attributes.push(att);
         ins.seqend_handle = Some(doc.allocate_handle());
 
-        let sources: Vec<codec::Handle> = [
+        let sources: Vec<document::Handle> = [
             EntityType::PolyfaceMesh(mesh),
             EntityType::PolygonMesh(grid),
             EntityType::Insert(ins),
@@ -4182,8 +4218,8 @@ mod copy_entities_subhandle_tests {
             scene.copy_entities(&[src], &EntityTransform::Translate(DVec3::new(dx, 0.0, 0.0)));
         }
 
-        let bytes = codec::DwgWriter::write_to_vec(&scene.document).unwrap();
-        let reopened = codec::DwgReader::from_stream(std::io::Cursor::new(bytes))
+        let bytes = document::DwgWriter::write_to_vec(&scene.document).unwrap();
+        let reopened = document::DwgReader::from_stream(std::io::Cursor::new(bytes))
             .read()
             .unwrap();
         let mut first_x: Vec<f64> = reopened
@@ -4206,14 +4242,14 @@ mod copy_entities_subhandle_tests {
 mod copy_viewport_clip_tests {
     use super::*;
     use crate::command::EntityTransform;
-    use codec::entities::{LwPolyline, Viewport};
+    use document::entities::{LwPolyline, Viewport};
     use glam::DVec3;
 
     fn clipped_viewport(scene: &mut Scene) -> (Handle, Handle) {
         let mut boundary = LwPolyline::new();
-        boundary.add_point(codec::types::Vector2::new(0.0, 0.0));
-        boundary.add_point(codec::types::Vector2::new(10.0, 0.0));
-        boundary.add_point(codec::types::Vector2::new(5.0, 8.0));
+        boundary.add_point(document::types::Vector2::new(0.0, 0.0));
+        boundary.add_point(document::types::Vector2::new(10.0, 0.0));
+        boundary.add_point(document::types::Vector2::new(5.0, 8.0));
         boundary.is_closed = true;
         let boundary = scene.add_entity(EntityType::LwPolyline(boundary));
         let mut viewport = Viewport::new();
@@ -4262,12 +4298,12 @@ mod copy_viewport_clip_tests {
 mod copy_field_tests {
     use super::*;
     use crate::command::EntityTransform;
-    use codec::objects::{Dictionary, Field, ObjectType};
+    use document::objects::{Dictionary, Field, ObjectType};
     use glam::DVec3;
 
     /// `owner`'s extension dictionary: ACAD_FIELD { TEXT -> field(child) }.
     /// Returns (root, text field, child field).
-    fn add_field_tree(doc: &mut codec::Document, owner: Handle) -> (Handle, Handle, Handle) {
+    fn add_field_tree(doc: &mut document::Document, owner: Handle) -> (Handle, Handle, Handle) {
         let root_h = doc.allocate_handle();
         let fields_h = doc.allocate_handle();
         let text_h = doc.allocate_handle();
@@ -4301,7 +4337,7 @@ mod copy_field_tests {
         (root_h, text_h, child_h)
     }
 
-    fn entry(doc: &codec::Document, dict: Handle, key: &str) -> Handle {
+    fn entry(doc: &document::Document, dict: Handle, key: &str) -> Handle {
         match doc.objects.get(&dict) {
             Some(ObjectType::Dictionary(d)) => d
                 .entries
@@ -4313,7 +4349,7 @@ mod copy_field_tests {
         }
     }
 
-    fn field(doc: &codec::Document, h: Handle) -> &Field {
+    fn field(doc: &document::Document, h: Handle) -> &Field {
         match doc.objects.get(&h) {
             Some(ObjectType::Field(f)) => f,
             other => panic!("expected a field, got {other:?}"),
@@ -4323,7 +4359,7 @@ mod copy_field_tests {
     /// The copy's ACAD_FIELD tree is its own: fresh handles stored on the
     /// objects themselves, owners and child links inside the new tree.
     fn assert_own_field_tree(
-        doc: &codec::Document,
+        doc: &document::Document,
         copy_root: Handle,
         src_text: Handle,
         src_child: Handle,
@@ -4348,7 +4384,7 @@ mod copy_field_tests {
         let mut scene = Scene::new();
         let src = scene
             .document
-            .add_entity(EntityType::MText(Box::new(codec::entities::MText::new())))
+            .add_entity(EntityType::MText(Box::new(document::entities::MText::new())))
             .unwrap();
         let (root, text, child) = add_field_tree(&mut scene.document, src);
         scene
@@ -4376,11 +4412,11 @@ mod copy_field_tests {
     #[test]
     fn copied_insert_attribute_gets_its_own_field_tree() {
         let mut scene = Scene::new();
-        let mut insert = codec::entities::Insert::new(
+        let mut insert = document::entities::Insert::new(
             "TITLE".to_string(),
-            codec::types::Vector3::ZERO,
+            document::types::Vector3::ZERO,
         );
-        insert.attributes.push(codec::entities::AttributeEntity::new(
+        insert.attributes.push(document::entities::AttributeEntity::new(
             "CLIENT".to_string(),
             "ACME".to_string(),
         ));
@@ -4423,9 +4459,9 @@ mod table_picture_ownership_tests {
     use crate::command::{CadCommand, CmdResult, EntityTransform};
     use crate::modules::annotate::table_cmd::TableCellEditCommand;
     use crate::scene::Scene;
-    use codec::entities::Table;
-    use codec::types::Vector3;
-    use codec::{EntityType, Handle};
+    use document::entities::Table;
+    use document::types::Vector3;
+    use document::{EntityType, Handle};
     use glam::DVec3;
 
     fn table(scene: &Scene, handle: Handle) -> &Table {

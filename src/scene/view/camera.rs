@@ -314,13 +314,22 @@ impl Camera {
     /// coordinates — the CPU equivalent of the GPU's relative-to-eye path.
     /// Returns `None` for points at/behind the perspective eye plane.
     pub fn project(&self, p: glam::DVec3, bounds: Rectangle) -> Option<glam::Vec2> {
-        let screen = crate::scene::view::projection::project_screen(
-            self.view_proj_rte(bounds),
-            self.eye(),
-            bounds,
-            p,
-        )?;
-        Some(glam::vec2(screen.x, screen.y))
+        self.projector(bounds)(p)
+    }
+
+    /// [`Self::project`] with the view matrix built once, for projecting
+    /// many points under one view.
+    pub fn projector(
+        &self,
+        bounds: Rectangle,
+    ) -> impl Fn(glam::DVec3) -> Option<glam::Vec2> + Copy {
+        let view_rot = self.view_proj_rte(bounds);
+        let eye = self.eye();
+        move |p| {
+            let screen =
+                crate::scene::view::projection::project_screen(view_rot, eye, bounds, p)?;
+            Some(glam::vec2(screen.x, screen.y))
+        }
     }
 
     /// Unproject in f64, with the kernel intersection relative to the plane
@@ -410,8 +419,8 @@ impl Camera {
     /// Carry the camera through a rigid model-space transform. BEDIT uses this
     /// when a transient UCS is baked into block-local geometry: the contents
     /// retain their on-screen framing while their canonical coordinates change.
-    pub fn apply_rigid_transform(&mut self, transform: &codec::types::Transform) {
-        let point = codec::types::Vector3::new(self.target.x, self.target.y, self.target.z);
+    pub fn apply_rigid_transform(&mut self, transform: &document::types::Transform) {
+        let point = document::types::Vector3::new(self.target.x, self.target.y, self.target.z);
         let point = transform.apply(point);
         self.target = DVec3::new(point.x, point.y, point.z);
 
@@ -451,7 +460,7 @@ impl Camera {
             let mut new_max = DVec3::splat(f64::NEG_INFINITY);
             for corner in corners {
                 let transformed =
-                    transform.apply(codec::types::Vector3::new(corner.x, corner.y, corner.z));
+                    transform.apply(document::types::Vector3::new(corner.x, corner.y, corner.z));
                 let transformed = DVec3::new(transformed.x, transformed.y, transformed.z);
                 new_min = new_min.min(transformed);
                 new_max = new_max.max(transformed);
@@ -944,6 +953,14 @@ pub fn yaw_pitch_to_quat(yaw: f32, pitch: f32, roll: f32) -> Quat {
     let q_yaw = Quat::from_rotation_z(yaw);
     let q_pitch = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2 - pitch);
     let q_roll = Quat::from_rotation_z(roll);
+    (q_yaw * q_pitch * q_roll).normalize()
+}
+
+/// [`yaw_pitch_to_quat`] in f64, for placing points far along the view axes.
+pub fn yaw_pitch_to_dquat(yaw: f64, pitch: f64, roll: f64) -> glam::DQuat {
+    let q_yaw = glam::DQuat::from_rotation_z(yaw);
+    let q_pitch = glam::DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2 - pitch);
+    let q_roll = glam::DQuat::from_rotation_z(roll);
     (q_yaw * q_pitch * q_roll).normalize()
 }
 

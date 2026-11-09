@@ -687,7 +687,7 @@ undo step; missing `layer`s are created and reported in `layers_created`.
 | `Point` | `location` |
 | `Text` | `value`, `position`, optional `height` (default 2.5), `rotation_deg`, `style` |
 | `MText` | `value`, `position`, optional `height`, `width`, `rotation_deg`, `style` |
-| `Insert` | `block` (must exist), `position`, optional `scale` (number or `[x,y,z]`, nonzero), `rotation_deg` |
+| `Insert` | `block` (must exist), `position`, optional `scale` (number or `[x,y,z]`, nonzero), `rotation_deg`, `attributes` (`{"TAG":"value"}`; tags are case-insensitive, the ones left out keep their default; unknown or constant tags are refused) |
 | `Solid` | `corners` (3 or 4 `[x,y,z]`) |
 | `Hatch` | `boundary` (≥ 3 points, closed), `solid`, or `pattern` (catalog name, default `ANSI31`), `pattern_scale`, `pattern_angle_deg` |
 
@@ -878,7 +878,12 @@ template's tables/styles instead of the source drawing's.
 Copies the entities from the active document into the open document
 addressed by `document_id`. Every handle must exist in the source
 (`entity_absent` otherwise); the target must be open (`document_closed`).
-Referenced (missing) layer definitions travel along. `result.created` lists
+The dependencies the interactive copy carries travel along: layer, linetype
+and style records the copy needs, and the block definition the source holds
+for a copied reference — transitively, with its object graph. A reference
+whose definition the source itself does not hold stays a dangling reference,
+as it does when the drawing is loaded, and the audit reports it.
+`result.created` lists
 the new handles in the target, `result.count` their number. Combined with
 an empty `POST /documents` (REST) this is the multi-document assembly
 workflow.

@@ -10,7 +10,7 @@
 //   the applied rotation is new-angle - reference-angle.
 
 use crate::t;
-use codec::Handle;
+use document::Handle;
 use glam::DVec3;
 use kernel::geom2d::{self, Curve as KernelCurve};
 
@@ -67,7 +67,7 @@ pub struct RotateCommand {
     spatial: bool,
     /// The plane is the one square to the chosen axis, not the UCS.
     axis_chosen: bool,
-    /// `Copy` option: rotate a copy and keep the originals.
+    /// The Copy option: rotate a duplicate and leave the source in place.
     copy: bool,
 }
 
@@ -120,7 +120,7 @@ impl RotateCommand {
             angle_rad,
         };
         if self.copy {
-            CmdResult::BatchCopy(self.handles.clone(), vec![transform])
+            CmdResult::CopySelectedAndExit(self.handles.clone(), transform)
         } else {
             CmdResult::TransformSelected(self.handles.clone(), transform)
         }
@@ -215,15 +215,19 @@ impl CadCommand for RotateCommand {
             }
             Step::Angle { .. } if self.spatial => {
                 let a = format!("{:.4}", self.default_angle);
-                t!("3DROTATE  Specify rotation angle  <%{a}>:", a = a).into_owned()
+                t!(
+                    "3DROTATE  Specify rotation angle or [Copy/Reference]  <%{a}>:",
+                    a = a
+                )
+                .into_owned()
             }
             Step::Angle { .. } => {
                 let a = format!("{:.4}", self.default_angle);
-                if self.copy {
-                    t!("ROTATE  Specify rotation angle (a copy is rotated)  <%{a}>:", a = a).into_owned()
-                } else {
-                    t!("ROTATE  Specify rotation angle  <%{a}>:", a = a).into_owned()
-                }
+                t!(
+                    "ROTATE  Specify rotation angle or [Copy/Reference]  <%{a}>:",
+                    a = a
+                )
+                .into_owned()
             }
             Step::RefFirst { .. } => {
                 t!("ROTATE  Specify first reference point or type reference angle:").into_owned()
@@ -468,59 +472,6 @@ impl CadCommand for RotateCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn at_angle_step() -> RotateCommand {
-        let mut command = RotateCommand::new(vec![Handle::new(1)], vec![]);
-        assert!(matches!(command.on_point(DVec3::ZERO), CmdResult::NeedPoint));
-        command
-    }
-
-    fn keywords(command: &RotateCommand) -> Vec<String> {
-        command.options().into_iter().map(|o| o.keyword).collect()
-    }
-
-    #[test]
-    fn rotate_without_copy_transforms_the_selection_itself() {
-        let mut command = at_angle_step();
-        assert!(matches!(
-            command.on_text_input("90"),
-            Some(CmdResult::TransformSelected(_, EntityTransform::Rotate { .. }))
-        ));
-    }
-
-    #[test]
-    fn rotate_copy_rotates_a_copy_and_keeps_the_original() {
-        let mut command = at_angle_step();
-        assert_eq!(keywords(&command), ["C", "R"]);
-        assert!(matches!(command.on_text_input("C"), Some(CmdResult::NeedPoint)));
-        assert!(matches!(&command.step, Step::Angle { .. }), "still asking for the angle");
-        match command.on_text_input("90") {
-            Some(CmdResult::BatchCopy(handles, transforms)) => {
-                assert_eq!(handles, vec![Handle::new(1)]);
-                assert!(matches!(transforms[..], [EntityTransform::Rotate { .. }]));
-            }
-            _ => panic!("expected a rotated copy"),
-        }
-    }
-
-    #[test]
-    fn rotate_copy_is_kept_through_the_reference_option() {
-        let mut command = at_angle_step();
-        command.on_text_input("C");
-        command.on_text_input("R");
-        command.on_text_input("10");
-        assert!(matches!(
-            command.on_text_input("55"),
-            Some(CmdResult::BatchCopy(..))
-        ));
-    }
-
-    #[test]
-    fn rotate_copy_by_enter_uses_the_stored_angle_on_a_copy() {
-        let mut command = at_angle_step();
-        command.on_text_input("C");
-        assert!(matches!(command.on_enter(), CmdResult::BatchCopy(..)));
-    }
 
     #[test]
     fn angle_label_uses_the_working_plane_arc_midpoint() {

@@ -6,9 +6,9 @@
 //! draw order, and clip boundaries. Leaf entities remain responsible for
 //! producing their normal wire, hatch, image, wipeout, or mesh model.
 
-use codec::entities::Insert;
-use codec::types::{Color, Matrix3, Matrix4, Transform, Vector3};
-use codec::{Document, EntityType, Handle};
+use document::entities::Insert;
+use document::types::{Color, Matrix3, Matrix4, Transform, Vector3};
+use document::{Document, EntityType, Handle};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::scene::view::render::{
@@ -84,9 +84,12 @@ impl InsertStyleSpec {
         let common = &insert.common;
         let has_book_color = has_resolved_book_color_common(document, common);
         let linetype = &common.linetype;
+        let mut insert = render_style_for_common_viewport(document, common, viewport);
+        (insert.1, insert.2) =
+            crate::scene::view::render::insert_pattern_for_children(common, insert.1, insert.2);
         Self {
             own: BlockStyle {
-                insert: render_style_for_common_viewport(document, common, viewport),
+                insert,
                 layer0: layer_render_style_viewport(document, &common.layer, viewport),
                 layer0_aci: layer_aci(document, &common.layer),
             },
@@ -96,10 +99,10 @@ impl InsertStyleSpec {
             transparency_bylayer: common.transparency.is_by_layer(),
             linetype_byblock: linetype.eq_ignore_ascii_case("byblock"),
             linetype_bylayer: linetype.is_empty() || linetype.eq_ignore_ascii_case("bylayer"),
-            lineweight_byblock: matches!(common.line_weight, codec::types::LineWeight::ByBlock),
+            lineweight_byblock: matches!(common.line_weight, document::types::LineWeight::ByBlock),
             lineweight_bylayer: matches!(
                 common.line_weight,
-                codec::types::LineWeight::ByLayer | codec::types::LineWeight::Default
+                document::types::LineWeight::ByLayer | document::types::LineWeight::Default
             ),
             layer0: is_effective_layer_zero(&common.layer),
         }
@@ -698,13 +701,29 @@ fn single_scale_picture(document: &Document, handle: Handle, block: &str) -> boo
         )
 }
 
+/// An unedited dimension whose definition points measure something other than
+/// the measurement it stores (group 42) cannot be rebuilt: a dimension copied
+/// into a block can keep some points in world coordinates, so one stored as 65
+/// rebuilds as 6570. The source application draws the scale's picture, and so
+/// do we. Saving refreshes the measurement of every dimension it re-bakes, so
+/// a picture an edit left behind is never chosen this way.
+fn rebuild_disagrees_with_picture(document: &Document, handle: Handle) -> bool {
+    let Some(EntityType::Dimension(stored)) = document.get_entity(handle) else {
+        return false;
+    };
+    let measured = stored.stored_measurement();
+    let kept = stored.base().actual_measurement;
+    !stored.base().block_name.trim().is_empty()
+        && (measured - kept).abs() > 1e-6 * measured.abs().max(kept.abs()).max(1.0)
+}
+
 /// The block reference that places a dimension's picture block: at the
 /// dimension's insertion point, with its insertion rotation and scale. The
 /// point is stored in the dimension's OCS; the picture's sub-entities are in
 /// world coordinates, so only the point goes through the OCS. A zero scale
 /// component (an unread field) counts as 1 rather than collapsing the picture.
 pub(crate) fn dimension_picture_insert(
-    base: &codec::entities::dimension::DimensionBase,
+    base: &document::entities::dimension::DimensionBase,
     block_name: String,
 ) -> Insert {
     let scale = |s: f64| if s.abs() < 1e-12 { 1.0 } else { s };
@@ -721,7 +740,7 @@ pub(crate) fn dimension_picture_insert(
 /// World transform of a dimension's picture placement, or None when it is
 /// the identity (the usual case: OCS bakes its pictures in place).
 pub(crate) fn dimension_picture_placement(
-    base: &codec::entities::dimension::DimensionBase,
+    base: &document::entities::dimension::DimensionBase,
 ) -> Option<Transform> {
     let insert = dimension_picture_insert(base, String::new());
     let p = insert.insert_point;
@@ -845,7 +864,7 @@ pub struct BlockUse {
 pub(crate) fn block_record_by_name<'a>(
     document: &'a Document,
     name: &str,
-) -> Option<&'a codec::tables::BlockRecord> {
+) -> Option<&'a document::tables::BlockRecord> {
     document.block_records.get(name).or_else(|| {
         document
             .block_records
@@ -945,7 +964,8 @@ fn entity_owned_block_uses(
                 let mut insert = dimension_picture_insert(base, record.name.clone());
                 insert.common = base.common.clone();
                 let picture = !crate::scene::annotative::is_annotative(document, entity)
-                    || single_scale_picture(document, base.common.handle, &record.name);
+                    || single_scale_picture(document, base.common.handle, &record.name)
+                    || rebuild_disagrees_with_picture(document, base.common.handle);
                 vec![block_use(
                     document,
                     insert,
@@ -1181,6 +1201,49 @@ pub fn block_contains_hatch(
     block_name: &str,
     memo: &mut std::collections::HashMap<String, bool>,
 ) -> bool {
+    block_contains_kind(document, block_name, memo, &|entity| {
+        matches!(entity, EntityType::Hatch(_))
+    })
+}
+
+/// Whether the block, or a block it nests, holds a WIPEOUT mask.
+pub fn block_contains_wipeout(
+    document: &Document,
+    block_name: &str,
+    memo: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    block_contains_kind(document, block_name, memo, &|entity| {
+        matches!(entity, EntityType::Wipeout(_))
+    })
+}
+
+/// Whether the block, or a block it nests, holds a solid, surface or mesh
+/// entity, the kinds that draw through the mesh cache.
+pub fn block_contains_mesh(
+    document: &Document,
+    block_name: &str,
+    memo: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    block_contains_kind(document, block_name, memo, &|entity| {
+        matches!(
+            entity,
+            EntityType::Solid3D(_)
+                | EntityType::Region(_)
+                | EntityType::Body(_)
+                | EntityType::Surface(_)
+                | EntityType::Mesh(_)
+                | EntityType::PolygonMesh(_)
+                | EntityType::PolyfaceMesh(_)
+        )
+    })
+}
+
+fn block_contains_kind(
+    document: &Document,
+    block_name: &str,
+    memo: &mut std::collections::HashMap<String, bool>,
+    is_kind: &dyn Fn(&EntityType) -> bool,
+) -> bool {
     let key = block_name.to_ascii_lowercase();
     if let Some(&contains) = memo.get(&key) {
         return contains;
@@ -1191,12 +1254,17 @@ pub fn block_contains_hatch(
             .entity_handles
             .iter()
             .any(|&handle| match document.get_entity(handle) {
-                Some(EntityType::Hatch(_)) => true,
+                Some(entity) if is_kind(entity) => true,
                 Some(entity) => entity_render_block_uses(document, entity, 1.0)
                     .into_iter()
                     .filter(|block_use| block_use.active)
                     .any(|block_use| {
-                        block_contains_hatch(document, &block_use.insert.block_name, memo)
+                        block_contains_kind(
+                            document,
+                            &block_use.insert.block_name,
+                            memo,
+                            is_kind,
+                        )
                     }),
                 _ => false,
             })
@@ -1208,7 +1276,7 @@ pub fn block_contains_hatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::xdata::ExtendedDataRecord;
+    use document::xdata::ExtendedDataRecord;
 
     #[test]
     fn applied_block_scale_skips_annotative_rescaling() {
@@ -1233,8 +1301,8 @@ mod tests {
 
     #[test]
     fn layer_zero_block_members_follow_the_reference_until_frozen() {
-        use codec::entities::Line;
-        use codec::tables::BlockRecord;
+        use document::entities::Line;
+        use document::tables::BlockRecord;
         let mut document = Document::new();
         let mut record = BlockRecord::new("ARROW");
         record.handle = document.allocate_handle();

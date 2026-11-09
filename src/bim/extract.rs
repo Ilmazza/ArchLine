@@ -43,11 +43,11 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::entities::{Insert, MLine};
-use codec::objects::{MLineStyle, ObjectType};
-use codec::tables::{BlockRecord, DimStyle, Layer, TextStyle};
-use codec::xdata::ExtendedData;
-use codec::{Document, DxfVersion, EntityType, Handle, Vector3};
+use document::entities::{Insert, MLine};
+use document::objects::{MLineStyle, ObjectType};
+use document::tables::{BlockRecord, DimStyle, Layer, TextStyle};
+use document::xdata::ExtendedData;
+use document::{Document, DxfVersion, EntityType, Handle, Vector3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::app::{copy_to_clipboard_kernel, paste_entities_kernel, ClipboardDeps, PasteSpace};
@@ -594,7 +594,7 @@ fn ensure_layer_like(src: &Document, out: &mut Document, name: &str, aci: i16) -
             layer.line_type = from.line_type.clone();
             layer.line_weight = from.line_weight;
         }
-        None => layer.color = codec::Color::from_index(aci),
+        None => layer.color = document::Color::from_index(aci),
     }
     let line_type = layer.line_type.clone();
     layer.handle = out.allocate_handle();
@@ -1556,11 +1556,11 @@ pub fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::{Insert, LwPolyline, MText};
-    use codec::objects::ObjectType;
-    use codec::tables::{Layer, LineType};
-    use codec::xdata::{ExtendedDataRecord, XDataValue};
-    use codec::{Color, DxfVersion, EntityType, Handle, Vector2, Vector3};
+    use document::entities::{Insert, LwPolyline, MText};
+    use document::objects::ObjectType;
+    use document::tables::{Layer, LineType};
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+    use document::{Color, DxfVersion, EntityType, Handle, Vector2, Vector3};
 
     use crate::bim::fixtures::{case_a, move_to_layer, shift_tramezzo, Form, LAYER_MURI};
     use crate::bim::record::{self, ProjectRecord};
@@ -1684,7 +1684,7 @@ mod tests {
         doc
     }
 
-    fn hatches(doc: &Document) -> Vec<&codec::entities::Hatch> {
+    fn hatches(doc: &Document) -> Vec<&document::entities::Hatch> {
         doc.entities()
             .filter_map(|e| match e {
                 EntityType::Hatch(h) => Some(h.as_ref()),
@@ -1693,7 +1693,7 @@ mod tests {
             .collect()
     }
 
-    fn lines_on<'a>(doc: &'a Document, layer: &str) -> Vec<&'a codec::entities::Line> {
+    fn lines_on<'a>(doc: &'a Document, layer: &str) -> Vec<&'a document::entities::Line> {
         doc.entities()
             .filter_map(|e| match e {
                 EntityType::Line(l) if l.common.layer == layer => Some(l),
@@ -1970,10 +1970,10 @@ mod tests {
         let mut src = doc_with_zones();
         // Una LINE del rilievo con un record di un'altra applicazione e uno
         // nostro (di una versione futura).
-        let mut altra = codec::tables::AppId::new("ALTRA_APP");
+        let mut altra = document::tables::AppId::new("ALTRA_APP");
         altra.handle = src.allocate_handle();
         src.app_ids.add(altra).unwrap();
-        let mut futura = codec::tables::AppId::new("ARCHLINE_FUTURA");
+        let mut futura = document::tables::AppId::new("ARCHLINE_FUTURA");
         futura.handle = src.allocate_handle();
         src.app_ids.add(futura).unwrap();
         let line = src
@@ -2289,8 +2289,8 @@ mod tests {
     /// quelli devono arrivare nel file estratto.
     #[test]
     fn source_read_from_dwg_loses_raw_xdata_too() {
-        let bytes = codec::DwgWriter::write_to_vec(&doc_with_zones()).unwrap();
-        let src = codec::DwgReader::from_stream(std::io::Cursor::new(bytes))
+        let bytes = document::DwgWriter::write_to_vec(&doc_with_zones()).unwrap();
+        let src = document::DwgReader::from_stream(std::io::Cursor::new(bytes))
             .read()
             .unwrap();
         let zones = crate::bim::zone::zones_in(&src);
@@ -2338,12 +2338,12 @@ mod tests {
     /// Un'immagine raster la cui definizione sta negli oggetti di `doc`.
     fn image_entity(doc: &mut Document) -> EntityType {
         let definition = doc.allocate_handle();
-        let mut def = codec::objects::ImageDefinition::new("foto.png");
+        let mut def = document::objects::ImageDefinition::new("foto.png");
         def.handle = definition;
         def.owner = doc.header.named_objects_dict_handle;
         doc.objects
             .insert(definition, ObjectType::ImageDefinition(def));
-        let mut image = codec::entities::RasterImage::new("foto.png", Vector3::ZERO, 100.0, 100.0);
+        let mut image = document::entities::RasterImage::new("foto.png", Vector3::ZERO, 100.0, 100.0);
         image.definition_handle = Some(definition);
         EntityType::RasterImage(image)
     }
@@ -2362,7 +2362,7 @@ mod tests {
             .add_entity(EntityType::Insert(Insert::new("XREF_A", Vector3::ZERO)))
             .unwrap();
         let solid = src
-            .add_entity(EntityType::Solid3D(codec::entities::Solid3D::new()))
+            .add_entity(EntityType::Solid3D(document::entities::Solid3D::new()))
             .unwrap();
         // Un blocco qualunque con un'immagine dentro: l'INSERT non si porta
         // intero.
@@ -2442,14 +2442,14 @@ mod tests {
         let mut src = doc_with_zones();
         let paper = src.header.paper_space_block_handle;
         assert!(!paper.is_null());
-        let mut overall = codec::entities::Viewport::new();
+        let mut overall = document::entities::Viewport::new();
         overall.id = 1;
         overall.common.owner_handle = paper;
         src.add_entity(EntityType::Viewport(Box::new(overall)))
             .unwrap();
         assert!(extract(&src, &opts(&both())).notices.is_empty());
 
-        let mut note = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
+        let mut note = document::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
         note.common.owner_handle = paper;
         src.add_entity(EntityType::Line(note)).unwrap();
         let ex = extract(&src, &opts(&both()));
@@ -2490,7 +2490,7 @@ mod tests {
         let zero = src.layers.get_mut("0").unwrap();
         zero.color = Color::from_index(3);
         zero.line_type = "TRATTO_0".into();
-        zero.line_weight = codec::LineWeight::Value(25);
+        zero.line_weight = document::LineWeight::Value(25);
         zero.flags.locked = true;
         let standard = src.text_styles.get_mut("Standard").unwrap();
         standard.font_file = "romans.shx".into();
@@ -2526,7 +2526,7 @@ mod tests {
                 "{what}: colore del layer 0"
             );
             assert_eq!(zero.line_type, "TRATTO_0", "{what}");
-            assert_eq!(zero.line_weight, codec::LineWeight::Value(25), "{what}");
+            assert_eq!(zero.line_weight, document::LineWeight::Value(25), "{what}");
             assert!(zero.flags.locked, "{what}");
             let lt = out
                 .line_types
@@ -2582,12 +2582,12 @@ mod tests {
         rec.add_value(XDataValue::String("rotto".into()));
         let common = garbage.common_mut();
         common.layer = "ALTRO".into();
-        common.extended_data = codec::xdata::ExtendedData::new();
+        common.extended_data = document::xdata::ExtendedData::new();
         common.extended_data.add_record(rec);
         let garbage = src.add_entity(garbage).unwrap();
         assert!(crate::bim::zone::read_zone(garbage, src.get_entity(garbage).unwrap()).is_none());
         // Anche una LINE con il record (in minuscolo) conta come zona.
-        let mut segnata = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
+        let mut segnata = document::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
         let mut rec = ExtendedDataRecord::new(APP_ZONA.to_ascii_lowercase());
         rec.add_value(XDataValue::Integer16(1));
         segnata.common.extended_data.add_record(rec);
@@ -2612,7 +2612,7 @@ mod tests {
     fn mline_style_named<'a>(
         doc: &'a Document,
         name: &str,
-    ) -> Option<(Handle, &'a codec::objects::MLineStyle)> {
+    ) -> Option<(Handle, &'a document::objects::MLineStyle)> {
         let Some(ObjectType::Dictionary(dict)) =
             doc.objects.get(&doc.header.acad_mlinestyle_dict_handle)
         else {
@@ -2642,11 +2642,11 @@ mod tests {
         src.line_types.add(tratto).unwrap();
         let dict = src.header.acad_mlinestyle_dict_handle;
         let add_style = |src: &mut Document, name: &str, offset: f64| {
-            let mut style = codec::objects::MLineStyle::new(name);
-            let mut outer = codec::objects::MLineStyleElement::new(offset);
+            let mut style = document::objects::MLineStyle::new(name);
+            let mut outer = document::objects::MLineStyleElement::new(offset);
             outer.linetype = "TRATTO_ML".into();
             style.add_element(outer);
-            style.add_element(codec::objects::MLineStyleElement::new(-offset));
+            style.add_element(document::objects::MLineStyleElement::new(-offset));
             style.description = format!("muro {name}");
             let handle = src.allocate_handle();
             style.handle = handle;
@@ -2661,7 +2661,7 @@ mod tests {
         let muro30 = add_style(&mut src, "MURO30", 0.15);
         let standard = add_style(&mut src, "Standard", 0.05);
         let mline = |style: Handle, name: &str, y: f64| {
-            let mut m = codec::entities::MLine::from_points(&[
+            let mut m = document::entities::MLine::from_points(&[
                 Vector3::new(10.0, y, 0.0),
                 Vector3::new(14.0, y, 0.0),
             ]);
@@ -2673,11 +2673,11 @@ mod tests {
         src.add_entity(mline(standard, "Standard", 1.0)).unwrap();
         let mleader = src
             .add_entity(EntityType::MultiLeader(Box::new(
-                codec::entities::MultiLeader::new(),
+                document::entities::MultiLeader::new(),
             )))
             .unwrap();
         let table = src
-            .add_entity(EntityType::Table(Box::new(codec::entities::Table::new(
+            .add_entity(EntityType::Table(Box::new(document::entities::Table::new(
                 Vector3::new(20.0, 0.0, 0.0),
                 2,
                 2,
@@ -2694,7 +2694,7 @@ mod tests {
         );
         #[track_caller]
         fn check(out: &Document, what: &str) {
-            let mlines: Vec<&codec::entities::MLine> = out
+            let mlines: Vec<&document::entities::MLine> = out
                 .entities()
                 .filter_map(|e| match e {
                     EntityType::MLine(m) => Some(m),
@@ -2738,7 +2738,7 @@ mod tests {
     #[test]
     fn mline_without_a_style_is_listed() {
         let mut src = doc_with_zones();
-        let mut m = codec::entities::MLine::from_points(&[Vector3::ZERO, Vector3::UNIT_X]);
+        let mut m = document::entities::MLine::from_points(&[Vector3::ZERO, Vector3::UNIT_X]);
         m.style_handle = Some(Handle::new(0xBEEF));
         m.style_name = "INESISTENTE".into();
         let orphan = src.add_entity(EntityType::MLine(m)).unwrap();
@@ -2750,7 +2750,7 @@ mod tests {
     // ---- Fix round 1 (R31): riferimenti per handle delle tabelle ----
 
     fn add_text_style(doc: &mut Document, name: &str, font: &str) -> Handle {
-        let mut style = codec::tables::TextStyle::new(name);
+        let mut style = document::tables::TextStyle::new(name);
         style.font_file = font.into();
         style.handle = doc.allocate_handle();
         let handle = style.handle;
@@ -2769,7 +2769,7 @@ mod tests {
     fn handle_of_text_style(
         doc: &Document,
         handle: Handle,
-    ) -> Option<&codec::tables::TextStyle> {
+    ) -> Option<&document::tables::TextStyle> {
         doc.text_styles.iter().find(|s| s.handle == handle)
     }
 
@@ -2818,15 +2818,15 @@ mod tests {
         add_text_style(&mut src, "ROMANS", "romans.shx");
         let lt_text = add_text_style(&mut src, "LT_TESTO", "simplex.shx");
         let mut dashed = LineType::new("TRATTEGGIO_Q");
-        dashed.add_element(codec::tables::LineTypeElement::dash(0.5));
-        dashed.add_element(codec::tables::LineTypeElement::space(0.25));
+        dashed.add_element(document::tables::LineTypeElement::dash(0.5));
+        dashed.add_element(document::tables::LineTypeElement::space(0.25));
         dashed.pattern_length = 0.75;
         add_line_type(&mut src, dashed);
         let mut gas = LineType::new("GAS_LT");
-        gas.add_element(codec::tables::LineTypeElement::dash(0.5));
-        let mut text = codec::tables::LineTypeElement::space(0.2);
-        text.complex = Some(codec::tables::LineTypeComplexData {
-            content: codec::tables::LineTypeComplexContent::Text { text: "GAS".into() },
+        gas.add_element(document::tables::LineTypeElement::dash(0.5));
+        let mut text = document::tables::LineTypeElement::space(0.2);
+        text.complex = Some(document::tables::LineTypeComplexData {
+            content: document::tables::LineTypeComplexContent::Text { text: "GAS".into() },
             style_handle: lt_text,
             scale: 0.1,
             ..Default::default()
@@ -2834,7 +2834,7 @@ mod tests {
         gas.add_element(text);
         gas.pattern_length = 0.7;
         add_line_type(&mut src, gas);
-        let mut tubo = codec::entities::Line::from_points(
+        let mut tubo = document::entities::Line::from_points(
             Vector3::new(0.0, 5.0, 0.0),
             Vector3::new(8.0, 5.0, 0.0),
         );
@@ -2843,7 +2843,7 @@ mod tests {
 
         let arch_tick = crate::entities::arrowheads::resolve(&mut src, "_ArchTick").unwrap();
         crate::entities::arrowheads::resolve(&mut src, "_Oblique").unwrap();
-        let mut arch = codec::tables::DimStyle::standard();
+        let mut arch = document::tables::DimStyle::standard();
         arch.name = "ARCH".into();
         arch.handle = src.allocate_handle();
         arch.dimtxsty_handle = src.text_styles.get("ROMANS").unwrap().handle;
@@ -2869,14 +2869,14 @@ mod tests {
             "*D7",
             Vector3::ZERO,
             &[
-                EntityType::Line(codec::entities::Line::from_points(
+                EntityType::Line(document::entities::Line::from_points(
                     Vector3::new(0.0, -1.0, 0.0),
                     Vector3::new(4.0, -1.0, 0.0),
                 )),
                 EntityType::Insert(Insert::new("_Oblique", Vector3::new(0.0, -1.0, 0.0))),
             ],
         );
-        let mut quota = codec::entities::DimensionLinear::new(
+        let mut quota = document::entities::DimensionLinear::new(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(4.0, 0.0, 0.0),
         );
@@ -2884,17 +2884,17 @@ mod tests {
         quota.base.style_name = "ARCH".into();
         quota.base.block_name = "*D7".into();
         src.add_entity(EntityType::Dimension(Box::new(
-            codec::entities::Dimension::Linear(quota),
+            document::entities::Dimension::Linear(quota),
         )))
         .unwrap();
-        let mut sullo_standard = codec::entities::DimensionLinear::new(
+        let mut sullo_standard = document::entities::DimensionLinear::new(
             Vector3::new(4.1, 0.0, 0.0),
             Vector3::new(8.0, 0.0, 0.0),
         );
         sullo_standard.definition_point = Vector3::new(8.0, -1.0, 0.0);
         sullo_standard.base.style_name = "Standard".into();
         src.add_entity(EntityType::Dimension(Box::new(
-            codec::entities::Dimension::Linear(sullo_standard),
+            document::entities::Dimension::Linear(sullo_standard),
         )))
         .unwrap();
 
@@ -2906,7 +2906,7 @@ mod tests {
         testi.handle = src.allocate_handle();
         testi.plotstyle_handle = Handle::new(0xFEED);
         src.layers.add(testi).unwrap();
-        let mut nota = codec::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
+        let mut nota = document::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_Y);
         nota.common.layer = "TESTI".into();
         src.add_entity(EntityType::Line(nota)).unwrap();
 
@@ -3171,7 +3171,7 @@ mod tests {
     fn progetto_closed_walls_lists_junctions_and_pieces_lose_xdata() {
         let mut src = doc_with_demolition(Form::ChiusaPerMuro);
         for name in ["ALTRA_APP", "ARCHLINE_FUTURA"] {
-            let mut app = codec::tables::AppId::new(name);
+            let mut app = document::tables::AppId::new(name);
             app.handle = src.allocate_handle();
             src.app_ids.add(app).unwrap();
         }
@@ -3355,14 +3355,14 @@ mod tests {
         let muri = src.layers.get_mut(LAYER_MURI).unwrap();
         muri.color = Color::from_index(3);
         muri.line_type = "DASHED".into();
-        muri.line_weight = codec::LineWeight::Value(35);
+        muri.line_weight = document::LineWeight::Value(35);
         // Un layer di muri meno frequente, d'altro colore: non conta.
         let mut tramezzi = Layer::new("TRAMEZZI");
         tramezzi.handle = src.allocate_handle();
         tramezzi.color = Color::from_index(5);
         src.layers.add(tramezzi).unwrap();
         for y in [10.0, 11.0] {
-            let mut line = codec::entities::Line::from_points(
+            let mut line = document::entities::Line::from_points(
                 Vector3::new(20.0, y, 0.0),
                 Vector3::new(25.0, y, 0.0),
             );
@@ -3380,7 +3380,7 @@ mod tests {
             assert!(!layer.handle.is_null(), "{what}");
             assert_eq!(layer.color, Color::from_index(3), "{what}");
             assert_eq!(layer.line_type, "DASHED", "{what}");
-            assert_eq!(layer.line_weight, codec::LineWeight::Value(35), "{what}");
+            assert_eq!(layer.line_weight, document::LineWeight::Value(35), "{what}");
             let lt = out.line_types.get("DASHED").expect("tipo di linea DASHED");
             assert_eq!(lt.description, "__ __ __", "{what}");
             assert!(!lt.handle.is_null(), "{what}");
@@ -3421,7 +3421,7 @@ mod tests {
         nuovi.handle = src.allocate_handle();
         nuovi.color = Color::from_index(3);
         nuovi.line_type = "DASHED".into();
-        nuovi.line_weight = codec::LineWeight::Value(35);
+        nuovi.line_weight = document::LineWeight::Value(35);
         src.layers.add(nuovi).unwrap();
         let mut o = opts(&[Elaborato::StatoDiProgetto]);
         o.new_walls_layer = "nuovi".into();
@@ -3432,7 +3432,7 @@ mod tests {
             assert!(!layer.handle.is_null(), "{what}");
             assert_eq!(layer.color, Color::from_index(3), "{what}");
             assert_eq!(layer.line_type, "DASHED", "{what}");
-            assert_eq!(layer.line_weight, codec::LineWeight::Value(35), "{what}");
+            assert_eq!(layer.line_weight, document::LineWeight::Value(35), "{what}");
             let lt = out.line_types.get("DASHED").expect("tipo di linea DASHED");
             assert_eq!(lt.description, "__ __ __", "{what}");
             assert!(!lt.handle.is_null(), "{what}");
@@ -3466,11 +3466,11 @@ mod tests {
     fn progetto_keeps_other_entities_and_lists_what_it_leaves_out() {
         let mut src = doc_with_zones();
         // Un testo dentro la zona demolita: escluso.
-        let mut dentro = codec::entities::Text::with_value("via", Vector3::new(4.05, 1.5, 0.0));
+        let mut dentro = document::entities::Text::with_value("via", Vector3::new(4.05, 1.5, 0.0));
         dentro.common.layer = "TESTI".into();
         let dentro = src.add_entity(EntityType::Text(dentro)).unwrap();
         // Un testo nel locale A: resta.
-        let mut fuori = codec::entities::Text::with_value("A", Vector3::new(1.0, 1.0, 0.0));
+        let mut fuori = document::entities::Text::with_value("A", Vector3::new(1.0, 1.0, 0.0));
         fuori.common.layer = "TESTI".into();
         src.add_entity(EntityType::Text(fuori)).unwrap();
         // Un locale (contorno e testo): non entra nel progetto.
@@ -3485,7 +3485,7 @@ mod tests {
         seme.common.layer = LAYER_LOCALI_PROGETTO.into();
         src.add_entity(EntityType::MText(Box::new(seme))).unwrap();
         // Un muro fuori dal piano XY, lontano dalle zone.
-        let alto = codec::entities::Line::from_points(
+        let alto = document::entities::Line::from_points(
             Vector3::new(10.0, 0.0, 1.0),
             Vector3::new(12.0, 0.0, 1.0),
         );
@@ -3538,7 +3538,7 @@ mod tests {
     #[test]
     fn proposal_is_most_frequent_wall_layer() {
         let line_on = |layer: &str, y: f64| {
-            let mut line = codec::entities::Line::from_points(
+            let mut line = document::entities::Line::from_points(
                 Vector3::new(20.0, y, 0.0),
                 Vector3::new(25.0, y, 0.0),
             );
@@ -3550,7 +3550,7 @@ mod tests {
         // Ciò che non è muro non conta: testi, layer spenti o congelati, AL-*.
         for k in 0..20 {
             let mut text =
-                codec::entities::Text::with_value("x", Vector3::new(0.0, f64::from(k), 0.0));
+                document::entities::Text::with_value("x", Vector3::new(0.0, f64::from(k), 0.0));
             text.common.layer = "TESTI".into();
             doc.add_entity(EntityType::Text(text)).unwrap();
         }
@@ -4135,7 +4135,7 @@ mod tests {
     fn drawn_entities_that_do_not_enter_are_listed() {
         let mut work = case_a_doc(Form::Continua);
         let line = |y: f64| {
-            let mut line = codec::entities::Line::from_points(
+            let mut line = document::entities::Line::from_points(
                 Vector3::new(0.0, y, 0.0),
                 Vector3::new(1.0, y, 0.0),
             );
@@ -4212,7 +4212,7 @@ mod tests {
         let mut src = case_a_doc(Form::ChiusaPerMuro);
         write_room(&mut src, M, 1e-6, "A", [2.0, 1.5]);
         write_room(&mut src, M, 1e-6, "B", [6.0, 1.5]);
-        let written: Vec<Vec<codec::entities::LwVertex>> = outlines_on(&src, LAYER_LOCALI)
+        let written: Vec<Vec<document::entities::LwVertex>> = outlines_on(&src, LAYER_LOCALI)
             .into_iter()
             .map(|p| p.vertices.clone())
             .collect();
@@ -4385,7 +4385,7 @@ mod tests {
     mod abaco {
         use super::*;
 
-        use codec::entities::Table;
+        use document::entities::Table;
 
         use crate::bim::abaco::{compute_abaco, render_tables, AbacoOptions, TableText};
         use crate::bim::abaco_table::{self, rebuilt, tables_in};
@@ -4777,8 +4777,8 @@ mod tests {
                 let t = [view.target.x, view.target.y, view.target.z];
                 assert_eq!(t, want, "{elaborato:?} {name}");
             }
-            let bytes = codec::DwgWriter::write_to_vec(out).expect("DWG");
-            let back = codec::DwgReader::from_stream(std::io::Cursor::new(bytes))
+            let bytes = document::DwgWriter::write_to_vec(out).expect("DWG");
+            let back = document::DwgReader::from_stream(std::io::Cursor::new(bytes))
                 .read()
                 .expect("rilettura");
             let found: Vec<String> = back.views.iter().map(|v| v.name.clone()).collect();

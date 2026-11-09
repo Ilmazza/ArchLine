@@ -8,7 +8,7 @@
 use iced::wgpu;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CircleInstance {
     pub center_high: [f32; 3],
     pub start_width: f32,
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_donut_polyline_tessellates_to_analytical_arcs() {
-        use codec::Document;
+        use document::Document;
         let mut doc = Document::new();
         let donut = crate::modules::draw::draw::donut::make_donut(10.0, 20.0, 0.0, 10.0, 30.0);
         let h = doc.add_entity(donut).unwrap();
@@ -601,7 +601,7 @@ mod tests {
             None,
             None,
             None,
-            false,
+            None,
             &reference_only,
         );
         assert_eq!(

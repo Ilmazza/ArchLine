@@ -36,6 +36,16 @@ pub struct AppConfig {
     pub workspaces: crate::workspaces::WorkspaceSet,
     /// Whether the optional Graphic Attributes palette is visible.
     pub show_graphic_attributes: bool,
+    /// Whether the Tool Palettes panel is visible.
+    pub show_tool_palettes: bool,
+    /// Whether the Command History pallet is open.
+    pub show_command_history: bool,
+    /// Whether the Layer Manager pallet is open.
+    pub show_layers: bool,
+    /// Whether the document file tabs are shown (FILETAB).
+    pub show_file_tabs: bool,
+    /// Whether the layout tabs are shown (LAYOUTTAB).
+    pub show_layout_tabs: bool,
     /// Graphic Attributes creates fills on the current layer instead of the
     /// layer of the filled object.
     pub graphic_fills_on_current_layer: bool,
@@ -50,6 +60,8 @@ pub struct AppConfig {
     pub shortcuts: ShortcutConfig,
     /// Model space background, grid, and selection appearance.
     pub model_space: ModelSpaceThemeConfig,
+    /// The user's changes to the right-click menu.
+    pub context_menu: crate::ui::popup::context_menu::MenuCustomization,
 }
 
 impl Default for AppConfig {
@@ -64,12 +76,18 @@ impl Default for AppConfig {
             toolbars: crate::ui::toolbar_layout::ToolbarLayout::autocad_classic(),
             workspaces: crate::workspaces::WorkspaceSet::default(),
             show_graphic_attributes: false,
+            show_tool_palettes: false,
+            show_command_history: false,
+            show_layers: false,
+            show_file_tabs: true,
+            show_layout_tabs: true,
             graphic_fills_on_current_layer: false,
             annotation_auto_scale: -4,
             ribbon: RibbonConfig::default(),
             plot: PlotDialogState::default(),
             shortcuts: ShortcutConfig::default(),
             model_space: ModelSpaceThemeConfig::default(),
+            context_menu: Default::default(),
         }
     }
 }
@@ -341,6 +359,9 @@ pub const DEFAULT_PAPER_BG: [u8; 3] = [255, 255, 255];
 /// Standard paper space desk surround [138, 138, 138].
 pub const DEFAULT_DESK_BG: [u8; 3] = [138, 138, 138];
 
+/// Default VPHIGHLIGHTOPACITY: a soft outline that does not compete with the drawing.
+pub const DEFAULT_VIEWPORT_HOVER_OPACITY: u8 = 50;
+
 /// Persistent configuration for Model Space appearance and selection visual effects.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -368,6 +389,17 @@ pub struct ModelSpaceThemeConfig {
     /// VSEDGECOLOR: the edge colour of the shaded-with-edges modes
     /// (`None`: black).
     pub edge_color: Option<[u8; 3]>,
+    /// VSEDGESMOOTH: crease angle in degrees; mesh edges whose faces meet
+    /// flatter are not drawn in the shaded-with-edges modes (default 1).
+    pub edge_smooth: f32,
+    /// COMPARECOLORADDED / REMOVED / MODIFIED: COMPARE's overlay colours.
+    pub compare_added: [u8; 3],
+    pub compare_removed: [u8; 3],
+    pub compare_modified: [u8; 3],
+    /// COMPARETOLERANCE: points closer than this compare as the same.
+    pub compare_tolerance: f64,
+    /// HPDLGMODE: 0 hides the Hatch panel while HATCH runs, 1 and 2 show it.
+    pub hatch_dialog_mode: u8,
     /// Selection highlight opacity in percent (10–100); below 100 the
     /// object's own colour shows through.
     pub selection_highlight_opacity: u8,
@@ -387,6 +419,12 @@ pub struct ModelSpaceThemeConfig {
     pub grip_hover: u8,
     /// SNAPMARKERSIZE: object-snap marker half-size in pixels (1–20, default 5).
     pub snap_marker_size: u8,
+    /// VPHIGHLIGHT: outline the Model viewport under the cursor when the
+    /// view is split into several.
+    pub viewport_hover_highlight: bool,
+    /// VPHIGHLIGHTOPACITY: strength of that outline in percent (0–100);
+    /// the default keeps it barely visible.
+    pub viewport_hover_opacity: u8,
 }
 
 impl Default for ModelSpaceThemeConfig {
@@ -403,6 +441,12 @@ impl Default for ModelSpaceThemeConfig {
             selection_crossing_color: 0,
             selection_highlight_color: 0,
             edge_color: None,
+            edge_smooth: 1.0,
+            compare_added: crate::scene::compare::CompareSettings::default().colors[0],
+            compare_removed: crate::scene::compare::CompareSettings::default().colors[1],
+            compare_modified: crate::scene::compare::CompareSettings::default().colors[2],
+            compare_tolerance: crate::scene::compare::CompareSettings::default().tolerance,
+            hatch_dialog_mode: 2,
             selection_highlight_opacity: 100,
             selection_highlight_widen: 0,
             selection_effect: true,
@@ -412,6 +456,8 @@ impl Default for ModelSpaceThemeConfig {
             grip_hot: 0,
             grip_hover: 0,
             snap_marker_size: 5,
+            viewport_hover_highlight: true,
+            viewport_hover_opacity: DEFAULT_VIEWPORT_HOVER_OPACITY,
         }
     }
 }
@@ -456,7 +502,7 @@ impl ModelSpaceThemeConfig {
 
     /// Resolve active selection highlight overlay color as [f32; 4].
     pub fn resolve_selection_color(&self) -> [f32; 4] {
-        let mut color = codec::types::aci_table::aci_to_rgb(self.selection_highlight_color)
+        let mut color = document::types::aci_table::aci_to_rgb(self.selection_highlight_color)
             .filter(|_| self.selection_highlight_color != 0)
             .map_or(crate::scene::model::wire_model::WireModel::SELECTED, |(r, g, b)| {
                 [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
@@ -836,6 +882,87 @@ mod tests {
         assert_eq!(value["ribbon"]["hidden_tabs"][0], "manage");
         assert_eq!(value["ribbon"]["minimize"], "PanelTitles");
         assert_eq!(value["ribbon"]["search_expanded"], false);
+        let restored: AppConfig = serde_json::from_str(&serialized).expect("deserialize config");
+        assert!(restored.ribbon == original.ribbon);
+    }
+
+    #[test]
+    fn quick_access_toolbar_defaults_and_round_trips() {
+        use crate::ui::ribbon::{QatBuiltin, QatItem};
+
+        // A config saved before the toolbar was customizable shows today's
+        // toolbar.
+        let old: AppConfig =
+            serde_json::from_str(r#"{"ribbon":{"search_expanded":false}}"#).expect("old config");
+        assert_eq!(old.ribbon.layout.qat, crate::ui::ribbon::default_qat());
+        assert!(!old.ribbon.layout.qat_below);
+        assert!(old.ribbon.layout.qat_faces.is_empty());
+
+        let mut original = AppConfig::default();
+        let layout = &mut original.ribbon.layout;
+        layout.qat = vec![
+            QatItem::Command("QSAVE".into()),
+            QatItem::Separator,
+            QatItem::Builtin(QatBuiltin::LayerCombo),
+            QatItem::Command("ZOOM E".into()),
+            QatItem::Builtin(QatBuiltin::DimStyle),
+        ];
+        layout.qat_below = true;
+        layout
+            .qat_faces
+            .insert("MEASURE_MENU".into(), "AREA".into());
+        let serialized = serde_json::to_string(&original).expect("serialize config");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("json");
+        assert_eq!(value["ribbon"]["qat"][0]["Command"], "QSAVE");
+        assert_eq!(value["ribbon"]["qat"][1], "Separator");
+        assert_eq!(value["ribbon"]["qat"][2]["Builtin"], "LayerCombo");
+        assert_eq!(value["ribbon"]["qat"][4]["Builtin"], "DimStyle");
+        assert_eq!(value["ribbon"]["qat_below"], true);
+        let restored: AppConfig = serde_json::from_str(&serialized).expect("deserialize config");
+        assert!(restored.ribbon == original.ribbon);
+    }
+
+    #[test]
+    fn floating_panels_default_and_round_trip() {
+        use crate::ui::ribbon::FloatingPanel;
+
+        // A config from before floating panels has none, and a saved panel
+        // missing newer fields loads with their defaults.
+        let old: AppConfig =
+            serde_json::from_str(r#"{"ribbon":{"minimize":"Off"}}"#).expect("old config");
+        assert!(old.ribbon.layout.floating.is_empty());
+        let partial: AppConfig = serde_json::from_str(
+            r#"{"ribbon":{"floating":[{"key":"draw/Draw","module_id":"draw","x":10,"y":20}]}}"#,
+        )
+        .expect("partial panel");
+        let panel = &partial.ribbon.layout.floating[0];
+        assert_eq!((panel.x, panel.y, panel.z), (10.0, 20.0, 0));
+        assert!(!panel.extras_right && !panel.pinned);
+
+        let mut original = AppConfig::default();
+        original.ribbon.layout.floating = vec![
+            FloatingPanel {
+                key: "draw/Draw".into(),
+                module_id: "draw".into(),
+                x: 120.5,
+                y: 300.0,
+                extras_right: true,
+                pinned: true,
+                z: 2,
+            },
+            FloatingPanel {
+                key: "draw/Modify".into(),
+                module_id: "draw".into(),
+                x: 400.0,
+                y: 300.0,
+                z: 1,
+                ..FloatingPanel::default()
+            },
+        ];
+        let serialized = serde_json::to_string(&original).expect("serialize config");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("json");
+        assert_eq!(value["ribbon"]["floating"][0]["key"], "draw/Draw");
+        assert_eq!(value["ribbon"]["floating"][0]["extras_right"], true);
         let restored: AppConfig = serde_json::from_str(&serialized).expect("deserialize config");
         assert!(restored.ribbon == original.ribbon);
     }

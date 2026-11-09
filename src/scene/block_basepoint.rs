@@ -1,10 +1,10 @@
 //! The native authoring anchor, separate from the BLOCK definition origin.
 use super::block_authoring::{self as authoring, *};
-use codec::objects::{
+use document::objects::{
     BlockBasePointParameter, BlockElement, BlockEvalValue, BlockOnePointParameter, BlockParameter,
     DynamicBlockData, ObjectType,
 };
-use codec::{
+use document::{
     types::{Transform, Vector3},
     Document, Handle,
 };
@@ -38,6 +38,21 @@ pub(crate) fn parameter(
 }
 pub(crate) fn placement_error(document: &Document, definition: Handle) -> Option<&'static str> {
     authoring::graph(document, definition).err()
+}
+/// How the editor draws the insertion grip: the marker on its own, plus the
+/// `Basepoint` caption only when the definition carries a basepoint parameter.
+/// Captioning the origin marker every time reads as a parameter nobody authored.
+pub(crate) fn marker_graphic(
+    document: &Document,
+    definition: Handle,
+    point: Vector3,
+) -> super::block_distance_parameter::Graphic {
+    let mut graphic = super::block_distance_parameter::Graphic::default();
+    graphic.base_grips.push(point);
+    if parameter(document, definition).is_some() {
+        graphic.labels.push((point, "Basepoint".into()));
+    }
+    graphic
 }
 pub(crate) fn create(
     document: &mut Document,
@@ -116,7 +131,7 @@ fn move_attributes(document: &mut Document, name: &str, old: Vector3, new: Vecto
     let handles = document
         .entities()
         .filter_map(|entity| match entity {
-            codec::EntityType::Insert(i)
+            document::EntityType::Insert(i)
                 if i.block_name.eq_ignore_ascii_case(name) && !i.attributes.is_empty() =>
             {
                 Some(i.common.handle)
@@ -125,11 +140,11 @@ fn move_attributes(document: &mut Document, name: &str, old: Vector3, new: Vecto
         })
         .collect::<Vec<_>>();
     for handle in handles {
-        if let Some(codec::EntityType::Insert(insert)) = document.get_entity_mut(handle) {
+        if let Some(document::EntityType::Insert(insert)) = document.get_entity_mut(handle) {
             let shift = insert.get_transform().apply_rotation(old - new);
             let transform = Transform::from_translation(shift);
             for attribute in &mut insert.attributes {
-                codec::Entity::apply_transform(attribute, &transform);
+                document::Entity::apply_transform(attribute, &transform);
             }
         }
     }

@@ -6,12 +6,12 @@
 //! muri, oppure una polilinea chiusa per muro. Coordinate in metri,
 //! moltiplicate per `unit.per_metre()`.
 
-use codec::entities::hatch::BoundaryPathFlags;
-use codec::entities::{
+use document::entities::hatch::BoundaryPathFlags;
+use document::entities::{
     BoundaryEdge, BoundaryPath, Hatch, Line, LwPolyline, MText, PolylineEdge, Text,
 };
-use codec::tables::Layer;
-use codec::{Document, EntityType, Handle, Vector2, Vector3};
+use document::tables::Layer;
+use document::{Document, EntityType, Handle, Vector2, Vector3};
 
 use super::units::DrawingUnit;
 use super::LAYER_LOCALI;

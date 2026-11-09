@@ -7,6 +7,18 @@ fn rendered_wire_bounds(
     wires: &[WireModel],
     fallback_z: f64,
 ) -> Option<(glam::DVec3, glam::DVec3)> {
+    rendered_wire_bounds_memo(wires, fallback_z, &mut StubBounds::new())
+}
+
+/// Bounds of each stub prototype already measured, by its allocation: an
+/// array of a thousand copies measures its one prototype once.
+type StubBounds = std::collections::HashMap<usize, Option<(glam::DVec3, glam::DVec3)>>;
+
+fn rendered_wire_bounds_memo(
+    wires: &[WireModel],
+    fallback_z: f64,
+    stub_bounds: &mut StubBounds,
+) -> Option<(glam::DVec3, glam::DVec3)> {
     let mut min = glam::DVec3::splat(f64::INFINITY);
     let mut max = glam::DVec3::splat(f64::NEG_INFINITY);
     macro_rules! include_bound {
@@ -20,6 +32,28 @@ fn rendered_wire_bounds(
     }
 
     for wire in wires {
+        // A stub stands for its prototype moved by `delta` (the copies of a
+        // block drawn many times, the items of an array): bound the
+        // prototype in f64 and move that box, rather than the stub's f32 XY
+        // box, which loses a georeferenced drawing's precision and its Z.
+        if let Some(stub) = wire.stub.as_ref() {
+            let key = std::sync::Arc::as_ptr(&stub.prototype) as usize;
+            let prototype = match stub_bounds.get(&key) {
+                Some(bounds) => *bounds,
+                None => {
+                    let bounds =
+                        rendered_wire_bounds_memo(&stub.prototype, fallback_z, stub_bounds);
+                    stub_bounds.insert(key, bounds);
+                    bounds
+                }
+            };
+            if let Some((lo, hi)) = prototype {
+                let delta = glam::DVec3::from_array(stub.delta);
+                include_bound!(lo + delta);
+                include_bound!(hi + delta);
+            }
+            continue;
+        }
         let mut has_precise_position = false;
         let hw = wire.world_width as f64 * 0.5;
 
@@ -119,7 +153,7 @@ fn block_entity_transform(
     target: Handle,
     visited: &mut Vec<String>,
     annotation_scale: f32,
-) -> Option<codec::types::Transform> {
+) -> Option<document::types::Transform> {
     if visited
         .iter()
         .any(|name| name.eq_ignore_ascii_case(block_name))
@@ -131,7 +165,7 @@ fn block_entity_transform(
         .iter()
         .find(|record| record.name.eq_ignore_ascii_case(block_name))?;
     if record.entity_handles.contains(&target) {
-        return Some(codec::types::Transform::identity());
+        return Some(document::types::Transform::identity());
     }
 
     visited.push(record.name.clone());
@@ -177,7 +211,7 @@ fn is_active_vport_name(name: &str) -> bool {
 /// Views saved by earlier versions of this application stored the target
 /// itself as the centre; that centre (equal to a non-zero target) is taken
 /// as the target, not as an offset from it.
-pub fn named_view_center(view: &codec::tables::View) -> glam::DVec3 {
+pub fn named_view_center(view: &document::tables::View) -> glam::DVec3 {
     use glam::{DQuat, DVec3};
     let target = DVec3::new(view.target.x, view.target.y, view.target.z);
     let (cx, cy) = (view.center.x, view.center.y);
@@ -213,7 +247,7 @@ impl Scene {
     }
 
     /// Restore camera to a named view from the document view table.
-    pub fn restore_named_view(&mut self, view: &codec::tables::View) {
+    pub fn restore_named_view(&mut self, view: &document::tables::View) {
         let before = {
             let cam = self.camera.borrow();
             (cam.rotation, cam.target, cam.distance)
@@ -250,14 +284,14 @@ impl Scene {
         }
     }
 
-    fn restore_named_view_camera(&mut self, view: &codec::tables::View) {
+    fn restore_named_view_camera(&mut self, view: &document::tables::View) {
         named_view_camera(view, &mut self.camera.borrow_mut());
         self.camera_generation += 1;
     }
 
     /// Restores a model-space view into a paper-space viewport: its camera,
     /// a copy of the view's background (or none) and the view's visual style.
-    pub fn restore_named_view_in_viewport(&mut self, view: &codec::tables::View, viewport: Handle) {
+    pub fn restore_named_view_in_viewport(&mut self, view: &document::tables::View, viewport: Handle) {
         let mut camera = self.navigation_camera();
         named_view_camera(view, &mut camera);
         self.apply_navigation_camera(camera);
@@ -277,7 +311,7 @@ impl Scene {
     /// The paper-space viewport of the current layout takes a copy of a
     /// paper-space view's background (kept with the layout; the sheet itself
     /// is not drawn over).
-    fn set_sheet_background(&mut self, view: &codec::tables::View) {
+    fn set_sheet_background(&mut self, view: &document::tables::View) {
         let sheet = self.current_layout_sheet_viewport_handle();
         let background = copy_background(&mut self.document, view.background_handle);
         let old = match self.document.get_entity_mut(sheet) {
@@ -291,7 +325,7 @@ impl Scene {
 }
 
 /// Points a camera along a named view: direction, target and height.
-fn named_view_camera(view: &codec::tables::View, cam: &mut view::camera::Camera) {
+fn named_view_camera(view: &document::tables::View, cam: &mut view::camera::Camera) {
     use glam::Vec3;
     {
         // The stored direction points from the target toward the eye.
@@ -377,7 +411,7 @@ impl Scene {
             .objects
             .iter()
             .find_map(|(handle, object)| match object {
-                codec::objects::ObjectType::VisualStyle(style) if style.description == name => {
+                document::objects::ObjectType::VisualStyle(style) if style.description == name => {
                     Some(*handle)
                 }
                 _ => None,
@@ -425,14 +459,14 @@ impl Scene {
 
     /// Save the current camera state into a new named view entry.
     /// Returns the view; caller must push it into document.views.
-    pub fn current_as_named_view(&self, name: &str) -> codec::tables::View {
-        use codec::types::Vector3;
+    pub fn current_as_named_view(&self, name: &str) -> document::tables::View {
+        use document::types::Vector3;
         let cam = self.camera.borrow();
         let eye_dir = cam.rotation * glam::Vec3::Z;
         let height = cam.ortho_size() * 2.0;
         // The window's shape: the last rendered aspect ratio.
         let width = height * self.active_camera_aspect();
-        let mut view = codec::tables::View::new(name);
+        let mut view = document::tables::View::new(name);
         // The centre is in view (DCS) coordinates, relative to the target.
         view.center = Vector3 {
             x: 0.0,
@@ -845,7 +879,7 @@ impl Scene {
         let mut max = glam::DVec3::splat(f64::NEG_INFINITY);
         for corner in 0..8 {
             let pick = |bit: usize, lo: f64, hi: f64| if corner & bit == 0 { lo } else { hi };
-            let world = transform.apply(codec::types::Vector3::new(
+            let world = transform.apply(document::types::Vector3::new(
                 pick(1, lo.x, hi.x),
                 pick(2, lo.y, hi.y),
                 pick(4, lo.z, hi.z),
@@ -885,20 +919,20 @@ impl Scene {
         true
     }
 
-    /// Apply camera state from an opencadcodec View table entry, through the shared
+    /// Apply camera state from a document View table entry, through the shared
     /// `camera_from_view` decoder so the twist round-trips like every other
     /// saved view. `model_space`: if true, subtracts world_offset from target
     /// (wire-space); paper-space entries carry no offset.
     fn apply_camera_from_view_entry(
         &mut self,
-        view: &codec::tables::View,
+        view: &document::tables::View,
         model_space: bool,
     ) -> bool {
         let _ = model_space;
         let Some(cam) = self.camera_from_view_mode(
             view.direction,
             view.target,
-            codec::types::Vector2 {
+            document::types::Vector2 {
                 x: view.center.x,
                 y: view.center.y,
             },
@@ -970,9 +1004,9 @@ impl Scene {
     /// Returns `None` for a zero `view_height` (an uninitialised entry).
     pub(super) fn camera_from_view_mode(
         &self,
-        view_direction: codec::types::Vector3,
-        view_target: codec::types::Vector3,
-        view_center: codec::types::Vector2,
+        view_direction: document::types::Vector3,
+        view_target: document::types::Vector3,
+        view_center: document::types::Vector2,
         view_height: f64,
         twist: f64,
         perspective: bool,
@@ -1003,18 +1037,29 @@ impl Scene {
         // so the drawing opens square, the way it was saved, instead of in raw
         // world orientation (which looks tilted).
         let rotation = view::camera::yaw_pitch_to_quat(yaw, pitch, -twist as f32);
-        let view_right = rotation * glam::Vec3::X;
-        let view_up = rotation * glam::Vec3::Y;
         // view_target is WCS; wire-space subtracts world_offset. view_center is
         // a DCS (screen-plane) offset, so fold it through the view basis.
         // Keep the target in f64: casting it to f32 first quantizes the camera
         // to ~0.5 m at UTM scale, so panning/zooming inside a floating viewport
         // (which nudges view_target by sub-metre f64 steps) made the content
-        // jump on the f32 grid. The axis directions stay f32 (orientation only);
-        // only the position must stay precise — matching the model camera.
+        // jump on the f32 grid.
         let base = glam::DVec3::new(view_target.x, view_target.y, view_target.z);
-        let target =
-            base + view_right.as_dvec3() * view_center.x + view_up.as_dvec3() * view_center.y;
+        // The axes that carry view_center stay f64 too: a view saved with its
+        // target far from the drawing stores a view_center hundreds of
+        // millions of units long, and f32 axes, true to ~1e-7, then misplace
+        // the content by tens of units.
+        let vd64 = glam::DVec3::new(view_direction.x, view_direction.y, view_direction.z)
+            .normalize_or(glam::DVec3::Z);
+        let yaw64 = if vd64.x.abs() < 1e-6 && vd64.y.abs() < 1e-6 {
+            0.0
+        } else {
+            vd64.x.atan2(-vd64.y)
+        };
+        let rotation64 =
+            view::camera::yaw_pitch_to_dquat(yaw64, vd64.z.clamp(-1.0, 1.0).asin(), -twist);
+        let target = base
+            + rotation64 * glam::DVec3::X * view_center.x
+            + rotation64 * glam::DVec3::Y * view_center.y;
         let lens_length = lens_length.max(1.0) as f32;
         // The saved-view convention uses a 24 mm vertical aperture. This is
         // the inverse of the projection path's documented
@@ -1051,7 +1096,7 @@ impl Scene {
     }
 
     /// Decode a VPort table entry (model-space tiled view) into a `Camera`.
-    fn camera_from_vport(&self, vp: &codec::tables::VPort) -> Option<Camera> {
+    fn camera_from_vport(&self, vp: &document::tables::VPort) -> Option<Camera> {
         self.camera_from_view_mode(
             vp.view_direction,
             vp.view_target,
@@ -1065,14 +1110,14 @@ impl Scene {
 
     fn apply_camera_to_vport(
         &self,
-        entry: &mut codec::tables::VPort,
+        entry: &mut document::tables::VPort,
         cam: &Camera,
-        lower_left: codec::types::Vector2,
-        upper_right: codec::types::Vector2,
+        lower_left: document::types::Vector2,
+        upper_right: document::types::Vector2,
     ) {
         let view_dir = cam.rotation * glam::Vec3::Z;
         let view_height = cam.ortho_size() * 2.0;
-        let target_wcs = codec::types::Vector3 {
+        let target_wcs = document::types::Vector3 {
             x: cam.target.x,
             y: cam.target.y,
             z: cam.target.z,
@@ -1080,7 +1125,7 @@ impl Scene {
         entry.lower_left = lower_left;
         entry.upper_right = upper_right;
         entry.view_target = target_wcs;
-        entry.view_direction = codec::types::Vector3 {
+        entry.view_direction = document::types::Vector3 {
             x: view_dir.x as f64,
             y: view_dir.y as f64,
             z: view_dir.z as f64,
@@ -1094,15 +1139,15 @@ impl Scene {
         }
         entry.perspective = cam.projection == view::camera::Projection::Perspective;
         entry.lens_length = cam.lens as f64;
-        entry.view_center = codec::types::Vector2::ZERO;
+        entry.view_center = document::types::Vector2::ZERO;
         // Stored twist = -roll, matching the decoder (roll = -twist).
         entry.view_twist = -cam.roll() as f64;
     }
 
     fn vport_rect_matches(
-        entry: &codec::tables::VPort,
-        lower_left: codec::types::Vector2,
-        upper_right: codec::types::Vector2,
+        entry: &document::tables::VPort,
+        lower_left: document::types::Vector2,
+        upper_right: document::types::Vector2,
     ) -> bool {
         const EPSILON: f64 = 1e-5;
         (entry.lower_left.x - lower_left.x).abs() <= EPSILON
@@ -1112,9 +1157,9 @@ impl Scene {
     }
 
     fn vport_contains_rect_center(
-        entry: &codec::tables::VPort,
-        lower_left: codec::types::Vector2,
-        upper_right: codec::types::Vector2,
+        entry: &document::tables::VPort,
+        lower_left: document::types::Vector2,
+        upper_right: document::types::Vector2,
     ) -> bool {
         const EPSILON: f64 = 1e-5;
         let center_x = (lower_left.x + upper_right.x) * 0.5;
@@ -1128,12 +1173,12 @@ impl Scene {
     /// Convert a `ModelTile`'s normalized iced rectangle (top-left origin) to
     /// the (lower_left, upper_right) pair the VPort table uses (bottom-left
     /// origin).
-    fn tile_rect_to_vport(rect: iced::Rectangle) -> (codec::types::Vector2, codec::types::Vector2) {
-        let lower_left = codec::types::Vector2 {
+    fn tile_rect_to_vport(rect: iced::Rectangle) -> (document::types::Vector2, document::types::Vector2) {
+        let lower_left = document::types::Vector2 {
             x: rect.x as f64,
             y: (1.0 - rect.y - rect.height) as f64,
         };
-        let upper_right = codec::types::Vector2 {
+        let upper_right = document::types::Vector2 {
             x: (rect.x + rect.width) as f64,
             y: (1.0 - rect.y) as f64,
         };
@@ -1142,8 +1187,8 @@ impl Scene {
 
     /// Inverse of `tile_rect_to_vport`.
     fn vport_to_tile_rect(
-        lower_left: codec::types::Vector2,
-        upper_right: codec::types::Vector2,
+        lower_left: document::types::Vector2,
+        upper_right: document::types::Vector2,
     ) -> iced::Rectangle {
         iced::Rectangle {
             x: lower_left.x as f32,
@@ -1158,7 +1203,7 @@ impl Scene {
     /// in that case because the active tile's camera has already been loaded
     /// into `self.camera`.
     fn restore_model_tiles_from_vports(&mut self) -> bool {
-        let active_vports: Vec<codec::tables::VPort> = self
+        let active_vports: Vec<document::tables::VPort> = self
             .document
             .vports
             .iter()
@@ -1222,7 +1267,7 @@ impl Scene {
     pub(crate) fn ucs_follow(&self) -> bool {
         if let Some(handle) = self.active_viewport {
             return matches!(self.document.get_entity(handle),
-                Some(codec::EntityType::Viewport(vp)) if vp.status.ucs_follow);
+                Some(document::EntityType::Viewport(vp)) if vp.status.ucs_follow);
         }
         if self.current_layout != "Model" {
             return false;
@@ -1234,7 +1279,7 @@ impl Scene {
 
     pub(crate) fn set_ucs_follow(&mut self, enabled: bool) {
         if let Some(handle) = self.active_viewport {
-            if let Some(codec::EntityType::Viewport(vp)) = self.document.get_entity_mut(handle) {
+            if let Some(document::EntityType::Viewport(vp)) = self.document.get_entity_mut(handle) {
                 vp.status.ucs_follow = enabled;
             }
         } else if self.current_layout == "Model" {
@@ -1244,7 +1289,7 @@ impl Scene {
             if self.ucs_follow_vport_index().is_none() {
                 self.document
                     .vports
-                    .add_or_replace(codec::tables::VPort::new("*Active"));
+                    .add_or_replace(document::tables::VPort::new("*Active"));
             }
             if let Some(index) = self.ucs_follow_vport_index() {
                 if let Some(vp) = self.document.vports.iter_mut().nth(index) {
@@ -1271,7 +1316,7 @@ impl Scene {
         }
 
         let table_handle = self.document.vports.handle();
-        let mut active_vports: Vec<codec::tables::VPort> = self
+        let mut active_vports: Vec<document::tables::VPort> = self
             .document
             .vports
             .iter()
@@ -1280,14 +1325,14 @@ impl Scene {
             .collect();
         let source_vports = active_vports.clone();
         let inherited_vport = active_vports.first().cloned();
-        let preserved_vps: Vec<codec::tables::VPort> = self
+        let preserved_vps: Vec<document::tables::VPort> = self
             .document
             .vports
             .iter()
             .filter(|v| !is_active_vport_name(&v.name))
             .cloned()
             .collect();
-        let mut new_vports = codec::tables::Table::with_handle(table_handle);
+        let mut new_vports = document::tables::Table::with_handle(table_handle);
         for vp in preserved_vps {
             new_vports.add_or_replace(vp);
         }
@@ -1346,10 +1391,10 @@ impl Scene {
                         .cloned()
                 })
                 .or_else(|| inherited_vport.clone())
-                .unwrap_or_else(|| codec::tables::VPort::new("*Active"));
+                .unwrap_or_else(|| document::tables::VPort::new("*Active"));
             let cloned = inherited.is_none();
             if cloned {
-                entry.handle = codec::Handle::NULL;
+                entry.handle = document::Handle::NULL;
             }
             entry.name = "*Active".to_string();
             self.apply_camera_to_vport(&mut entry, &tile.camera, ll, ur);
@@ -1366,8 +1411,8 @@ impl Scene {
                     .objects
                     .get(&entry.sun_handle)
                     .and_then(|object| match object {
-                        codec::objects::ObjectType::ClassObject(value)
-                            if matches!(&value.data, codec::objects::ClassObjectData::Sun(_)) =>
+                        document::objects::ObjectType::ClassObject(value)
+                            if matches!(&value.data, document::objects::ClassObjectData::Sun(_)) =>
                         {
                             Some(value.clone())
                         }
@@ -1381,7 +1426,7 @@ impl Scene {
                     sun.xdictionary_handle = None;
                     self.document
                         .objects
-                        .insert(handle, codec::objects::ObjectType::ClassObject(sun));
+                        .insert(handle, document::objects::ObjectType::ClassObject(sun));
                     entry.sun_handle = handle;
                     scene_objects_changed = true;
                 }
@@ -1490,7 +1535,7 @@ impl Scene {
         let Some(cam) = self.camera_from_view_mode(
             vp.view_direction,
             vp.view_target,
-            codec::types::Vector2 {
+            document::types::Vector2 {
                 x: vp.view_center.x,
                 y: vp.view_center.y,
             },
@@ -1515,7 +1560,7 @@ impl Scene {
         // Stored twist is the negative of the camera roll (the decoder applies
         // roll = -twist), so the saved view round-trips square.
         let twist = -cam.roll() as f64;
-        let vd3 = codec::types::Vector3 {
+        let vd3 = document::types::Vector3 {
             x: view_dir.x as f64,
             y: view_dir.y as f64,
             z: view_dir.z as f64,
@@ -1525,7 +1570,7 @@ impl Scene {
             self.save_model_tiles_to_vports();
             true
         } else {
-            let target_wcs = codec::types::Vector3 {
+            let target_wcs = document::types::Vector3 {
                 x: cam.target.x as f64,
                 y: cam.target.y as f64,
                 z: cam.target.z as f64,
@@ -1536,8 +1581,8 @@ impl Scene {
             let sheet_handle = self.current_layout_sheet_viewport_handle();
             if let Some(EntityType::Viewport(vp)) = self.document.get_entity_mut(sheet_handle) {
                 // Paper-space position is stored in view_center (DCS).
-                vp.view_center = codec::types::Vector3::new(target_wcs.x, target_wcs.y, 0.0);
-                vp.view_target = codec::types::Vector3::ZERO;
+                vp.view_center = document::types::Vector3::new(target_wcs.x, target_wcs.y, 0.0);
+                vp.view_target = document::types::Vector3::ZERO;
                 vp.view_direction = vd3;
                 vp.view_height = view_height as f64;
                 vp.twist_angle = twist;
@@ -1831,6 +1876,7 @@ impl Scene {
         // Infinite display segments do not contribute to drawing extents.
         // Keep their base points as a fallback for otherwise empty drawings.
         let mut infinite_base: Vec<glam::DVec3> = Vec::new();
+        let mut stub_bounds = StubBounds::new();
         for wire in wires.iter() {
             let entity = Self::handle_from_wire_name(&wire.name)
                 .and_then(|handle| self.document.get_entity(handle));
@@ -1838,7 +1884,10 @@ impl Scene {
             // marker carrying just its insertion snap. The content counts
             // through its meshes; the insertion point is no geometry, and a
             // georeferenced block's sits far from what it draws (#1829).
+            // A stub is no such marker: it carries no points of its own but
+            // stands for a copy of the block's wires (array items included).
             if matches!(entity, Some(EntityType::Insert(_)))
+                && wire.stub.is_none()
                 && wire.points.is_empty()
                 && wire.text_verts.is_empty()
             {
@@ -1855,7 +1904,11 @@ impl Scene {
                 );
                 continue;
             }
-            fold!(rendered_wire_bounds(std::slice::from_ref(wire), fallback_z));
+            fold!(rendered_wire_bounds_memo(
+                std::slice::from_ref(wire),
+                fallback_z,
+                &mut stub_bounds
+            ));
         }
 
         // 3D solids render as meshes, not wires: a drawing of only solids has
@@ -1885,6 +1938,7 @@ impl Scene {
             None,
             scale,
             self.annotation_all_visible(),
+            None,
             None,
             None,
         ) {
@@ -2099,8 +2153,8 @@ impl Scene {
 }
 
 /// The drawing's ACAD_BACKGROUND dictionary, made when it has none.
-fn background_dictionary(document: &mut codec::Document) -> Option<Handle> {
-    use codec::objects::{Dictionary, ObjectType};
+fn background_dictionary(document: &mut document::Document) -> Option<Handle> {
+    use document::objects::{Dictionary, ObjectType};
     let root = document.header.named_objects_dict_handle;
     let Some(ObjectType::Dictionary(root_dictionary)) = document.objects.get(&root) else {
         return None;
@@ -2130,10 +2184,10 @@ fn background_dictionary(document: &mut codec::Document) -> Option<Handle> {
 /// A new background object in ACAD_BACKGROUND, keyed by its own handle as
 /// the reference keys it. Null when the drawing has no named-objects root.
 pub fn add_background(
-    document: &mut codec::Document,
-    data: codec::objects::ClassObjectData,
+    document: &mut document::Document,
+    data: document::objects::ClassObjectData,
 ) -> Handle {
-    use codec::objects::{ClassObject, ObjectType};
+    use document::objects::{ClassObject, ObjectType};
     let Some(dictionary) = background_dictionary(document) else {
         return Handle::NULL;
     };
@@ -2154,13 +2208,13 @@ pub fn add_background(
 /// Erases a background object once no view or viewport refers to it (the
 /// reference erases a view's background when it is replaced, cleared or the
 /// view deleted, and a viewport's when the viewport takes another).
-pub fn erase_background(document: &mut codec::Document, handle: Handle) {
-    use codec::objects::{ClassObjectData as D, ObjectType};
+pub fn erase_background(document: &mut document::Document, handle: Handle) {
+    use document::objects::{ClassObjectData as D, ObjectType};
     if !handle.is_valid()
         || document.views.iter().any(|view| view.background_handle == handle)
         || document.vports.iter().any(|vport| vport.background_handle == handle)
         || document.entities().any(|entity| {
-            matches!(entity, codec::EntityType::Viewport(viewport) if viewport.background_handle == handle)
+            matches!(entity, document::EntityType::Viewport(viewport) if viewport.background_handle == handle)
         })
     {
         return;
@@ -2189,8 +2243,8 @@ pub fn erase_background(document: &mut codec::Document, handle: Handle) {
 
 /// A copy of a background object (the reference gives each view and
 /// viewport its own); null for none.
-pub fn copy_background(document: &mut codec::Document, handle: Handle) -> Handle {
-    use codec::objects::{ClassObjectData as D, ObjectType};
+pub fn copy_background(document: &mut document::Document, handle: Handle) -> Handle {
+    use document::objects::{ClassObjectData as D, ObjectType};
     match document.objects.get(&handle) {
         Some(ObjectType::ClassObject(object))
             if matches!(
@@ -2225,6 +2279,45 @@ mod named_view_tests {
             "width {} height {}",
             view.width,
             view.height
+        );
+    }
+}
+
+#[cfg(test)]
+mod far_view_center_tests {
+    use super::*;
+
+    #[test]
+    fn far_view_center_lands_where_the_view_was_saved() {
+        // A twisted viewport whose target was saved far from the drawing:
+        // its view_center (a DCS offset from that target) is ~5e8 long. The
+        // camera has to land on the drawing to the millimetre; folding the
+        // offset through f32 axes put it tens of units off.
+        let target = document::types::Vector3::new(34_000_000.0, 630_000_000.0, 0.0);
+        let twist: f64 = -0.93;
+        let want = glam::DVec2::new(500_000.0, 4_000_000.0);
+        // WCS = target + R(-twist) * center, so center = R(twist) * (want - target).
+        let d = want - glam::DVec2::new(target.x, target.y);
+        let (s, c) = twist.sin_cos();
+        let center = document::types::Vector2::new(c * d.x - s * d.y, s * d.x + c * d.y);
+        assert!(center.x.hypot(center.y) > 4.0e8);
+
+        let scene = crate::scene::Scene::new();
+        let cam = scene
+            .camera_from_view_mode(
+                document::types::Vector3::new(0.0, 0.0, 1.0),
+                target,
+                center,
+                100.0,
+                twist,
+                false,
+                50.0,
+            )
+            .expect("a camera");
+        assert!(
+            (cam.target.x - want.x).abs() < 1e-3 && (cam.target.y - want.y).abs() < 1e-3,
+            "camera at {:?}, view saved at {want:?}",
+            cam.target
         );
     }
 }

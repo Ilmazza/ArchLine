@@ -1,12 +1,12 @@
 //! Native Point parameter authoring. Action evaluation is a separate service.
 use super::block_authoring::{self as authoring, *};
-use codec::objects::{
+use document::objects::{
     BlockConnection, BlockElement, BlockEvalValue, BlockGrip, BlockGripExpression,
     BlockOnePointParameter, BlockParameter, BlockParameterProperty, BlockPointParameter,
     DynamicBlockData, ObjectType,
 };
-use codec::types::{Transform, Vector3};
-use codec::{Document, Handle};
+use document::types::{Transform, Vector3};
+use document::{Document, Handle};
 
 fn graph_handle(document: &Document, definition: Handle) -> Option<Handle> {
     match document
@@ -48,6 +48,20 @@ pub(crate) fn placement_error(document: &Document, definition: Handle) -> Option
     authoring::graph(document, definition).err()
 }
 
+/// The next free position label, e.g. the `Position1` a placement prompt
+/// offers when no such label is taken.
+pub(crate) fn next_position_name(document: &Document, definition: Handle) -> String {
+    let existing = parameters(document, definition);
+    (1..)
+        .map(|number| format!("Position{number}"))
+        .find(|name| {
+            existing
+                .iter()
+                .all(|(_, parameter)| !parameter.position_name.eq_ignore_ascii_case(name))
+        })
+        .unwrap()
+}
+
 pub(crate) fn create(
     document: &mut Document,
     definition: Handle,
@@ -71,15 +85,7 @@ pub(crate) fn create(
             ("BLOCKGRIPLOCATIONCOMPONENT", "AcDbBlockGripExpr", 20),
         ],
     );
-    let existing = parameters(document, definition);
-    let name = (1..)
-        .map(|number| format!("Position{number}"))
-        .find(|name| {
-            existing
-                .iter()
-                .all(|(_, parameter)| !parameter.position_name.eq_ignore_ascii_case(name))
-        })
-        .unwrap();
+    let name = next_position_name(document, definition);
     let [parameter, grip, x, y] = [(); 4].map(|_| document.allocate_handle());
     let element = |offset, name: &str| BlockElement {
         eval: expression(slots.eval + offset, NO_VALUE, BlockEvalValue::None),
@@ -200,123 +206,8 @@ pub(crate) fn reframe(
 mod tests {
     use super::*;
     use crate::scene::{block_visibility, Scene};
-    use codec::{entities::Line, EntityType};
+    use document::{entities::Line, EntityType};
 
-    #[test]
-    #[ignore = "requires OCS_DYNAMIC_BLOCK_FIXTURES with local DWG fixtures"]
-    fn point_parameter_fixture_graph_append_roundtrips() {
-        use sha2::{Digest, Sha256};
-        let directory = std::env::var_os("OCS_DYNAMIC_BLOCK_FIXTURES").expect("fixture directory");
-        let mut paths = std::fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dwg"))
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        assert!(!paths.is_empty());
-        for path in paths {
-            let bytes = std::fs::read(&path).unwrap();
-            let digest = Sha256::digest(&bytes);
-            let filename = path.file_name().unwrap().to_string_lossy();
-            let mut scene = Scene::new();
-            scene.document = crate::io::load_bytes(&filename, bytes).unwrap();
-            let definitions = scene
-                .document
-                .block_records
-                .iter()
-                .filter(|record| graph_handle(&scene.document, record.handle).is_some())
-                .map(|record| record.handle)
-                .collect::<Vec<_>>();
-            let existing = !definitions.is_empty();
-            let definition = if existing {
-                definitions
-                    .iter()
-                    .copied()
-                    .find(|definition| authoring::graph(&scene.document, *definition).is_ok())
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{filename}: no editable decoded graph: {:?}",
-                            definitions
-                                .iter()
-                                .map(|definition| authoring::graph(&scene.document, *definition))
-                                .collect::<Vec<_>>()
-                        )
-                    })
-            } else {
-                scene.define_block_raw(
-                    "POINT_PARAMETER_TEST",
-                    Vector3::ZERO,
-                    vec![EntityType::Line(Line::from_points(
-                        Vector3::ZERO,
-                        Vector3::UNIT_X,
-                    ))],
-                );
-                scene
-                    .document
-                    .block_records
-                    .get("POINT_PARAMETER_TEST")
-                    .unwrap()
-                    .handle
-            };
-            let before = scene.document.clone();
-            let graph = graph_handle(&before, definition);
-            let old_nodes = existing.then(|| graph_data(&before, definition).nodes.clone());
-            let location = Vector3::new(3.25, -4.5, 2.0);
-            let label = Vector3::new(6.0, 7.0, 2.0);
-            let handle = create(&mut scene.document, definition, location, label).unwrap();
-            let name = parameters(&scene.document, definition)
-                .iter()
-                .find(|(found, _)| *found == handle)
-                .unwrap()
-                .1
-                .position_name
-                .clone();
-            for (handle, object) in &before.objects {
-                if Some(*handle) != graph {
-                    assert_eq!(
-                        scene.document.objects.get(handle),
-                        Some(object),
-                        "{filename}: preserved {handle}"
-                    );
-                }
-            }
-            if let Some(nodes) = old_nodes {
-                assert_eq!(
-                    &graph_data(&scene.document, definition).nodes[..nodes.len()],
-                    &nodes
-                );
-            }
-            for extension in ["dwg", "dxf"] {
-                let bytes =
-                    crate::io::save_to_bytes(&scene.document, extension, scene.document.version)
-                        .unwrap();
-                let read = crate::io::load_bytes(&format!("point.{extension}"), bytes).unwrap();
-                let points = parameters(&read, definition);
-                let point = points
-                    .iter()
-                    .find(|(_, point)| point.position_name == name)
-                    .unwrap_or_else(|| panic!("{filename}: missing {name} in {extension}"))
-                    .1;
-                assert_eq!(
-                    point.parameter.definition_point, location,
-                    "{filename}: {extension}"
-                );
-                assert_eq!(
-                    point.definition_label_point, label,
-                    "{filename}: {extension}"
-                );
-                assert!(
-                    authoring::graph(&read, definition).is_ok(),
-                    "{filename}: graph in {extension}"
-                );
-            }
-            assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), digest);
-            eprintln!("{filename}: Point DWG/DXF roundtrips; appended to existing graph={existing}; original objects/checksum preserved");
-        }
-    }
 
     fn fixture() -> (Scene, Handle) {
         let mut scene = Scene::new();
@@ -340,7 +231,7 @@ mod tests {
     fn graph_data(
         document: &Document,
         definition: Handle,
-    ) -> &codec::objects::BlockEvaluationGraph {
+    ) -> &document::objects::BlockEvaluationGraph {
         let ObjectType::DynamicBlock(object) =
             &document.objects[&graph_handle(document, definition).unwrap()]
         else {

@@ -19,10 +19,10 @@
 //!
 //! Qui non c'è undo: lo apre il comando che crea il taglio.
 
-use codec::entities::{EntityCommon, Line};
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle, Vector3};
+use document::entities::{EntityCommon, Line};
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle, Vector3};
 
 use super::{APP_TAGLIO, LAYER_TAGLI};
 
@@ -292,13 +292,13 @@ mod tests {
     #[test]
     fn cuts_survive_a_dxf_and_a_dwg_save() {
         let (doc, _) = doc_with(&[cut()]);
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
         assert_eq!(cuts_in(&read).iter().map(|c| c.cut.clone()).collect::<Vec<_>>(), vec![cut()]);
         assert!(!missing_layer(&read));
 
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
         assert_eq!(cuts_in(&read).iter().map(|c| c.cut.clone()).collect::<Vec<_>>(), vec![cut()]);
         assert!(!missing_layer(&read), "layer e APPID devono sopravvivere al DWG");
     }

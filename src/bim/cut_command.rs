@@ -160,7 +160,7 @@ mod tests {
         let CmdResult::CommitEntitiesAndExit(entities) = result else {
             panic!("non consegnato")
         };
-        read_cut(codec::Handle::NULL, &entities[0]).expect("taglio").cut
+        read_cut(document::Handle::NULL, &entities[0]).expect("taglio").cut
     }
 
     /// Due punti, il lato di vista e Invio al nome proposto.

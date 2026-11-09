@@ -17,10 +17,7 @@ impl OpenCADStudio {
         }
         let ask = |app: &mut Self| {
             let current = app.tabs[i].scene.document.header.current_table_style_name.clone();
-            app.command_line.push_output(&crate::t!(
-                "Enter new value for CTABLESTYLE <\"%{name}\">:",
-                name = current
-            ));
+            app.command_line.push_output(&crate::ui::command_line::value_prompt("CTABLESTYLE", &format!("\"{current}\"")));
             app.pending_setvar = Some(NAME.to_string());
         };
         let value = value.trim().trim_matches('"').trim();
@@ -34,7 +31,7 @@ impl OpenCADStudio {
             .objects
             .values()
             .find_map(|object| match object {
-                codec::objects::ObjectType::TableStyle(style)
+                document::objects::ObjectType::TableStyle(style)
                     if style.name.eq_ignore_ascii_case(value) =>
                 {
                     Some(style.name.clone())
@@ -45,8 +42,8 @@ impl OpenCADStudio {
             Some(style) => Some(self.on_ribbon_style_changed(StyleKey::TableStyle, style)),
             None => {
                 self.command_line
-                    .push_error(crate::t!("Cannot set CTABLESTYLE to that value.").as_ref());
-                self.command_line.push_error("*Invalid*");
+                    .push_rejection(crate::t!("Cannot set CTABLESTYLE to that value.").as_ref());
+                self.command_line.push_rejection("*Invalid*");
                 Some(Task::none())
             }
         }

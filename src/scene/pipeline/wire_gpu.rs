@@ -25,6 +25,8 @@
 // The high+low pair encodes the f64 source so the relative-to-eye shader
 // stays precise at UTM-scale coordinates and after a cross-drawing paste.
 
+use super::analytic_slots::BlockSlot;
+use crate::scene::model::wire_model::DashClosure;
 use crate::scene::model::wire_model::WireModel;
 use iced::wgpu;
 
@@ -72,7 +74,8 @@ pub struct WireInstance {
     /// fetch unit. `[0, 0]` means use the constant width. Ratios retain the
     /// full f32 world-width scale in `WireConst` while making every instance
     /// exactly one 64-byte cache line. A constant-width band carries its
-    /// joint miters (`band_miters`) here instead.
+    /// joint miters (`band_miters`) here instead, and a thin wire its dash run's
+    /// layout (`run_total_slots`).
     pub taper_ratio: [i16; 2],
 }
 
@@ -118,7 +121,7 @@ impl WireInstance {
             wgpu::VertexAttribute {
                 offset: std::mem::offset_of!(WireInstance, taper_ratio) as u64,
                 shader_location: 7,
-                format: wgpu::VertexFormat::Snorm16x2,
+                format: wgpu::VertexFormat::Sint16x2,
             },
         ];
         wgpu::VertexBufferLayout {
@@ -131,8 +134,8 @@ impl WireInstance {
 
 /// Per-wire constants shared by every segment of a wire (storage path). std430
 /// layout: three vec4, eight scalars, then three vec4 = 128 B, matching `WireConst` in
-/// wire_indexed.wgsl. `align_end` / `align_total` carry the "A"-type endpoint
-/// alignment (see `wire_distances`); 0.0 total = no alignment.
+/// wire_indexed.wgsl. `align_total` carries a band's run layout (see
+/// `wire_distances`); a thin wire's segments carry their own.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct WireConst {
@@ -142,7 +145,7 @@ pub struct WireConst {
     pub half_width: f32,
     pub pattern_length: f32,
     pub draw_depth: f32,
-    pub align_end: f32,
+    pub _reserved: f32,
     pub align_total: f32,
     /// World-space half-width for a wide-polyline band. `0.0` = a normal wire
     /// (uses `half_width`, screen pixels). Non-zero = the vertex shader expands
@@ -204,9 +207,8 @@ pub struct PackedWireInstance {
     /// Normalized draw-order depth in (0,1); applied as a small clip-z bias
     /// in the shader so this wire orders against other entity types.
     pub draw_depth: f32,
-    /// "A"-type endpoint alignment (see `wire_distances`): the end-dash length
-    /// and the total wire length. `align_total == 0.0` = not aligned.
-    pub align_end: f32,
+    pub _reserved: f32,
+    /// A band's run layout (see `wire_distances`).
     pub align_total: f32,
     /// World-space half-width for a wide-polyline band (see `WireConst`). `0.0`
     /// = a normal wire (uses `half_width`, screen pixels).
@@ -260,7 +262,7 @@ impl PackedWireInstance {
                 shader_location: 5,
                 format: wgpu::VertexFormat::Float32x4,
             },
-            // misc = (draw_depth, align_end, align_total, world_half_width)
+            // misc = (draw_depth, reserved, align_total, world_half_width)
             wgpu::VertexAttribute {
                 offset: std::mem::offset_of!(PackedWireInstance, draw_depth) as u64,
                 shader_location: 6,
@@ -409,7 +411,7 @@ impl BlockWireVertex {
             wgpu::VertexAttribute {
                 offset: std::mem::offset_of!(BlockWireVertex, taper_ratio) as u64,
                 shader_location: 5,
-                format: wgpu::VertexFormat::Snorm16x2,
+                format: wgpu::VertexFormat::Sint16x2,
             },
         ];
         wgpu::VertexBufferLayout {
@@ -421,7 +423,7 @@ impl BlockWireVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BlockWireInstance {
     pub translation: [f32; 3],
     pub translation_low: [f32; 3],
@@ -543,28 +545,32 @@ fn pack_color(color: [f32; 4]) -> [u8; 4] {
     ]
 }
 
-/// Cumulative arc-length per point (NaN-break aware) plus the `"A"`-type
-/// alignment pair `(align_end, align_total)`. Shared by the wasm and native
-/// emission paths and PDF dash materialization.
+/// How a wire lays out its dash pattern, per run. See [`wire_distances`].
+#[derive(Default)]
+pub(crate) struct WireDashes {
+    /// Cumulative arc-length per point, restarting with each run.
+    pub dists: Vec<f32>,
+    /// Per point, the layout of the segment starting there: above zero an
+    /// "A"-aligned run of that length, below zero a closed path of that length,
+    /// and zero a pattern tiled from the distance.
+    pub run_totals: Vec<f32>,
+}
+
+/// The dash layout of a wire. Shared by the wasm and native emission paths and
+/// PDF dash materialization; the end dashes themselves are worked out at the
+/// current linetype scale (`aligned_end_dash`, and `dash_layout.wgsl`).
 ///
 /// AutoCAD-style linetypes are implicitly `A` (aligned): a dashed line must
 /// begin AND end on a solid dash, keeping the interior dashes at their nominal
 /// length and stretching/shrinking only the two end dashes symmetrically to
-/// absorb the leftover (so parallel lines share an identical interior). We
-/// express that on the GPU by handing the shader the total wire length
-/// (`align_total`) and the end-dash length (`align_end`); the pattern walk then
-/// forces the two end regions lit and phases the interior to resume right after
-/// the first dash. `align_total == 0.0` disables it and the shader falls back to
-/// the legacy centred repeating pattern.
-///
-/// Alignment applies only to a single continuous run (`!has_break`) whose
-/// pattern begins with a dash. NaN-separated (plinegen=false) polylines and
-/// non-dash-first patterns keep the legacy centred phase.
-pub(crate) fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
+/// absorb the leftover (so parallel lines share an identical interior). Each run
+/// of a wire aligns on its own: a polyline without PLINEGEN restarts at every
+/// vertex, and a batched block wire holds one run per member.
+pub(crate) fn wire_distances(wire: &WireModel) -> WireDashes {
     let n = wire.points.len();
     let pat_len = wire.pattern_length;
     if pat_len <= 1e-6 || n < 2 {
-        return (Vec::new(), 0.0, 0.0);
+        return WireDashes::default();
     }
     let explicit = wire.pattern_stations.len() >= n + 1;
     let (mut dists, has_break, total) = if explicit {
@@ -600,13 +606,21 @@ pub(crate) fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
         let total = dists.last().copied().unwrap_or(0.0);
         (dists, has_break, total)
     };
+    let mut run_totals = vec![0.0_f32; n];
+    // An alternating pattern that BEGINS with a dash, or a dot, followed by a
+    // gap — every standard linetype does (DASHED/DASHDOT/CENTER/HIDDEN/…), and
+    // the drawing aligns a dot-first one the same way. Gap-first (the drawing
+    // rejects it for this alignment), single-element, or consecutive-dash
+    // patterns keep the legacy centred phase: the interior resume assumes the
+    // element after the leading one is a gap.
+    let aligns = wire.pattern[0] >= 0.0 && wire.pattern[1] < 0.0;
 
     if has_break {
-        // A run too short for one whole period of a dash-first (or
-        // dot-first) pattern is drawn as one solid dash, as a single line is
-        // below. Batched block wires and plinegen=false polylines are many
-        // runs in one wire, so pin each such run at the first element's start.
-        if wire.pattern[0] >= 0.0 && wire.pattern[1] < 0.0 {
+        if aligns {
+            // Only a thin wire has a slot per segment for its run's layout, and
+            // only a restarting wire has runs of its own: a wire running on
+            // across its breaks, or a band, pins each short run solid instead.
+            let own_runs = !explicit && !wire.plinegen && wire.world_width <= 0.0;
             let mut start = 0;
             while start < n {
                 if !wire.points[start][0].is_finite() {
@@ -617,16 +631,19 @@ pub(crate) fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
                 while end + 1 < n && wire.points[end + 1][0].is_finite() {
                     end += 1;
                 }
-                if end > start && (dists[end] - dists[start]).abs() <= pat_len {
+                let length = (dists[end] - dists[start]).abs();
+                if own_runs && end > start {
+                    run_totals[start..end].fill(length);
+                } else if end > start && length <= pat_len {
                     dists[start..=end].fill(0.0);
                 }
                 start = end + 1;
             }
         }
-        return (dists, 0.0, 0.0);
+        return WireDashes { dists, run_totals };
     }
     if total <= 1e-6 {
-        return (dists, 0.0, 0.0);
+        return WireDashes { dists, run_totals };
     }
 
     // DGN line styles draw the pattern from the START vertex with continuous
@@ -635,55 +652,32 @@ pub(crate) fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     // there. Return before the A-type / centring logic that standard linetypes
     // use (see `WireModel::dash_from_start`).
     if wire.dash_from_start {
-        return (dists, 0.0, 0.0);
+        return WireDashes { dists, run_totals };
     }
 
-    // Shared "A"-type for MLINE elements: the caller fixes the begin/end
-    // solid-dash length (`dash_align_end`, derived once from the multiline's
-    // centre-line length) so every parallel element runs the SAME interior phase
-    // — the shader's interior walk depends on `align_end`, not on the wire's own
-    // length — while `align_total` stays this wire's own length, so each element
-    // still ends on a dash at its own endpoint.
-    if let Some(ae) = wire.dash_align_end {
-        if total <= pat_len {
-            // Shorter than one full period → solid (matches the per-wire path).
-            return (dists, total, total);
+    // Stations are a clipped wire's: what remains of the path is no longer closed.
+    let closure = if explicit {
+        DashClosure::Open
+    } else {
+        wire.dash_closure
+    };
+    match closure {
+        DashClosure::Open => {}
+        DashClosure::Curve => {
+            run_totals.fill(-total);
+            return WireDashes { dists, run_totals };
         }
-        return (dists, ae.max(1e-4).min(total * 0.5), total);
+        DashClosure::Polyline { start } => {
+            let shift = dists.get(start as usize).copied().unwrap_or(0.0);
+            dists.iter_mut().for_each(|dist| *dist -= shift);
+            run_totals.fill(-total);
+            return WireDashes { dists, run_totals };
+        }
     }
 
-    // Align an alternating pattern that BEGINS with a dash, or a dot, followed
-    // by a gap — every standard linetype does (DASHED/DASHDOT/CENTER/HIDDEN/…),
-    // and the drawing aligns a dot-first one the same way: the dot stretches
-    // into the end dash `D = (L - kP) / 2` and the last interior dash runs on
-    // into it. Gap-first (the drawing rejects it for this alignment),
-    // single-element, or consecutive-dash patterns keep the legacy centred
-    // phase: the A-type interior-resume assumes the element after the leading
-    // one is a gap, and force-lighting an end dash on a gap start would paint
-    // over a leading blank.
-    if wire.pattern[0] >= 0.0 && wire.pattern[1] < 0.0 {
-        let a = wire.pattern[0];
-        let p = pat_len;
-        if total <= p {
-            // Shorter than one full pattern period → drawn as a single solid
-            // dash spanning the whole line (aligned linetypes can't fit a
-            // dash-gap-dash in less than one period).
-            return (dists, total, total);
-        }
-        // "A" alignment for a dash-first pattern of period P laid out as
-        //   [D] [gap] ([dash] [gap])*(k-1) [D]
-        // gives  L = 2D + (k-1)a + k(P-a)  =>  D = (L - k*P + a) / 2.
-        // Pick the interior period count k so the end dash D stays near nominal a.
-        let mut k = ((total - a) / p).round().max(1.0);
-        let mut d_end = (total - k * p + a) * 0.5;
-        if d_end <= 1e-4 {
-            // End dash underflowed (period ≫ first dash); drop one period so the
-            // ends stay visible.
-            k = (k - 1.0).max(0.0);
-            d_end = (total - k * p + a) * 0.5;
-        }
-        let d_end = d_end.max(1e-4).min(total * 0.5);
-        return (dists, d_end, total);
+    if aligns {
+        run_totals.fill(total);
+        return WireDashes { dists, run_totals };
     }
 
     // Legacy centred phase for non-aligned patterns (behaviour unchanged from
@@ -700,7 +694,49 @@ pub(crate) fn wire_distances(wire: &WireModel) -> (Vec<f32>, f32, f32) {
     for d in dists.iter_mut() {
         *d += offset;
     }
-    (dists, 0.0, 0.0)
+    WireDashes { dists, run_totals }
+}
+
+/// `aligned_end_dash` in dash_layout.wgsl, for the plot.
+pub(crate) fn aligned_end_dash(run_total: f32, pat_len: f32, first: f32) -> f32 {
+    if run_total <= 0.0 {
+        return 0.0;
+    }
+    if run_total <= pat_len {
+        return run_total;
+    }
+    let mut periods = (run_total / pat_len).floor().max(1.0);
+    let mut end_dash = (run_total - periods * pat_len + first) * 0.5;
+    if end_dash <= 1e-4 {
+        periods = (periods - 1.0).max(0.0);
+        end_dash = (run_total - periods * pat_len + first) * 0.5;
+    }
+    end_dash.clamp(1e-4, (run_total * 0.5).max(1e-4))
+}
+
+/// Whether a closed path is too short for its pattern and drawn solid. As in
+/// `closed_dash_solid`.
+pub(crate) fn closed_dash_solid(length: f32, pat_len: f32) -> bool {
+    length < pat_len * 0.999
+}
+
+/// The periods a closed path holds, each stretched to fit: the nearest count,
+/// the lower on a tie, and at least two. As in `closed_dash_phase`.
+pub(crate) fn closed_dash_periods(length: f32, pat_len: f32) -> f32 {
+    (length / pat_len - 0.5001).ceil().max(2.0)
+}
+
+/// The stretch `closed_dash_phase` in dash_layout.wgsl applies to a distance
+/// along a closed path, for the plot.
+pub(crate) fn closed_dash_stretch(length: f32, pat_len: f32) -> f32 {
+    closed_dash_periods(length, pat_len) * pat_len / length
+}
+
+/// A thin segment's run layout in its two 16-bit slots (see `dash_run_total` in
+/// dash_layout.wgsl): the bits of `run_total`, low half first.
+pub(crate) fn run_total_slots(run_total: f32) -> [i16; 2] {
+    let bits = run_total.to_bits();
+    [bits as u16 as i16, (bits >> 16) as u16 as i16]
 }
 
 #[inline]
@@ -892,10 +928,10 @@ pub(crate) fn emit_wire_packed(
         return Vec::new();
     }
     let has_pattern = wire.pattern_length > 1e-6;
-    let (dists, align_end, align_total) = if has_pattern {
+    let WireDashes { dists, run_totals } = if has_pattern {
         wire_distances(wire)
     } else {
-        (Vec::new(), 0.0, 0.0)
+        WireDashes::default()
     };
     let (marker_origin_high, marker_origin_low, marker_normal_scale) = marker_metadata(wire);
     let miters = band_miters(wire, marker_normal_scale);
@@ -933,8 +969,8 @@ pub(crate) fn emit_wire_packed(
             pat0,
             pat1,
             draw_depth,
-            align_end,
-            align_total,
+            _reserved: 0.0,
+            align_total: run_totals.get(i).copied().unwrap_or(0.0),
             world_half_width: wire.world_width * 0.5,
             world_hw_a: tw(i),
             world_hw_b: tw(i + 1),
@@ -966,10 +1002,10 @@ pub(crate) fn emit_wire_native(
     let n = wire.points.len();
     let seg_count = n.saturating_sub(1);
     let has_pattern = wire.pattern_length > 1e-6 && seg_count > 0;
-    let (dists, align_end, align_total) = if has_pattern {
+    let WireDashes { dists, run_totals } = if has_pattern {
         wire_distances(wire)
     } else {
-        (Vec::new(), 0.0, 0.0)
+        WireDashes::default()
     };
     let (marker_origin_high, marker_origin_low, marker_normal_scale) = marker_metadata(wire);
     let is_tapered = !wire.taper_widths.is_empty();
@@ -990,8 +1026,9 @@ pub(crate) fn emit_wire_native(
         half_width: wire.line_weight_px.max(1.0) * 0.5,
         pattern_length: wire.pattern_length,
         draw_depth,
-        align_end,
-        align_total,
+        _reserved: 0.0,
+        // A band has no per-segment slot: it holds one layout, for the wire.
+        align_total: run_totals.first().copied().unwrap_or(0.0),
         world_half_width: wire.world_width * 0.5,
         is_tapered: if is_tapered { 1.0 } else { 0.0 },
         hidden: 0.0,
@@ -1034,9 +1071,13 @@ pub(crate) fn emit_wire_native(
             distance_a: dist_a,
             distance_b: dist_b,
             wire_id,
-            taper_ratio: match miters.get(i) {
-                Some(k) => [snorm(k[0]), snorm(k[1])],
-                None => [taper_ratio(i), taper_ratio(i + 1)],
+            taper_ratio: if wire.world_width <= 0.0 {
+                run_total_slots(run_totals.get(i).copied().unwrap_or(0.0))
+            } else {
+                match miters.get(i) {
+                    Some(k) => [snorm(k[0]), snorm(k[1])],
+                    None => [taper_ratio(i), taper_ratio(i + 1)],
+                }
             },
         });
     }
@@ -1200,6 +1241,64 @@ pub struct BlockGeometryRecords {
     pub records: Vec<BlockWireVertex>,
 }
 
+/// Where the placements of one upload landed: each reference's slots, and the
+/// instance buffer of every arena they index.
+pub struct BlockTracking {
+    pub slots: Vec<(document::Handle, BlockSlot)>,
+    pub buffers: Vec<wgpu::Buffer>,
+    /// The block-local geometry of each group, indexed by `BlockSlot::group`.
+    pub shapes: Vec<Vec<[f32; 3]>>,
+}
+
+/// Group items by key: groups in the order their key first appears, members in
+/// the order they were given. Sorting finds the same groups a sequential walk
+/// with a map would, so it can use every core.
+#[cfg(not(target_arch = "wasm32"))]
+fn group_in_first_seen_order<T: Copy + Send + Sync>(
+    items: Vec<((u64, bool), T)>,
+) -> Vec<((u64, bool), Vec<T>)> {
+    use rayon::prelude::*;
+    let mut order: Vec<((u64, bool), u32)> = items
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _))| (*key, index as u32))
+        .collect();
+    // Stable, so members of one key stay in submission order.
+    order.par_sort_by_key(|entry| entry.0);
+    let mut groups: Vec<(u32, (u64, bool), Vec<T>)> = Vec::new();
+    for (key, index) in order {
+        let item = items[index as usize].1;
+        match groups.last_mut() {
+            Some((_, last, members)) if *last == key => members.push(item),
+            _ => groups.push((index, key, vec![item])),
+        }
+    }
+    groups.sort_unstable_by_key(|(first, _, _)| *first);
+    groups
+        .into_iter()
+        .map(|(_, key, members)| (key, members))
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn group_in_first_seen_order<T: Copy>(items: Vec<((u64, bool), T)>) -> Vec<((u64, bool), Vec<T>)> {
+    group_with_map(items)
+}
+
+/// The sequential reference: one pass with a map from key to group.
+fn group_with_map<T: Copy>(items: Vec<((u64, bool), T)>) -> Vec<((u64, bool), Vec<T>)> {
+    let mut slots: rustc_hash::FxHashMap<(u64, bool), usize> = rustc_hash::FxHashMap::default();
+    let mut groups: Vec<((u64, bool), Vec<T>)> = Vec::new();
+    for (key, item) in items {
+        let slot = *slots.entry(key).or_insert_with(|| {
+            groups.push((key, Vec::new()));
+            groups.len() - 1
+        });
+        groups[slot].1.push(item);
+    }
+    groups
+}
+
 impl BlockWireGpu {
     /// Identity of the geometry this batch draws, comparable across pipeline
     /// modes.
@@ -1221,32 +1320,54 @@ impl BlockWireGpu {
         depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
         color_override: Option<[f32; 4]>,
         target: BlockWireTarget<'_>,
-        mut cache: Option<&mut BlockGeometryCache>,
+        cache: Option<&mut BlockGeometryCache>,
     ) -> Vec<Self> {
+        Self::from_wires_impl(device, queue, wires, depth_map, color_override, target, cache, false).0
+    }
+
+    /// `from_wires`, also reporting where every placement landed so a later
+    /// move can overwrite it in place. `None` when some placement cannot be
+    /// attributed or sits in more than one arena.
+    pub fn from_wires_tracked(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wires: &[BlockRef<'_>],
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        target: BlockWireTarget<'_>,
+        cache: Option<&mut BlockGeometryCache>,
+    ) -> (Vec<Self>, Option<BlockTracking>) {
+        Self::from_wires_impl(device, queue, wires, depth_map, None, target, cache, true)
+    }
+
+    fn from_wires_impl(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wires: &[BlockRef<'_>],
+        depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+        color_override: Option<[f32; 4]>,
+        target: BlockWireTarget<'_>,
+        mut cache: Option<&mut BlockGeometryCache>,
+        track: bool,
+    ) -> (Vec<Self>, Option<BlockTracking>) {
         let BlockWireTarget { const_bgl, mode } = target;
-        let mut slots: rustc_hash::FxHashMap<(u64, bool), usize> = rustc_hash::FxHashMap::default();
-        let mut groups: Vec<(bool, Vec<BlockRef<'_>>)> = Vec::new();
-        for &block in wires {
-            let wire = block.wire;
-            if color_override.is_none() && !(wire.display_visible && block.named().display_visible)
-            {
-                continue;
+        let block_started = crate::perf::enabled().then(std::time::Instant::now);
+        let block_mark = |stage: &str| {
+            if let Some(started) = block_started {
+                crate::perf_record!(
+                    "[perf] block-wires {stage}={:.1}ms",
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
             }
-            let Some(instance) = wire.render_instance else {
-                continue;
-            };
-            if wire.points.len() < 2 {
-                continue;
-            }
-            let mesh_edge = color_override.is_none() && wire.fill_is_3d;
-            let key = (instance.source_id, mesh_edge);
-            let slot = *slots.entry(key).or_insert_with(|| {
-                let slot = groups.len();
-                groups.push((mesh_edge, Vec::new()));
-                slot
-            });
-            groups[slot].1.push(block);
-        }
+        };
+        let keyed: Vec<((u64, bool), BlockRef<'_>)> = wires
+            .iter()
+            .filter_map(|&block| block_key(&block, color_override).map(|key| (key, block)))
+            .collect();
+        let groups: Vec<(bool, Vec<BlockRef<'_>>)> = group_in_first_seen_order(keyed)
+            .into_iter()
+            .map(|((_, mesh_edge), members)| (mesh_edge, members))
+            .collect();
+        block_mark("grouped");
 
         let mut arena = BlockArenaBuilder::new(device, mode);
         let mut live_keys: rustc_hash::FxHashSet<BlockGeometryKey> =
@@ -1254,6 +1375,10 @@ impl BlockWireGpu {
         // Records emitted this call, so a cache that is earning its keep is
         // visible rather than assumed.
         let mut emitted_segments = 0usize;
+        // Definitions are resolved in order (the cache is mutable), then their
+        // placements, which are independent of one another, are built across
+        // the cores before being packed in that same order.
+        let mut prepared: Vec<(bool, Vec<BlockRef<'_>>, crate::scene::model::instance_model::RenderInstance, _)> = Vec::new();
         for (mesh_edge, group) in groups {
             // A copy reached through a stub carries the prototype's
             // geometry at the prototype's placement, which is what `base`
@@ -1308,17 +1433,63 @@ impl BlockWireGpu {
                     built
                 }
             };
-            let instances = block_instances(&group, base, mesh_edge, depth_map);
+            prepared.push((mesh_edge, group, base, geometry));
+        }
+        block_mark("prepared");
+        let placed: Vec<Vec<BlockWireInstance>> = {
+            use crate::par::prelude::*;
+            prepared
+                .par_iter()
+                .map(|(mesh_edge, group, base, _)| {
+                    block_instances(group, *base, *mesh_edge, depth_map)
+                })
+                .collect()
+        };
+        block_mark("placed");
+        let mut tracked: Option<Vec<(document::Handle, BlockSlot)>> = track.then(Vec::new);
+        let mut shapes: Vec<Vec<[f32; 3]>> = Vec::new();
+        for ((mesh_edge, group, base, geometry), instances) in prepared.iter().zip(placed.iter()) {
             if instances.is_empty() {
                 continue;
             }
-            arena.push(&geometry, &instances, mesh_edge);
+            let landed = arena.push(geometry, instances, *mesh_edge);
+            let Some(list) = tracked.as_mut() else {
+                continue;
+            };
+            let Some((chunk, first)) = landed.filter(|_| instances.len() == group.len()) else {
+                tracked = None;
+                continue;
+            };
+            let group_index = shapes.len() as u32;
+            shapes.push(group.first().map_or_else(Vec::new, |first| relative_points(first.wire).0));
+            for (position, member) in group.iter().enumerate() {
+                let Some(handle) =
+                    crate::scene::Scene::handle_from_wire_name(&member.named().name)
+                else {
+                    tracked = None;
+                    break;
+                };
+                list.push((
+                    handle,
+                    BlockSlot {
+                        chunk: chunk as u32,
+                        index: first + position as u32,
+                        source_id: base.source_id,
+                        mesh_edge: *mesh_edge,
+                        base: base.translation,
+                        group: group_index,
+                        style: wire_look(member.wire),
+                    },
+                ));
+            }
         }
         // Release geometry that this build no longer uses.
         if let Some(cache) = cache {
             cache.retain(|key, _| live_keys.contains(key));
         }
+        block_mark("pushed");
         let out = arena.finish(device, queue, const_bgl);
+        block_mark("finished");
         if crate::perf::enabled() && arena.segments > 0 {
             crate::perf_record!(
                 "[perf] block-wire-geometry mode={} definitions={} arenas={} batches={} \
@@ -1337,7 +1508,24 @@ segments={} bytes={} bytes_if_per_definition={} emitted={}",
                 emitted_segments,
             );
         }
-        out
+        let tracking = tracked.map(|slots| {
+            // One arena per chunk, in chunk order: the batches name them in turn.
+            let mut buffers: Vec<wgpu::Buffer> = Vec::new();
+            let mut last: Option<*const BlockArena> = None;
+            for batch in &out {
+                let identity = std::sync::Arc::as_ptr(&batch.arena);
+                if last != Some(identity) {
+                    buffers.push(batch.arena.instance_buffer.clone());
+                    last = Some(identity);
+                }
+            }
+            BlockTracking {
+                slots,
+                buffers,
+                shapes,
+            }
+        });
+        (out, tracking)
     }
 }
 
@@ -1409,8 +1597,12 @@ impl BlockArenaBuilder {
         geometry: &std::sync::Arc<BlockGeometryRecords>,
         instances: &[BlockWireInstance],
         mesh_edge: bool,
-    ) {
+    ) -> Option<(usize, u32)> {
         self.segments += geometry.records.len();
+        // Where the placements landed, when that is a single run in a single
+        // arena; a definition split across arenas keeps no in-place record.
+        let mut pieces = 0usize;
+        let mut landed = None;
         // A definition's geometry, constants and placements must land in the
         // same arena — one bind group and one instance buffer draw them — so a
         // definition too large for one arena is split into pieces that each
@@ -1438,6 +1630,8 @@ impl BlockArenaBuilder {
                 chunk.consts.push(geometry.constant);
                 let first_instance = chunk.instances.len() as u32;
                 chunk.instances.extend_from_slice(run);
+                pieces += 1;
+                landed = Some((index, first_instance));
                 chunk.batches.push(PendingBlockBatch {
                     first_vertex,
                     vertex_count: take as u32 * 6,
@@ -1449,6 +1643,11 @@ impl BlockArenaBuilder {
                 });
                 placed += take;
             }
+        }
+        if pieces == 1 {
+            landed
+        } else {
+            None
         }
     }
 
@@ -1560,6 +1759,104 @@ impl BlockArenaBuilder {
         const PAGE: u64 = 64 * 1024;
         definitions as u64 * 2 * PAGE
     }
+}
+
+/// The group a block placement is drawn in, or `None` when it is not drawn at
+/// all. Shared by the upload and by in-place patching, so both agree on which
+/// placements exist.
+fn block_key(block: &BlockRef<'_>, color_override: Option<[f32; 4]>) -> Option<(u64, bool)> {
+    let wire = block.wire;
+    if color_override.is_none() && !(wire.display_visible && block.named().display_visible) {
+        return None;
+    }
+    let instance = wire.render_instance?;
+    if wire.points.len() < 2 {
+        return None;
+    }
+    let mesh_edge = color_override.is_none() && wire.fill_is_3d;
+    Some((instance.source_id, mesh_edge))
+}
+
+/// A wire's points relative to its own translation: the block-local shape that
+/// every placement of one definition shares, whatever its position, plus the
+/// largest coordinate whose f32 rounding they carry. With split (high + low)
+/// points that is the relative one, so far from the origin a turned or scaled
+/// copy still differs from its old shape; without, the absolute one.
+pub(crate) fn relative_points(wire: &WireModel) -> (Vec<[f32; 3]>, f32) {
+    let translation = wire.render_instance.map_or([0.0; 3], |instance| instance.translation);
+    let split = wire.points_low.len() == wire.points.len();
+    let mut magnitude = 0.0f32;
+    let points = wire
+        .points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let low = wire.points_low.get(index).copied().unwrap_or([0.0; 3]);
+            let mut relative = [0.0f32; 3];
+            for axis in 0..3 {
+                let absolute = point[axis] as f64 + low[axis] as f64;
+                relative[axis] = (absolute - translation[axis]) as f32;
+                let rounded = if split { relative[axis] } else { absolute as f32 };
+                magnitude = magnitude.max(rounded.abs());
+            }
+            relative
+        })
+        .collect();
+    (points, magnitude)
+}
+
+/// A signature of a wire's look. Placements of one definition share one set of
+/// drawing constants, so a patch may only rewrite a placement whose wire still
+/// looks the way it did when uploaded.
+pub(crate) fn wire_look(wire: &WireModel) -> super::analytic_slots::WireLook {
+    use std::hash::{Hash, Hasher};
+    let mut dashes = rustc_hash::FxHasher::default();
+    wire.pattern_length.to_bits().hash(&mut dashes);
+    wire.pattern.map(f32::to_bits).hash(&mut dashes);
+    wire.world_width.to_bits().hash(&mut dashes);
+    wire.aci.hash(&mut dashes);
+    wire.plinegen.hash(&mut dashes);
+    wire.dash_from_start.hash(&mut dashes);
+    wire.dash_closure.hash(&mut dashes);
+    super::analytic_slots::WireLook {
+        color: wire.color.map(f32::to_bits),
+        selected: wire.selected,
+        weight: wire.line_weight_px.to_bits(),
+        dashes: dashes.finish(),
+    }
+}
+
+/// What the given block placements are now, in the form an in-place patch
+/// compares against the slots recorded at upload.
+pub(crate) fn new_blocks(
+    blocks: &[BlockRef<'_>],
+    depth_map: &rustc_hash::FxHashMap<u64, [f32; 2]>,
+) -> Vec<super::analytic_slots::NewBlock> {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let (source_id, mesh_edge) = block_key(block, None)?;
+            let instance = block.wire.render_instance?;
+            let (points, magnitude) = relative_points(block.wire);
+            Some(super::analytic_slots::NewBlock {
+                source_id,
+                mesh_edge,
+                position: [
+                    instance.translation[0] + block.delta[0],
+                    instance.translation[1] + block.delta[1],
+                    instance.translation[2] + block.delta[2],
+                ],
+                depth: if mesh_edge {
+                    0.0
+                } else {
+                    block.draw_depth(depth_map)
+                },
+                style: wire_look(block.wire),
+                points,
+                magnitude,
+            })
+        })
+        .collect()
 }
 
 /// Placements and draw depths relative to the group's first instance.
@@ -2071,5 +2368,36 @@ mod block_wire_storage_tests {
         validator
             .validate(&module)
             .expect("wire_indexed.wgsl validates cleanly with naga");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod grouping_tests {
+    use super::{group_in_first_seen_order, group_with_map};
+
+    /// A small deterministic generator, so the cases are the same every run.
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    #[test]
+    fn sorted_grouping_matches_the_sequential_walk() {
+        let mut state = 7;
+        for &(count, keys) in &[(0usize, 1u64), (1, 1), (50, 3), (5_000, 40), (40_000, 9_000)] {
+            let items: Vec<((u64, bool), u32)> = (0..count)
+                .map(|index| {
+                    let key = (next(&mut state) % keys, next(&mut state) % 2 == 0);
+                    (key, index as u32)
+                })
+                .collect();
+            assert_eq!(
+                group_in_first_seen_order(items.clone()),
+                group_with_map(items),
+                "{count} items over {keys} keys"
+            );
+        }
     }
 }

@@ -1,4 +1,4 @@
-use codec::tables::{Table, TableEntry};
+use document::tables::{Table, TableEntry};
 use iced::Task;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Map, Value};
@@ -191,7 +191,7 @@ fn decode_enum<T: DeserializeOwned>(kind: &str, properties: Value) -> Result<T, 
     serde_json::from_value(Value::Object(wrapper)).map_err(|error| error.to_string())
 }
 
-fn handle_text(handle: codec::Handle) -> String {
+fn handle_text(handle: document::Handle) -> String {
     format!("{:X}", handle.value())
 }
 
@@ -205,7 +205,7 @@ fn without_hex_prefix(value: &str) -> &str {
 fn record(
     collection: &str,
     kind: &str,
-    handle: Option<codec::Handle>,
+    handle: Option<document::Handle>,
     name: Option<&str>,
     mutable: bool,
     properties: Value,
@@ -227,7 +227,7 @@ fn record(
 }
 
 fn entity_record(
-    entity: &codec::EntityType,
+    entity: &document::EntityType,
     reference_only: bool,
     disabled_plugins: &rustc_hash::FxHashSet<String>,
 ) -> Result<Value, String> {
@@ -265,8 +265,8 @@ fn entity_record(
 }
 
 fn object_record(
-    handle: codec::Handle,
-    object: &codec::objects::ObjectType,
+    handle: document::Handle,
+    object: &document::objects::ObjectType,
 ) -> Result<Value, String> {
     let (kind, properties) = enum_parts(object)?;
     Ok(record(
@@ -304,16 +304,16 @@ fn table_records<T: Serialize + TableEntry>(
 const REPRESENTATION_TAG: &str = "AcDbBlockRepBTag";
 
 fn representation_definition(
-    document: &codec::Document,
-    record: &codec::tables::BlockRecord,
-) -> Option<codec::Handle> {
+    document: &document::Document,
+    record: &document::tables::BlockRecord,
+) -> Option<document::Handle> {
     document
         .object_xdata(record.handle)?
         .get_record(REPRESENTATION_TAG)?
         .values
         .iter()
         .find_map(|value| match value {
-            codec::xdata::XDataValue::Handle(handle)
+            document::xdata::XDataValue::Handle(handle)
                 if !handle.is_null() && *handle != record.handle =>
             {
                 Some(*handle)
@@ -326,8 +326,8 @@ fn representation_definition(
 /// at an anonymous `*U` record, so the named definition's own list is empty:
 /// report the inserts under the definition they display, and keep the
 /// generated record from advertising them a second time.
-fn block_record_records(document: &codec::Document) -> Result<Vec<Value>, String> {
-    let mut folded: rustc_hash::FxHashMap<codec::Handle, Vec<codec::Handle>> = Default::default();
+fn block_record_records(document: &document::Document) -> Result<Vec<Value>, String> {
+    let mut folded: rustc_hash::FxHashMap<document::Handle, Vec<document::Handle>> = Default::default();
     let mut generated = rustc_hash::FxHashSet::default();
     for record in document.block_records.iter() {
         if record.insert_handles.is_empty() {
@@ -379,7 +379,7 @@ fn block_record_records(document: &codec::Document) -> Result<Vec<Value>, String
 fn map_records<T: Serialize>(
     collection: &str,
     kind: &str,
-    values: &std::collections::HashMap<codec::Handle, T>,
+    values: &std::collections::HashMap<document::Handle, T>,
 ) -> Result<Vec<Value>, String> {
     let mut entries: Vec<_> = values.iter().collect();
     entries.sort_by_key(|(handle, _)| handle.value());
@@ -578,7 +578,7 @@ fn collection_records(
     }
 }
 
-fn collection_count(document: &codec::Document, collection: &str) -> usize {
+fn collection_count(document: &document::Document, collection: &str) -> usize {
     match collection {
         "entities" => document.entities().count(),
         "objects" => document.objects.len(),
@@ -920,6 +920,12 @@ fn append_schema_fields(
         if let Some(constraints) = type_constraints(type_id) {
             object.insert("constraints".into(), constraints);
         }
+        if type_id == "Color" {
+            object.insert(
+                "value_examples".into(),
+                json!([3, {"rgb":[255, 128, 0]}, {"Index":3}, "ByLayer", "ByBlock"]),
+            );
+        }
         fields.push(description);
 
         let nested_prefix = if sequence {
@@ -1205,18 +1211,96 @@ fn collection_record_types(collection: &str) -> Vec<Value> {
     })]
 }
 
-fn requested_handle(request: &Value) -> Result<codec::Handle, String> {
+fn requested_handle(request: &Value) -> Result<document::Handle, String> {
     request["handle"]
         .as_str()
         .and_then(|value| u64::from_str_radix(without_hex_prefix(value), 16).ok())
-        .map(codec::Handle::new)
+        .map(document::Handle::new)
         .ok_or_else(|| "set_properties requires a hexadecimal handle".to_string())
+}
+
+/// The registry type at `path` inside a record of `collection`; `kind` is the
+/// variant an entity or object record serializes as. Follows struct fields,
+/// sequence indices and newtype variants; `None` once the path leaves what
+/// the registry describes.
+fn type_at_path(collection: &str, kind: Option<&str>, path: &str) -> Option<String> {
+    let step = |type_name: &str, segment: &str| -> Option<(String, bool)> {
+        let info = registry_types().get(type_name)?;
+        let field = match info["kind"].as_str()? {
+            "Struct" => info["fields"]
+                .as_array()?
+                .iter()
+                .find(|field| field["name"] == segment)?,
+            "Enum" => {
+                let variant = info["variants"]
+                    .as_array()?
+                    .iter()
+                    .find(|variant| variant["name"] == segment)?;
+                let fields = variant["fields"].as_array()?;
+                (fields.len() == 1 && fields[0]["name"] == "0").then(|| &fields[0])?
+            }
+            _ => return None,
+        };
+        Some((
+            field["type_id"].as_str()?.to_string(),
+            field["is_sequence"].as_bool().unwrap_or(false),
+        ))
+    };
+    let mut current = collection_root_type(collection)?.to_string();
+    if let Some(kind) = kind {
+        current = step(&current, kind)?.0;
+    }
+    let mut segments = path
+        .split('/')
+        .skip(1)
+        .map(|segment| segment.replace("~1", "/").replace("~0", "~"));
+    while let Some(segment) = segments.next() {
+        let (next, sequence) = step(&current, &segment)?;
+        current = next;
+        if sequence {
+            if let Some(index) = segments.next() {
+                index.parse::<usize>().ok()?;
+            }
+        }
+    }
+    Some(current)
+}
+
+/// A colour written the way `entities_create` and `property` take it, an
+/// index number (0 ByBlock, 1-255, 256 ByLayer, 257 None) or
+/// `{"rgb":[r,g,b]}`, in its serialized form. The serialized forms
+/// (`{"Index":3}`, `"ByLayer"`) pass through unchanged.
+fn color_update_value(path: &str, value: Value) -> Result<Value, String> {
+    let color = if let Some(index) = value.as_i64() {
+        if !(0..=257).contains(&index) {
+            return Err(format!(
+                "{path}: a colour index is 0 (ByBlock) through 256 (ByLayer), or 257 (None)"
+            ));
+        }
+        document::types::Color::from_index(index as i16)
+    } else if let Some(rgb) = value.as_object().and_then(|object| object.get("rgb")) {
+        let components = rgb
+            .as_array()
+            .filter(|components| components.len() == 3)
+            .and_then(|components| {
+                components
+                    .iter()
+                    .map(|component| component.as_u64().and_then(|c| u8::try_from(c).ok()))
+                    .collect::<Option<Vec<u8>>>()
+            })
+            .ok_or_else(|| format!("{path}: rgb takes three components 0 through 255"))?;
+        document::types::Color::from_rgb(components[0], components[1], components[2])
+    } else {
+        return Ok(value);
+    };
+    json_value(&color)
 }
 
 fn apply_updates(
     properties: &mut Value,
     request: &Value,
     collection: &str,
+    kind: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let updates = request["updates"]
         .as_array()
@@ -1237,10 +1321,13 @@ fn apply_updates(
         if path_changes_identity(collection, path) {
             return Err(format!("{path} is read-only identity data"));
         }
-        let value = update
+        let mut value = update
             .get("value")
             .ok_or_else(|| format!("update {path} requires value"))?
             .clone();
+        if type_at_path(collection, kind, path).as_deref() == Some("Color") {
+            value = color_update_value(path, value)?;
+        }
         let target = properties
             .pointer_mut(path)
             .ok_or_else(|| format!("property does not exist: {path}"))?;
@@ -1312,7 +1399,7 @@ where
     let requested = request["handle"].as_str().and_then(|value| {
         u64::from_str_radix(without_hex_prefix(value), 16)
             .ok()
-            .map(codec::Handle::new)
+            .map(document::Handle::new)
     });
     let name = request["name"].as_str();
     let source = table
@@ -1324,7 +1411,7 @@ where
         .cloned()
         .ok_or_else(|| format!("record does not exist in {collection}"))?;
     let mut properties = json_value(&source)?;
-    let paths = apply_updates(&mut properties, request, collection)?;
+    let paths = apply_updates(&mut properties, request, collection, None)?;
     let edited: T = serde_json::from_value(properties).map_err(|error| error.to_string())?;
     if edited.handle() != source.handle() || edited.name() != source.name() {
         return Err("record identity is read-only".into());
@@ -1332,7 +1419,7 @@ where
     Ok((source, edited, paths))
 }
 
-fn replace_table_entry<T: TableEntry>(table: &mut Table<T>, handle: codec::Handle, edited: T) {
+fn replace_table_entry<T: TableEntry>(table: &mut Table<T>, handle: document::Handle, edited: T) {
     let target = table
         .iter_mut()
         .find(|entry| entry.handle() == handle)
@@ -1632,9 +1719,9 @@ impl OpenCADStudio {
                     .ok_or_else(|| failure("record_absent", "entity does not exist"))?;
                 let (kind, mut properties) =
                     enum_parts(&source).map_err(|error| failure("serialization_failed", error))?;
-                paths = apply_updates(&mut properties, request, collection)
+                paths = apply_updates(&mut properties, request, collection, Some(&kind))
                     .map_err(|error| failure("invalid_update", error))?;
-                let mut edited: codec::EntityType = decode_enum(&kind, properties)
+                let mut edited: document::EntityType = decode_enum(&kind, properties)
                     .map_err(|error| failure("invalid_value", error))?;
                 if edited.common().handle != handle {
                     return Err(failure("identity_changed", "entity identity is read-only"));
@@ -1663,9 +1750,9 @@ impl OpenCADStudio {
                     .ok_or_else(|| failure("record_absent", "object does not exist"))?;
                 let (kind, mut properties) =
                     enum_parts(&source).map_err(|error| failure("serialization_failed", error))?;
-                paths = apply_updates(&mut properties, request, collection)
+                paths = apply_updates(&mut properties, request, collection, Some(&kind))
                     .map_err(|error| failure("invalid_update", error))?;
-                let mut edited: codec::objects::ObjectType = decode_enum(&kind, properties)
+                let mut edited: document::objects::ObjectType = decode_enum(&kind, properties)
                     .map_err(|error| failure("invalid_value", error))?;
                 edited.preserve_storage_data_from(&source);
                 changed = edited != source;
@@ -1681,7 +1768,7 @@ impl OpenCADStudio {
                 let source = self.tabs[i].scene.document.header.clone();
                 let mut properties =
                     json_value(&source).map_err(|error| failure("serialization_failed", error))?;
-                paths = apply_updates(&mut properties, request, collection)
+                paths = apply_updates(&mut properties, request, collection, None)
                     .map_err(|error| failure("invalid_update", error))?;
                 let edited =
                     serde_json::from_value(properties).map_err(|error: serde_json::Error| {
@@ -1701,7 +1788,7 @@ impl OpenCADStudio {
                 let source = self.tabs[i].scene.document.summary_info.clone();
                 let mut properties =
                     json_value(&source).map_err(|error| failure("serialization_failed", error))?;
-                paths = apply_updates(&mut properties, request, collection)
+                paths = apply_updates(&mut properties, request, collection, None)
                     .map_err(|error| failure("invalid_update", error))?;
                 let edited =
                     serde_json::from_value(properties).map_err(|error: serde_json::Error| {
@@ -1796,9 +1883,9 @@ impl OpenCADStudio {
 
 #[cfg(test)]
 mod tests {
-    use codec::entities::{AttributeEntity, EntityType, Insert};
-    use codec::objects::{Dictionary, ObjectType};
-    use codec::types::{Handle, Vector3};
+    use document::entities::{AttributeEntity, EntityType, Insert};
+    use document::objects::{Dictionary, ObjectType};
+    use document::types::{Handle, Vector3};
     use serde_json::{json, Value};
 
     use super::OpenCADStudio;
@@ -1849,7 +1936,7 @@ mod tests {
         let handle =
             app.tabs[i]
                 .scene
-                .add_entity(EntityType::Line(codec::entities::Line::from_points(
+                .add_entity(EntityType::Line(document::entities::Line::from_points(
                     Vector3::new(0.0, 0.0, 0.0),
                     Vector3::new(10.0, 0.0, 0.0),
                 )));
@@ -1903,12 +1990,12 @@ mod tests {
         // An entity stamped with a perfect plugin class identity (registered
         // app, class-prefix key) still shows the native display while no
         // declaring plugin is loaded — the gating is live manager state.
-        let mut entity = EntityType::Line(codec::entities::Line::from_points(
+        let mut entity = EntityType::Line(document::entities::Line::from_points(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(10.0, 0.0, 0.0),
         ));
-        let mut record = codec::xdata::ExtendedDataRecord::new("CVIFC");
-        record.add_value(codec::xdata::XDataValue::String(
+        let mut record = document::xdata::ExtendedDataRecord::new("CVIFC");
+        record.add_value(document::xdata::XDataValue::String(
             "CVIFC-CLASS:LINE".to_string(),
         ));
         entity.common_mut().extended_data.add_record(record);
@@ -2045,6 +2132,82 @@ mod tests {
         let undo = execute(&mut app, json!({"op":"undo"}), "undo-summary");
         assert_eq!(undo["status"], "completed", "{undo}");
         assert!(app.tabs[i].scene.document.summary_info.author.is_empty());
+    }
+
+    /// `entities_create` and `property` take a colour as an index number or
+    /// `{"rgb":[r,g,b]}`, but `set_properties` only took the serialized enum:
+    /// `{"path":"/color","value":3}` on a layer failed with "invalid type:
+    /// integer". Every Color-typed path now takes all three forms.
+    #[test]
+    fn set_properties_takes_colour_numbers_and_rgb_like_the_other_ops() {
+        use document::types::Color;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let layer = |app: &OpenCADStudio| app.tabs[i].scene.document.layers.get("0").unwrap().color;
+        let set_layer = |app: &mut OpenCADStudio, id: &str, path: &str, value: Value| {
+            execute(
+                app,
+                json!({
+                    "op":"set_properties",
+                    "collection":"layers",
+                    "name":"0",
+                    "updates":[{"path":path,"value":value}]
+                }),
+                id,
+            )
+        };
+
+        let index = set_layer(&mut app, "layer-index", "/color", json!(3));
+        assert_eq!(index["status"], "completed", "{index}");
+        assert_eq!(layer(&app), Color::Index(3));
+        let rgb = set_layer(
+            &mut app,
+            "layer-rgb",
+            "/color",
+            json!({"rgb":[255, 128, 0]}),
+        );
+        assert_eq!(rgb["status"], "completed", "{rgb}");
+        assert_eq!(layer(&app), Color::from_rgb(255, 128, 0));
+        let serialized = set_layer(&mut app, "layer-serde", "/color", json!({"Index":5}));
+        assert_eq!(serialized["status"], "completed", "{serialized}");
+        assert_eq!(layer(&app), Color::Index(5));
+
+        let out_of_range = set_layer(&mut app, "layer-300", "/color", json!(300));
+        assert_eq!(out_of_range["code"], "invalid_update", "{out_of_range}");
+        assert_eq!(
+            layer(&app),
+            Color::Index(5),
+            "a refused colour changes nothing"
+        );
+        // Only Color-typed paths convert: a number into a string field is
+        // still a type error, not a colour.
+        let not_colour = set_layer(&mut app, "layer-desc", "/description", json!(3));
+        assert_ne!(not_colour["status"], "completed", "{not_colour}");
+
+        let line = document::entities::Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        let entity = app.tabs[i].scene.add_entity(EntityType::Line(line));
+        let red = execute(
+            &mut app,
+            json!({
+                "op":"set_properties",
+                "collection":"entities",
+                "handle":format!("{:X}", entity.value()),
+                "updates":[{"path":"/common/color","value":1}]
+            }),
+            "entity-red",
+        );
+        assert_eq!(red["status"], "completed", "{red}");
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .get_entity(entity)
+                .unwrap()
+                .common()
+                .color,
+            Color::Index(1)
+        );
     }
 
     #[test]
@@ -2254,7 +2417,7 @@ mod tests {
 
     #[test]
     fn block_records_report_a_dynamic_definitions_evaluated_references() {
-        use codec::entities::Line;
+        use document::entities::Line;
 
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
@@ -2353,7 +2516,7 @@ mod tests {
 
     #[test]
     fn block_record_reference_lists_are_derived_and_read_only() {
-        use codec::entities::Line;
+        use document::entities::Line;
 
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
@@ -2386,9 +2549,9 @@ mod tests {
             .get("*U7")
             .unwrap()
             .handle;
-        let mut tag = codec::xdata::ExtendedDataRecord::new("AcDbBlockRepBTag");
-        tag.add_value(codec::xdata::XDataValue::Integer16(1));
-        tag.add_value(codec::xdata::XDataValue::Handle(definition));
+        let mut tag = document::xdata::ExtendedDataRecord::new("AcDbBlockRepBTag");
+        tag.add_value(document::xdata::XDataValue::Integer16(1));
+        tag.add_value(document::xdata::XDataValue::Handle(definition));
         app.tabs[i]
             .scene
             .document

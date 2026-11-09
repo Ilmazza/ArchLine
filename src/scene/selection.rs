@@ -13,7 +13,7 @@ fn pe_url_strings(entity: &EntityType) -> impl Iterator<Item = &str> {
         .into_iter()
         .flat_map(|record| record.values.iter())
         .filter_map(|value| match value {
-            codec::xdata::XDataValue::String(text) => Some(text.trim()),
+            document::xdata::XDataValue::String(text) => Some(text.trim()),
             _ => None,
         })
 }
@@ -78,6 +78,7 @@ impl Scene {
             return;
         }
         self.selected_constraint = None;
+        self.table_cells = None;
         let expanded = self.expanded_with_leaders(handles);
         let mut changed = false;
         for handle in expanded {
@@ -131,6 +132,7 @@ impl Scene {
     }
     pub fn select_entity(&mut self, handle: Handle, exclusive: bool) {
         self.selected_constraint = None;
+        self.table_cells = None;
         let handles = self.handles_expanded_for_leader_annotations(&[handle]);
         let mut changed = false;
 
@@ -154,6 +156,7 @@ impl Scene {
 
     pub fn deselect_all(&mut self) {
         self.selected_constraint = None;
+        self.table_cells = None;
         self.sub_segments.clear();
         if self.selected.is_empty() {
             return;
@@ -161,6 +164,29 @@ impl Scene {
         self.selected.clear();
         self.selected_order.clear();
         self.bump_selection_set();
+    }
+
+    /// Snapshot the current selection as the "previous" set SELECTPREVIOUS
+    /// hands back. Called when a command starts, before its own picks replace
+    /// the set, and skipped by the commands that only read the set.
+    pub(crate) fn remember_selection_set(&mut self) {
+        let current = self.selected_handles_in_order();
+        if current != self.previous_selected {
+            self.previous_selected = current;
+        }
+    }
+
+    /// Swap the current selection with the remembered one. Returns the number
+    /// of objects restored, or `None` when nothing was remembered.
+    pub(crate) fn select_previous(&mut self) -> Option<usize> {
+        if self.previous_selected.is_empty() {
+            return None;
+        }
+        let current = self.selected_handles_in_order();
+        let previous = std::mem::take(&mut self.previous_selected);
+        self.replace_selection_exact(&previous);
+        self.previous_selected = current;
+        Some(previous.len())
     }
 
     /// Script-facing replacement: preserve exactly the validated input order.
@@ -318,24 +344,88 @@ impl Scene {
 
     fn qselect_candidate_handles(&self, scope: crate::app::QSelectScope) -> Vec<Handle> {
         match scope {
-            crate::app::QSelectScope::CurrentSpace => self.current_layout_entity_handles(),
+            // Through an active viewport the current space is model space,
+            // the same space picking works in (#2611).
+            crate::app::QSelectScope::CurrentSpace => {
+                let block = self.interaction_block_handle();
+                self.document
+                    .block_records
+                    .iter()
+                    .find(|br| br.handle == block)
+                    .map(|br| br.entity_handles.clone())
+                    .unwrap_or_default()
+            }
             crate::app::QSelectScope::CurrentSelection => self.selected_handles_in_order(),
         }
+    }
+
+    /// Select the current space's objects on `layers` (names, any case).
+    /// Returns how many are selected.
+    pub fn select_objects_on_layers(&mut self, layers: &[String]) -> usize {
+        let handles: HashSet<Handle> = self.objects_on_layers(layers).into_iter().collect();
+        self.replace_selection(handles);
+        self.selected.len()
+    }
+
+    /// The current space's objects on `layers` (names, any case).
+    pub fn objects_on_layers(&self, layers: &[String]) -> Vec<Handle> {
+        self.qselect_candidate_handles(crate::app::QSelectScope::CurrentSpace)
+            .into_iter()
+            .filter(|h| {
+                self.document.get_entity(*h).is_some_and(|e| {
+                    let layer = &e.common().layer;
+                    layers.iter().any(|name| name.eq_ignore_ascii_case(layer))
+                })
+            })
+            .collect()
     }
 
     pub fn qselect_candidate_count(&self, scope: crate::app::QSelectScope) -> usize {
         self.qselect_candidate_handles(scope).len()
     }
 
-    pub fn qselect_entity_type_names(&self, scope: crate::app::QSelectScope) -> Vec<String> {
+    /// The object types in the scope, by name, with how many of each.
+    pub fn qselect_type_counts(&self, scope: crate::app::QSelectScope) -> Vec<(String, usize)> {
         use crate::entities::traits::entity_type_name;
-        let mut names = std::collections::BTreeSet::new();
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
         for h in self.qselect_candidate_handles(scope) {
             if let Some(entity) = self.document.get_entity(h) {
-                names.insert(entity_type_name(entity).to_string());
+                *counts
+                    .entry(entity_type_name(entity).to_string())
+                    .or_default() += 1;
             }
         }
-        names.into_iter().collect()
+        counts.into_iter().collect()
+    }
+
+    /// The values `field` takes on the scope's objects (of `type_name`, when
+    /// given), most frequent first, at most `limit` of them.
+    pub fn qselect_value_counts(
+        &self,
+        scope: crate::app::QSelectScope,
+        type_name: Option<&str>,
+        field: &str,
+        limit: usize,
+    ) -> Vec<(String, usize)> {
+        use crate::entities::traits::entity_type_name;
+        let mut counts = rustc_hash::FxHashMap::<String, usize>::default();
+        for h in self.qselect_candidate_handles(scope) {
+            let Some(entity) = self.document.get_entity(h) else {
+                continue;
+            };
+            if type_name.is_some_and(|wanted| entity_type_name(entity) != wanted) {
+                continue;
+            }
+            if let Some(value) = self.entity_property_value(entity, field) {
+                if !value.trim().is_empty() {
+                    *counts.entry(value).or_default() += 1;
+                }
+            }
+        }
+        let mut counts: Vec<(String, usize)> = counts.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts.truncate(limit);
+        counts
     }
 
     /// Add every object of the active layout that has the type of a
@@ -346,7 +436,7 @@ impl Scene {
         if self.selected.is_empty() {
             return 0;
         }
-        let key = |e: &codec::EntityType| -> Vec<Option<String>> {
+        let key = |e: &document::EntityType| -> Vec<Option<String>> {
             SIMILAR_FIELDS
                 .iter()
                 .filter(|(bit, _)| mode & bit != 0)
@@ -445,77 +535,88 @@ impl Scene {
             operator: op,
             value: value.to_owned(),
         };
-        self.qselect_conditions(scope, &[condition], mode, append)
+        let result = if append {
+            crate::app::QSelectResult::Add
+        } else {
+            crate::app::QSelectResult::New
+        };
+        self.qselect_conditions(scope, &[condition], mode, result)
     }
 
-    /// Evaluate all conditions against the same candidate set, then apply result behavior once.
+    /// The scope's objects the conditions find (or, in Exclude mode, don't),
+    /// without touching the selection.
+    pub fn qselect_matches(
+        &self,
+        scope: crate::app::QSelectScope,
+        conditions: &[crate::app::QSelectCondition],
+        mode: crate::app::QSelectMode,
+    ) -> Vec<Handle> {
+        let filter = crate::filter::qselect::filter_from_conditions(conditions);
+        let source = EntityProperties(self);
+        let include = matches!(mode, crate::app::QSelectMode::Include);
+        self.qselect_candidate_handles(scope)
+            .into_iter()
+            .filter(|h| {
+                self.document
+                    .get_entity(*h)
+                    .is_some_and(|e| filter.matches(&source, e) == include)
+            })
+            .collect()
+    }
+
+    /// The scope's objects a whole filter finds (or, with `invert`, the
+    /// ones it doesn't), without touching the selection.
+    pub fn filter_matches(
+        &self,
+        scope: crate::app::QSelectScope,
+        filter: &crate::filter::Filter,
+        invert: bool,
+    ) -> Vec<Handle> {
+        let source = EntityProperties(self);
+        self.qselect_candidate_handles(scope)
+            .into_iter()
+            .filter(|h| {
+                self.document
+                    .get_entity(*h)
+                    .is_some_and(|e| filter.matches(&source, e) != invert)
+            })
+            .collect()
+    }
+
+    /// `handles` become, join or leave the selection.
+    pub fn apply_found(
+        &mut self,
+        handles: Vec<Handle>,
+        result: crate::app::QSelectResult,
+    ) -> usize {
+        use crate::app::QSelectResult;
+        let selection: HashSet<Handle> = match result {
+            QSelectResult::New => handles.into_iter().collect(),
+            QSelectResult::Add => self.selected.iter().copied().chain(handles).collect(),
+            QSelectResult::Remove => {
+                let found: HashSet<Handle> = handles.into_iter().collect();
+                self.selected
+                    .iter()
+                    .copied()
+                    .filter(|h| !found.contains(h))
+                    .collect()
+            }
+        };
+        self.replace_selection(selection);
+        self.selected.len()
+    }
+
+    /// Evaluate all conditions against the same candidate set, then apply the
+    /// result once: the matches become, join or leave the selection.
     pub fn qselect_conditions(
         &mut self,
         scope: crate::app::QSelectScope,
         conditions: &[crate::app::QSelectCondition],
         mode: crate::app::QSelectMode,
-        append: bool,
+        result: crate::app::QSelectResult,
     ) -> usize {
-        use crate::app::{QSelectMode, QSelectOp};
-        use crate::entities::traits::entity_type_name;
-        let previous = self.selected.clone();
-        let handles = self.qselect_candidate_handles(scope);
-        let mut result = HashSet::default();
-        for h in handles {
-            let Some(e) = self.document.get_entity(h) else {
-                continue;
-            };
-            let matches_filter = conditions.iter().all(|condition| {
-                let type_ok = condition
-                    .type_filter
-                    .as_deref()
-                    .is_none_or(|t| entity_type_name(e) == t);
-                let prop_ok = if !type_ok {
-                    true
-                } else {
-                    match (
-                        condition
-                            .property
-                            .as_ref()
-                            .map(|property| property.field.as_str()),
-                        condition.operator,
-                    ) {
-                        (None, _) | (_, QSelectOp::Any) => true,
-                        (Some(field), op) => match self.entity_property_value(e, field) {
-                            Some(actual) => match op {
-                                QSelectOp::Eq => actual.eq_ignore_ascii_case(&condition.value),
-                                QSelectOp::Neq => !actual.eq_ignore_ascii_case(&condition.value),
-                                QSelectOp::Gt | QSelectOp::Lt => {
-                                    match (
-                                        crate::entities::common::parse_f64(&actual),
-                                        crate::entities::common::parse_f64(&condition.value),
-                                    ) {
-                                        (Some(a), Some(b)) if matches!(op, QSelectOp::Gt) => a > b,
-                                        (Some(a), Some(b)) => a < b,
-                                        _ => false,
-                                    }
-                                }
-                                QSelectOp::Any => true,
-                            },
-                            None => false,
-                        },
-                    }
-                };
-                type_ok && prop_ok
-            });
-            let keep = match mode {
-                QSelectMode::Include => matches_filter,
-                QSelectMode::Exclude => !matches_filter,
-            };
-            if keep {
-                result.insert(h);
-            }
-        }
-        if append {
-            result.extend(previous);
-        }
-        self.replace_selection(result);
-        self.selected.len()
+        let matches = self.qselect_matches(scope, conditions, mode);
+        self.apply_found(matches, result)
     }
 
     /// Entity type names in the current layout for the selection-filter menu.
@@ -958,10 +1059,14 @@ impl Scene {
     /// `"ByLayer"` / `"7"` / `"0.30mm"` are stable; everything else
     /// goes through `geometry_properties()` and pulls the matching
     /// row's value out.
-    pub fn entity_property_value(&self, entity: &codec::EntityType, field: &str) -> Option<String> {
+    pub fn entity_property_value(&self, entity: &document::EntityType, field: &str) -> Option<String> {
         use crate::entities::traits::EntityTypeOps;
         use crate::scene::model::object::PropValue;
         match field {
+            // The type test as a property, so a command-line filter can match
+            // type names with the same wildcards and comparisons as any other
+            // value. The dialog keeps using `Condition::type_filter` directly.
+            "type" => Some(crate::entities::traits::entity_type_name(entity).to_string()),
             "handle" => Some(entity.common().handle.value().to_string()),
             "layer" => Some(entity.common().layer.clone()),
             "color" => Some(
@@ -989,9 +1094,9 @@ impl Scene {
             ),
             "lineweight" => Some(Self::format_lineweight(entity.common().line_weight)),
             "transparency" => Some(match entity.common().transparency {
-                codec::types::Transparency::ByLayer => "ByLayer".to_string(),
-                codec::types::Transparency::ByBlock => "ByBlock".to_string(),
-                codec::types::Transparency::Explicit(alpha) => {
+                document::types::Transparency::ByLayer => "ByLayer".to_string(),
+                document::types::Transparency::ByBlock => "ByBlock".to_string(),
+                document::types::Transparency::Explicit(alpha) => {
                     ((alpha as f64 / 255.0 * 100.0).round() as u32).to_string()
                 }
             }),
@@ -1056,8 +1161,8 @@ impl Scene {
         }
     }
 
-    fn format_color(c: codec::types::Color) -> String {
-        use codec::types::Color;
+    fn format_color(c: document::types::Color) -> String {
+        use document::types::Color;
         match c {
             Color::ByLayer => "ByLayer".to_string(),
             Color::None => "None".to_string(),
@@ -1067,8 +1172,8 @@ impl Scene {
         }
     }
 
-    fn format_lineweight(lw: codec::types::LineWeight) -> String {
-        use codec::types::LineWeight;
+    fn format_lineweight(lw: document::types::LineWeight) -> String {
+        use document::types::LineWeight;
         match lw {
             LineWeight::ByLayer => "ByLayer".to_string(),
             LineWeight::ByBlock => "ByBlock".to_string(),
@@ -1094,6 +1199,15 @@ impl Scene {
     /// enforced either way.
     pub fn erase_entities_plugin(&mut self, handles: &[Handle]) {
         self.remove_entities(handles, true, false, true);
+    }
+
+    /// Erase entities a constraint owns, such as the dimension it draws.
+    /// Ownership, not the layer, decides: a locked layer must not keep a
+    /// measurement alive after the geometry it measured is gone. The
+    /// reference-only skip is bypassed as well; a constraint-owned dimension is
+    /// never plugin-designated.
+    pub(crate) fn erase_constraint_owned(&mut self, handles: &[Handle]) {
+        self.remove_entities(handles, false, false, true);
     }
 
     /// Roll back entities created by the current command after a downstream
@@ -1122,7 +1236,7 @@ impl Scene {
         let mut managers_by_section: HashMap<Handle, Vec<Handle>> = HashMap::default();
         for (handle, object) in self.document.objects.iter() {
             if let ObjectType::ClassObject(object) = object {
-                if let codec::objects::ClassObjectData::SectionManager(manager) = &object.data {
+                if let document::objects::ClassObjectData::SectionManager(manager) = &object.data {
                     for &section in &manager.sections {
                         managers_by_section
                             .entry(section)
@@ -1150,7 +1264,7 @@ impl Scene {
             }
             let settings_handle = self.document.get_entity(h).and_then(|entity| match entity {
                 EntityType::Extended(extended) => match &extended.data {
-                    codec::entities::ExtendedEntityData::SectionObject(data)
+                    document::entities::ExtendedEntityData::SectionObject(data)
                         if !data.settings_handle.is_null() =>
                     {
                         Some(data.settings_handle)
@@ -1189,7 +1303,7 @@ impl Scene {
                 if let Some(ObjectType::ClassObject(object)) =
                     self.document.objects.get_mut(&manager_handle)
                 {
-                    if let codec::objects::ClassObjectData::SectionManager(manager) =
+                    if let document::objects::ClassObjectData::SectionManager(manager) =
                         &mut object.data
                     {
                         manager.sections.retain(|section| *section != h);
@@ -1359,8 +1473,8 @@ mod tests {
     #[test]
     fn qselect_sample_matches_identical_entities_without_unique_handles() {
         use crate::app::{QSelectMode, QSelectScope};
-        use codec::entities::Line;
-        use codec::types::Vector3;
+        use document::entities::Line;
+        use document::types::Vector3;
         let mut scene = Scene::new();
         let line = || {
             EntityType::Line(Line::from_points(
@@ -1393,17 +1507,128 @@ mod tests {
                 QSelectScope::CurrentSpace,
                 &conditions,
                 QSelectMode::Include,
-                false,
+                crate::app::QSelectResult::New,
             ),
             2
         );
         assert!(scene.selected.contains(&first) && scene.selected.contains(&second));
     }
 
+    /// #2611: samples of two types find objects like either one, and a typed
+    /// number matches its displayed value whatever the precision.
+    #[test]
+    fn qselect_samples_of_two_types_and_numbers_compare_as_numbers() {
+        use crate::app::{QSelectMode, QSelectScope};
+        use document::entities::{Circle, Line};
+        use document::types::Vector3;
+        let mut scene = Scene::new();
+        let line = scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::ZERO,
+            Vector3::new(10.0, 0.0, 0.0),
+        )));
+        let mut circle = Circle::new();
+        circle.radius = 3.0;
+        let circle = scene.add_entity(EntityType::Circle(circle));
+        let mut conditions = scene.qselect_conditions_from_entity(line);
+        conditions.extend(scene.qselect_conditions_from_entity(circle));
+        let found = scene.qselect_conditions(
+            QSelectScope::CurrentSpace,
+            &conditions,
+            QSelectMode::Include,
+            crate::app::QSelectResult::New,
+        );
+        assert_eq!(found, 2, "a Line and a Circle sample find both");
+
+        assert!(crate::filter::compare::values_equal("10.0000", "10"));
+        assert!(!crate::filter::compare::values_equal("10.0000", "10.5"));
+        assert!(crate::filter::compare::values_equal("Walls", "WALLS"));
+    }
+
+    /// #2611: Quick Select on the shared filter engine. Layer patterns work,
+    /// an untyped condition holds for every type group, and Exclude keeps the
+    /// rest.
+    #[test]
+    fn qselect_runs_on_the_filter_engine_with_patterns_and_type_groups() {
+        use crate::app::{
+            QSelectCondition, QSelectMode, QSelectOp, QSelectPropertyChoice, QSelectScope,
+            QSelectValueEditor,
+        };
+        use document::entities::{Circle, Line};
+        use document::types::Vector3;
+        let mut scene = Scene::new();
+        for name in ["FAL-KULSO", "AJTO"] {
+            let _ = scene
+                .document
+                .layers
+                .add(document::tables::Layer::new(name));
+        }
+        let mut add = |entity: EntityType, layer: &str| {
+            let mut entity = entity;
+            entity.common_mut().layer = layer.to_string();
+            scene.add_entity(entity)
+        };
+        let line = || {
+            EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+            ))
+        };
+        let circle = || EntityType::Circle(Circle::new());
+        let wall_line = add(line(), "FAL-KULSO");
+        let wall_circle = add(circle(), "FAL-KULSO");
+        let door_line = add(line(), "AJTO");
+        let condition =
+            |type_filter: Option<&str>, field: Option<&str>, value: &str| QSelectCondition {
+                type_filter: type_filter.map(str::to_owned),
+                property: field.map(|field| QSelectPropertyChoice {
+                    field: field.to_owned(),
+                    label: field.to_owned(),
+                    editor: QSelectValueEditor::Text,
+                }),
+                operator: QSelectOp::Eq,
+                value: value.to_owned(),
+            };
+        let layer_fal = condition(None, Some("layer"), "FAL*");
+        assert_eq!(
+            scene.qselect_conditions(
+                QSelectScope::CurrentSpace,
+                &[layer_fal.clone()],
+                QSelectMode::Include,
+                crate::app::QSelectResult::New
+            ),
+            2
+        );
+        assert!(scene.selected.contains(&wall_line) && scene.selected.contains(&wall_circle));
+        // Line or Circle, both on FAL*: the door line is left out.
+        let typed = [
+            condition(Some("Line"), None, ""),
+            condition(Some("Circle"), None, ""),
+            layer_fal,
+        ];
+        assert_eq!(
+            scene.qselect_conditions(
+                QSelectScope::CurrentSpace,
+                &typed,
+                QSelectMode::Include,
+                crate::app::QSelectResult::New
+            ),
+            2
+        );
+        assert_eq!(
+            scene.qselect_conditions(
+                QSelectScope::CurrentSpace,
+                &typed,
+                QSelectMode::Exclude,
+                crate::app::QSelectResult::New
+            ),
+            1
+        );
+        assert!(scene.selected.contains(&door_line));
+    }
     #[test]
     fn pe_url_of_reads_standard_hyperlink_xdata() {
-        use codec::entities::Point;
-        use codec::xdata::{ExtendedDataRecord, XDataValue};
+        use document::entities::Point;
+        use document::xdata::{ExtendedDataRecord, XDataValue};
 
         let mut doc = Document::new();
 
@@ -1442,8 +1667,8 @@ mod tests {
 
     #[test]
     fn bulk_selection_matches_selecting_one_at_a_time() {
-        use codec::entities::Line;
-        use codec::types::Vector3;
+        use document::entities::Line;
+        use document::types::Vector3;
 
         let build = || {
             let mut scene = Scene::new();
@@ -1497,12 +1722,12 @@ mod tests {
 
     #[test]
     fn the_leader_index_matches_a_document_walk() {
-        use codec::entities::Leader;
-        use codec::types::Vector3;
+        use document::entities::Leader;
+        use document::types::Vector3;
 
         let mut scene = Scene::new();
         let line = |x: f64| {
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::new(x, 0.0, 0.0),
                 Vector3::new(x + 1.0, 0.0, 0.0),
             ))
@@ -1566,8 +1791,8 @@ mod tests {
 
     #[test]
     fn adding_a_type_already_present_reuses_the_list() {
-        use codec::entities::{Circle, EntityType, Line};
-        use codec::types::Vector3;
+        use document::entities::{Circle, EntityType, Line};
+        use document::types::Vector3;
         use std::sync::Arc;
 
         let line = || {
@@ -1606,8 +1831,8 @@ mod tests {
 
     #[test]
     fn changing_an_entity_type_rebuilds_the_type_names() {
-        use codec::entities::{Circle, EntityType, Line};
-        use codec::types::Vector3;
+        use document::entities::{Circle, EntityType, Line};
+        use document::types::Vector3;
 
         let mut scene = Scene::new();
         let handle = scene.add_entity(EntityType::Line(Line::from_points(
@@ -1624,8 +1849,8 @@ mod tests {
 
     #[test]
     fn layout_type_cache_reuses_and_invalidates_on_edits_undo_and_layout() {
-        use codec::entities::{Circle, EntityType, Line};
-        use codec::types::Vector3;
+        use document::entities::{Circle, EntityType, Line};
+        use document::types::Vector3;
         use std::sync::Arc;
 
         let mut scene = Scene::new();
@@ -1685,3 +1910,85 @@ mod tests {
 }
 
 
+
+/// Cells picked in one table: the cell the pick started from and the one it
+/// reaches (a Shift+click or a drag moves the second).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableCellSelection {
+    pub table: Handle,
+    pub anchor: (usize, usize),
+    pub end: (usize, usize),
+}
+
+impl TableCellSelection {
+    /// Top row, left column, bottom row, right column.
+    pub fn range(&self) -> (usize, usize, usize, usize) {
+        (
+            self.anchor.0.min(self.end.0),
+            self.anchor.1.min(self.end.1),
+            self.anchor.0.max(self.end.0),
+            self.anchor.1.max(self.end.1),
+        )
+    }
+}
+
+impl Scene {
+    /// Select cells of a table: the table becomes the only selected object.
+    pub fn select_table_cells(&mut self, cells: TableCellSelection) {
+        self.select_entity(cells.table, true);
+        self.table_cells = Some(cells);
+        self.bump_selection_set();
+    }
+
+    /// The cell of a shown table in the current space whose inside holds
+    /// `point` at least `margin` from its edges, topmost table first.
+    pub(crate) fn table_cell_pick(
+        &self,
+        point: glam::DVec3,
+        margin: f64,
+    ) -> Option<(Handle, (usize, usize))> {
+        let block = self.interaction_block_handle();
+        let record = self.document.block_records.iter().find(|r| r.handle == block)?;
+        record.entity_handles.iter().rev().find_map(|&handle| {
+            let Some(EntityType::Table(table)) = self.document.get_entity(handle) else {
+                return None;
+            };
+            let layer = self.document.layers.get(&table.common.layer);
+            if self.entity_temporarily_hidden(handle)
+                || self.is_reference_only(handle)
+                || !self.passes_selection_filter(handle)
+                || layer.is_some_and(|l| l.is_off() || l.is_frozen() || l.is_locked())
+                || table.common.invisible
+            {
+                return None;
+            }
+            let style = table.table_style_handle.and_then(|h| match self.document.objects.get(&h)? {
+                document::objects::ObjectType::TableStyle(style) => Some(style),
+                _ => None,
+            });
+            crate::modules::annotate::table_cmd::table_cell_inside(table, style, point, margin)
+                .map(|cell| (handle, cell))
+        })
+    }
+
+    /// The table whose cells are selected.
+    pub fn table_cells_handle(&self) -> Option<Handle> {
+        self.table_cells
+            .filter(|cells| self.selected.contains(&cells.table))
+            .map(|cells| cells.table)
+    }
+}
+
+/// The drawing's objects as the filter engine reads them: the type name and
+/// each property as Properties shows it.
+struct EntityProperties<'a>(&'a Scene);
+
+impl crate::filter::PropertySource for EntityProperties<'_> {
+    type Item = document::EntityType;
+    fn type_name<'a>(&'a self, item: &'a document::EntityType) -> &'a str {
+        crate::entities::traits::entity_type_name(item)
+    }
+    fn value(&self, item: &document::EntityType, property: &str) -> Option<String> {
+        self.0.entity_property_value(item, property)
+    }
+}

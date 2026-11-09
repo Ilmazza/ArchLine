@@ -24,7 +24,7 @@ static TRI_UP: &[u8] = include_bytes!("../../assets/icons/ui/tri_up.svg");
 static TRI_RIGHT: &[u8] = include_bytes!("../../assets/icons/ui/tri_right.svg");
 static TRI_LEFT: &[u8] = include_bytes!("../../assets/icons/ui/tri_left.svg");
 static HOME: &[u8] = include_bytes!("../../assets/icons/ui/home.svg");
-static UNDO: &[u8] = include_bytes!("../../assets/icons/ui/undo.svg");
+pub static UNDO: &[u8] = include_bytes!("../../assets/icons/ui/undo.svg");
 static REDO: &[u8] = include_bytes!("../../assets/icons/ui/redo.svg");
 
 // OSNAP marker symbols. Rendered as SVG (not Unicode glyphs) so the snap menu
@@ -65,6 +65,7 @@ pub static CHECK: &[u8] = include_bytes!("../../assets/icons/ui/check.svg");
 pub static CLOSE: &[u8] = include_bytes!("../../assets/icons/ui/close.svg");
 pub static EYEDROPPER: &[u8] = include_bytes!("../../assets/icons/ui/eyedropper.svg");
 pub static PLUS: &[u8] = include_bytes!("../../assets/icons/ui/plus.svg");
+pub static IMPORT: &[u8] = include_bytes!("../../assets/icons/ui/import.svg");
 pub static REFRESH: &[u8] = include_bytes!("../../assets/icons/ui/refresh.svg");
 pub static SWAP: &[u8] = include_bytes!("../../assets/icons/ui/swap.svg");
 pub static MINUS: &[u8] = include_bytes!("../../assets/icons/ui/minus.svg");
@@ -74,6 +75,10 @@ pub static COPY: &[u8] = include_bytes!("../../assets/icons/ui/copy.svg");
 pub static MENU: &[u8] = include_bytes!("../../assets/icons/ui/menu.svg");
 pub static MOVE: &[u8] = include_bytes!("../../assets/icons/ui/move.svg");
 pub static RESIZE: &[u8] = include_bytes!("../../assets/icons/ui/resize.svg");
+/// Move a dialog or pallet into a window of its own.
+pub static DETACH: &[u8] = include_bytes!("../../assets/icons/ui/window_detach.svg");
+/// Bring a window of its own back into the main window.
+pub static DOCK_BACK: &[u8] = include_bytes!("../../assets/icons/ui/window_dock_back.svg");
 pub static PIN: &[u8] = include_bytes!("../../assets/icons/ui/pin.svg");
 /// `PIN` tilted 30°: the pin while auto-hide is on.
 pub static PIN_ACTIVE: &[u8] = include_bytes!("../../assets/icons/ui/pin_active.svg");
@@ -924,7 +929,7 @@ pub fn mtp_icon() -> &'static [u8] {
 
 /// Base marker and offset arrow for the FROM point modifier.
 pub fn from_icon() -> &'static [u8] {
-    br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.5">
+    br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#B4B6B9" stroke-width="1.5">
 <circle cx="5" cy="18" r="3"/><path d="M7 16L19 4M12 4h7v7"/>
 </svg>"##
 }
@@ -1115,7 +1120,7 @@ pub fn set_scale_factor(scale: f32) {
     );
 }
 
-fn scale_factor() -> f32 {
+pub fn scale_factor() -> f32 {
     SCALE_FACTOR.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
 }
 

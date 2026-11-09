@@ -453,7 +453,12 @@ fn ui_icon(command: &str) -> Option<&'static [u8]> {
 /// glyph. `None` when the app has no icon for it.
 fn icon_for(command: &str) -> Option<MenuIcon> {
     let ribbon = |id: &str| registry::command_icon(id).map(MenuIcon::Ribbon);
-    ribbon(command)
+    // The five quick-access commands keep their quick-access glyph first:
+    // since upstream v2026.45 the registry has coloured icons for them too,
+    // and the Standard bar would change look.
+    ui_icon(command)
+        .map(MenuIcon::Ui)
+        .or_else(|| ribbon(command))
         .or_else(|| {
             RIBBON_ALIASES
                 .iter()
@@ -469,7 +474,6 @@ fn icon_for(command: &str) -> Option<MenuIcon> {
                 IconKind::Glyph(_) => None,
             }
         })
-        .or_else(|| ui_icon(command).map(MenuIcon::Ui))
         .or_else(|| super::menu_icons::ribbon(command).map(MenuIcon::Ribbon))
         .or_else(|| super::menu_icons::mono(command).map(MenuIcon::Ui))
 }
@@ -897,9 +901,9 @@ mod tests {
     /// below until the row gets one or is listed here on purpose. Kept sorted.
     ///
     /// The eighteen Ristrutturazione commands have their own icons
-    /// (`menu_icons::RIBBON`); only FIND, from the merge of upstream v2026.43,
-    /// is left without one.
-    const NO_ICON: &[&str] = &["FIND"];
+    /// (`menu_icons::RIBBON`); FIND, from the merge of upstream v2026.43, has
+    /// the registry's icon since v2026.45.
+    const NO_ICON: &[&str] = &[];
 
     #[test]
     fn command_rows_without_an_icon_are_the_known_ones() {

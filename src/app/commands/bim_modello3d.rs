@@ -23,7 +23,7 @@ use crate::bim::model3d_place::{
 use crate::bim::model3d_views;
 use crate::bim::section_build::SectionOptions;
 use crate::bim::units::DrawingUnit;
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use iced::Task;
 
 use super::bim::room_tolerance;

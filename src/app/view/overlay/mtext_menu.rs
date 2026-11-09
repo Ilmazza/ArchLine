@@ -7,7 +7,7 @@ use crate::app::mtext_editor::{
     EditorMenu, FractionPart, JustifyChoice, ListKind, MTextEditorState, MTextFmt, ParaNumber,
     Script,
 };
-use codec::entities::mtext_format::StackingType;
+use document::entities::mtext_format::StackingType;
 use iced::widget::column;
 pub(super) mod popup;
 
@@ -71,6 +71,9 @@ const UPPERCASE: &[u8] = include_bytes!("../../../../assets/icons/mt_upper.svg")
 const LOWERCASE: &[u8] = include_bytes!("../../../../assets/icons/mt_lower.svg");
 const TAB: &[u8] = include_bytes!("../../../../assets/icons/ui/arrow_long_right.svg");
 const DOWN: &[u8] = include_bytes!("../../../../assets/icons/ui/tri_down.svg");
+const MORE: &[u8] = include_bytes!("../../../../assets/icons/ui/more.svg");
+const NEW: &[u8] = include_bytes!("../../../../assets/icons/ui/doc_new.svg");
+const REFRESH: &[u8] = include_bytes!("../../../../assets/icons/ui/refresh.svg");
 
 fn mark_cell(mark: Mark) -> Element<'static, Message> {
     let cell: Element<'static, Message> = match mark {
@@ -219,7 +222,113 @@ fn title(menu: EditorMenu) -> String {
         EditorMenu::Fraction => label!("panel-fraction"),
         EditorMenu::Background => label!("background"),
         EditorMenu::Position => label!("position"),
+        EditorMenu::Style => t!("Style").into_owned(),
+        EditorMenu::NewStyle => t!("New text style").into_owned(),
     }
+}
+
+/// The open panel's content.
+fn panel(ed: &MTextEditorState, menu: EditorMenu) -> Element<'static, Message> {
+    match menu {
+        EditorMenu::Fraction => fraction_panel(ed),
+        EditorMenu::More => more_panel(ed),
+        EditorMenu::Background => background_panel(ed),
+        EditorMenu::Position => position_panel(ed),
+        EditorMenu::Paragraph => paragraph_panel(ed),
+        EditorMenu::Columns => columns_panel(ed),
+        EditorMenu::Justify => justify_panel(ed),
+        EditorMenu::Symbols => symbols_panel(),
+        EditorMenu::Find => find_panel(ed),
+        EditorMenu::Style => style_panel(ed),
+        EditorMenu::NewStyle => new_style_panel(ed),
+    }
+}
+
+/// The style menu beside the Style list: a style from the selected
+/// characters, and the Text Style Manager.
+pub(super) fn style_menu(ed: &MTextEditorState) -> Element<'static, Message> {
+    let open = matches!(ed.menu, Some(EditorMenu::Style | EditorMenu::NewStyle));
+    let base = iced::widget::tooltip(
+        button(crate::ui::icons::themed(MORE, 14.0))
+            .on_press(Message::MTextMenu(Some(EditorMenu::Style)))
+            .padding([5, 6])
+            .style(trigger_style(open)),
+        container(text(t!("Style")).size(11))
+            .padding(6)
+            .style(container::rounded_box),
+        iced::widget::tooltip::Position::Bottom,
+    );
+    let shown = open.then(|| panel(ed, ed.menu.unwrap_or(EditorMenu::Style)));
+    popup::anchored(base, shown, close())
+}
+
+fn style_panel(ed: &MTextEditorState) -> Element<'static, Message> {
+    let name = &ed.style;
+    let update = crate::tf!("Update “{name}” from selection").into_owned();
+    Panel::new(title(EditorMenu::Style), 260.0)
+        .push(row_button(
+            Mark::Svg(NEW),
+            t!("New style from selection…").into_owned(),
+            Message::MTextNewStyleOpen,
+        ))
+        .push(if ed.object_style.read_only {
+            inert(
+                Mark::Svg(REFRESH),
+                update,
+                t!("Referenced style · Read only").into_owned(),
+            )
+        } else {
+            item(
+                Mark::Svg(REFRESH),
+                update,
+                Message::MTextUpdateStyleFromSelection,
+            )
+        })
+        .separator()
+        .push(item(
+            "",
+            t!("Text Style Manager…").into_owned(),
+            Message::MTextStyleManager,
+        ))
+        .build()
+}
+
+fn new_style_panel(ed: &MTextEditorState) -> Element<'static, Message> {
+    let name = row![
+        text(t!("Name")).size(11).width(Fill),
+        text_input("", &ed.new_style_name)
+            .id(crate::app::mtext_editor::NEW_STYLE_NAME_ID)
+            .on_input(Message::MTextNewStyleName)
+            .on_submit(Message::MTextNewStyleCreate)
+            .size(12)
+            .padding(2)
+            .width(150),
+    ]
+    .spacing(6)
+    .padding([0, 6])
+    .align_y(iced::Alignment::Center)
+    .height(ROW_H);
+    let named = !ed.new_style_name.trim().is_empty();
+    let buttons = row![
+        Space::new().width(Fill),
+        button(text(label!("cancel")).size(11))
+            .on_press(Message::MTextNewStyleOpen)
+            .padding([3, 10])
+            .style(button::secondary),
+        button(text(t!("Create")).size(11))
+            .on_press_maybe(named.then_some(Message::MTextNewStyleCreate))
+            .padding([3, 10])
+            .style(button::primary),
+    ]
+    .spacing(6)
+    .padding([0, 6])
+    .align_y(iced::Alignment::Center)
+    .height(ROW_H + 6.0);
+    Panel::new(title(EditorMenu::NewStyle), 260.0)
+        .push(name.into())
+        .separator()
+        .push(buttons.into())
+        .build()
 }
 
 /// A second-row menu: its trigger, and its panel while it is open.
@@ -234,25 +343,18 @@ pub(super) fn toolbar_menu(ed: &MTextEditorState, menu: EditorMenu) -> Element<'
     });
     let open = shown == Some(menu);
     let base = button(
-        row![text(title(menu)).size(11), crate::ui::icons::themed_arrow_down(9.0)]
-            .spacing(5)
-            .align_y(iced::Alignment::Center),
+        row![
+            text(title(menu)).size(11),
+            crate::ui::icons::themed_arrow_down(9.0)
+        ]
+        .spacing(5)
+        .align_y(iced::Alignment::Center),
     )
     .on_press(Message::MTextMenu(Some(menu)))
     .padding([4, 8])
     .style(trigger_style(open));
-    let panel = open.then(|| match ed.menu.unwrap_or(menu) {
-        EditorMenu::Fraction => fraction_panel(ed),
-        EditorMenu::More => more_panel(ed),
-        EditorMenu::Background => background_panel(ed),
-        EditorMenu::Position => position_panel(ed),
-        EditorMenu::Paragraph => paragraph_panel(ed),
-        EditorMenu::Columns => columns_panel(ed),
-        EditorMenu::Justify => justify_panel(ed),
-        EditorMenu::Symbols => symbols_panel(),
-        EditorMenu::Find => find_panel(ed),
-    });
-    popup::anchored(base, panel, close())
+    let shown = open.then(|| panel(ed, ed.menu.unwrap_or(menu)));
+    popup::anchored(base, shown, close())
 }
 
 /// Character formatting the first row has no room for.
@@ -284,11 +386,6 @@ fn more_panel(ed: &MTextEditorState) -> Element<'static, Message> {
         ))
         .separator()
         .push(field(
-            label!("oblique"),
-            ed.span_field("oblique", &ed.oblique),
-            Message::MTextOblique,
-        ))
-        .push(field(
             label!("tracking"),
             ed.span_field("tracking", &ed.char_space),
             Message::MTextCharSpace,
@@ -311,7 +408,7 @@ fn more_panel(ed: &MTextEditorState) -> Element<'static, Message> {
 
 fn paragraph_panel(ed: &MTextEditorState) -> Element<'static, Message> {
     let list = ed.list_kind();
-    let exact = ed.line_spacing_style == codec::entities::LineSpacingStyle::Exactly;
+    let exact = ed.line_spacing_style == document::entities::LineSpacingStyle::Exactly;
     let factor = ed
         .line_spacing_draft
         .clone()
@@ -467,29 +564,54 @@ fn justify_panel(ed: &MTextEditorState) -> Element<'static, Message> {
 
 pub(super) fn symbols() -> Vec<(&'static str, String)> {
     vec![
-        ("⌀", label!("diameter")),
         ("°", label!("degree")),
         ("±", label!("plus-minus")),
+        ("⌀", label!("diameter")),
+        ("≈", label!("approximately")),
+        ("∠", label!("angle")),
+        ("℄", label!("centerline")),
+        ("Δ", label!("delta")),
+        ("ɸ", label!("electrical-phase")),
+        ("≡", label!("identity")),
+        ("≠", label!("not-equal")),
+        ("Ω", label!("ohm")),
+        ("Ω", label!("omega")),
+        ("⅊", label!("property-line")),
+        ("₂", label!("subscript-2")),
         ("²", label!("squared")),
         ("³", label!("cubed")),
         ("×", label!("multiply")),
         ("÷", label!("divide")),
         ("≤", label!("less-equal")),
         ("≥", label!("greater-equal")),
-        ("≈", label!("approximately")),
+        // Shown as a gap in the list; it keeps two words on one line.
+        ("\u{a0}", label!("non-breaking-space")),
     ]
 }
 
+/// Two columns, so the whole list opens under its button.
 fn symbols_panel() -> Element<'static, Message> {
-    symbols()
+    let mut cells: Vec<Element<'static, Message>> = symbols()
         .into_iter()
-        .fold(
-            Panel::new(title(EditorMenu::Symbols), 220.0),
-            |panel, (symbol, name)| {
-                panel.push(item(symbol, name, Message::MTextInsert(symbol.into())))
-            },
-        )
-        .build()
+        .map(|(symbol, name)| item(symbol, name, Message::MTextInsert(symbol.into())))
+        .collect();
+    let mut panel = Panel::new(title(EditorMenu::Symbols), 440.0);
+    while !cells.is_empty() {
+        let left = cells.remove(0);
+        let right: Element<'static, Message> = if cells.is_empty() {
+            Space::new().width(Fill).into()
+        } else {
+            cells.remove(0)
+        };
+        panel = panel.push(
+            row![
+                container(left).width(Fill),
+                container(right).width(Fill)
+            ]
+            .into(),
+        );
+    }
+    panel.build()
 }
 
 fn find_panel(ed: &MTextEditorState) -> Element<'static, Message> {
@@ -682,7 +804,7 @@ fn background_panel(ed: &MTextEditorState) -> Element<'static, Message> {
 
 /// Normal, vertical or by style set the MTEXT's own drawing direction.
 fn position_panel(ed: &MTextEditorState) -> Element<'static, Message> {
-    use codec::entities::DrawingDirection as D;
+    use document::entities::DrawingDirection as D;
     let panel = Panel::new(title(EditorMenu::Position), 240.0);
     let current = ed.direction_value();
     [

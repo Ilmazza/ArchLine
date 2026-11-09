@@ -1,4 +1,4 @@
-use codec::entities::{Viewport, ViewportRenderMode};
+use document::entities::{Viewport, ViewportRenderMode};
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
@@ -87,8 +87,15 @@ fn properties(vp: &Viewport) -> Vec<PropSection> {
     let shade_opts: Vec<String> = SHADE_PLOT_LABELS.iter().map(|s| s.to_string()).collect();
     let current_shade = shade_plot_label(vp.shade_plot_mode).to_string();
 
+    // A standard label is already a ratio ("10:1", "1:100"); a bare factor
+    // is paper units per drawing unit.
     let annotation_scale = if effective_scale.abs() > 1e-9 {
-        format!("1:{}", scale_label(effective_scale))
+        let label = scale_label(effective_scale);
+        if label.contains(':') {
+            label
+        } else {
+            format!("{label}:1")
+        }
     } else {
         String::new()
     };
@@ -179,7 +186,7 @@ fn properties(vp: &Viewport) -> Vec<PropSection> {
 }
 
 fn apply_geom_prop(vp: &mut Viewport, field: &str, value: &str) {
-    use codec::types::Vector3;
+    use document::types::Vector3;
 
     // Boolean / toggle fields handled first (value = "toggle" or "true"/"false").
     match field {
@@ -355,18 +362,39 @@ pub(crate) fn is_clipped(vp: &Viewport) -> bool {
     !vp.clip_boundary_handle.is_null() && vp.status.non_rectangular_clipping
 }
 
+/// The corners [`stretch`] tests against the window, at the height it tests
+/// them: the points a STRETCH window can catch.
+pub fn stretch_corners(vp: &Viewport) -> [glam::DVec3; 4] {
+    let hw = vp.width * 0.5;
+    let hh = vp.height * 0.5;
+    let (left, right) = (vp.center.x - hw, vp.center.x + hw);
+    let (bottom, top) = (vp.center.y - hh, vp.center.y + hh);
+    [
+        glam::DVec3::new(left, bottom, 0.0),
+        glam::DVec3::new(right, bottom, 0.0),
+        glam::DVec3::new(left, top, 0.0),
+        glam::DVec3::new(right, top, 0.0),
+    ]
+}
+
 pub fn stretch(
     vp: &mut Viewport,
     win_min: glam::DVec3,
     win_max: glam::DVec3,
+    excluded: &dyn Fn(glam::DVec3) -> bool,
     delta: glam::DVec3,
 ) -> bool {
     let hw = vp.width * 0.5;
     let hh = vp.height * 0.5;
     let (left, right) = (vp.center.x - hw, vp.center.x + hw);
     let (bottom, top) = (vp.center.y - hh, vp.center.y + hh);
-    let inside =
-        |x: f64, y: f64| x >= win_min.x && x <= win_max.x && y >= win_min.y && y <= win_max.y;
+    let inside = |x: f64, y: f64| {
+        x >= win_min.x
+            && x <= win_max.x
+            && y >= win_min.y
+            && y <= win_max.y
+            && !excluded(glam::DVec3::new(x, y, 0.0))
+    };
 
     let bottom_left = inside(left, bottom);
     let bottom_right = inside(right, bottom);
@@ -471,5 +499,30 @@ impl crate::entities::traits::FallbackTess for Viewport {
             [cx - hw, cy - hh, cz],
         ];
         (pts, vec![], vec![], vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D#2542: a 10× viewport read "1:10:1" as its annotation scale.
+    #[test]
+    fn the_fallback_annotation_scale_is_one_ratio() {
+        let label = |scale: f64| {
+            let mut vp = Viewport::new();
+            vp.height = 100.0;
+            vp.view_height = 100.0 / scale;
+            vp.custom_scale = scale;
+            properties(&vp)
+                .into_iter()
+                .flat_map(|section| section.props)
+                .find(|p| p.field == "vp_anno_scale")
+                .map(|p| format!("{:?}", p.value))
+                .unwrap()
+        };
+        assert!(label(10.0).contains("\"10:1\""), "{}", label(10.0));
+        assert!(label(0.01).contains("\"1:100\""), "{}", label(0.01));
+        assert!(!label(10.0).contains("1:10:1"));
     }
 }

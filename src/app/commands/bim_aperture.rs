@@ -21,7 +21,7 @@ use crate::bim::report::Notice;
 use crate::bim::units::DrawingUnit;
 use crate::bim::walls;
 use crate::command::{CadCommand, KeywordCommand};
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use iced::Task;
 use std::collections::HashMap;
 

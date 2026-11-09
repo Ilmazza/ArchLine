@@ -15,8 +15,8 @@ use crate::scene::{
 };
 use crate::ui::window::block_palette::BlockPaletteMsg;
 use crate::ui::PropertiesPanel;
-use codec::types::Color as AcadColor;
-use codec::{EntityType as AcadEntityType, Handle};
+use document::types::Color as AcadColor;
+use document::{EntityType as AcadEntityType, Handle};
 use iced::time::Instant;
 use iced::{mouse, Point, Task};
 
@@ -45,7 +45,7 @@ impl OpenCADStudio {
             .and_then(|path| path.extension())
             .and_then(|ext| ocs_save::external_format(&ext.to_string_lossy()));
         self.save_dialog_format = if let Some(converter) = converter {
-            converter.name().to_string()
+            ocs_save::external_format_label(converter).to_string()
         } else if let Some(path) = &self.tabs[tab_idx].current_path {
             let document = &self.tabs[tab_idx].scene.document;
             let is_dxf = crate::io::source_is_dxf(Some(path), document);
@@ -84,7 +84,7 @@ impl OpenCADStudio {
 
     pub(in crate::app) fn close_save_dialog_window(&mut self) -> Task<Message> {
         self.aec_drop_acknowledged = false;
-        if self.active_modal == Some(crate::app::ModalKind::SaveDialog) {
+        if self.focus_dialog(crate::app::ModalKind::SaveDialog) {
             self.active_modal = None;
             self.reset_modal_geometry();
         }
@@ -112,7 +112,7 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn close_unsaved_dialog_window(&mut self) -> Task<Message> {
-        if self.active_modal == Some(crate::app::ModalKind::Unsaved) {
+        if self.focus_dialog(crate::app::ModalKind::Unsaved) {
             self.active_modal = None;
             self.reset_modal_geometry();
         }
@@ -138,7 +138,14 @@ impl OpenCADStudio {
         match event {
             // `dispatch_command` turns a one-shot tool's highlight off
             // again once nothing is left running (#355).
-            ModuleEvent::Command(cmd) => return self.dispatch_ribbon_command(&cmd),
+            ModuleEvent::Command(cmd) => {
+                if cmd == "TOOLPALETTES"
+                    && self.dock_panel_visible(crate::ui::dock::PanelId::ToolPalettes)
+                {
+                    return self.dispatch_ribbon_command("TOOLPALETTESCLOSE");
+                }
+                return self.dispatch_ribbon_command(&cmd);
+            }
             ModuleEvent::OpenFileDialog => {
                 self.command_line
                     .push_info(crate::t!("Open DWG/DXF: not yet implemented.").as_ref());
@@ -237,7 +244,7 @@ impl OpenCADStudio {
                 }
                 if self.tabs.len() == 1 {
                     self.tab_counter += 1;
-                    self.tabs[0] = crate::app::document::DocumentTab::new_drawing(self.tab_counter);
+                    self.tabs[0] = crate::app::tab_document::DocumentTab::new_drawing(self.tab_counter);
                     self.active_tab = 0;
                     self.apply_display_defaults(0);
                 } else {
@@ -246,6 +253,10 @@ impl OpenCADStudio {
                         self.active_tab = self.tabs.len() - 1;
                     }
                 }
+                // Discarded for good: the positions this drawing had placed
+                // go with it, so a later drawing cannot inherit them.
+                crate::modules::draw::draw::attdef::session().forget_place_of(tab_id);
+                crate::modules::annotate::text::forget_place_of(tab_id);
                 // The active tab is now a fresh blank or a
                 // different existing tab; sync ribbon chips so
                 // they don't keep showing the discarded tab's
@@ -438,7 +449,7 @@ impl OpenCADStudio {
     #[cfg(test)]
     fn import_document_as_block(
         &mut self,
-        doc: codec::Document,
+        doc: document::Document,
         stem: String,
     ) -> Result<String, String> {
         self.import_document_block(doc, stem, false)
@@ -446,7 +457,7 @@ impl OpenCADStudio {
 
     pub(super) fn import_document_block(
         &mut self,
-        doc: codec::Document,
+        doc: document::Document,
         stem: String,
         redefine: bool,
     ) -> Result<String, String> {
@@ -456,15 +467,15 @@ impl OpenCADStudio {
             .objects
             .values()
             .find_map(|o| {
-                if let codec::objects::ObjectType::Layout(l) = o {
+                if let document::objects::ObjectType::Layout(l) = o {
                     (l.name == "Model" && !l.block_record.is_null()).then_some(l.block_record)
                 } else {
                     None
                 }
             })
             .or_else(|| doc.block_records.get("*Model_Space").map(|br| br.handle))
-            .unwrap_or(codec::Handle::NULL);
-        let mut entities: Vec<codec::EntityType> = if model_br.is_null() {
+            .unwrap_or(document::Handle::NULL);
+        let mut entities: Vec<document::EntityType> = if model_br.is_null() {
             Vec::new()
         } else {
             let br = doc.block_records.iter().find(|br| br.handle == model_br);
@@ -477,7 +488,7 @@ impl OpenCADStudio {
                     .filter(|e| {
                         !matches!(
                             e,
-                            codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_)
+                            document::EntityType::Block(_) | document::EntityType::BlockEnd(_)
                         )
                     })
                     .cloned()
@@ -493,7 +504,7 @@ impl OpenCADStudio {
                     .filter(|e| {
                         !matches!(
                             e,
-                            codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_)
+                            document::EntityType::Block(_) | document::EntityType::BlockEnd(_)
                         )
                     })
                     .cloned()
@@ -572,7 +583,7 @@ impl OpenCADStudio {
             .iter_mut()
             .chain(defs.iter_mut().flat_map(|def| def.entities.iter_mut()))
         {
-            if let codec::EntityType::Insert(ins) = entity {
+            if let document::EntityType::Insert(ins) = entity {
                 if let Some(new_name) = rename_map.get(&ins.block_name) {
                     ins.block_name = new_name.clone();
                 }
@@ -586,7 +597,7 @@ impl OpenCADStudio {
         // A drawing written out from a dynamic block keeps the block's
         // parameters and actions on its model space; the new definition
         // takes them over, as the file's nested definitions do theirs.
-        let base_point = codec::types::Vector3::new(base.x, base.y, base.z);
+        let base_point = document::types::Vector3::new(base.x, base.y, base.z);
         let file_def = (!redefine)
             .then(|| crate::scene::block_authoring::export_graph(&doc, model_br))
             .flatten()
@@ -616,7 +627,7 @@ impl OpenCADStudio {
             let scene = &mut self.tabs[i].scene;
             scene.define_block_from_owned_entities(entities, &name, glam::DVec3::ZERO)?;
             let block = scene.document.block_records.get(&name).map(|r| r.block_entity_handle);
-            if let Some(codec::EntityType::Block(block)) =
+            if let Some(document::EntityType::Block(block)) =
                 block.and_then(|h| scene.document.get_entity_mut(h))
             {
                 block.base_point = base_point;
@@ -717,19 +728,19 @@ impl OpenCADStudio {
         // not persist an unloaded bit), so keep their source entities but
         // remove their decoded render models.  A reload repopulates the cache
         // after clearing the corresponding session key.
-        let hidden_images: Vec<codec::types::Handle> = self.tabs[i]
+        let hidden_images: Vec<document::types::Handle> = self.tabs[i]
             .scene
             .document
             .entities()
             .filter_map(|entity| match entity {
-                codec::EntityType::RasterImage(image)
+                document::EntityType::RasterImage(image)
                     if image
                         .definition_handle
                         .is_some_and(|key| self.tabs[i].xref_unloaded.is_unloaded(key.value())) =>
                 {
                     Some(entity.common().handle)
                 }
-                codec::EntityType::Underlay(underlay)
+                document::EntityType::Underlay(underlay)
                     if self.tabs[i]
                         .xref_unloaded
                         .is_unloaded(underlay.definition_handle.value()) =>
@@ -899,8 +910,8 @@ impl OpenCADStudio {
                             if row_kind != kind || row_name != name {
                                 continue;
                             }
-                            let handle = codec::types::Handle::new(*key);
-                            if let Some(codec::objects::ObjectType::UnderlayDefinition(def)) =
+                            let handle = document::types::Handle::new(*key);
+                            if let Some(document::objects::ObjectType::UnderlayDefinition(def)) =
                                 self.tabs[i].scene.document.objects.get_mut(&handle)
                             {
                                 def.unloaded = false;
@@ -914,7 +925,7 @@ impl OpenCADStudio {
                             if row_kind == kind && row_name == name {
                                 crate::io::xref::set_point_cloud_loaded(
                                     &mut self.tabs[i].scene.document,
-                                    codec::types::Handle::new(*key),
+                                    document::types::Handle::new(*key),
                                     true,
                                 );
                             }
@@ -934,7 +945,7 @@ impl OpenCADStudio {
                     self.tabs[i].xref_stat_cache.remove(key);
                 }
                 done += self.reload_image_refs(i, &image_rows);
-                let handles: rustc_hash::FxHashSet<codec::types::Handle> = self.tabs[i]
+                let handles: rustc_hash::FxHashSet<document::types::Handle> = self.tabs[i]
                     .scene
                     .document
                     .block_records
@@ -1118,9 +1129,9 @@ impl OpenCADStudio {
         if images.is_empty() {
             return 0;
         }
-        let handles: Vec<codec::types::Handle> = images
+        let handles: Vec<document::types::Handle> = images
             .iter()
-            .map(|(key, _)| codec::types::Handle::new(*key))
+            .map(|(key, _)| document::types::Handle::new(*key))
             .collect();
         for (key, _) in images {
             self.tabs[i].xref_unloaded.remove(key);
@@ -1213,9 +1224,9 @@ impl OpenCADStudio {
 mod tests {
     use super::*;
     use crate::app::OpenCADStudio;
-    use codec::entities::Line;
-    use codec::types::Vector3;
-    use codec::EntityType;
+    use document::entities::Line;
+    use document::types::Vector3;
+    use document::EntityType;
 
     fn fresh() -> OpenCADStudio {
         let mut app = OpenCADStudio::new_for_test();
@@ -1224,13 +1235,13 @@ mod tests {
     }
 
     /// A foreign document: the fresh scene's document plus one model-space LINE.
-    fn foreign_doc(app: &OpenCADStudio) -> codec::Document {
+    fn foreign_doc(app: &OpenCADStudio) -> document::Document {
         let mut doc = app.tabs[app.active_tab].scene.document.clone();
         let model_br = doc
             .objects
             .values()
             .find_map(|o| {
-                if let codec::objects::ObjectType::Layout(l) = o {
+                if let document::objects::ObjectType::Layout(l) = o {
                     (l.name == "Model" && !l.block_record.is_null()).then_some(l.block_record)
                 } else {
                     None
@@ -1264,7 +1275,7 @@ mod tests {
 
     #[test]
     fn import_document_as_block_merges_source_only_layer() {
-        use codec::tables::Layer;
+        use document::tables::Layer;
 
         let mut app = fresh();
         let mut doc = foreign_doc(&app);
@@ -1275,7 +1286,7 @@ mod tests {
             .objects
             .values()
             .find_map(|o| match o {
-                codec::objects::ObjectType::Layout(l) if l.name == "Model" => Some(l.block_record),
+                document::objects::ObjectType::Layout(l) if l.name == "Model" => Some(l.block_record),
                 _ => None,
             })
             .unwrap();
@@ -1298,10 +1309,10 @@ mod tests {
     /// definition itself INSERTs a `Door` block — so the imported `Door` is a
     /// *nested dependency*, not a top-level entity. The `Door` in this file is
     /// unrelated to any `Door` in the destination drawing.
-    fn nested_foreign_doc(app: &OpenCADStudio) -> codec::Document {
-        use codec::entities::Insert;
-        use codec::tables::BlockRecord;
-        use codec::Handle;
+    fn nested_foreign_doc(app: &OpenCADStudio) -> document::Document {
+        use document::entities::Insert;
+        use document::tables::BlockRecord;
+        use document::Handle;
         let mut doc = foreign_doc(app);
 
         // "Door" block definition: one LINE of geometry.
@@ -1329,7 +1340,7 @@ mod tests {
             .objects
             .values()
             .find_map(|o| {
-                if let codec::objects::ObjectType::Layout(l) = o {
+                if let document::objects::ObjectType::Layout(l) = o {
                     (l.name == "Model" && !l.block_record.is_null()).then_some(l.block_record)
                 } else {
                     None
@@ -1345,7 +1356,7 @@ mod tests {
     }
 
     /// The nested-INSERT's block name inside a defined block record.
-    fn nested_insert_target(doc: &codec::Document, block: &str) -> Option<String> {
+    fn nested_insert_target(doc: &document::Document, block: &str) -> Option<String> {
         let br = doc.block_records.get(block)?;
         br.entity_handles
             .iter()
@@ -1358,10 +1369,10 @@ mod tests {
     /// A foreign document whose model space INSERTs a `Fixture` block whose
     /// definition INSERTs `Door (2)`, whose definition in turn INSERTs `Door`.
     /// The file therefore carries *both* `Door` and `Door (2)` as nested deps.
-    fn doubly_nested_foreign_doc(app: &OpenCADStudio) -> codec::Document {
-        use codec::entities::Insert;
-        use codec::tables::BlockRecord;
-        use codec::Handle;
+    fn doubly_nested_foreign_doc(app: &OpenCADStudio) -> document::Document {
+        use document::entities::Insert;
+        use document::tables::BlockRecord;
+        use document::Handle;
         let mut doc = foreign_doc(app);
 
         let door_h = Handle::new(doc.next_handle());
@@ -1394,7 +1405,7 @@ mod tests {
             .objects
             .values()
             .find_map(|o| {
-                if let codec::objects::ObjectType::Layout(l) = o {
+                if let document::objects::ObjectType::Layout(l) = o {
                     (l.name == "Model" && !l.block_record.is_null()).then_some(l.block_record)
                 } else {
                     None
@@ -1527,7 +1538,7 @@ mod tests {
 
     #[test]
     fn blockpalette_reflects_new_block_without_reopen() {
-        use codec::types::Transform;
+        use document::types::Transform;
 
         let mut app = fresh();
         let i = app.active_tab;
@@ -1606,7 +1617,7 @@ mod tests {
         let new_dir = dir.join("new");
         std::fs::create_dir_all(&old_dir).unwrap();
         std::fs::create_dir_all(&new_dir).unwrap();
-        let mut br = codec::tables::BlockRecord::new("PLAN");
+        let mut br = document::tables::BlockRecord::new("PLAN");
         br.flags.is_xref = true;
         br.xref_path = "refs/plan.dwg".to_string();
         br.handle = app.tabs[i].scene.document.allocate_handle();
@@ -1702,9 +1713,9 @@ mod tests {
         // wording), never silently skip.
         use crate::app::Message;
         use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
-        use codec::tables::BlockRecord;
+        use document::tables::BlockRecord;
         let dir = palette_tmpdir("nestedmatrix");
-        let mut host_doc = codec::Document::new();
+        let mut host_doc = document::Document::new();
         let mut inner = BlockRecord::new("INNER");
         inner.flags.is_xref = true;
         inner.xref_path = "inner.dwg".to_string();
@@ -1761,7 +1772,7 @@ mod tests {
         // drive the exact GUI message path (row right-click menu item).
         use crate::app::Message;
         use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
-        use codec::tables::BlockRecord;
+        use document::tables::BlockRecord;
         let mut app = fresh();
         let i = app.active_tab;
         for name in ["PLAN", "SITE"] {
@@ -1824,7 +1835,7 @@ mod tests {
         use crate::app::Message;
         use crate::io::xref_model::{Pathtype, RefType};
         use crate::ui::window::xref_manager::{XrefPaletteOp, XrefRowId};
-        use codec::tables::BlockRecord;
+        use document::tables::BlockRecord;
         let mut app = fresh();
         let i = app.active_tab;
         let mut br = BlockRecord::new("PLAN");
@@ -1885,9 +1896,9 @@ mod tests {
     fn palette_reload_all_resolves_direct_refs() {
         // Toolbar Reload All against a real on-disk reference: full
         // resolve, per-ref report, entry back to Loaded.
-        use codec::tables::BlockRecord;
+        use document::tables::BlockRecord;
         let dir = palette_tmpdir("reloadall");
-        let ref_doc = codec::Document::new();
+        let ref_doc = document::Document::new();
         let bytes = crate::io::save_to_bytes(&ref_doc, "dwg", ref_doc.version).unwrap();
         std::fs::write(dir.join("plan.dwg"), &bytes).unwrap();
         let mut app = fresh();
@@ -1934,9 +1945,9 @@ mod tests {
         // F6: palette Unload on a nested row reports the per-entry nested
         // error (CLI wording) instead of the confusing 'no loaded reference'.
         use crate::ui::window::xref_manager::XrefPaletteOp;
-        use codec::tables::BlockRecord;
+        use document::tables::BlockRecord;
         let dir = palette_tmpdir("nested");
-        let mut host_doc = codec::Document::new();
+        let mut host_doc = document::Document::new();
         let mut inner = BlockRecord::new("INNER");
         inner.flags.is_xref = true;
         inner.xref_path = "inner.dwg".to_string();
@@ -1978,9 +1989,9 @@ mod tests {
         std::path::PathBuf,
         std::path::PathBuf,
         u64,
-        codec::types::Handle,
+        document::types::Handle,
     ) {
-        use codec::objects::{ImageDefinition, ObjectType};
+        use document::objects::{ImageDefinition, ObjectType};
         let dir = palette_tmpdir(tag);
         let png = dir.join("plan.png");
         image::RgbaImage::new(w, w).save(&png).unwrap();
@@ -1995,9 +2006,9 @@ mod tests {
             .document
             .objects
             .insert(h, ObjectType::ImageDefinition(def));
-        let mut img = codec::entities::RasterImage::with_size(
+        let mut img = document::entities::RasterImage::with_size(
             &path,
-            codec::types::Vector3::ZERO,
+            document::types::Vector3::ZERO,
             w as f64,
             w as f64,
             1.0,
@@ -2006,7 +2017,7 @@ mod tests {
         img.definition_handle = Some(h);
         let image = app.tabs[i]
             .scene
-            .add_entity(codec::EntityType::RasterImage(img));
+            .add_entity(document::EntityType::RasterImage(img));
         app.tabs[i].current_path = Some(dir.join("host.dwg"));
         app.refresh_xref_manager();
         (app, dir, png, h.value(), image)

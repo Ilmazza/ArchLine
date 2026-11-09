@@ -26,7 +26,7 @@
 //!   parziale. Nel fatto contano le aperture esistenti e da demolire; nel
 //!   progetto le esistenti e le nuove.
 
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use kernel::geom2d::distance_to;
 
 use super::aperture::{apertures_in, Aperture, ApertureGeom, ApertureKind, ApertureState};

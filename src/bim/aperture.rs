@@ -20,10 +20,10 @@
 //!
 //! Qui non c'è undo: lo apre il comando che crea o cambia le aperture.
 
-use codec::entities::{EntityCommon, Line, LwPolyline, LwVertex};
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle, Vector2, Vector3};
+use document::entities::{EntityCommon, Line, LwPolyline, LwVertex};
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle, Vector2, Vector3};
 
 use rustc_hash::FxHashMap;
 
@@ -759,8 +759,8 @@ mod tests {
             ..door()
         };
         let (doc, _) = doc_with(&[a.clone()]);
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes))
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes))
             .unwrap()
             .read()
             .unwrap();
@@ -773,8 +773,8 @@ mod tests {
     #[test]
     fn apertures_survive_a_dwg_save_and_reload() {
         let (doc, _) = doc_with(&[door()]);
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes))
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes))
             .read()
             .unwrap();
         let found = apertures_in(&read);

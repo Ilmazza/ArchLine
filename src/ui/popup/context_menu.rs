@@ -53,6 +53,9 @@ pub enum SubmenuId {
     Osnap3d,
     /// Point Filters ▸, nested inside Snap Overrides.
     PointFilters,
+    SavedFilters,
+    /// A submenu of a menu-bar menu opened from the keyboard.
+    MenuBar(u16),
 }
 
 impl SubmenuId {
@@ -114,6 +117,8 @@ pub enum MenuAction {
     FeedInput(String),
     /// Run a command line string (`Message::Command`).
     Command(String),
+    /// Run a menu-bar line (`Message::MenuCommand`).
+    MenuLine(String),
     /// One-shot "Mid Between 2 Points" snap override.
     Mtp,
     /// FROM / Temporary track point, answering the current point prompt.
@@ -136,6 +141,8 @@ pub enum MenuAction {
     Grip(GripMenuCmd),
     /// Expand / collapse an accordion submenu (never "picked" as a command).
     ToggleSubmenu(SubmenuId),
+    /// Edit this menu in place: hide rows, add commands.
+    Customize,
 }
 
 /// One selectable row.
@@ -290,11 +297,18 @@ impl ContextMenu {
                 }),
                 MenuRow::Separator => {}
                 MenuRow::Submenu {
-                    id, items, open, ..
+                    id,
+                    items,
+                    open,
+                    label,
+                    ..
                 } => {
                     out.push(Selectable {
                         action: MenuAction::ToggleSubmenu(*id),
-                        mnemonic: None,
+                        mnemonic: label
+                            .chars()
+                            .find(|c| c.is_alphanumeric())
+                            .and_then(|c| c.to_uppercase().next()),
                         enabled: !items.is_empty(),
                         header: Some(*id),
                     });
@@ -346,7 +360,7 @@ impl ContextMenu {
     /// excluding) `from` and wrapping, so repeated presses cycle through rows
     /// sharing a letter (PLINE's CEnter / CLose both answer to `C`).
     pub fn find_mnemonic(&self, ch: char, from: Option<usize>) -> Option<usize> {
-        let ch = ch.to_ascii_uppercase();
+        let ch = ch.to_uppercase().next().unwrap_or(ch);
         let rows = self.selectable();
         if rows.is_empty() {
             return None;
@@ -475,6 +489,8 @@ pub enum MenuContext {
         undo_label: Option<String>,
         redo_label: Option<String>,
         props_open: bool,
+        /// The drawing's saved selection filters, by name.
+        saved_filters: Vec<String>,
     },
     /// A grip is hot / being dragged.
     Grip(GripMenuContext),
@@ -499,6 +515,7 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
             undo_label,
             redo_label,
             props_open,
+            saved_filters,
         } => idle_rows(
             *has_selection,
             *single_hatch,
@@ -510,13 +527,65 @@ pub fn build_context_menu(ctx: &MenuContext, open_submenu: Option<SubmenuId>) ->
             undo_label.as_deref(),
             redo_label.as_deref(),
             *props_open,
+            saved_filters,
             open_submenu,
         ),
         MenuContext::Grip(grip) => grip_rows(grip),
     };
-    let mut menu = ContextMenu { rows, width: 0.0 };
-    menu.width = menu.fit_width();
-    menu
+    let idle = matches!(ctx, MenuContext::Idle { .. });
+    let mut rows = rows;
+    if idle {
+        give_mnemonics(&mut rows);
+    }
+    ContextMenu::from_rows(rows)
+}
+
+impl ContextMenu {
+    /// A menu of `rows`, as wide as they need.
+    pub fn from_rows(rows: Vec<MenuRow>) -> Self {
+        let mut menu = ContextMenu { rows, width: 0.0 };
+        menu.width = menu.fit_width();
+        menu
+    }
+}
+
+/// Rows without a letter take the first letter of their label, so every row
+/// of a menu can be picked from the keyboard (shared letters cycle).
+pub fn give_mnemonics(rows: &mut [MenuRow]) {
+    let first = |label: &str| {
+        label
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().next().unwrap_or(c))
+    };
+    for row in rows {
+        match row {
+            MenuRow::Item(item) if item.mnemonic.is_none() => item.mnemonic = first(&item.label),
+            MenuRow::Submenu { items, .. } => {
+                for item in items.iter_mut().filter(|item| item.mnemonic.is_none()) {
+                    item.mnemonic = first(&item.label);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A row that runs a menu-bar line; `None` greys it out.
+pub fn menu_line_item(
+    label: String,
+    line: Option<String>,
+    hint: String,
+    icon: Option<&'static [u8]>,
+) -> MenuItem {
+    let enabled = line.is_some();
+    let mut item = MenuItem::new(label, MenuAction::MenuLine(line.unwrap_or_default()))
+        .enabled(enabled);
+    if !hint.is_empty() {
+        item = item.hint(hint);
+    }
+    item.icon = icon.map(MenuIcon::Tool);
+    item
 }
 
 /// Keyboard letter for an option keyword: its first ASCII alphanumeric.
@@ -699,6 +768,7 @@ fn idle_rows(
     undo_label: Option<&str>,
     redo_label: Option<&str>,
     props_open: bool,
+    saved_filters: &[String],
     open_submenu: Option<SubmenuId>,
 ) -> Vec<MenuRow> {
     let cmd = |label: String, name: &str| {
@@ -886,6 +956,21 @@ fn idle_rows(
         t!("Quick Select...").into_owned(),
         MenuAction::QuickSelect,
     )));
+    rows.push(MenuRow::Item(cmd(t!("Filter...").into_owned(), "FILTER")));
+    // The drawing's saved filters open below the row, in the menu (#2611):
+    // one click applies one, no dialog.
+    if !saved_filters.is_empty() {
+        rows.push(MenuRow::Submenu {
+            id: SubmenuId::SavedFilters,
+            label: t!("Apply saved filter").into_owned(),
+            icon: None,
+            items: saved_filters
+                .iter()
+                .map(|name| cmd(name.clone(), &format!("FILTER {name}")))
+                .collect(),
+            open: open_submenu == Some(SubmenuId::SavedFilters),
+        });
+    }
     // Count the selected objects, or start a count.
     rows.push(MenuRow::Item(if has_selection {
         cmd(t!("Count Selection").into_owned(), "COUNT _C")
@@ -1208,6 +1293,7 @@ mod tests {
             undo_label: Some("LINE".into()),
             redo_label: None,
             props_open: false,
+            saved_filters: Vec::new(),
         }
     }
 
@@ -1343,8 +1429,9 @@ mod tests {
         assert_eq!(menu.default_row_y(), MENU_PAD_TOP);
         let menu = build_context_menu(&idle_ctx(false), None);
         assert_eq!(menu.default_row_y(), MENU_PAD_TOP);
-        // 11 items + 3 submenu headers + 6 separators, plus panel padding.
-        let expected = MENU_PAD_TOP * 2.0 + 14.0 * MENU_ROW_H + 6.0 * MENU_SEP_H;
+        // 12 items (Filter... among them) + 3 submenu headers + 6
+        // separators, plus panel padding. No saved filters: no submenu.
+        let expected = MENU_PAD_TOP * 2.0 + 15.0 * MENU_ROW_H + 6.0 * MENU_SEP_H;
         assert_eq!(menu.height(), expected);
     }
 
@@ -1371,5 +1458,163 @@ mod tests {
             .find(|s| s.action == MenuAction::Grip(GripMenuCmd::Undo))
             .unwrap();
         assert!(!undo.enabled);
+    }
+}
+
+/// The user's changes to the shortcut menu shown with no command running.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MenuCustomization {
+    /// Keys of the rows taken out (see `row_key`).
+    pub hidden: Vec<String>,
+    /// Commands added, as (label, command line), shown after Recent Input.
+    pub custom: Vec<(String, String)>,
+}
+
+/// A stable name for a row, whatever the language: its command, else its
+/// action.
+pub fn row_key(row: &MenuRow) -> Option<String> {
+    match row {
+        MenuRow::Item(item) => Some(match &item.action {
+            MenuAction::Command(command) => command.to_uppercase(),
+            action => format!("{action:?}"),
+        }),
+        MenuRow::Submenu { id, .. } => Some(format!("{id:?}")),
+        MenuRow::Separator => None,
+    }
+}
+
+fn item_key(item: &MenuItem) -> String {
+    row_key(&MenuRow::Item(item.clone())).unwrap_or_default()
+}
+
+/// The idle menu as the user arranged it: hidden rows gone, their own
+/// commands after Recent Input, and Customize at the end.
+/// The command a user's entry carries when it is a separator line.
+pub const MENU_SEPARATOR: &str = "--";
+
+pub fn customize_rows(rows: Vec<MenuRow>, custom: &MenuCustomization) -> Vec<MenuRow> {
+    // The default row (Repeat) always stays.
+    let hidden = |key: &str| custom.hidden.iter().any(|h| h == key);
+    let mut out: Vec<MenuRow> = Vec::new();
+    let mut inserted = custom.custom.is_empty();
+    for row in rows {
+        let row = match row {
+            MenuRow::Item(item) if !item.default && hidden(&item_key(&item)) => continue,
+            MenuRow::Submenu { id, label, icon, items, open } => {
+                if hidden(&format!("{id:?}")) {
+                    continue;
+                }
+                let items: Vec<MenuItem> = if id == SubmenuId::RecentInput {
+                    items
+                } else {
+                    items.into_iter().filter(|item| !hidden(&item_key(item))).collect()
+                };
+                MenuRow::Submenu { id, label, icon, items, open }
+            }
+            row => row,
+        };
+        let separator = matches!(row, MenuRow::Separator);
+        out.push(row);
+        if separator && !inserted {
+            inserted = true;
+            for (label, command) in &custom.custom {
+                if command == MENU_SEPARATOR {
+                    out.push(MenuRow::Separator);
+                    continue;
+                }
+                out.push(MenuRow::Item(
+                    MenuItem::new(label.clone(), MenuAction::Command(command.clone()))
+                        .command_icon(command.split_whitespace().next().unwrap_or("")),
+                ));
+            }
+            out.push(MenuRow::Separator);
+        }
+    }
+    out.push(MenuRow::Separator);
+    out.push(MenuRow::Item(
+        MenuItem::new(crate::tr!("context-menu", "customize"), MenuAction::Customize)
+            .icon(MenuIcon::Chrome(crate::ui::icons::GEAR)),
+    ));
+    // No separator leads, ends or doubles up once rows are gone.
+    let mut tidy: Vec<MenuRow> = Vec::with_capacity(out.len());
+    for row in out {
+        let separator = matches!(row, MenuRow::Separator);
+        if separator && tidy.last().is_none_or(|last| matches!(last, MenuRow::Separator)) {
+            continue;
+        }
+        tidy.push(row);
+    }
+    tidy
+}
+
+#[cfg(test)]
+mod customization_tests {
+    use super::*;
+
+    fn idle() -> MenuContext {
+        MenuContext::Idle {
+            has_selection: true,
+            single_hatch: false,
+            single_mleader: false,
+            selected_constraint: None,
+            isolation_active: false,
+            recent_cmds: vec!["LINE".into()],
+            clipboard_nonempty: true,
+            undo_label: None,
+            redo_label: None,
+            props_open: false,
+            saved_filters: Vec::new(),
+        }
+    }
+
+    fn keys(rows: &[MenuRow]) -> Vec<String> {
+        let mut out = Vec::new();
+        for row in rows {
+            out.extend(row_key(row));
+            if let MenuRow::Submenu { items, .. } = row {
+                out.extend(items.iter().map(item_key));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn hidden_rows_go_and_own_commands_come_after_recent_input() {
+        let rows = build_context_menu(&idle(), None).rows;
+        assert!(keys(&rows).contains(&"COPYCLIP".to_string()));
+        let custom = MenuCustomization {
+            hidden: vec!["Undo".into(), "COPYCLIP".into()],
+            custom: vec![("Offset".into(), "OFFSET".into())],
+        };
+        let rows = customize_rows(rows, &custom);
+        let shown = keys(&rows);
+        assert!(!shown.contains(&"Undo".to_string()) && !shown.contains(&"COPYCLIP".to_string()));
+        assert!(shown.contains(&"Redo".to_string()));
+        // Repeat, Recent Input, separator, then the user's command.
+        assert!(matches!(&rows[3], MenuRow::Item(item) if item.action == MenuAction::Command("OFFSET".into())));
+        assert!(matches!(rows.last(), Some(MenuRow::Item(item)) if item.action == MenuAction::Customize));
+        assert!(!rows.windows(2).any(|pair| matches!(pair, [MenuRow::Separator, MenuRow::Separator])));
+    }
+
+    /// #2619: a "--" entry draws a separator between the user's commands.
+    #[test]
+    fn a_separator_entry_splits_the_users_commands() {
+        let rows = build_context_menu(&idle(), None).rows;
+        let custom = MenuCustomization {
+            hidden: Vec::new(),
+            custom: vec![
+                ("Offset".into(), "OFFSET".into()),
+                ("──────".into(), MENU_SEPARATOR.into()),
+                ("Trim".into(), "TRIM".into()),
+            ],
+        };
+        let rows = customize_rows(rows, &custom);
+        let at = rows
+            .iter()
+            .position(|row| matches!(row, MenuRow::Item(item) if item.action == MenuAction::Command("OFFSET".into())))
+            .unwrap();
+        assert!(matches!(rows[at + 1], MenuRow::Separator));
+        assert!(matches!(&rows[at + 2], MenuRow::Item(item) if item.action == MenuAction::Command("TRIM".into())));
     }
 }

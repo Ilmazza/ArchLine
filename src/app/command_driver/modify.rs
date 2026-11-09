@@ -152,6 +152,10 @@ impl OpenCADStudio {
                     .collect();
                 crate::modules::draw::modify::join::join_to_source(entity, &candidates)
             });
+        let line_source = matches!(
+            self.tabs[i].scene.document.get_entity(source),
+            Some(document::EntityType::Line(_))
+        );
         if let Some((replacement, consumed)) = joined {
             self.push_undo_snapshot(i, "JOIN");
             if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(source) {
@@ -163,10 +167,17 @@ impl OpenCADStudio {
                 .scene
                 .bump_entities(&[(source, crate::scene::ChangeKind::Modified)]);
             self.tabs[i].dirty = true;
-            self.command_line.push_output(&format!(
-                "JOIN: {} objects joined to source.",
-                consumed.len()
-            ));
+            let count = consumed.len();
+            let message = match self.tabs[i].scene.document.get_entity(source) {
+                Some(document::EntityType::Arc(_)) if count == 1 => crate::tf!("{count} arc joined to source"),
+                Some(document::EntityType::Arc(_)) => crate::tf!("{count} arcs joined to source"),
+                Some(document::EntityType::Line(_)) if line_source && count == 1 => {
+                    crate::tf!("{count} line joined to source")
+                }
+                Some(document::EntityType::Line(_)) if line_source => crate::tf!("{count} lines joined to source"),
+                _ => crate::tf!("{count} segments added to polyline"),
+            };
+            self.command_line.push_output(message.as_ref());
             self.refresh_properties();
         } else {
             self.command_line
@@ -193,13 +204,46 @@ impl OpenCADStudio {
             .iter()
             .filter_map(|&h| self.tabs[i].scene.document.get_entity(h).map(|e| (h, e)))
             .collect();
+        let discarded_note = |discarded: usize| match discarded {
+            0 => String::new(),
+            1 => crate::t!(", 1 object discarded from the operation").into_owned(),
+            count => crate::tf!(", {count} objects discarded from the operation").into_owned(),
+        };
         match join_entities(&pairs) {
             Some((to_remove, merged)) => {
+                // The reference's summary: what went in and what came out.
+                let count_in = to_remove.len();
+                let joined: Vec<&document::EntityType> = pairs
+                    .iter()
+                    .filter(|(h, _)| to_remove.contains(h))
+                    .map(|(_, e)| *e)
+                    .collect();
+                let all = |test: fn(&document::EntityType) -> bool| joined.iter().all(|e| test(e));
+                let polylines = joined
+                    .iter()
+                    .filter(|e| matches!(e, document::EntityType::LwPolyline(_) | document::EntityType::Polyline2D(_)))
+                    .count();
+                let summary = match (merged.as_slice(), merged.len()) {
+                    ([document::EntityType::Line(_)], _) if all(|e| matches!(e, document::EntityType::Line(_))) => {
+                        crate::tf!("{count_in} lines joined into 1 line").into_owned()
+                    }
+                    ([document::EntityType::Arc(_)], _) if all(|e| matches!(e, document::EntityType::Arc(_))) => {
+                        crate::tf!("{count_in} arcs joined into 1 arc").into_owned()
+                    }
+                    (_, 1) if polylines > 0 => {
+                        let count = count_in - polylines;
+                        if count == 1 {
+                            crate::t!("1 segment joined into 1 polyline").into_owned()
+                        } else {
+                            crate::tf!("{count} segments joined into 1 polyline").into_owned()
+                        }
+                    }
+                    (_, 1) => crate::tf!("{count_in} objects converted to 1 polyline").into_owned(),
+                    (_, count) => crate::tf!("{count_in} objects converted to {count} polylines").into_owned(),
+                } + &discarded_note(pairs.len() - count_in);
                 let label = self.history_label_from_active_cmd(i, "JOIN");
                 self.push_undo_snapshot(i, label);
                 self.tabs[i].scene.erase_entities(&to_remove);
-                let count_in = to_remove.len();
-                let count_out = merged.len();
                 for e in merged {
                     self.tabs[i].scene.add_entity(e);
                 }
@@ -208,18 +252,18 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.restore_pre_cmd_tangent();
-                self.command_line.push_output(
-                    crate::tf!("JOIN: {count_in} object(s) joined into {count_out}.").as_ref(),
-                );
+                self.command_line.push_output(&summary);
                 self.refresh_properties();
             }
             None => {
-                let reason = crate::modules::draw::modify::join::join_failure_reason(&pairs);
+                let count = pairs.len();
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                self.command_line.push_error(reason.as_ref());
+                self.command_line.push_output(
+                    crate::tf!("0 objects joined, {count} objects discarded from the operation").as_ref(),
+                );
             }
         }
         None
@@ -321,21 +365,21 @@ impl OpenCADStudio {
         }
         if !matches!(
             self.tabs[i].scene.document.get_entity(handle),
-            Some(codec::EntityType::Hatch(_))
+            Some(document::EntityType::Hatch(_))
         ) {
             self.command_line
                 .push_error(crate::t!("HATCHEDIT: hatch entity not found.").as_ref());
         } else {
             use crate::command::{CadCommand, HatchEditOperation};
             if matches!(&operation, HatchEditOperation::BeginAssociate) {
-                let associative = matches!(self.tabs[i].scene.document.get_entity(handle),Some(codec::EntityType::Hatch(h)) if h.is_associative);
+                let associative = matches!(self.tabs[i].scene.document.get_entity(handle),Some(document::EntityType::Hatch(h)) if h.is_associative);
                 if associative {
                     self.command_line
                         .push_info("HATCHEDIT: hatch is already associative.");
                     self.tabs[i].active_cmd = None;
                 } else {
                     let plane = match self.tabs[i].scene.document.get_entity(handle) {
-                        Some(codec::EntityType::Hatch(h)) => {
+                        Some(document::EntityType::Hatch(h)) => {
                             let storage = crate::entities::curve::ocs_plane(h.normal, h.elevation);
                             crate::command::WorkingPlane::new(
                                 glam::DVec3::from_array(storage.origin),
@@ -359,7 +403,7 @@ impl OpenCADStudio {
             }
             if let HatchEditOperation::DrawOrderBoundary { above } = &operation {
                 let references: Vec<_> = match self.tabs[i].scene.document.get_entity(handle) {
-                    Some(codec::EntityType::Hatch(h)) => h
+                    Some(document::EntityType::Hatch(h)) => h
                         .paths
                         .iter()
                         .flat_map(|p| p.boundary_handles.iter())
@@ -455,7 +499,7 @@ impl OpenCADStudio {
                             }
                         }
                     }
-                    if let Some(codec::EntityType::Hatch(hatch)) =
+                    if let Some(document::EntityType::Hatch(hatch)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
                         crate::entities::hatch_fill::apply_pattern_update(
@@ -494,7 +538,7 @@ impl OpenCADStudio {
                         .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
                 }
                 HatchEditOperation::Window(edit) => {
-                    if let Some(codec::EntityType::Hatch(hatch)) =
+                    if let Some(document::EntityType::Hatch(hatch)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
                         crate::entities::hatch_fill::apply_window_edit(hatch, &edit);
@@ -535,7 +579,7 @@ impl OpenCADStudio {
                 }
                 HatchEditOperation::RecreateBoundary { associate, region } => {
                     let source = self.tabs[i].scene.document.get_entity(handle).cloned();
-                    if let Some(codec::EntityType::Hatch(source)) = source {
+                    if let Some(document::EntityType::Hatch(source)) = source {
                         let storage =
                             crate::entities::curve::ocs_plane(source.normal, source.elevation);
                         let plane = crate::command::WorkingPlane::new(
@@ -645,7 +689,7 @@ impl OpenCADStudio {
                             }
                         }
                         if associate {
-                            if let Some(codec::EntityType::Hatch(hatch)) =
+                            if let Some(document::EntityType::Hatch(hatch)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 for (path, boundary) in
@@ -666,12 +710,12 @@ impl OpenCADStudio {
                 }
                 HatchEditOperation::Separate => {
                     let source = self.tabs[i].scene.document.get_entity(handle).cloned();
-                    if let Some(codec::EntityType::Hatch(hatch)) = source {
+                    if let Some(document::EntityType::Hatch(hatch)) = source {
                         let groups = crate::scene::separated_hatch_path_groups(&hatch);
                         if groups.len() > 1 {
                             for paths in groups {
                                 let mut separated = hatch.clone();
-                                separated.common.handle = codec::Handle::NULL;
+                                separated.common.handle = document::Handle::NULL;
                                 separated.paths = paths;
                                 separated.is_associative = separated
                                     .paths
@@ -679,7 +723,7 @@ impl OpenCADStudio {
                                     .any(|path| !path.boundary_handles.is_empty());
                                 self.tabs[i]
                                     .scene
-                                    .add_entity(codec::EntityType::Hatch(separated));
+                                    .add_entity(document::EntityType::Hatch(separated));
                             }
                             self.tabs[i].scene.erase_entities(&[handle]);
                         }

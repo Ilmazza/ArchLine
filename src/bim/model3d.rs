@@ -15,7 +15,7 @@
 //!
 //! Gli avvisi sono quelli di classificazione e di estrusione, senza doppioni.
 
-use codec::Document;
+use document::Document;
 
 use super::aperture::{present_apertures, ApertureGeom, ApertureKind};
 use super::extract::push_unique;
@@ -64,7 +64,7 @@ fn vani_of(found: &[ApertureGeom], per_metre: f64) -> Vec<VanoRing> {
 }
 
 fn build_one(
-    sources: &rustc_hash::FxHashMap<codec::Handle, crate::scene::BoundarySource>,
+    sources: &rustc_hash::FxHashMap<document::Handle, crate::scene::BoundarySource>,
     found: &[ApertureGeom],
     rows: &[&RoomRow],
     opts: &SectionOptions,

@@ -87,6 +87,24 @@ pub struct DispatchResult {
     pub errors: Vec<(String, String)>,
 }
 
+/// The outcome of [`PluginManager::attach_notification_channel`] — honest
+/// diagnostics for the ChannelReady drain: the ambiguous case used to be
+/// indistinguishable from a successful attach in the log (both printed as
+/// "attached (0 deferred flushed)"), which masked the boot-death class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The plugin's channel attached; N deferred boot notifications flushed.
+    Attached(usize),
+    /// A duplicate ack for an already-live channel; nothing to do.
+    AlreadyAttached,
+    /// An empty-id ack with several unattached candidates: ambiguous — the
+    /// ack cannot name its plugin, nothing attached; the boot grace is the
+    /// fallback (its flush path logs separately).
+    Ambiguous(usize),
+    /// No loaded plugin carries this id (a stale ack after an unload).
+    UnknownPlugin,
+}
+
 impl PluginManager {
     /// Create an empty manager.
     pub fn new() -> Self {
@@ -213,42 +231,47 @@ impl PluginManager {
 
     /// Mark a plugin's notification channel verifiably live and flush every
     /// notification deferred during its boot window (API v13). Called when
-    /// the runner acks `PluginNotification::ChannelReady`. Returns the number
-    /// flushed; `None` when no loaded plugin carries that id.
-    pub fn attach_notification_channel(&self, plugin_id: &str) -> Option<usize> {
+    /// the runner acks `PluginNotification::ChannelReady`.
+    pub fn attach_notification_channel(&self, plugin_id: &str) -> AttachOutcome {
         // A handshake-window ack may reach the reader thread before the spawn
         // thread has pinned the manifest id (the empty placeholder id): the
         // ack itself is what proves the channel is live, so attach by
         // elimination — but only when exactly one plugin waits. With several
         // booting at once the ack is ambiguous; the boot grace covers them.
         if plugin_id.is_empty() {
+            let unattached =
+                |p: &&LoadedPlugin| !p.attach.lock().unwrap_or_else(|e| e.into_inner()).attached;
             let mut waiting = self
                 .plugins
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| !p.attach.lock().unwrap_or_else(|e| e.into_inner()).attached)
+                .filter(|(_, p)| unattached(p))
                 .map(|(index, _)| index);
             return match (waiting.next(), waiting.next()) {
-                (Some(index), None) => Some(self.attach_by_index(index)),
-                _ => Some(0),
+                (Some(index), None) => self.attach_by_index(index),
+                (None, _) => AttachOutcome::AlreadyAttached,
+                (_, _) => AttachOutcome::Ambiguous(self.plugins.iter().filter(unattached).count()),
             };
         }
-        let index = self
+        match self
             .plugins
             .iter()
-            .position(|p| p.process.id() == plugin_id)?;
-        Some(self.attach_by_index(index))
+            .position(|p| p.process.id() == plugin_id)
+        {
+            Some(index) => self.attach_by_index(index),
+            None => AttachOutcome::UnknownPlugin,
+        }
     }
 
     /// Attach one plugin by index (shared helper).
-    fn attach_by_index(&self, index: usize) -> usize {
+    fn attach_by_index(&self, index: usize) -> AttachOutcome {
         let p = &self.plugins[index];
         let pending = {
             let mut attach = p.attach.lock().unwrap_or_else(|e| e.into_inner());
             if attach.attached {
                 // A second ack (runner restart on the same process, a
                 // duplicate frame): idempotent, nothing deferred.
-                return 0;
+                return AttachOutcome::AlreadyAttached;
             }
             attach.attached = true;
             attach.grace_deadline = None;
@@ -270,7 +293,7 @@ impl PluginManager {
                 );
             }
         }
-        flushed
+        AttachOutcome::Attached(flushed)
     }
 
     /// Whether a plugin's notification channel has been acked live (or the
@@ -440,9 +463,11 @@ impl PluginManager {
     pub fn drain_io(&self) -> Vec<crate::process::PluginIoLine> {
         let mut out = Vec::new();
         for p in &self.plugins {
-            if !p.process.is_alive() {
-                continue;
-            }
+            // NO is_alive gate: the "dead" flag can be set by a mere call
+            // timeout while the OS runner is alive and its stderr holds the
+            // ONLY trace of the hang (e.g. a plugin's dispatch echo never
+            // printed anywhere else). A dead process's pipes drain EOF
+            // instantly, so the un-gated drain costs nothing.
             out.extend(p.process.drain_io());
         }
         out
@@ -503,10 +528,10 @@ mod tests {
                 0
             }
             fn for_each_entity(&self, _f: &mut dyn FnMut(crate::host::ReaderEntity<'_>)) {}
-            fn layer_name(&self, _handle: codec::Handle) -> Option<&str> {
+            fn layer_name(&self, _handle: document::Handle) -> Option<&str> {
                 None
             }
-            fn app_id_name(&self, _handle: codec::Handle) -> Option<&str> {
+            fn app_id_name(&self, _handle: document::Handle) -> Option<&str> {
                 None
             }
         }
@@ -516,34 +541,34 @@ mod tests {
             fn tab_index(&self) -> usize {
                 0
             }
-            fn document(&self) -> &codec::Document {
+            fn document(&self) -> &document::Document {
                 panic!("not used")
             }
-            fn document_mut(&mut self) -> &mut codec::Document {
+            fn document_mut(&mut self) -> &mut document::Document {
                 panic!("not used")
             }
             fn document_reader(&self) -> Box<dyn crate::host::DocumentReader + '_> {
                 Box::new(EmptyReader)
             }
-            fn add_entity(&mut self, _entity: codec::EntityType) -> codec::Handle {
+            fn add_entity(&mut self, _entity: document::EntityType) -> document::Handle {
                 panic!("not used")
             }
             fn bump_geometry(&mut self) {}
             fn read_record(
                 &self,
-                _handle: codec::Handle,
+                _handle: document::Handle,
                 _app_name: &str,
-            ) -> Option<&codec::xdata::ExtendedDataRecord> {
+            ) -> Option<&document::xdata::ExtendedDataRecord> {
                 None
             }
             fn write_record(
                 &mut self,
-                _handle: codec::Handle,
-                _record: codec::xdata::ExtendedDataRecord,
+                _handle: document::Handle,
+                _record: document::xdata::ExtendedDataRecord,
             ) -> bool {
                 false
             }
-            fn remove_record(&mut self, _handle: codec::Handle, _app_name: &str) -> bool {
+            fn remove_record(&mut self, _handle: document::Handle, _app_name: &str) -> bool {
                 false
             }
             fn push_undo(&mut self, _label: &str) {}

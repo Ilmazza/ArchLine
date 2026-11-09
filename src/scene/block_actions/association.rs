@@ -84,6 +84,7 @@ pub(crate) fn associate(
     if staged == *doc {
         return Ok(false);
     }
+    flip_graph::preserve_authored_selection(doc, &staged, definition)?;
     *doc = staged;
     Ok(true)
 }
@@ -94,7 +95,7 @@ mod tests {
     use crate::scene::{
         block_distance_parameter as distance, block_orientation_parameter as orientation, Scene,
     };
-    use codec::{DwgReader, DwgWriter, DxfReader, DxfWriter};
+    use document::{DwgReader, DwgWriter, DxfReader, DxfWriter};
     use std::io::Cursor;
 
     fn parameter(doc: &mut Document, definition: Handle, kind: Kind) -> Handle {
@@ -144,7 +145,7 @@ mod tests {
             scene.define_block_raw(
                 "ASSOCIATE",
                 Vector3::ZERO,
-                vec![EntityType::Line(codec::entities::Line::from_points(
+                vec![EntityType::Line(document::entities::Line::from_points(
                     Vector3::new(1.0, 1.0, 0.0),
                     Vector3::new(2.0, 2.0, 0.0),
                 ))],

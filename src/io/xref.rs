@@ -1,10 +1,10 @@
 // XREF resolution — scan a loaded document for external-reference blocks and
 // populate them with geometry from the referenced DWG/DXF files.
 
-use codec::entities::{Block, BlockEnd};
-use codec::tables::TableEntry;
-use codec::types::{Handle, Vector3};
-use codec::{Document, EntityType};
+use document::entities::{Block, BlockEnd};
+use document::tables::TableEntry;
+use document::types::{Handle, Vector3};
+use document::{Document, EntityType};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ pub struct XrefInfo {
     pub status: XrefStatus,
     /// Reader diagnostics retained for the recovery report.
     pub diagnostics: Vec<String>,
-    pub read_stats: Option<codec::ReadStats>,
+    pub read_stats: Option<document::ReadStats>,
     pub source_sha256: Option<String>,
 }
 
@@ -113,8 +113,8 @@ fn source_cache() -> &'static Mutex<(HashMap<String, Arc<Vec<u8>>>, VecDeque<Str
     SOURCES.get_or_init(|| Mutex::new((HashMap::default(), VecDeque::new())))
 }
 
-fn parsed_cache() -> &'static Mutex<HashMap<String, codec::ReadOutcome>> {
-    static PARSED: OnceLock<Mutex<HashMap<String, codec::ReadOutcome>>> = OnceLock::new();
+fn parsed_cache() -> &'static Mutex<HashMap<String, document::ReadOutcome>> {
+    static PARSED: OnceLock<Mutex<HashMap<String, document::ReadOutcome>>> = OnceLock::new();
     PARSED.get_or_init(|| Mutex::new(HashMap::default()))
 }
 
@@ -154,7 +154,7 @@ pub fn register_source(name: &str, bytes: Arc<Vec<u8>>) {
 /// merge. The entry is one-shot: a resolve consumes it, so a later reload
 /// re-reads the registered bytes instead of replaying a stale document.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn register_parsed(name: &str, outcome: codec::ReadOutcome) {
+pub(crate) fn register_parsed(name: &str, outcome: document::ReadOutcome) {
     parsed_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -187,7 +187,7 @@ pub(crate) fn registered_bytes(key: &str) -> Option<Arc<Vec<u8>>> {
 
 /// Take the cached parse for `key`, if one is pending.
 #[cfg(any(target_arch = "wasm32", test))]
-fn take_parsed(key: &str) -> Option<codec::ReadOutcome> {
+fn take_parsed(key: &str) -> Option<document::ReadOutcome> {
     parsed_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -203,7 +203,7 @@ fn take_parsed(key: &str) -> Option<codec::ReadOutcome> {
 fn read_registered_outcome(
     key: &str,
     progress: Option<Arc<dyn Fn(u16) + Send + Sync>>,
-) -> Result<codec::ReadOutcome, String> {
+) -> Result<document::ReadOutcome, String> {
     if let Some(mut outcome) = take_parsed(key) {
         finalize_xref_outcome(&mut outcome);
         return Ok(outcome);
@@ -219,10 +219,10 @@ fn read_registered_outcome(
 /// Apply the same post-parse fixups the file-open tail applies, so merged
 /// xref content behaves like natively loaded content.
 #[cfg(target_arch = "wasm32")]
-fn finalize_xref_outcome(outcome: &mut codec::ReadOutcome) {
+fn finalize_xref_outcome(outcome: &mut document::ReadOutcome) {
     let doc = &mut outcome.document;
     super::normalize_block_origins(doc);
-    if outcome.stats.source_format == Some(codec::SourceFormat::Dxf) {
+    if outcome.stats.source_format == Some(document::SourceFormat::Dxf) {
         super::fix_dxf_layout_plot_settings(doc);
     }
     super::fix_viewport_status_flags(doc);
@@ -238,9 +238,9 @@ fn read_outcome_from_bytes(
     name: &str,
     bytes: Arc<Vec<u8>>,
     progress: Option<Arc<dyn Fn(u16) + Send + Sync>>,
-) -> Result<codec::ReadOutcome, String> {
-    use codec::DwgReader;
-    use codec::DxfReader;
+) -> Result<document::ReadOutcome, String> {
+    use document::DwgReader;
+    use document::DxfReader;
     // The readers keep their stream and want an owned, 'static buffer —
     // take the registry `Arc`'s contents by value (one copy; the worker
     // pre-parse makes this fallback path the exception, not the rule).
@@ -343,7 +343,7 @@ fn resolve_xrefs_with_filter(
         String,
         Handle,
         Option<PathBuf>,
-        Option<Result<codec::ReadOutcome, String>>,
+        Option<Result<document::ReadOutcome, String>>,
         Option<String>,
         Option<SourceFingerprint>,
     )> = xref_entries
@@ -447,7 +447,7 @@ fn resolve_xrefs_with_filter(
                     || outcome.stats.skipped_source_records > 0
                     || !outcome.stats.stream_completed
                     || outcome.document.notifications.iter().any(|item| {
-                        item.notification_type == codec::notification::NotificationType::Error
+                        item.notification_type == document::notification::NotificationType::Error
                     });
                 let mut diagnostics: Vec<String> = outcome
                     .document
@@ -528,7 +528,7 @@ fn resolve_xrefs_with_filter(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn register_underlay_sources(doc: &Document, base_dir: &Path) {
     for object in doc.objects.values() {
-        let codec::objects::ObjectType::UnderlayDefinition(def) = object else {
+        let document::objects::ObjectType::UnderlayDefinition(def) = object else {
             continue;
         };
         let stored = def.file_path.as_str();
@@ -541,11 +541,11 @@ pub fn register_underlay_sources(doc: &Document, base_dir: &Path) {
     }
     // Point cloud scans are large and read lazily: register where they are.
     for object in doc.objects.values() {
-        let codec::objects::ObjectType::ClassObject(object) = object else {
+        let document::objects::ObjectType::ClassObject(object) = object else {
             continue;
         };
-        let (codec::objects::ClassObjectData::PointCloudDefinitionEx(def)
-        | codec::objects::ClassObjectData::PointCloudDefinition(def)) = &object.data
+        let (document::objects::ClassObjectData::PointCloudDefinitionEx(def)
+        | document::objects::ClassObjectData::PointCloudDefinition(def)) = &object.data
         else {
             continue;
         };
@@ -563,9 +563,9 @@ pub fn register_underlay_sources(doc: &Document, base_dir: &Path) {
 /// "Layer property overrides" row.
 #[derive(Clone, PartialEq)]
 struct LayerLook {
-    color: codec::types::Color,
+    color: document::types::Color,
     line_type: String,
-    line_weight: codec::types::LineWeight,
+    line_weight: document::types::LineWeight,
     off: bool,
     frozen: bool,
     locked: bool,
@@ -573,7 +573,7 @@ struct LayerLook {
 }
 
 impl LayerLook {
-    fn of(layer: &codec::tables::Layer) -> Self {
+    fn of(layer: &document::tables::Layer) -> Self {
         Self {
             color: layer.color.clone(),
             line_type: layer.line_type.to_uppercase(),
@@ -996,7 +996,7 @@ fn import_xref_symbols(
     // so without an import every bound image loses its file link. Fresh
     // handle, detached owner; the path stays verbatim here.
     {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         for (handle, obj) in xref_doc.objects.iter() {
             match obj {
                 ObjectType::ImageDefinition(def) => {
@@ -1067,7 +1067,7 @@ fn remap_xref_entity(host: &Document, entity: &mut EntityType, maps: &XrefSymbol
     }
 
     // ── Text-style names (incl. embedded MText in attributes) ──
-    let remap_mtext_style = |mtext: &mut codec::entities::MText, maps: &XrefSymbolMaps| {
+    let remap_mtext_style = |mtext: &mut document::entities::MText, maps: &XrefSymbolMaps| {
         rename(&maps.text_styles, &mut mtext.style);
     };
     match entity {
@@ -1134,7 +1134,7 @@ fn remap_xref_entity(host: &Document, entity: &mut EntityType, maps: &XrefSymbol
                     img.definition_handle = Some(new);
                     // Keep the entity path in sync with its definition (bind
                     // COLLECT retargets the definition before merging).
-                    use codec::objects::ObjectType;
+                    use document::objects::ObjectType;
                     if let Some(ObjectType::ImageDefinition(def)) = host.objects.get(&new) {
                         img.file_path = def.file_name.clone();
                     }
@@ -1161,7 +1161,7 @@ fn copy_xref_sortents(
     br_handle_map: &HashMap<Handle, Handle>,
     entity_handle_map: &HashMap<Handle, Handle>,
 ) {
-    use codec::objects::{ObjectType, SortEntitiesTable};
+    use document::objects::{ObjectType, SortEntitiesTable};
     let xref_ms_handle = xref_doc.header.model_space_block_handle;
     for obj in xref_doc.objects.values() {
         let ObjectType::SortEntitiesTable(t) = obj else {
@@ -1324,7 +1324,7 @@ fn merge_source_entities(
             continue;
         };
         entity.common_mut().owner_handle = new_owner;
-        // Clear the foreign handle so opencadcodec assigns a new one.
+        // Clear the foreign handle so document assigns a new one.
         set_handle(&mut entity, Handle::NULL);
         if let Ok(new_h) = target.add_entity(entity) {
             entity_handle_map.insert(old_h, new_h);
@@ -1378,7 +1378,7 @@ pub use crate::io::xref_model::child_key;
 /// nested file that fails to parse is skipped silently. Synchronous by
 /// design; async stat is Task 8.
 pub fn collect_entries(
-    doc: &codec::Document,
+    doc: &document::Document,
     base_dir: &Path,
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
 ) -> Vec<crate::io::xref_model::ReferenceEntry> {
@@ -1388,7 +1388,7 @@ pub fn collect_entries(
 /// [`collect_entries`] with a load-time mtime baseline for `Stale` detection.
 /// See [`collect_entries`] for the full contract.
 pub fn collect_entries_with_prev(
-    doc: &codec::Document,
+    doc: &document::Document,
     base_dir: &Path,
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
     prev: &std::collections::HashMap<u64, std::time::SystemTime>,
@@ -1397,7 +1397,7 @@ pub fn collect_entries_with_prev(
         child_key, decide_status, normalize_lexical, RefKind, RefStatus, RefType, ReferenceEntry,
         UnloadKey,
     };
-    use codec::objects::ObjectType;
+    use document::objects::ObjectType;
 
     /// Resolve `raw` via `base_dir`; on success record `found_at`, stat
     /// size/mtime, and flip the entry to Loaded. Missing/empty stays NotFound.
@@ -1556,7 +1556,7 @@ pub fn collect_entries_with_prev(
     let mut referenced_clouds: HashSet<Handle> = HashSet::default();
     for e in doc.entities() {
         if let EntityType::Extended(extended) = e {
-            if let codec::entities::ExtendedEntityData::PointCloudEx(data) = &extended.data {
+            if let document::entities::ExtendedEntityData::PointCloudEx(data) = &extended.data {
                 referenced_clouds.insert(data.definition_handle);
             }
         }
@@ -1579,7 +1579,7 @@ pub fn collect_entries_with_prev(
         let ObjectType::ClassObject(object) = obj else {
             continue;
         };
-        let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data else {
+        let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data else {
             continue;
         };
         let key = handle.value();
@@ -1722,7 +1722,7 @@ fn find_target(doc: &Document, key: u64) -> Option<RefTarget> {
         }
     }
     for (handle, obj) in doc.objects.iter() {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         match obj {
             ObjectType::ImageDefinition(def) if handle.value() == key => {
                 return Some(RefTarget::Image {
@@ -1731,7 +1731,7 @@ fn find_target(doc: &Document, key: u64) -> Option<RefTarget> {
                 });
             }
             ObjectType::ClassObject(object) if handle.value() == key => {
-                if let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data {
+                if let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data {
                     return Some(RefTarget::PointCloud {
                         handle: *handle,
                         name: def.source_filename.clone(),
@@ -1782,7 +1782,7 @@ pub fn unload_reference(doc: &mut Document, key: u64) -> Result<String, String> 
             }
             // Drop draw-order overrides owned by the unloaded block.
             {
-                use codec::objects::ObjectType;
+                use document::objects::ObjectType;
                 let dead: Vec<Handle> = doc
                     .objects
                     .iter()
@@ -1802,7 +1802,7 @@ pub fn unload_reference(doc: &mut Document, key: u64) -> Result<String, String> 
         RefTarget::Image { name, .. } => Ok(name),
         // A PDF keeps its unloaded state on the definition (saved with it).
         RefTarget::Pdf { handle, name } => {
-            if let Some(codec::objects::ObjectType::UnderlayDefinition(def)) =
+            if let Some(document::objects::ObjectType::UnderlayDefinition(def)) =
                 doc.objects.get_mut(&handle)
             {
                 def.unloaded = true;
@@ -1819,8 +1819,8 @@ pub fn unload_reference(doc: &mut Document, key: u64) -> Result<String, String> 
 
 /// A point cloud definition's loaded flag (Unload / Reload).
 pub fn set_point_cloud_loaded(doc: &mut Document, handle: Handle, loaded: bool) {
-    if let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) {
-        if let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data {
+    if let Some(document::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) {
+        if let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data {
             def.is_loaded = loaded;
         }
     }
@@ -1868,7 +1868,7 @@ pub fn detach_reference(doc: &mut Document, key: u64) -> Result<String, String> 
             remove_pipe_symbols(doc, &name);
             // Draw-order tables owned by the detached block.
             {
-                use codec::objects::ObjectType;
+                use document::objects::ObjectType;
                 let dead: Vec<Handle> = doc
                     .objects
                     .iter()
@@ -1921,7 +1921,7 @@ pub fn detach_reference(doc: &mut Document, key: u64) -> Result<String, String> 
         // The clouds, their reactors, the definition and its dictionary
         // entry.
         RefTarget::PointCloud { handle, name } => {
-            use codec::entities::ExtendedEntityData;
+            use document::entities::ExtendedEntityData;
             let clouds: Vec<(Handle, Handle)> = doc
                 .entities()
                 .filter_map(|e| match e {
@@ -1941,7 +1941,7 @@ pub fn detach_reference(doc: &mut Document, key: u64) -> Result<String, String> 
                 doc.objects.remove(&reactor);
             }
             for object in doc.objects.values_mut() {
-                if let codec::objects::ObjectType::Dictionary(dictionary) = object {
+                if let document::objects::ObjectType::Dictionary(dictionary) = object {
                     dictionary.entries.retain(|(_, h)| *h != handle);
                 }
             }
@@ -2009,6 +2009,496 @@ fn bind_failed(name: &str, reason: impl std::fmt::Display) -> String {
     crate::tf!("XREF: cannot bind \"{}\": {}.", name, reason.to_string()).to_string()
 }
 
+// ── XBIND — copy named symbols out of one reference ────────────────────
+
+/// The symbol kinds XBIND can copy out of a referenced drawing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum XbindKind {
+    Layer,
+    Block,
+    Linetype,
+    TextStyle,
+    DimStyle,
+}
+
+impl XbindKind {
+    /// The word reports and prompts use.
+    pub fn label(self) -> &'static str {
+        match self {
+            XbindKind::Layer => "layer",
+            XbindKind::Block => "block",
+            XbindKind::Linetype => "linetype",
+            XbindKind::TextStyle => "text style",
+            XbindKind::DimStyle => "dim style",
+        }
+    }
+
+    /// Every bindable name of this kind in `doc`, using the drawing's own
+    /// spelling. Anonymous blocks, layout records and nested references are
+    /// not bindable named objects, so they are not listed.
+    fn names(self, doc: &Document) -> Vec<String> {
+        match self {
+            XbindKind::Layer => doc.layers.names().map(str::to_string).collect(),
+            XbindKind::Linetype => doc.line_types.names().map(str::to_string).collect(),
+            XbindKind::TextStyle => doc.text_styles.names().map(str::to_string).collect(),
+            XbindKind::DimStyle => doc.dim_styles.names().map(str::to_string).collect(),
+            XbindKind::Block => doc
+                .block_records
+                .iter()
+                .filter(|br| {
+                    !br.name.starts_with('*')
+                        && !br.is_layout()
+                        && !br.flags.is_xref
+                        && !br.flags.is_xref_overlay
+                })
+                .map(|br| br.name.clone())
+                .collect(),
+        }
+    }
+}
+
+/// What one XBIND call copied.
+#[derive(Debug, Default)]
+pub struct XbindOutcome {
+    /// The reference the symbols came from.
+    pub reference: String,
+    /// `(kind, source name, host name)` for every symbol written.
+    pub imported: Vec<(XbindKind, String, String)>,
+    /// `(kind, requested pattern)` that matched nothing bindable.
+    pub missing: Vec<(XbindKind, String)>,
+}
+
+/// Everything a selective import must carry, as upper-case names.
+#[derive(Debug, Default)]
+struct XbindSelection {
+    layers: HashSet<String>,
+    blocks: HashSet<String>,
+    linetypes: HashSet<String>,
+    text_styles: HashSet<String>,
+    dim_styles: HashSet<String>,
+    image_defs: HashSet<Handle>,
+    underlay_defs: HashSet<Handle>,
+}
+
+/// Import `requests` of `(kind, name-or-wildcard)` from the drawing reference
+/// `key` into `doc`, under BIND names (`PLAN$0$WALLS`), leaving the reference
+/// itself attached. Only the selected symbols and the symbols they actually
+/// draw with (a block's layers, styles and nested blocks) are copied.
+pub fn xbind_symbols(
+    doc: &mut Document,
+    key: u64,
+    base_dir: &Path,
+    requests: &[(XbindKind, String)],
+) -> Result<XbindOutcome, String> {
+    let Some(RefTarget::DwgXref { handle, name }) = find_target(doc, key) else {
+        return Err(crate::t!("XBIND: applies to drawing references only.").to_string());
+    };
+    let saved = doc
+        .block_records
+        .iter()
+        .find(|b| b.handle == handle)
+        .map(|b| b.xref_path.clone())
+        .unwrap_or_default();
+    let Some(found) = resolve_path(&saved, base_dir) else {
+        return Err(crate::t!("XBIND: the reference file was not found.").to_string());
+    };
+    let source = load_bind_source(&name, &found)?;
+
+    let mut selection = XbindSelection::default();
+    let mut outcome = XbindOutcome {
+        reference: name.clone(),
+        ..Default::default()
+    };
+    let mut requested: Vec<(XbindKind, String)> = Vec::new();
+    for (kind, pattern) in requests {
+        let hits: Vec<String> = kind
+            .names(&source)
+            .into_iter()
+            .filter(|candidate| crate::io::xref_model::wildcard_match(candidate, pattern))
+            .collect();
+        if hits.is_empty() {
+            outcome.missing.push((*kind, pattern.clone()));
+            continue;
+        }
+        for hit in hits {
+            let upper = hit.to_uppercase();
+            let set = match kind {
+                XbindKind::Layer => &mut selection.layers,
+                XbindKind::Block => &mut selection.blocks,
+                XbindKind::Linetype => &mut selection.linetypes,
+                XbindKind::TextStyle => &mut selection.text_styles,
+                XbindKind::DimStyle => &mut selection.dim_styles,
+            };
+            set.insert(upper);
+            if !requested
+                .iter()
+                .any(|(k, n)| k == kind && n.eq_ignore_ascii_case(&hit))
+            {
+                requested.push((*kind, hit));
+            }
+        }
+    }
+    if requested.is_empty() {
+        return Ok(outcome);
+    }
+
+    collect_xbind_dependencies(&source, &mut selection);
+    let filtered = prune_source_for_xbind(&source, &selection);
+
+    let taken = BindTaken::capture(doc);
+    let mut naming = SymbolNaming::BindDollar {
+        parent: name.clone(),
+        taken,
+    };
+    let maps = import_xref_symbols(doc, &filtered, &mut naming);
+
+    // An imported layer keeps naming its linetype: point it at the imported
+    // copy instead of the reference's own name (the layer clone precedes the
+    // linetype clones in `import_xref_symbols`).
+    for (source_name, host_name) in &maps.layers {
+        let Some(source_layer) = source.layers.get(source_name) else {
+            continue;
+        };
+        let Some(new_linetype) = maps
+            .linetypes
+            .get(&source_layer.line_type.to_uppercase())
+        else {
+            continue;
+        };
+        if let Some(host_layer) = doc.layers.get_mut(host_name) {
+            host_layer.line_type = new_linetype.clone();
+        }
+    }
+
+    if !selection.blocks.is_empty() {
+        copy_xbind_block_entities(doc, &filtered, &maps);
+        for host_block in maps.blocks.values() {
+            ensure_block_entities(doc, host_block);
+        }
+    }
+
+    for (kind, source_name) in requested {
+        let upper = source_name.to_uppercase();
+        let host = match kind {
+            XbindKind::Layer => maps.layers.get(&upper),
+            XbindKind::Block => maps.blocks.get(&upper),
+            XbindKind::Linetype => maps.linetypes.get(&upper),
+            XbindKind::TextStyle => maps.text_styles.get(&upper),
+            XbindKind::DimStyle => maps.dim_styles.get(&upper),
+        };
+        match host {
+            Some(host) => outcome.imported.push((kind, source_name, host.clone())),
+            None => outcome.missing.push((kind, source_name)),
+        }
+    }
+    Ok(outcome)
+}
+
+/// Every bindable named object in one drawing reference, grouped by kind.
+/// Backs the bare `XBIND <reference>` listing.
+pub fn xbind_list(
+    doc: &Document,
+    key: u64,
+    base_dir: &Path,
+) -> Result<Vec<(XbindKind, String)>, String> {
+    let Some(RefTarget::DwgXref { handle, name }) = find_target(doc, key) else {
+        return Err(crate::t!("XBIND: applies to drawing references only.").to_string());
+    };
+    let saved = doc
+        .block_records
+        .iter()
+        .find(|b| b.handle == handle)
+        .map(|b| b.xref_path.clone())
+        .unwrap_or_default();
+    let Some(found) = resolve_path(&saved, base_dir) else {
+        return Err(crate::t!("XBIND: the reference file was not found.").to_string());
+    };
+    let source = load_bind_source(&name, &found)?;
+    let mut symbols = Vec::new();
+    for kind in [
+        XbindKind::Layer,
+        XbindKind::Block,
+        XbindKind::Linetype,
+        XbindKind::TextStyle,
+        XbindKind::DimStyle,
+    ] {
+        for symbol in kind.names(&source) {
+            if kind == XbindKind::Layer
+                && (symbol == "0" || symbol.eq_ignore_ascii_case("Defpoints"))
+            {
+                continue;
+            }
+            if kind == XbindKind::Linetype && is_sentinel_linetype(&symbol) {
+                continue;
+            }
+            symbols.push((kind, symbol));
+        }
+    }
+    Ok(symbols)
+}
+
+/// Follow the selected blocks through their geometry, collecting every layer,
+/// linetype, text style, dimension style, image/underlay definition and nested
+/// block an INSERT of those blocks would need.
+fn collect_xbind_dependencies(source: &Document, selection: &mut XbindSelection) {
+    let mut queue: Vec<String> = selection.blocks.iter().cloned().collect();
+    let mut visited: HashSet<String> = HashSet::default();
+    while let Some(upper) = queue.pop() {
+        if !visited.insert(upper.clone()) {
+            continue;
+        }
+        let Some(record) = source.block_records.get(&upper) else {
+            continue;
+        };
+        let mut handles: HashSet<Handle> = record.entity_handles.iter().copied().collect();
+        for entity in source.entities() {
+            if entity.common().owner_handle == record.handle {
+                handles.insert(entity.common().handle);
+            }
+        }
+        for handle in handles {
+            let Some(entity) = source.get_entity(handle) else {
+                continue;
+            };
+            let common = entity.common();
+            if !common.layer.is_empty() {
+                selection.layers.insert(common.layer.to_uppercase());
+            }
+            if !common.linetype.is_empty() && !is_sentinel_linetype(&common.linetype) {
+                selection.linetypes.insert(common.linetype.to_uppercase());
+            }
+            match entity {
+                EntityType::Text(text) => {
+                    selection.text_styles.insert(text.style.to_uppercase());
+                }
+                EntityType::MText(mtext) => {
+                    selection.text_styles.insert(mtext.style.to_uppercase());
+                }
+                EntityType::AttributeDefinition(attribute) => {
+                    selection
+                        .text_styles
+                        .insert(attribute.text_style.to_uppercase());
+                }
+                EntityType::AttributeEntity(attribute) => {
+                    selection
+                        .text_styles
+                        .insert(attribute.text_style.to_uppercase());
+                }
+                EntityType::Dimension(dimension) => {
+                    let base = dimension.base();
+                    if !base.style_name.is_empty() {
+                        selection
+                            .dim_styles
+                            .insert(base.style_name.to_uppercase());
+                    }
+                    queue_bindable_block(source, &base.block_name, selection, &mut queue);
+                }
+                EntityType::Leader(leader) => {
+                    if !leader.dimension_style.is_empty() {
+                        selection
+                            .dim_styles
+                            .insert(leader.dimension_style.to_uppercase());
+                    }
+                }
+                EntityType::Tolerance(tolerance) => {
+                    if !tolerance.dimension_style_name.is_empty() {
+                        selection
+                            .dim_styles
+                            .insert(tolerance.dimension_style_name.to_uppercase());
+                    }
+                }
+                EntityType::Insert(insert) => {
+                    queue_bindable_block(source, &insert.block_name, selection, &mut queue);
+                }
+                EntityType::Table(table) => {
+                    queue_bindable_block(source, &table.block_name, selection, &mut queue);
+                }
+                EntityType::RasterImage(image) => {
+                    if let Some(definition) = image.definition_handle {
+                        selection.image_defs.insert(definition);
+                    }
+                }
+                EntityType::Underlay(underlay) => {
+                    selection.underlay_defs.insert(underlay.definition_handle);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // A layer's linetype and a linetype's compound text style are part of
+    // what the layer or linetype draws with.
+    for name in selection.layers.clone() {
+        if let Some(layer) = source.layers.get(&name) {
+            if !layer.line_type.is_empty() && !is_sentinel_linetype(&layer.line_type) {
+                selection.linetypes.insert(layer.line_type.to_uppercase());
+            }
+        }
+    }
+    for name in selection.linetypes.clone() {
+        let Some(linetype) = source.line_types.get(&name) else {
+            continue;
+        };
+        for element in &linetype.elements {
+            let Some(complex) = element.complex.as_ref() else {
+                continue;
+            };
+            if let Some(style) = source
+                .text_styles
+                .iter()
+                .find(|style| style.handle == complex.style_handle)
+            {
+                selection.text_styles.insert(style.name.to_uppercase());
+            }
+        }
+    }
+}
+
+fn queue_bindable_block(
+    source: &Document,
+    name: &str,
+    selection: &mut XbindSelection,
+    queue: &mut Vec<String>,
+) {
+    let upper = name.to_uppercase();
+    let Some(record) = source.block_records.get(name) else {
+        return;
+    };
+    if record.name.starts_with('*')
+        || record.is_layout()
+        || record.flags.is_xref
+        || record.flags.is_xref_overlay
+    {
+        return;
+    }
+    if selection.blocks.insert(upper.clone()) {
+        queue.push(upper);
+    }
+}
+
+/// A copy of `source` reduced to what the selection needs, so the shared
+/// `import_xref_symbols` copies the chosen symbols and nothing else.
+fn prune_source_for_xbind(source: &Document, selection: &XbindSelection) -> Document {
+    let mut filtered = source.clone();
+    let model_space = filtered.header.model_space_block_handle;
+
+    let block_names: Vec<String> = filtered
+        .block_records
+        .iter()
+        .map(|record| record.name.clone())
+        .collect();
+    for name in block_names {
+        let keep = filtered
+            .block_records
+            .get(&name)
+            .map(|record| {
+                record.handle == model_space || selection.blocks.contains(&name.to_uppercase())
+            })
+            .unwrap_or(false);
+        if !keep {
+            filtered.block_records.remove(&name);
+        }
+    }
+
+    let kept_blocks: HashSet<Handle> = filtered
+        .block_records
+        .iter()
+        .map(|record| record.handle)
+        .collect();
+    let mut keep_entities: HashSet<Handle> = HashSet::default();
+    for record in filtered.block_records.iter() {
+        keep_entities.extend(record.entity_handles.iter().copied());
+    }
+    for entity in source.entities() {
+        if kept_blocks.contains(&entity.common().owner_handle) {
+            keep_entities.insert(entity.common().handle);
+        }
+    }
+    let entity_handles: Vec<Handle> = filtered
+        .entities()
+        .map(|entity| entity.common().handle)
+        .collect();
+    for handle in entity_handles {
+        if !keep_entities.contains(&handle) {
+            filtered.remove_entity(handle);
+        }
+    }
+
+    let keep_table = |table_names: Vec<String>, keep: &HashSet<String>| {
+        table_names
+            .into_iter()
+            .filter(|name| !keep.contains(&name.to_uppercase()))
+            .collect::<Vec<_>>()
+    };
+    for name in keep_table(
+        filtered.layers.names().map(str::to_string).collect(),
+        &selection.layers,
+    ) {
+        // Layer 0 and Defpoints are shared, never dependent copies.
+        if name != "0" && !name.eq_ignore_ascii_case("Defpoints") {
+            filtered.layers.remove(&name);
+        }
+    }
+    for name in keep_table(
+        filtered.line_types.names().map(str::to_string).collect(),
+        &selection.linetypes,
+    ) {
+        filtered.line_types.remove(&name);
+    }
+    for name in keep_table(
+        filtered.text_styles.names().map(str::to_string).collect(),
+        &selection.text_styles,
+    ) {
+        filtered.text_styles.remove(&name);
+    }
+    for name in keep_table(
+        filtered.dim_styles.names().map(str::to_string).collect(),
+        &selection.dim_styles,
+    ) {
+        filtered.dim_styles.remove(&name);
+    }
+
+    let dead_objects: Vec<Handle> = filtered
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| match object {
+            document::objects::ObjectType::ImageDefinition(_)
+                if !selection.image_defs.contains(handle) =>
+            {
+                Some(*handle)
+            }
+            document::objects::ObjectType::UnderlayDefinition(_)
+                if !selection.underlay_defs.contains(handle) =>
+            {
+                Some(*handle)
+            }
+            _ => None,
+        })
+        .collect();
+    for handle in dead_objects {
+        filtered.objects.remove(&handle);
+    }
+
+    filtered
+}
+
+/// Copy the selected blocks' geometry into the host. The imported block
+/// records arrive with cleared membership, so `add_entity` re-chains each
+/// entity under its new owner and `import_xref_symbols` has already renamed
+/// every symbol its geometry references.
+fn copy_xbind_block_entities(target: &mut Document, source: &Document, maps: &XrefSymbolMaps) {
+    for (_, mut entity) in ordered_source_entities(source) {
+        let old_owner = entity.common().owner_handle;
+        let Some(&new_owner) = maps.br_handles.get(&old_owner) else {
+            continue;
+        };
+        remap_xref_entity(target, &mut entity, maps);
+        entity.common_mut().owner_handle = new_owner;
+        set_handle(&mut entity, Handle::NULL);
+        let _ = target.add_entity(entity);
+    }
+}
+
 fn bind_dwg(
     doc: &mut Document,
     br_handle: Handle,
@@ -2071,8 +2561,8 @@ fn load_bind_source(ref_name: &str, found: &Path) -> Result<Document, String> {
 /// Reject PDF underlays anywhere in a bind closure: vector import is
 /// unavailable, and silently dropping them would lose data.
 fn check_no_pdf_underlays(source: &Document) -> Result<(), String> {
-    use codec::entities::UnderlayType;
-    use codec::objects::ObjectType;
+    use document::entities::UnderlayType;
+    use document::objects::ObjectType;
     let has_pdf = source.objects.values().any(
         |o| matches!(o, ObjectType::UnderlayDefinition(d) if d.underlay_type == UnderlayType::Pdf),
     );
@@ -2181,7 +2671,7 @@ fn collect_bind_images(
     host_dir: &Path,
     only: Option<Handle>,
 ) -> Result<(), String> {
-    use codec::objects::ObjectType;
+    use document::objects::ObjectType;
     let defs: Vec<(Handle, String)> = source
         .objects
         .iter()
@@ -2366,7 +2856,7 @@ fn remove_dependent_symbols(doc: &mut Document, name: &str, layers_too: bool) {
         doc.remove_entity(h);
     }
     {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let dead: Vec<Handle> = doc
             .objects
             .iter()
@@ -2453,7 +2943,7 @@ fn remove_dependent_symbols(doc: &mut Document, name: &str, layers_too: bool) {
 fn snapshot_dependent_layers(
     doc: &Document,
     name: &str,
-) -> HashMap<String, codec::tables::Layer> {
+) -> HashMap<String, document::tables::Layer> {
     let prefix = format!("{}|", name.to_uppercase());
     doc.layers
         .names()
@@ -2475,7 +2965,7 @@ fn snapshot_dependent_layers(
 fn restore_dependent_layers(
     doc: &mut Document,
     name: &str,
-    kept: HashMap<String, codec::tables::Layer>,
+    kept: HashMap<String, document::tables::Layer>,
 ) {
     if kept.is_empty() {
         return;
@@ -2517,7 +3007,7 @@ pub fn set_ref_path(doc: &mut Document, key: u64, new_raw: &str) -> Result<Strin
             Err(crate::t!("XREF: no loaded reference with that key.").to_string())
         }
         RefTarget::Image { handle, name } => {
-            use codec::objects::ObjectType;
+            use document::objects::ObjectType;
             match doc.objects.get_mut(&handle) {
                 Some(ObjectType::ImageDefinition(def)) => {
                     def.file_name = new_raw.to_string();
@@ -2527,7 +3017,7 @@ pub fn set_ref_path(doc: &mut Document, key: u64, new_raw: &str) -> Result<Strin
             }
         }
         RefTarget::Pdf { handle, name } => {
-            use codec::objects::ObjectType;
+            use document::objects::ObjectType;
             match doc.objects.get_mut(&handle) {
                 Some(ObjectType::UnderlayDefinition(def)) => {
                     def.file_path = new_raw.to_string();
@@ -2537,7 +3027,7 @@ pub fn set_ref_path(doc: &mut Document, key: u64, new_raw: &str) -> Result<Strin
             }
         }
         RefTarget::PointCloud { handle, name } => {
-            use codec::objects::{ClassObjectData, ObjectType};
+            use document::objects::{ClassObjectData, ObjectType};
             match doc.objects.get_mut(&handle) {
                 Some(ObjectType::ClassObject(object)) => match &mut object.data {
                     ClassObjectData::PointCloudDefinitionEx(def) => {
@@ -2567,14 +3057,14 @@ pub fn apply_pathtype(
             .map(|b| b.xref_path.clone())
             .unwrap_or_default(),
         Some(RefTarget::Image { handle, .. }) => {
-            use codec::objects::ObjectType;
+            use document::objects::ObjectType;
             match doc.objects.get(&handle) {
                 Some(ObjectType::ImageDefinition(def)) => def.file_name.clone(),
                 _ => String::new(),
             }
         }
         Some(RefTarget::Pdf { handle, .. }) => {
-            use codec::objects::ObjectType;
+            use document::objects::ObjectType;
             match doc.objects.get(&handle) {
                 Some(ObjectType::UnderlayDefinition(def)) => def.file_path.clone(),
                 _ => String::new(),
@@ -2661,7 +3151,7 @@ pub fn replace_path_prefix(doc: &mut Document, old: &str, new: &str) -> usize {
         }
     }
     {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         for obj in doc.objects.values_mut() {
             match obj {
                 ObjectType::ImageDefinition(def) if !def.file_name.is_empty() => {
@@ -2767,7 +3257,7 @@ pub fn rebase_relative_paths_for_save_as(
         rebase(&mut br.xref_path);
     }
     {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         for obj in doc.objects.values_mut() {
             match obj {
                 ObjectType::ImageDefinition(def) if !def.file_name.is_empty() => {
@@ -2809,8 +3299,8 @@ mod tests {
         std::fs::write(&tmp, b"").unwrap();
         let saved = tmp.to_string_lossy().into_owned();
 
-        let mut doc = codec::Document::new();
-        let mut br = codec::tables::BlockRecord::new("PLAN");
+        let mut doc = document::Document::new();
+        let mut br = document::tables::BlockRecord::new("PLAN");
         br.flags.is_xref = true;
         br.xref_path = saved.clone();
         br.handle = doc.allocate_handle();
@@ -2827,9 +3317,9 @@ mod tests {
         assert_eq!(entries[0].kind, RefKind::DwgXref);
     }
 
-    fn xref_doc_with(name: &str, saved: &str) -> (codec::Document, u64) {
-        let mut doc = codec::Document::new();
-        let mut br = codec::tables::BlockRecord::new(name);
+    fn xref_doc_with(name: &str, saved: &str) -> (document::Document, u64) {
+        let mut doc = document::Document::new();
+        let mut br = document::tables::BlockRecord::new(name);
         br.flags.is_xref = true;
         br.xref_path = saved.to_string();
         br.handle = doc.allocate_handle();
@@ -2855,8 +3345,8 @@ mod tests {
         // mid.dwgxrefs inner.dwg; both must parse (enumeration reads the
         // mid file's block-record table). Returns (mid, inner) abs paths.
         std::fs::write(dir.join("inner.dwg"), b"inner-bytes").unwrap();
-        let mut mid = codec::Document::new();
-        let mut br = codec::tables::BlockRecord::new("INNER");
+        let mut mid = document::Document::new();
+        let mut br = document::tables::BlockRecord::new("INNER");
         br.flags.is_xref = true;
         br.xref_path = dir.join("inner.dwg").to_string_lossy().into_owned();
         mid.block_records.add(br).unwrap();
@@ -2899,7 +3389,7 @@ mod tests {
         // referenced image + unreferenced PDF): attach-equivalent list →
         // unload → targeted reload → detach. Catches integration skew that
         // unit tests on single ops cannot.
-        use codec::objects::{ImageDefinition, ObjectType, UnderlayDefinition};
+        use document::objects::{ImageDefinition, ObjectType, UnderlayDefinition};
         let dir = xref_tmpdir("e2e");
         let (mid_path, _) = write_nested_fixture(&dir);
         std::fs::write(dir.join("img.png"), b"fake-png").unwrap();
@@ -2911,9 +3401,9 @@ mod tests {
         doc.objects
             .insert(img_h, ObjectType::ImageDefinition(img_def));
         let mut img =
-            codec::entities::RasterImage::new("img.png", codec::types::Vector3::ZERO, 8.0, 8.0);
+            document::entities::RasterImage::new("img.png", document::types::Vector3::ZERO, 8.0, 8.0);
         img.definition_handle = Some(img_h);
-        doc.add_entity(codec::EntityType::RasterImage(img)).unwrap();
+        doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
         // Unreferenced PDF definition → listed, never merged.
         let pdf_h = doc.allocate_handle();
         let mut pdf_def = UnderlayDefinition::pdf("doc.pdf", "1");
@@ -3002,8 +3492,8 @@ mod tests {
 
     #[test]
     fn overlay_on_image_errors() {
-        use codec::objects::{ImageDefinition, ObjectType};
-        let mut doc = codec::Document::new();
+        use document::objects::{ImageDefinition, ObjectType};
+        let mut doc = document::Document::new();
         let h = doc.allocate_handle();
         let mut def = ImageDefinition::with_dimensions("img.png", 8, 8);
         def.handle = h;
@@ -3029,10 +3519,10 @@ mod tests {
     fn unload_drops_merged_entities_keeps_definition() {
         let (mut doc, key) = xref_doc_with("PLAN", "missing.dwg");
         let br_h = doc.block_records.get("PLAN").unwrap().handle;
-        let mut line = codec::entities::Line::new();
-        line.common.handle = codec::types::Handle::NULL;
+        let mut line = document::entities::Line::new();
+        line.common.handle = document::types::Handle::NULL;
         line.common.owner_handle = br_h;
-        doc.add_entity(codec::EntityType::Line(line)).unwrap();
+        doc.add_entity(document::EntityType::Line(line)).unwrap();
         assert_eq!(
             doc.block_records.get("PLAN").unwrap().entity_handles.len(),
             1
@@ -3051,19 +3541,19 @@ mod tests {
         // A reload replaces the definition body. The terminator written before
         // the merge belongs after the imported entities, not below them.
         let dir = xref_tmpdir("endorder");
-        let mut source = codec::Document::new();
-        let mut line = codec::entities::Line::new();
-        line.start = codec::types::Vector3::ZERO;
-        line.end = codec::types::Vector3::new(5.0, 0.0, 0.0);
+        let mut source = document::Document::new();
+        let mut line = document::entities::Line::new();
+        line.start = document::types::Vector3::ZERO;
+        line.end = document::types::Vector3::new(5.0, 0.0, 0.0);
         line.common.owner_handle = source.header.model_space_block_handle;
-        source.add_entity(codec::EntityType::Line(line)).unwrap();
+        source.add_entity(document::EntityType::Line(line)).unwrap();
         let bytes = crate::io::save_to_bytes(&source, "dwg", source.version).unwrap();
         let path = dir.join("order.dwg");
         std::fs::write(&path, &bytes).unwrap();
 
         let (mut doc, key) = xref_doc_with("ORDER", &path.to_string_lossy());
         let mut keys = HashSet::default();
-        keys.insert(codec::types::Handle::new(key));
+        keys.insert(document::types::Handle::new(key));
         let infos = resolve_xrefs_for_keys(&mut doc, &dir, &keys);
         assert!(infos
             .iter()
@@ -3085,8 +3575,8 @@ mod tests {
             "the ENDBLK follows the merged body: body {body:?}, end {end}"
         );
         assert!(matches!(
-            doc.get_entity(codec::types::Handle::new(end)),
-            Some(codec::EntityType::BlockEnd(_))
+            doc.get_entity(document::types::Handle::new(end)),
+            Some(document::EntityType::BlockEnd(_))
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3094,13 +3584,13 @@ mod tests {
     #[test]
     fn detach_erases_inserts_and_definition() {
         let (mut doc, key) = xref_doc_with("PLAN", "missing.dwg");
-        let ins = codec::entities::Insert::new("PLAN", codec::types::Vector3::ZERO);
-        doc.add_entity(codec::EntityType::Insert(ins)).unwrap();
+        let ins = document::entities::Insert::new("PLAN", document::types::Vector3::ZERO);
+        doc.add_entity(document::EntityType::Insert(ins)).unwrap();
         detach_reference(&mut doc, key).expect("detach");
         assert!(doc.block_records.get("PLAN").is_none());
         assert!(!doc.entities().any(|e| matches!(
             e,
-            codec::EntityType::Insert(i) if i.block_name.eq_ignore_ascii_case("PLAN")
+            document::EntityType::Insert(i) if i.block_name.eq_ignore_ascii_case("PLAN")
         )));
     }
 
@@ -3110,23 +3600,23 @@ mod tests {
         // must survive purge + re-merge. Exercises the mechanism directly:
         // snapshot → mutate to defaults → restore → overrides back.
         let (mut doc, _) = xref_doc_with("PLAN", "plan.dwg");
-        let mut layer = codec::tables::Layer::new("PLAN|WALLS");
+        let mut layer = document::tables::Layer::new("PLAN|WALLS");
         layer.flags.off = true;
         layer.flags.frozen = true;
-        layer.color = codec::types::Color::from_index(1);
+        layer.color = document::types::Color::from_index(1);
         doc.layers.add_or_replace(layer);
         let kept = snapshot_dependent_layers(&doc, "PLAN");
         assert!(kept.contains_key("PLAN|WALLS"));
         // Simulate the purge + file-default re-merge.
         doc.layers.remove("PLAN|WALLS");
         doc.layers
-            .add_or_replace(codec::tables::Layer::new("PLAN|WALLS"));
+            .add_or_replace(document::tables::Layer::new("PLAN|WALLS"));
         assert!(!doc.layers.get("PLAN|WALLS").unwrap().flags.off);
         restore_dependent_layers(&mut doc, "PLAN", kept);
         let back = doc.layers.get("PLAN|WALLS").unwrap();
         assert!(back.flags.off, "off override restored");
         assert!(back.flags.frozen, "frozen override restored");
-        assert_eq!(back.color, codec::types::Color::from_index(1));
+        assert_eq!(back.color, document::types::Color::from_index(1));
     }
 
     #[test]
@@ -3134,7 +3624,7 @@ mod tests {
         // Layers gone from the new file version stay gone — restore only
         // touches entries present post-merge, never resurrects.
         let (mut doc, _) = xref_doc_with("PLAN", "plan.dwg");
-        let mut layer = codec::tables::Layer::new("PLAN|GONE");
+        let mut layer = document::tables::Layer::new("PLAN|GONE");
         layer.flags.off = true;
         doc.layers.add_or_replace(layer);
         let kept = snapshot_dependent_layers(&doc, "PLAN");
@@ -3243,9 +3733,9 @@ mod tests {
         fn write_xref_file(
             dir: &std::path::Path,
             name: &str,
-            build: impl FnOnce(&mut codec::Document),
+            build: impl FnOnce(&mut document::Document),
         ) -> String {
-            let mut doc = codec::Document::new();
+            let mut doc = document::Document::new();
             build(&mut doc);
             let bytes = crate::io::save_to_bytes(&doc, "dwg", doc.version).expect("save xref");
             let path = dir.join(name);
@@ -3253,16 +3743,155 @@ mod tests {
             path.to_string_lossy().into_owned()
         }
 
-        fn line_on(layer: &str) -> codec::EntityType {
-            let mut line = codec::entities::Line::new();
+        fn line_on(layer: &str) -> document::EntityType {
+            let mut line = document::entities::Line::new();
             line.common.layer = layer.to_string();
-            codec::EntityType::Line(line)
+            document::EntityType::Line(line)
         }
 
-        fn add_layer(doc: &mut codec::Document, name: &str) {
+        fn add_layer(doc: &mut document::Document, name: &str) {
             doc.layers
-                .add(codec::tables::Layer::new(name))
+                .add(document::tables::Layer::new(name))
                 .expect("add layer");
+        }
+
+        #[test]
+        fn xbind_layer_copies_only_the_named_layer() {
+            use super::super::{xbind_symbols, XbindKind};
+            let dir = bind_dir("xbindlayer");
+            let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
+                add_layer(doc, "WALLS");
+                add_layer(doc, "HIDDEN");
+                let mut title = document::tables::BlockRecord::new("TITLE");
+                title.handle = doc.allocate_handle();
+                doc.block_records.add(title).expect("add title");
+                doc.add_entity(line_on("HIDDEN")).unwrap();
+            });
+            let (mut host, key) = xref_doc_with("PLAN", &xref_path);
+
+            let outcome = xbind_symbols(
+                &mut host,
+                key,
+                &dir,
+                &[(XbindKind::Layer, "WALLS".to_string())],
+            )
+            .expect("xbind");
+
+            assert_eq!(outcome.imported.len(), 1, "{outcome:?}");
+            assert!(host.layers.get("PLAN$0$WALLS").is_some());
+            assert!(host.layers.get("PLAN$0$HIDDEN").is_none());
+            assert!(host.block_records.get("PLAN$0$TITLE").is_none());
+            // The reference itself stays attached.
+            let reference = host.block_records.get("PLAN").expect("reference");
+            assert!(reference.flags.is_xref);
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn xbind_block_brings_its_geometry_and_stays_insertable_after_detach() {
+            use super::super::{detach_reference, xbind_symbols, XbindKind};
+            let dir = bind_dir("xbindblock");
+            let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
+                add_layer(doc, "WALLS");
+                add_layer(doc, "HIDDEN");
+                doc.text_styles
+                    .add(document::tables::TextStyle::new("NOTE"))
+                    .expect("add text style");
+                // TITLE: one line on WALLS and one note in NOTE.
+                let mut title = document::tables::BlockRecord::new("TITLE");
+                title.handle = doc.allocate_handle();
+                let title_handle = title.handle;
+                doc.block_records.add(title).expect("add title");
+                let mut line = document::entities::Line::new();
+                line.common.layer = "WALLS".to_string();
+                line.common.owner_handle = title_handle;
+                doc.add_entity(document::EntityType::Line(line)).unwrap();
+                let mut text = document::entities::Text::new();
+                text.style = "NOTE".to_string();
+                text.common.owner_handle = title_handle;
+                doc.add_entity(document::EntityType::Text(text)).unwrap();
+                // OTHER: not selected.
+                let mut other = document::tables::BlockRecord::new("OTHER");
+                other.handle = doc.allocate_handle();
+                let other_handle = other.handle;
+                doc.block_records.add(other).expect("add other");
+                let mut other_line = document::entities::Line::new();
+                other_line.common.layer = "HIDDEN".to_string();
+                other_line.common.owner_handle = other_handle;
+                doc.add_entity(document::EntityType::Line(other_line)).unwrap();
+            });
+            let (mut host, key) = xref_doc_with("PLAN", &xref_path);
+
+            let outcome = xbind_symbols(
+                &mut host,
+                key,
+                &dir,
+                &[(XbindKind::Block, "TITLE".to_string())],
+            )
+            .expect("xbind");
+
+            assert_eq!(outcome.imported.len(), 1, "{outcome:?}");
+            let block = host
+                .block_records
+                .get("PLAN$0$TITLE")
+                .expect("bound block")
+                .clone();
+            assert!(host.block_records.get("PLAN$0$OTHER").is_none());
+            let owned: Vec<_> = host
+                .entities()
+                .filter(|entity| entity.common().owner_handle == block.handle)
+                .collect();
+            assert_eq!(owned.len(), 2, "the block keeps its geometry");
+            let layers: Vec<_> = owned
+                .iter()
+                .map(|entity| entity.common().layer.clone())
+                .collect();
+            assert!(layers.contains(&"PLAN$0$WALLS".to_string()), "{layers:?}");
+            assert!(host.layers.get("PLAN$0$HIDDEN").is_none());
+            assert!(host.text_styles.get("PLAN$0$NOTE").is_some());
+            let styles: Vec<_> = owned
+                .iter()
+                .filter_map(|entity| match entity {
+                    document::EntityType::Text(text) => Some(text.style.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(styles, vec!["PLAN$0$NOTE".to_string()]);
+
+            // Leaving the reference keeps the import usable on its own.
+            detach_reference(&mut host, key).expect("detach");
+            assert!(host.block_records.get("PLAN").is_none());
+            assert!(host.block_records.get("PLAN$0$TITLE").is_some());
+            let insert = document::entities::Insert::new("PLAN$0$TITLE", document::types::Vector3::ZERO);
+            let handle = host.add_entity(document::EntityType::Insert(insert)).expect("insert");
+            assert!(host.get_entity(handle).is_some());
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
+        fn xbind_reports_symbols_it_cannot_find() {
+            use super::super::{xbind_symbols, XbindKind};
+            let dir = bind_dir("xbindmissing");
+            let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
+                add_layer(doc, "WALLS");
+            });
+            let (mut host, key) = xref_doc_with("PLAN", &xref_path);
+
+            let outcome = xbind_symbols(
+                &mut host,
+                key,
+                &dir,
+                &[
+                    (XbindKind::Layer, "NOPE".to_string()),
+                    (XbindKind::Block, "GHOST".to_string()),
+                ],
+            )
+            .expect("xbind");
+
+            assert!(outcome.imported.is_empty());
+            assert_eq!(outcome.missing.len(), 2, "{outcome:?}");
+            assert!(!host.layers.names().any(|name| name.contains("$0$")));
+            std::fs::remove_dir_all(&dir).ok();
         }
 
         #[test]
@@ -3322,7 +3951,7 @@ mod tests {
             let plan_path = write_xref_file(&dir, "plan.dwg", |doc| {
                 add_layer(doc, "PLANLAYER");
                 doc.add_entity(line_on("PLANLAYER")).unwrap();
-                let mut br = codec::tables::BlockRecord::new("DETAIL");
+                let mut br = document::tables::BlockRecord::new("DETAIL");
                 br.flags.is_xref = true;
                 br.xref_path = detail_path.clone();
                 doc.block_records.add(br).expect("add nested xref");
@@ -3350,27 +3979,27 @@ mod tests {
             let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
                 add_layer(doc, "WALLS");
                 // Nested block with content + a model-space INSERT of it.
-                let mut door = codec::tables::BlockRecord::new("DOOR");
+                let mut door = document::tables::BlockRecord::new("DOOR");
                 door.handle = doc.allocate_handle();
                 let door_h = door.handle;
                 doc.block_records.add(door).expect("add door");
-                let mut inner = codec::entities::Line::new();
+                let mut inner = document::entities::Line::new();
                 inner.common.layer = "WALLS".to_string();
                 inner.common.owner_handle = door_h;
-                doc.add_entity(codec::EntityType::Line(inner)).unwrap();
-                let ins = codec::entities::Insert::new("DOOR", codec::types::Vector3::ZERO);
-                doc.add_entity(codec::EntityType::Insert(ins)).unwrap();
+                doc.add_entity(document::EntityType::Line(inner)).unwrap();
+                let ins = document::entities::Insert::new("DOOR", document::types::Vector3::ZERO);
+                doc.add_entity(document::EntityType::Insert(ins)).unwrap();
                 // Hatch (pattern names have no table — preserved verbatim).
-                let mut hatch = codec::entities::Hatch::new();
+                let mut hatch = document::entities::Hatch::new();
                 hatch.pattern.name = "ANSI31".to_string();
-                doc.add_entity(codec::EntityType::Hatch(Box::new(hatch))).unwrap();
+                doc.add_entity(document::EntityType::Hatch(Box::new(hatch))).unwrap();
                 // Dim-style reference via a tolerance entity.
                 doc.dim_styles
-                    .add(codec::tables::DimStyle::new("ARCH"))
+                    .add(document::tables::DimStyle::new("ARCH"))
                     .expect("add dimstyle");
-                let mut tol = codec::entities::Tolerance::new();
+                let mut tol = document::entities::Tolerance::new();
                 tol.dimension_style_name = "ARCH".to_string();
-                doc.add_entity(codec::EntityType::Tolerance(tol)).unwrap();
+                doc.add_entity(document::EntityType::Tolerance(tol)).unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             bind_reference(&mut host, key, &dir, &dir).expect("bind");
@@ -3379,7 +4008,7 @@ mod tests {
             let inserts: Vec<_> = host
                 .entities()
                 .filter_map(|e| match e {
-                    codec::EntityType::Insert(i) => Some(i.block_name.clone()),
+                    document::EntityType::Insert(i) => Some(i.block_name.clone()),
                     _ => None,
                 })
                 .collect();
@@ -3394,7 +4023,7 @@ mod tests {
             let hatches: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle && matches!(e, codec::EntityType::Hatch(_))
+                    e.common().owner_handle == br.handle && matches!(e, document::EntityType::Hatch(_))
                 })
                 .collect();
             assert_eq!(hatches.len(), 1);
@@ -3402,7 +4031,7 @@ mod tests {
             let tols: Vec<_> = host
                 .entities()
                 .filter_map(|e| match e {
-                    codec::EntityType::Tolerance(t) => Some(t.dimension_style_name.clone()),
+                    document::EntityType::Tolerance(t) => Some(t.dimension_style_name.clone()),
                     _ => None,
                 })
                 .collect();
@@ -3415,22 +4044,22 @@ mod tests {
             let dir = bind_dir("styles");
             let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
                 doc.text_styles
-                    .add(codec::tables::TextStyle::new("NOTE"))
+                    .add(document::tables::TextStyle::new("NOTE"))
                     .expect("add text style");
-                let mut text = codec::entities::Text::new();
+                let mut text = document::entities::Text::new();
                 text.style = "NOTE".to_string();
-                doc.add_entity(codec::EntityType::Text(text)).unwrap();
+                doc.add_entity(document::EntityType::Text(text)).unwrap();
                 // Two foreign handles that cannot be remapped (plotstyle_flags
                 // set as a real writer would — otherwise the round-trip
                 // drops the handle).
-                let mut line = codec::entities::Line::new();
+                let mut line = document::entities::Line::new();
                 line.common.plotstyle_flags = 0b11;
                 line.common.plotstyle_handle = Some(doc.allocate_handle());
-                doc.add_entity(codec::EntityType::Line(line)).unwrap();
-                let mut mline = codec::entities::MLine::new();
+                doc.add_entity(document::EntityType::Line(line)).unwrap();
+                let mut mline = document::entities::MLine::new();
                 mline.style_name = "STD".to_string();
                 mline.style_handle = Some(doc.allocate_handle());
-                doc.add_entity(codec::EntityType::MLine(mline)).unwrap();
+                doc.add_entity(document::EntityType::MLine(mline)).unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             let outcome = bind_reference(&mut host, key, &dir, &dir).expect("bind");
@@ -3439,7 +4068,7 @@ mod tests {
             let styles: Vec<_> = host
                 .entities()
                 .filter_map(|e| match e {
-                    codec::EntityType::Text(t) => Some(t.style.clone()),
+                    document::EntityType::Text(t) => Some(t.style.clone()),
                     _ => None,
                 })
                 .collect();
@@ -3448,7 +4077,7 @@ mod tests {
             let lines: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle && matches!(e, codec::EntityType::Line(_))
+                    e.common().owner_handle == br.handle && matches!(e, document::EntityType::Line(_))
                 })
                 .collect();
             assert_eq!(lines.len(), 1);
@@ -3456,7 +4085,7 @@ mod tests {
             let mlines: Vec<_> = host
                 .entities()
                 .filter_map(|e| match e {
-                    codec::EntityType::MLine(m) => Some(m.style_handle),
+                    document::EntityType::MLine(m) => Some(m.style_handle),
                     _ => None,
                 })
                 .collect();
@@ -3466,7 +4095,7 @@ mod tests {
 
         #[test]
         fn bind_image_collect_copies_file() {
-            use codec::objects::{ImageDefinition, ObjectType};
+            use document::objects::{ImageDefinition, ObjectType};
             let src_dir = bind_dir("imgsrc");
             let host_dir = bind_dir("imghost");
             std::fs::write(src_dir.join("pixel.png"), b"fakepng").unwrap();
@@ -3475,14 +4104,14 @@ mod tests {
                 let mut def = ImageDefinition::with_dimensions("pixel.png", 8, 8);
                 def.handle = h;
                 doc.objects.insert(h, ObjectType::ImageDefinition(def));
-                let mut img = codec::entities::RasterImage::new(
+                let mut img = document::entities::RasterImage::new(
                     "pixel.png",
-                    codec::types::Vector3::ZERO,
+                    document::types::Vector3::ZERO,
                     8.0,
                     8.0,
                 );
                 img.definition_handle = Some(h);
-                doc.add_entity(codec::EntityType::RasterImage(img)).unwrap();
+                doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             bind_reference(&mut host, key, &src_dir, &host_dir).expect("bind");
@@ -3504,21 +4133,21 @@ mod tests {
 
         #[test]
         fn bind_image_missing_errors_without_partial_state() {
-            use codec::objects::{ImageDefinition, ObjectType};
+            use document::objects::{ImageDefinition, ObjectType};
             let dir = bind_dir("imgmissing");
             let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
                 let h = doc.allocate_handle();
                 let mut def = ImageDefinition::with_dimensions("ghost.png", 8, 8);
                 def.handle = h;
                 doc.objects.insert(h, ObjectType::ImageDefinition(def));
-                let mut img = codec::entities::RasterImage::new(
+                let mut img = document::entities::RasterImage::new(
                     "ghost.png",
-                    codec::types::Vector3::ZERO,
+                    document::types::Vector3::ZERO,
                     8.0,
                     8.0,
                 );
                 img.definition_handle = Some(h);
-                doc.add_entity(codec::EntityType::RasterImage(img)).unwrap();
+                doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             let err = bind_reference(&mut host, key, &dir, &dir).unwrap_err();
@@ -3533,8 +4162,8 @@ mod tests {
 
         #[test]
         fn bind_pdf_errors() {
-            use codec::objects::{ObjectType, UnderlayDefinition};
-            let mut host = codec::Document::new();
+            use document::objects::{ObjectType, UnderlayDefinition};
+            let mut host = document::Document::new();
             let h = host.allocate_handle();
             let mut def = UnderlayDefinition::pdf("doc.pdf", "1");
             def.handle = h;
@@ -3572,10 +4201,10 @@ mod tests {
 /// stays full.
 fn relative_point_cloud_path(doc: &mut Document, handle: Handle, host: &Path) {
     use crate::io::xref_model::{to_pathtype_result, Pathtype};
-    let Some(codec::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) else {
+    let Some(document::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) else {
         return;
     };
-    let codec::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data else {
+    let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data else {
         return;
     };
     if let Ok(relative) = to_pathtype_result(&def.source_filename, host, Pathtype::Relative) {
@@ -3604,8 +4233,8 @@ mod web_registry_tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn outcome() -> codec::ReadOutcome {
-        codec::ReadOutcome::new(Document::new(), codec::ReadStats::default())
+    fn outcome() -> document::ReadOutcome {
+        document::ReadOutcome::new(Document::new(), document::ReadStats::default())
     }
 
     #[test]

@@ -17,10 +17,10 @@
 //! particolari si impilano dall'alto da un angolo (in alto a sinistra), come le
 //! sezioni (R117), e quelli già posati danno l'angolo della posa successiva.
 
-use codec::entities::{AttachmentPoint, Line, LwPolyline, MText};
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle, Vector2, Vector3};
+use document::entities::{AttachmentPoint, Line, LwPolyline, MText};
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle, Vector2, Vector3};
 use glam::DVec3;
 
 use super::section_place::bbox;

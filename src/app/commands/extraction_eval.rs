@@ -24,7 +24,7 @@ impl OpenCADStudio {
     pub(crate) fn apply_link_updates(
         &mut self,
         i: usize,
-        updates: Vec<(codec::Handle, codec::Handle, Vec<Vec<String>>, usize)>,
+        updates: Vec<(document::Handle, document::Handle, Vec<Vec<String>>, usize)>,
     ) -> usize {
         if updates.is_empty() {
             return 0;
@@ -33,7 +33,7 @@ impl OpenCADStudio {
         let mut changed = Vec::new();
         for (table_handle, link_handle, rows, first_linked_row) in updates {
             let document = &mut self.tabs[i].scene.document;
-            let Some(codec::EntityType::Table(table)) = document.get_entity_mut(table_handle)
+            let Some(document::EntityType::Table(table)) = document.get_entity_mut(table_handle)
             else {
                 continue;
             };
@@ -131,7 +131,7 @@ impl OpenCADStudio {
             self.extraction_outdated = Some(prompt);
             return Task::none();
         }
-        if self.active_modal == Some(ModalKind::ExtractionOutdated) {
+        if self.focus_dialog(ModalKind::ExtractionOutdated) {
             self.active_modal = None;
             self.reset_modal_geometry();
         }
@@ -168,12 +168,12 @@ impl OpenCADStudio {
             _ => {
                 if !value.is_empty() {
                     let (min, max) = (0, 511);
-                    self.command_line.push_error(&crate::tf!(
+                    self.command_line.push_rejection(&crate::tf!(
                         "Requires an integer between {min} and {max}."
                     ));
                 }
                 self.command_line
-                    .push_output(&format!("Enter new value for DXEVAL <{current}>:"));
+                    .push_output(&crate::ui::command_line::value_prompt("DXEVAL", &current));
                 self.pending_setvar = Some("DXEVAL".into());
             }
         }

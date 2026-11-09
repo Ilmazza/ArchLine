@@ -32,11 +32,11 @@ use crate::bim::{
 };
 use crate::command::StepInput;
 use crate::ui::window::bim_extract::{BimMsg, OVERWRITE_BUTTON, OVERWRITE_NOTE};
-use codec::entities::table::Table;
-use codec::entities::{Arc, Line, LwPolyline, MText};
-use codec::objects::{ObjectType, TableStyle};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Document, Color, EntityType, Handle, Vector3};
+use document::entities::table::Table;
+use document::entities::{Arc, Line, LwPolyline, MText};
+use document::objects::{ObjectType, TableStyle};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Document, Color, EntityType, Handle, Vector3};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -922,8 +922,8 @@ fn stato_is_refused_outside_model_space() {
 #[test]
 fn stato_survives_a_dwg_save_and_reload() {
     let (app, _, _) = app_with_two_zones();
-    let bytes = codec::DwgWriter::write_to_vec(doc(&app)).unwrap();
-    let loaded = codec::DwgReader::from_stream(Cursor::new(bytes))
+    let bytes = document::DwgWriter::write_to_vec(doc(&app)).unwrap();
+    let loaded = document::DwgReader::from_stream(Cursor::new(bytes))
         .read()
         .unwrap();
     let zone_handle = zones_in(&loaded)
@@ -955,8 +955,8 @@ fn stato_survives_a_dwg_save_and_reload() {
     assert_eq!(now.state, ZoneState::Nuovo, "storia: {}", history(&app));
 
     // Salva in DWG e riapre: la zona è nuova, con altezza e spessore nuovi.
-    let bytes = codec::DwgWriter::write_to_vec(doc(&app)).unwrap();
-    let reread = codec::DwgReader::from_stream(Cursor::new(bytes))
+    let bytes = document::DwgWriter::write_to_vec(doc(&app)).unwrap();
+    let reread = document::DwgReader::from_stream(Cursor::new(bytes))
         .read()
         .unwrap();
     let found = zones_in(&reread)
@@ -3881,6 +3881,28 @@ fn has(texts: &[String], text: &str) -> bool {
 /// progetto 4,10 × 3,00 = 12,30, variazione +0,60) e non c'è il 12,00 di A di
 /// prima, in memoria e nel DWG salvato. Un altro lancio senza cambi non lascia
 /// passi; annullando, la tabella e il blocco di prima.
+/// Da upstream v2026.45 il testo di una cella va a capo dentro la colonna
+/// (con i margini dello stile tabella) e la riga cresce: nelle tabelle
+/// d'abaco nessuna riga deve crescere, né per i margini dello stile Standard
+/// (1,5 unità, in un disegno in metri) né per una colonna stretta.
+#[test]
+fn abaco_rows_keep_their_height_no_cell_wraps() {
+    let mut app = app_with_abaco_input();
+    run(&mut app, "AL_ABACO 20,0");
+    let tables = abaco_tables(&app);
+    assert!(!tables.is_empty());
+    for (_, kind, table) in tables {
+        let first = table.rows[0].height;
+        for (index, row) in table.rows.iter().enumerate() {
+            assert!(
+                (row.height - first).abs() < 1e-9,
+                "{kind:?}, riga {index}: alta {} invece di {first}",
+                row.height
+            );
+        }
+    }
+}
+
 #[test]
 fn abaco_replacement_redraws_the_table_block() {
     let mut app = app_with_abaco_input();
@@ -3967,9 +3989,9 @@ fn abaco_replacement_redraws_the_table_block() {
 #[test]
 fn abaco_warns_that_tables_are_not_proven_in_r2000() {
     for (version, warned) in [
-        (codec::DxfVersion::AC1015, true),
-        (codec::DxfVersion::AC1018, false),
-        (codec::DxfVersion::AC1032, false),
+        (document::DxfVersion::AC1015, true),
+        (document::DxfVersion::AC1018, false),
+        (document::DxfVersion::AC1032, false),
     ] {
         let mut app = app_with_abaco_input();
         let i = app.active_tab;
@@ -4697,7 +4719,7 @@ fn opening_a_drawing_with_old_records_migrates_them_before_any_copy() {
     let dir = std::env::temp_dir().join(format!("archline-migrate-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("vecchio.dxf");
-    std::fs::write(&path, codec::DxfWriter::new(&source).write_to_vec().unwrap()).unwrap();
+    std::fs::write(&path, document::DxfWriter::new(&source).write_to_vec().unwrap()).unwrap();
 
     let mut app = fresh_app();
     let p = path.to_string_lossy().replace('\\', "\\\\");
@@ -4766,7 +4788,7 @@ fn fatto_part(part: RoomPart, seed: [f64; 2]) -> EntityType {
             let mut outline = LwPolyline::new();
             outline.is_closed = true;
             for (x, y) in [(0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0)] {
-                outline.vertices.push(codec::entities::LwVertex::new(codec::Vector2::new(
+                outline.vertices.push(document::entities::LwVertex::new(document::Vector2::new(
                     seed[0] - 2.0 + x,
                     seed[1] - 1.5 + y,
                 )));

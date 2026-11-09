@@ -16,7 +16,7 @@
 //! Logica pura: legge le assegnazioni dal documento e le righe già calcolate
 //! dell'abaco.
 
-use codec::{Document, Handle};
+use document::{Document, Handle};
 
 use super::height::Height;
 use super::quantities::ZoneRow;

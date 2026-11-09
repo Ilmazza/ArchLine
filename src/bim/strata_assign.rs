@@ -11,8 +11,8 @@
 //! `AL_ALTEZZA` e la migrazione restano come sono, e una copia porta con sé
 //! l'assegnazione. Logica pura.
 
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Document, EntityType, Handle};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Document, EntityType, Handle};
 
 use super::rooms::{self, Phase, RoomPart};
 use super::strata::Kind;

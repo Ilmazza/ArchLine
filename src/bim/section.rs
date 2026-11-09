@@ -434,7 +434,7 @@ mod tests {
     const FORMS: [Form; 2] = [Form::Continua, Form::ChiusaPerMuro];
 
     /// Le facce dei muri e i contorni di A e B del caso dato.
-    fn plan(entities: Vec<codec::EntityType>) -> (Vec<Vec<[f64; 2]>>, Vec<Vec<[f64; 2]>>) {
+    fn plan(entities: Vec<document::EntityType>) -> (Vec<Vec<[f64; 2]>>, Vec<Vec<[f64; 2]>>) {
         let scene = scene_with(entities, M.insunits());
         let walls = wall_set_without_rooms(&scene.document, TOL);
         let all = faces(&walls.sources, TOL);
@@ -632,7 +632,7 @@ mod tests {
         profile(&faces, &rooms, [-1.0, 1.5], [9.0, 1.5], TOL)
     }
 
-    use codec::EntityType;
+    use document::EntityType;
 
     /// Il poché ha il massimo delle altezze dei locali che tocca: il muro
     /// d'ambito quella del suo locale, il tramezzo la maggiore dei due; un

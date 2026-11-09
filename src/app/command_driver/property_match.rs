@@ -1,4 +1,5 @@
 use super::*;
+use crate::command::CadCommand;
 
 impl OpenCADStudio {
     pub(super) fn handle_match_entity_layer(&mut self, dest: Vec<Handle>, src: Handle, copy: bool) {
@@ -20,7 +21,7 @@ impl OpenCADStudio {
                 .push_info(crate::t!("No editable objects selected.").as_ref());
         } else if let Some(layer) = src_layer {
             self.push_undo_snapshot(i, if copy { "COPYTOLAYER" } else { "LAYMATCH" });
-            // COPYTOLAYER changes the layer of copies left in place.
+            // Create the copies now; placement continues without another undo entry.
             let dest = if copy {
                 self.tabs[i]
                     .scene
@@ -49,6 +50,16 @@ impl OpenCADStudio {
                     .push_info(crate::tf!("Layer matched to \"{layer}\".").as_ref());
             }
             self.sync_ribbon_layers();
+            if copy && !dest.is_empty() {
+                use crate::modules::draw::modify::copy::CopyCommand;
+                let wires = self.tabs[i].scene.wire_models_for(&dest);
+                self.tabs[i].scene.deselect_all();
+                let cmd = CopyCommand::move_layer_copies(dest, wires);
+                self.command_line.push_info(&cmd.prompt());
+                self.command_line.set_step_options(cmd.options());
+                self.tabs[i].active_cmd = Some(Box::new(cmd));
+                self.sync_dyn_fields();
+            }
         } else {
             self.command_line
                 .push_error(crate::t!("Source object not found.").as_ref());
@@ -61,6 +72,7 @@ impl OpenCADStudio {
         src: Handle,
     ) -> Option<Task<Message>> {
         let i = self.active_tab;
+        self.tabs[i].last_matchprop_src = src;
         dest.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
         if dest.is_empty() {
             return Some(Task::none());
@@ -71,9 +83,9 @@ impl OpenCADStudio {
         // This application record is the hatch background colour.
         // Keep the outer Option to distinguish "source is not a
         // hatch" from "source hatch has no background".
-        let hatch_background_xdata: Option<Option<Vec<codec::xdata::XDataValue>>> =
+        let hatch_background_xdata: Option<Option<Vec<document::xdata::XDataValue>>> =
             match src_clone.as_ref() {
-                Some(codec::EntityType::Hatch(h)) => Some(
+                Some(document::EntityType::Hatch(h)) => Some(
                     h.common
                         .extended_data
                         .get_record("HATCHBACKGROUNDCOLOR")
@@ -84,12 +96,12 @@ impl OpenCADStudio {
         // Dimension-style overrides ride the ACAD record, identified
         // by a leading DSTYLE string. Matching replicates that payload
         // (or clears the destination when the source has none).
-        let dstyle_xdata: Option<Vec<(i16, codec::xdata::XDataValue)>> = src_clone
+        let dstyle_xdata: Option<Vec<(i16, document::xdata::XDataValue)>> = src_clone
             .as_ref()
             .filter(|e| {
                 matches!(
                     e,
-                    codec::EntityType::Dimension(_) | codec::EntityType::Leader(_)
+                    document::EntityType::Dimension(_) | document::EntityType::Leader(_)
                 )
             })
             .map(|e| crate::entities::dim_override::pairs(&e.common().extended_data));
@@ -98,20 +110,21 @@ impl OpenCADStudio {
             // Entity-level transfer lives in the shared kernel so headless
             // callers share it; the `&mut Document` xdata paths, undo,
             // tessellation, selection and echo stay caller-side here.
-            // `all()` preserves the interactive behaviour; the xdata paths
-            // below honour the matching flags for future narrow callers.
-            let match_opts = crate::entities::match_props::MatchOpts::all();
+            // MATCHMODE decides what crosses; the xdata paths below honour
+            // the same bits.
+            use crate::entities::match_props::MatchOpts;
+            let match_opts = MatchOpts::for_document(&self.tabs[i].scene.document);
             self.apply_property_op(i, "MATCHPROP", &dest, |app, handle| {
                 let mut is_dim = false;
                 let mut is_hatch = false;
                 if let Some(se) = &src_clone {
                     if let Some(e) = app.tabs[i].scene.document.get_entity_mut(handle) {
-                        is_dim = matches!(e, codec::EntityType::Dimension(_));
-                        is_hatch = matches!(e, codec::EntityType::Hatch(_));
+                        is_dim = matches!(e, document::EntityType::Dimension(_));
+                        is_hatch = matches!(e, document::EntityType::Hatch(_));
                         crate::entities::match_props::match_properties_kernel(se, e, &match_opts);
                     }
                 }
-                if is_hatch && match_opts.copy_hatch_background {
+                if is_hatch && match_opts.has(MatchOpts::HATCH) {
                     if let Some(values) = &hatch_background_xdata {
                         crate::scene::view::dispatch::set_entity_xdata(
                             &mut app.tabs[i].scene.document,
@@ -127,14 +140,14 @@ impl OpenCADStudio {
                 // (Collapsed: the old outer `dstyle_xdata.is_some() || dst-is-dim`
                 // gate is subsumed — the replace only ever ran when both dst
                 // and src are dim/leader.)
-                if match_opts.copy_dim_overrides
+                if match_opts.has(MatchOpts::DIM)
                     && matches!(
                         app.tabs[i].scene.document.get_entity(handle),
-                        Some(codec::EntityType::Dimension(_) | codec::EntityType::Leader(_))
+                        Some(document::EntityType::Dimension(_) | document::EntityType::Leader(_))
                     )
                     && matches!(
                         src_clone,
-                        Some(codec::EntityType::Dimension(_) | codec::EntityType::Leader(_))
+                        Some(document::EntityType::Dimension(_) | document::EntityType::Leader(_))
                     )
                 {
                     crate::entities::dim_override::replace(
@@ -142,6 +155,11 @@ impl OpenCADStudio {
                         handle,
                         dstyle_xdata.clone().unwrap_or_default(),
                     );
+                }
+                // A centre line is rebuilt on its own sources with the
+                // source's extensions (centre marks are done in the kernel).
+                if match_opts.has(MatchOpts::CENTER) {
+                    app.tabs[i].scene.match_centerline_extensions(src, handle);
                 }
                 // A restyled dimension renders from its baked *D block —
                 // drop the stale block so the new style shows (#398).

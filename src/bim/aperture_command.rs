@@ -15,7 +15,7 @@
 //! app: qui niente documento e niente undo. Tutto sul piano XY del mondo, in
 //! unità del disegno.
 
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use glam::DVec3;
 use kernel::geom2d::{distance_to, Curve};
 use rustc_hash::FxHashMap;

@@ -24,7 +24,7 @@ use crate::bim::section_place::{self, drawings_in, existing_anchor_of, place};
 use crate::bim::units::DrawingUnit;
 use crate::command::{CadCommand, CmdOption, CmdResult};
 use glam::DVec3;
-use codec::Handle;
+use document::Handle;
 use iced::Task;
 
 use super::bim::room_tolerance;

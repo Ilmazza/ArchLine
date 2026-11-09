@@ -9,10 +9,10 @@
 // The MText is a separate entity referenced by the leader's annotation_handle
 // (DXF group 340); editing/erasing them stays in sync via that link.
 
-use codec::entities::mtext::AttachmentPoint;
-use codec::entities::{Leader, LeaderCreationType, LeaderPathType, MText};
-use codec::types::Vector3;
-use codec::EntityType;
+use document::entities::mtext::AttachmentPoint;
+use document::entities::{Leader, LeaderCreationType, LeaderPathType, MText};
+use document::types::Vector3;
+use document::EntityType;
 use glam::{DVec3, Mat4, Vec3};
 
 use crate::command::{CadCommand, CmdOption, CmdResult, InputKind, WorkingPlane};
@@ -442,7 +442,6 @@ fn preview_wire(pts: &[Vec3], arrow_size: f32) -> WireModel {
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
         dash_from_start: false,
-        dash_align_end: None,
         text_verts: Vec::new(),
         name: "leader_preview".into(),
         points,

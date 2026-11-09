@@ -17,8 +17,8 @@ fn page_size_text(path: &str, page: &str) -> String {
 }
 
 /// The page's (PDF, inches) or the sheet's / model's size.
-fn item_size_text(kind: codec::entities::UnderlayType, path: &str, item: &str) -> String {
-    if kind == codec::entities::UnderlayType::Pdf {
+fn item_size_text(kind: document::entities::UnderlayType, path: &str, item: &str) -> String {
+    if kind == document::entities::UnderlayType::Pdf {
         return page_size_text(path, item);
     }
     crate::scene::model::underlay_vector::sheet(kind, path, item)
@@ -32,7 +32,7 @@ fn item_size_text(kind: codec::entities::UnderlayType, path: &str, item: &str) -
         .unwrap_or_default()
 }
 
-fn sub_per_master(kind: codec::entities::UnderlayType, path: &str, item: &str) -> f64 {
+fn sub_per_master(kind: document::entities::UnderlayType, path: &str, item: &str) -> f64 {
     crate::scene::model::underlay_vector::sheet(kind, path, item)
         .map(|s| s.sub_per_master)
         .filter(|v| *v > 0.0)
@@ -73,20 +73,20 @@ impl OpenCADStudio {
         if let Some(ask) = self.pdf_locked(path, PdfPasswordThen::Attach) {
             return ask;
         }
-        self.open_underlay_attach_dialog(codec::entities::UnderlayType::Pdf, path);
+        self.open_underlay_attach_dialog(document::entities::UnderlayType::Pdf, path);
         Task::none()
     }
 
     /// PDFATTACH / DWFATTACH / DGNATTACH after the file is chosen.
     pub(in crate::app) fn open_underlay_attach_dialog(
         &mut self,
-        kind: codec::entities::UnderlayType,
+        kind: document::entities::UnderlayType,
         path: &str,
     ) {
         let i = self.active_tab;
         let mut existing: Vec<(String, String)> = Vec::new();
         for object in self.tabs[i].scene.document.objects.values() {
-            if let codec::objects::ObjectType::UnderlayDefinition(def) = object {
+            if let document::objects::ObjectType::UnderlayDefinition(def) = object {
                 if def.underlay_type != kind {
                     continue;
                 }
@@ -234,7 +234,7 @@ impl OpenCADStudio {
             ) {
                 (Some(x), Some(y), Some(z)) => Some(glam::DVec3::new(x, y, z)),
                 _ => {
-                    self.command_line.push_error("Requires numeric value.");
+                    self.command_line.push_rejection("Requires numeric value.");
                     return Task::none();
                 }
             }
@@ -246,7 +246,7 @@ impl OpenCADStudio {
                 Some(v) => Some(v),
                 None => {
                     self.command_line
-                        .push_error("Value must be positive and nonzero.");
+                        .push_rejection("Value must be positive and nonzero.");
                     return Task::none();
                 }
             }
@@ -257,7 +257,7 @@ impl OpenCADStudio {
             match number(&state.rotation) {
                 Some(v) => Some(v),
                 None => {
-                    self.command_line.push_error("Requires numeric value.");
+                    self.command_line.push_rejection("Requires numeric value.");
                     return Task::none();
                 }
             }
@@ -299,7 +299,7 @@ impl OpenCADStudio {
     /// (none: an empty dialog).
     pub(in crate::app) fn open_underlay_layers_dialog(&mut self, i: usize) {
         let document = &self.tabs[i].scene.document;
-        let selected: Vec<codec::Handle> = self.tabs[i]
+        let selected: Vec<document::Handle> = self.tabs[i]
             .scene
             .selected_entities()
             .iter()
@@ -307,7 +307,7 @@ impl OpenCADStudio {
             .collect();
         let mut targets: Vec<LayerTarget> = Vec::new();
         for entity in document.entities() {
-            let codec::EntityType::Underlay(u) = entity else {
+            let document::EntityType::Underlay(u) = entity else {
                 continue;
             };
             let Some(def) = crate::entities::underlay::definition(u, document) else {
@@ -319,7 +319,7 @@ impl OpenCADStudio {
                 name = format!("{name} ({})", same + 1);
             }
             let mut layers: Vec<String> = match u.underlay_type {
-                codec::entities::UnderlayType::Pdf => {
+                document::entities::UnderlayType::Pdf => {
                     crate::scene::model::pdf_layers::layers(&def.file_path)
                         .into_iter()
                         .map(|l| l.name)
@@ -360,6 +360,61 @@ impl OpenCADStudio {
         self.active_modal = Some(crate::app::ModalKind::Txt2MtxtSettings);
     }
 
+    /// MATCHPROP's Settings option: the Property Settings window over the
+    /// running command, with the source object's basic values.
+    pub(in crate::app) fn open_matchprop_settings(&mut self, src: document::Handle) {
+        use document::types::Color;
+        let doc = &self.tabs[self.active_tab].scene.document;
+        let Some(entity) = doc.get_entity(src) else {
+            return;
+        };
+        let common = entity.common();
+        let swatch = match common.color {
+            Color::ByLayer => doc.layers.get(&common.layer).and_then(|layer| layer.color.rgb()),
+            Color::ByBlock => None,
+            color => color.rgb(),
+        }
+        .map(|(r, g, b)| [r, g, b]);
+        let plot_style = !doc.header.plotstyle_mode;
+        let values = [
+            crate::ui::window::attman_dialog::color_label(common.color),
+            common.layer.clone(),
+            if common.linetype.is_empty() {
+                "ByLayer".to_string()
+            } else {
+                common.linetype.clone()
+            },
+            crate::entities::common::format_decimal(common.linetype_scale),
+            crate::ui::window::attman_dialog::lineweight_label(common.line_weight),
+            match common.transparency {
+                document::Transparency::ByLayer => "ByLayer".to_string(),
+                document::Transparency::ByBlock => "ByBlock".to_string(),
+                document::Transparency::Explicit(alpha) => {
+                    ((alpha as f64 / 255.0 * 100.0).round() as u32).to_string()
+                }
+            },
+            crate::entities::common::format_decimal(
+                crate::scene::view::dispatch::entity_thickness(entity).unwrap_or(0.0),
+            ),
+            if plot_style {
+                crate::app::properties::plot_style_name(
+                    doc,
+                    common.plotstyle_flags,
+                    common.plotstyle_handle,
+                )
+            } else {
+                "ByColor".to_string()
+            },
+        ];
+        self.matchprop_dialog = Some(crate::ui::window::pdf_dialogs::MatchPropDialog {
+            mode: crate::entities::match_props::match_mode(),
+            values,
+            swatch,
+            plot_style,
+        });
+        self.active_modal = Some(crate::app::ModalKind::MatchPropSettings);
+    }
+
     /// PDFIMPORT's File option after the file is chosen; an encrypted file
     /// asks for its password first.
     pub(in crate::app) fn open_pdf_import_file(&mut self, path: &str) -> Task<Message> {
@@ -390,7 +445,7 @@ impl OpenCADStudio {
         let changed: Vec<LayerTarget> = targets
             .into_iter()
             .filter(|t| match self.tabs[i].scene.document.get_entity(t.handle) {
-                Some(codec::EntityType::Underlay(u)) => hidden_layers(u) != t.hidden,
+                Some(document::EntityType::Underlay(u)) => hidden_layers(u) != t.hidden,
                 _ => false,
             })
             .collect();
@@ -406,7 +461,7 @@ impl OpenCADStudio {
             .get(LAYER_OVERRIDE_APP)
             .map(|a| a.handle.value());
         for target in &changed {
-            if let Some(codec::EntityType::Underlay(u)) =
+            if let Some(document::EntityType::Underlay(u)) =
                 self.tabs[i].scene.document.get_entity_mut(target.handle)
             {
                 let data = &mut u.common.extended_data;
@@ -415,15 +470,15 @@ impl OpenCADStudio {
                 }
                 data.remove_record(LAYER_OVERRIDE_APP);
                 if !target.hidden.is_empty() {
-                    let mut record = codec::xdata::ExtendedDataRecord::new(LAYER_OVERRIDE_APP);
+                    let mut record = document::xdata::ExtendedDataRecord::new(LAYER_OVERRIDE_APP);
                     // A DGN underlay's names follow a placeholder string.
-                    if u.underlay_type == codec::entities::UnderlayType::Dgn {
-                        record.add_value(codec::xdata::XDataValue::String(
+                    if u.underlay_type == document::entities::UnderlayType::Dgn {
+                        record.add_value(document::xdata::XDataValue::String(
                             DGN_OVERRIDE_PLACEHOLDER.to_string(),
                         ));
                     }
                     for name in &target.hidden {
-                        record.add_value(codec::xdata::XDataValue::String(name.clone()));
+                        record.add_value(document::xdata::XDataValue::String(name.clone()));
                     }
                     data.add_record(record);
                 }
@@ -445,10 +500,10 @@ impl OpenCADStudio {
             PdfDialogMsg::Help(which) => {
                 let kind = self.pdf_attach.as_ref().map(|s| s.kind);
                 let text = match which {
-                    "attach" if kind == Some(codec::entities::UnderlayType::Dwf) => {
+                    "attach" if kind == Some(document::entities::UnderlayType::Dwf) => {
                         crate::t!("Attaches a DWF or DWFx file as an underlay.")
                     }
-                    "attach" if kind == Some(codec::entities::UnderlayType::Dgn) => {
+                    "attach" if kind == Some(document::entities::UnderlayType::Dgn) => {
                         crate::t!("Attaches a DGN file as an underlay.")
                     }
                     "attach" => crate::t!("Attaches a PDF file as an underlay."),
@@ -461,6 +516,9 @@ impl OpenCADStudio {
                     }
                     "layers" => crate::t!("Turns the layers of a PDF underlay on or off."),
                     "txt2mtxt" => std::borrow::Cow::Owned(crate::tr!("txt2mtxt", "help")),
+                    "matchprop" => {
+                        std::borrow::Cow::Owned(crate::tr!("matchprop-settings", "help"))
+                    }
                     _ => crate::t!("Imports the geometry, fills, raster images and text of a PDF file as drawing objects."),
                 };
                 self.command_line.push_info(text.as_ref());
@@ -476,11 +534,11 @@ impl OpenCADStudio {
                     .pdf_attach
                     .as_ref()
                     .map(|s| s.kind)
-                    .unwrap_or(codec::entities::UnderlayType::Pdf);
+                    .unwrap_or(document::entities::UnderlayType::Pdf);
                 if let Some(state) = &self.pdf_attach {
                     state.remember();
                 }
-                if kind != codec::entities::UnderlayType::Pdf {
+                if kind != document::entities::UnderlayType::Pdf {
                     return Task::done(Message::UnderlayAttachPick(kind));
                 }
                 return Task::done(Message::PdfAttachPick);
@@ -508,7 +566,7 @@ impl OpenCADStudio {
             PdfDialogMsg::AttachPage(page) => {
                 let (ctrl, shift) = (self.ctrl_down, self.shift_down);
                 if let Some(state) = self.pdf_attach.as_mut() {
-                    if state.kind == codec::entities::UnderlayType::Pdf {
+                    if state.kind == document::entities::UnderlayType::Pdf {
                         click_page(&mut state.selected, &mut state.anchor, page, ctrl, shift);
                     } else {
                         // One sheet or model at a time.
@@ -776,6 +834,41 @@ impl OpenCADStudio {
                 self.close_active_modal();
             }
 
+            // ── Property Settings (MATCHPROP) ─────────────────────────────
+            PdfDialogMsg::MpToggle(bit) => {
+                if let Some(s) = self.matchprop_dialog.as_mut() {
+                    if s.switchable() & bit != 0 {
+                        s.mode ^= bit;
+                    }
+                }
+            }
+            PdfDialogMsg::MpAll => {
+                if let Some(s) = self.matchprop_dialog.as_mut() {
+                    s.mode |= s.switchable();
+                }
+            }
+            PdfDialogMsg::MpNone => {
+                if let Some(s) = self.matchprop_dialog.as_mut() {
+                    s.mode &= !s.switchable();
+                }
+            }
+            // The settings line again, then (on close) the destination
+            // prompt; the command goes on with the new set.
+            PdfDialogMsg::MpOk => {
+                if let Some(s) = &self.matchprop_dialog {
+                    let mode = s.mode;
+                    if mode != crate::entities::match_props::match_mode() {
+                        crate::entities::match_props::set_match_mode(mode);
+                        self.save_config();
+                    }
+                    self.command_line.push_output(
+                        &crate::entities::match_props::active_settings_line(mode),
+                    );
+                    self.refresh_active_cmd_preview(i);
+                }
+                self.close_active_modal();
+            }
+
             // ── Import PDF ────────────────────────────────────────────────
             PdfDialogMsg::ImportBrowse => return Task::done(Message::PdfImportPick),
             PdfDialogMsg::ImportPage(page) => {
@@ -821,7 +914,7 @@ impl OpenCADStudio {
                 let Some(scale) = state.scale.trim().parse::<f64>().ok().filter(|v| *v > 0.0)
                 else {
                     self.command_line
-                        .push_error("Value must be positive and nonzero.");
+                        .push_rejection("Value must be positive and nonzero.");
                     return Task::none();
                 };
                 let state = self.pdf_import_file.take().expect("checked above");
@@ -866,7 +959,7 @@ impl OpenCADStudio {
             ) {
                 (Some(x), Some(y), Some(z)) => Some(glam::DVec3::new(x, y, z)),
                 _ => {
-                    self.command_line.push_error("Requires numeric value.");
+                    self.command_line.push_rejection("Requires numeric value.");
                     return Task::none();
                 }
             }
@@ -878,7 +971,7 @@ impl OpenCADStudio {
                 Some(v) => Some(v),
                 None => {
                     self.command_line
-                        .push_error("Value must be positive and nonzero.");
+                        .push_rejection("Value must be positive and nonzero.");
                     return Task::none();
                 }
             }
@@ -889,7 +982,7 @@ impl OpenCADStudio {
             match number(&state.rotation) {
                 Some(v) => Some(v),
                 None => {
-                    self.command_line.push_error("Requires numeric value.");
+                    self.command_line.push_rejection("Requires numeric value.");
                     return Task::none();
                 }
             }

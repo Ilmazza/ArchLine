@@ -47,3 +47,7 @@ __pycache__/
 
 # Python (banco di conformita)
 **/__pycache__/
+
+# Plugin template has its own Cargo project (not part of the workspace build);
+# its lock file is a locally generated build artifact
+docs/plugin-template-v2/Cargo.lock

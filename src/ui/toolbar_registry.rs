@@ -833,7 +833,8 @@ mod tests {
     #[test]
     fn viewports_and_layouts_gather_their_ribbon_groups() {
         let vp = mains(bar_named("Viewports"));
-        for c in ["VPORTS", "VPORTS_NAMED", "VPJOIN", "VPORTS_RESTORE", "MVIEW"] {
+        // Upstream v2026.45: the single viewport is `VPORTS SINGLE`.
+        for c in ["VPORTS SINGLE", "VPORTS_NAMED", "VPJOIN", "VPORTS_RESTORE", "MVIEW"] {
             assert!(vp.contains(&c), "Viewports lacks {c}: {vp:?}");
         }
         let lay = mains(bar_named("Layouts"));

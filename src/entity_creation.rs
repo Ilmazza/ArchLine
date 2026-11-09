@@ -7,7 +7,7 @@ mod tests {
 
     #[test]
     fn published_examples_build_with_the_real_factory() {
-        let document = codec::Document::new();
+        let document = document::Document::new();
         for kind in TYPES {
             let contract = schema(kind).unwrap();
             for example in contract["examples"].as_array().unwrap() {
@@ -30,11 +30,11 @@ mod tests {
                 .unwrap()
                 .common()
                 .color,
-            codec::types::Color::from_index(2)
+            document::types::Color::from_index(2)
         );
         let spline = json!({"type":"Spline","degree":2.0,"control_points":[[0,0],[5,10],[10,0]]});
         validate_entity(&spline, "").unwrap();
-        let codec::EntityType::Spline(built) = build_entity(&spline, Some(&document)).unwrap()
+        let document::EntityType::Spline(built) = build_entity(&spline, Some(&document)).unwrap()
         else {
             panic!("expected spline")
         };
@@ -84,7 +84,7 @@ mod tests {
         let spec = json!({"type":"Text","value":"Label","position":[0,0],"style":"missing_style"});
         assert!(validate_entity(&spec, "").is_ok());
         assert_eq!(
-            build_entity(&spec, Some(&codec::Document::new())).unwrap_err()["code"],
+            build_entity(&spec, Some(&document::Document::new())).unwrap_err()["code"],
             "invalid_text_style"
         );
     }
@@ -218,6 +218,7 @@ fn build_schema(name: &str) -> Result<Value, String> {
             properties["position"] = point(2, 3);
             properties["rotation_deg"] = number.clone();
             properties["scale"] = json!({"anyOf":[{"type":"number","not":{"const":0}},{"type":"array","minItems":3,"maxItems":3,"items":{"type":"number","not":{"const":0}}}],"default":1,"description":"Nonzero uniform factor or three nonzero axis factors."});
+            properties["attributes"] = json!({"type":"object","additionalProperties":{"type":"string"},"description":"Attribute values by tag (case-insensitive), e.g. {\"CIRCUIT\":\"3\"}. Every attribute the block defines is created; tags left out keep their default value. A tag the block does not define, or a constant one, is refused."});
             (
                 vec!["block", "position"],
                 json!({"type":"Insert","block":"DOOR_90","position":[0,0],"scale":1}),
@@ -303,7 +304,7 @@ fn failure(code: &str, error: impl ToString) -> Value {
 
 /// Parse `[x,y]` or `[x,y,z]` without silently turning a malformed
 /// coordinate into zero.
-fn point_value(value: Option<&Value>, label: &str, code: &str) -> Parsed<codec::types::Vector3> {
+fn point_value(value: Option<&Value>, label: &str, code: &str) -> Parsed<document::types::Vector3> {
     let values = value
         .and_then(Value::as_array)
         .filter(|v| (2..=3).contains(&v.len()))
@@ -324,15 +325,15 @@ fn point_value(value: Option<&Value>, label: &str, code: &str) -> Parsed<codec::
         })
         .transpose()?
         .unwrap_or(0.0);
-    Ok(codec::types::Vector3::new(coord(0)?, coord(1)?, z))
+    Ok(document::types::Vector3::new(coord(0)?, coord(1)?, z))
 }
 
 /// `[x,y]` or `[x,y,z]` (missing z = 0) from `req[key]`.
-pub(crate) fn point_field(req: &Value, key: &str) -> Parsed<codec::types::Vector3> {
+pub(crate) fn point_field(req: &Value, key: &str) -> Parsed<document::types::Vector3> {
     point_value(req.get(key), key, "invalid_point")
 }
 
-fn point_list_field(spec: &Value, key: &str, minimum: usize) -> Parsed<Vec<codec::types::Vector3>> {
+fn point_list_field(spec: &Value, key: &str, minimum: usize) -> Parsed<Vec<document::types::Vector3>> {
     let points = spec[key]
         .as_array()
         .filter(|points| points.len() >= minimum)
@@ -399,12 +400,12 @@ fn finite_angle_field(spec: &Value, key: &str) -> Parsed<f64> {
         .ok_or_else(|| failure("invalid_angle", format!("arc needs a finite {key}")))
 }
 
-fn apply_common_properties(spec: &Value, entity: &mut codec::EntityType) -> Parsed<()> {
+fn apply_common_properties(spec: &Value, entity: &mut document::EntityType) -> Parsed<()> {
     if let Some(layer) = spec["layer"].as_str() {
         if !layer.is_empty()
             && !matches!(
                 entity,
-                codec::EntityType::Block(_) | codec::EntityType::BlockEnd(_)
+                document::EntityType::Block(_) | document::EntityType::BlockEnd(_)
             )
         {
             entity.common_mut().layer = layer.to_owned();
@@ -414,14 +415,14 @@ fn apply_common_properties(spec: &Value, entity: &mut codec::EntityType) -> Pars
         .as_f64()
         .filter(|n| n.fract() == 0.0 && (-32768.0..=32767.0).contains(n))
     {
-        entity.common_mut().color = codec::types::Color::from_index(index as i16);
+        entity.common_mut().color = document::types::Color::from_index(index as i16);
     }
     Ok(())
 }
 
 /// An explicit text style must exist in the current document; otherwise a
 /// typo would silently fall back to the default style.
-fn text_style_field(spec: &Value, document: Option<&codec::Document>) -> Parsed<Option<String>> {
+fn text_style_field(spec: &Value, document: Option<&document::Document>) -> Parsed<Option<String>> {
     let Some(style) = spec["style"].as_str().filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -434,14 +435,87 @@ fn text_style_field(spec: &Value, document: Option<&codec::Document>) -> Parsed<
     Ok(Some(style.to_owned()))
 }
 
+/// The attributes of a new Insert, built from its block's definitions the
+/// way `-INSERT` builds them, with the values given by tag. Without a
+/// document only the shape is checked, as for text styles; the scene then
+/// fills a bare reference with the defaults.
+fn insert_attributes(
+    insert: &document::entities::Insert,
+    values: &Value,
+    document: Option<&document::Document>,
+) -> Parsed<Vec<document::entities::AttributeEntity>> {
+    let at = |tag: &str| format!("/attributes/{}", tag.replace('~', "~0").replace('/', "~1"));
+    let object = values.as_object().ok_or_else(|| {
+        failure_at(
+            "invalid_attributes",
+            "/attributes",
+            "insert attributes map tags to text values",
+        )
+    })?;
+    let mut given: Vec<(&str, &str)> = Vec::with_capacity(object.len());
+    for (tag, value) in object {
+        let value = value.as_str().ok_or_else(|| {
+            failure_at("invalid_attributes", &at(tag), "attribute values are text")
+        })?;
+        if given.iter().any(|(seen, _)| seen.eq_ignore_ascii_case(tag)) {
+            return Err(failure_at(
+                "invalid_attributes",
+                &at(tag),
+                format!("attribute tag '{tag}' is given twice"),
+            ));
+        }
+        given.push((tag, value));
+    }
+    let Some(document) = document else {
+        return Ok(Vec::new());
+    };
+    let block = &insert.block_name;
+    for (tag, _) in &given {
+        let definition = document
+            .entities_in_block(block)
+            .find_map(|entity| match entity {
+                document::EntityType::AttributeDefinition(definition)
+                    if definition.tag.eq_ignore_ascii_case(tag) =>
+                {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                failure_at(
+                    "unknown_attribute_tag",
+                    &at(tag),
+                    format!("block '{block}' defines no attribute tagged '{tag}'"),
+                )
+            })?;
+        if definition.is_constant() {
+            return Err(failure_at(
+                "constant_attribute",
+                &at(tag),
+                format!("attribute '{tag}' of block '{block}' is constant"),
+            ));
+        }
+    }
+    Ok(crate::scene::Scene::attributes_from_definitions(
+        document,
+        insert,
+        |definition| {
+            given
+                .iter()
+                .find(|(tag, _)| tag.eq_ignore_ascii_case(&definition.tag))
+                .map(|(_, value)| (*value).to_owned())
+        },
+    ))
+}
+
 /// One `entities` array entry → a real entity. Geometry validation happens
 /// here so a bad definition aborts the whole batch before anything commits.
 pub(crate) fn build_entity(
     spec: &Value,
-    document: Option<&codec::Document>,
-) -> Parsed<codec::EntityType> {
-    use codec::entities::*;
-    use codec::types::Vector3;
+    document: Option<&document::Document>,
+) -> Parsed<document::EntityType> {
+    use document::entities::*;
+    use document::types::Vector3;
     let kind = spec["type"].as_str().unwrap_or("").to_ascii_uppercase();
     // Preserve the public unknown-field error while deriving allowed keys from
     // the published contract, rather than maintaining another field list.
@@ -600,7 +674,7 @@ pub(crate) fn build_entity(
                 let y = point[1].as_f64().filter(|v| v.is_finite()).ok_or_else(|| {
                     failure("invalid_vertices", "polyline vertices must be finite [x,y]")
                 })?;
-                pline.add_point(codec::types::Vector2::new(x, y));
+                pline.add_point(document::types::Vector2::new(x, y));
             }
             if spec["closed"].as_bool().unwrap_or(false) {
                 pline.close();
@@ -664,6 +738,9 @@ pub(crate) fn build_entity(
                 }
                 _ => {}
             }
+            if let Some(values) = spec.get("attributes") {
+                insert.attributes = insert_attributes(&insert, values, document)?;
+            }
             EntityType::Insert(insert)
         }
         "SOLID" => {
@@ -708,7 +785,7 @@ pub(crate) fn build_entity(
                 let y = point[1].as_f64().filter(|v| v.is_finite()).ok_or_else(|| {
                     failure("invalid_boundary", "hatch boundary must be finite [x,y]")
                 })?;
-                vertices.push(codec::types::Vector2::new(x, y));
+                vertices.push(document::types::Vector2::new(x, y));
             }
             let mut hatch = Hatch::new();
             if spec["solid"].as_bool().unwrap_or(false) {

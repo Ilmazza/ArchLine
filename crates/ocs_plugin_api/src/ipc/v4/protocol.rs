@@ -130,7 +130,7 @@ mod tests {
             CommandRequest::Text { text: "2".into() },
             CommandRequest::Token { text: "R".into() },
             CommandRequest::Entity {
-                handle: codec::Handle::new(9),
+                handle: document::Handle::new(9),
                 point: [0.0; 3],
             },
             CommandRequest::Selection,
@@ -174,7 +174,7 @@ mod tests {
             TableOperation::LayerCreate {
                 config: LayerConfig {
                     name: "Walls".into(),
-                    color: Some(codec::types::Color::Index(5)),
+                    color: Some(document::types::Color::Index(5)),
                     frozen: Some(true),
                     description: Some("d".into()),
                     ..Default::default()
@@ -236,7 +236,7 @@ mod tests {
             },
             TableOperation::BlockCreate {
                 name: "B".into(),
-                entities: vec![codec::Handle::new(4), codec::Handle::new(5)],
+                entities: vec![document::Handle::new(4), document::Handle::new(5)],
                 base_point: [1.0, 2.0, 3.0],
                 erase_originals: true,
                 description: Some("d".into()),
@@ -254,7 +254,7 @@ mod tests {
             TableOperation::BlockDelete { name: "C".into() },
             TableOperation::BlockEntityAdd {
                 block: "C".into(),
-                entity: codec::EntityType::Line(codec::entities::Line::new()),
+                entity: document::EntityType::Line(document::entities::Line::new()),
             },
             TableOperation::LinetypeCreate {
                 name: "L".into(),
@@ -296,7 +296,7 @@ mod tests {
                 PluginRequest::TableOperation { operation: decoded } if decoded == operation)
             );
         }
-        for result in [Ok(codec::Handle::new(9)), Err("refused".to_owned())] {
+        for result in [Ok(document::Handle::new(9)), Err("refused".to_owned())] {
             let bytes = bincode::serialize(&PluginResponse::TableResult(result.clone())).unwrap();
             assert!(
                 matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
@@ -319,11 +319,11 @@ mod tests {
                 layer: Some("SOLIDS".into()),
             },
             SolidOperation::Transform {
-                handle: codec::Handle::new(7),
+                handle: document::Handle::new(7),
                 matrix: [1.0; 16],
             },
             SolidOperation::RegionFromProfile {
-                source: codec::Handle::new(3),
+                source: document::Handle::new(3),
                 layer: None,
                 delete_source: true,
             },
@@ -334,19 +334,19 @@ mod tests {
                 layer: None,
             },
             SolidOperation::Boolean {
-                first: codec::Handle::new(1),
-                second: codec::Handle::new(2),
+                first: document::Handle::new(1),
+                second: document::Handle::new(2),
                 operation: crate::host::SolidBoolean::Subtract,
                 layer: None,
                 keep_operands: false,
             },
             SolidOperation::SurfaceFromProfile {
-                source: codec::Handle::new(4),
+                source: document::Handle::new(4),
                 layer: Some("S".into()),
                 delete_source: false,
             },
             SolidOperation::Extrude {
-                source: codec::Handle::new(5),
+                source: document::Handle::new(5),
                 direction: [0.0, 0.0, 2.0],
                 layer: None,
                 delete_source: true,
@@ -361,7 +361,7 @@ mod tests {
                 PluginRequest::SolidOperation { operation: decoded } if decoded == operation)
             );
         }
-        for result in [Ok(codec::Handle::new(9)), Err("refused".to_owned())] {
+        for result in [Ok(document::Handle::new(9)), Err("refused".to_owned())] {
             let bytes = bincode::serialize(&PluginResponse::SolidResult(result.clone())).unwrap();
             assert!(
                 matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
@@ -373,18 +373,18 @@ mod tests {
     #[test]
     fn selection_request_and_response_roundtrip() {
         let request = PluginRequest::SetSelection {
-            handles: vec![codec::Handle::new(9)],
+            handles: vec![document::Handle::new(9)],
         };
         let bytes = bincode::serialize(&request).unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
-            PluginRequest::SetSelection { handles } if handles == vec![codec::Handle::new(9)])
+            PluginRequest::SetSelection { handles } if handles == vec![document::Handle::new(9)])
         );
-        let response = PluginResponse::Selection(vec![codec::Handle::new(9)]);
+        let response = PluginResponse::Selection(vec![document::Handle::new(9)]);
         let bytes = bincode::serialize(&response).unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::Selection(handles) if handles == vec![codec::Handle::new(9)])
+            PluginResponse::Selection(handles) if handles == vec![document::Handle::new(9)])
         );
     }
 
@@ -449,12 +449,12 @@ mod tests {
                 dictionary_path == vec!["CVIFC".to_owned()])
         );
         let bytes = bincode::serialize(&PluginResponse::XRecordCreateResult(Ok(
-            codec::Handle::new(42),
+            document::Handle::new(42),
         )))
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::XRecordCreateResult(Ok(handle)) if handle == codec::Handle::new(42))
+            PluginResponse::XRecordCreateResult(Ok(handle)) if handle == document::Handle::new(42))
         );
         let bytes =
             bincode::serialize(&PluginResponse::XRecordEntries(Ok(entries.clone()))).unwrap();
@@ -463,12 +463,12 @@ mod tests {
             PluginResponse::XRecordEntries(Ok(decoded)) if decoded == entries)
         );
         let bytes = bincode::serialize(&PluginResponse::XRecordUpdateResult(Ok(
-            codec::Handle::new(42),
+            document::Handle::new(42),
         )))
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::XRecordUpdateResult(Ok(handle)) if handle == codec::Handle::new(42))
+            PluginResponse::XRecordUpdateResult(Ok(handle)) if handle == document::Handle::new(42))
         );
         let bytes = bincode::serialize(&PluginResponse::XRecordNames(Ok(vec!["alpha".to_owned()])))
             .unwrap();
@@ -562,7 +562,7 @@ mod tests {
             PluginResponse::RegisterPluginClassResult(Ok(())))
         );
         let bytes = bincode::serialize(&PluginResponse::StagePluginClassInstanceResult(Ok(
-            vec![codec::Handle::new(0x51)],
+            vec![document::Handle::new(0x51)],
         )))
         .unwrap();
         assert!(
@@ -615,12 +615,12 @@ mod tests {
         // additively: a stamped handle in, the declared rows (or the strict
         // refusal) out.
         let bytes = bincode::serialize(&PluginRequest::PluginClassInstanceProperties {
-            handle: codec::Handle::new(11),
+            handle: document::Handle::new(11),
         })
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
-            PluginRequest::PluginClassInstanceProperties { handle } if handle == codec::Handle::new(11))
+            PluginRequest::PluginClassInstanceProperties { handle } if handle == document::Handle::new(11))
         );
         let bytes = bincode::serialize(&PluginResponse::PluginClassInstancePropertiesResult(Ok(
             vec![crate::host::PluginClassParameterRow {
@@ -682,17 +682,17 @@ mod tests {
         // The V9 request marks an entity reference-only and the response
         // carries the operation's outcome.
         let bytes = bincode::serialize(&PluginRequest::SetReferenceOnly {
-            handle: codec::Handle::new(0x2A),
+            handle: document::Handle::new(0x2A),
             reference_only: true,
         })
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
             PluginRequest::SetReferenceOnly { handle, reference_only } if
-                handle == codec::Handle::new(0x2A) && reference_only)
+                handle == document::Handle::new(0x2A) && reference_only)
         );
         let bytes = bincode::serialize(&PluginRequest::SetReferenceOnly {
-            handle: codec::Handle::new(0x2A),
+            handle: document::Handle::new(0x2A),
             reference_only: false,
         })
         .unwrap();
@@ -759,7 +759,7 @@ mod tests {
             PluginRequest::SampleParametric { chain: got, s } if got == chain && s == 30.0)
         );
         let bytes = bincode::serialize(&PluginResponse::StageParametricChainResult(Ok(vec![
-            codec::Handle::new(0x2A),
+            document::Handle::new(0x2A),
         ])))
         .unwrap();
         assert!(matches!(
@@ -791,6 +791,50 @@ mod tests {
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
             PluginResponse::SampleParametricResult(Ok(None)))
         );
+
+        let request = PluginToHostV4::Request {
+            id: 80,
+            tab_id: Some(7),
+            payload: PluginRequest::ValidateParametricChain {
+                chain: chain.clone(),
+                tolerance: 1e-3,
+            },
+        };
+        let bytes = bincode::serialize(&request).unwrap();
+        match bincode::deserialize::<PluginToHostV4>(&bytes).unwrap() {
+            PluginToHostV4::Request {
+                id,
+                tab_id,
+                payload:
+                    PluginRequest::ValidateParametricChain {
+                        chain: decoded,
+                        tolerance,
+                    },
+            } => {
+                assert_eq!(id, 80);
+                assert_eq!(tab_id, Some(7));
+                assert_eq!(decoded, chain);
+                assert_eq!(tolerance, 1e-3);
+            }
+            other => panic!("unexpected validation request: {other:?}"),
+        }
+        for (id, result) in [
+            (81, Ok(())),
+            (82, Err("hard-corner seam".to_owned())),
+        ] {
+            let response = HostToPluginV4::Response {
+                id,
+                payload: PluginResponse::ValidateParametricChainResult(result.clone()),
+            };
+            let bytes = bincode::serialize(&response).unwrap();
+            assert!(matches!(
+                bincode::deserialize::<HostToPluginV4>(&bytes).unwrap(),
+                HostToPluginV4::Response {
+                    id: decoded_id,
+                    payload: PluginResponse::ValidateParametricChainResult(decoded),
+                } if decoded_id == id && decoded == result
+            ));
+        }
     }
 
     #[test]
@@ -825,6 +869,84 @@ mod tests {
         let got: RunnerHandshake = bincode::deserialize(&bytes).unwrap();
         match got {
             RunnerHandshake::Token(s) => assert_eq!(s, "abc"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quad_panel_requests_and_response_roundtrip() {
+        // API v15: quad registration frames survive one bincode hop intact;
+        // the icon rides the OwnedIconKind encoding (ribbon precedent) and
+        // the response keeps one outcome per panel.
+        let panels = vec![crate::dialog::QuadPanelDef::new("align_tools", "Align")
+            .with_applies_to(vec!["LWPOLYLINE".to_owned()])
+            .with_item(crate::dialog::QuadItemDef {
+                control_id: "flip".to_owned(),
+                label: "Flip".to_owned(),
+                icon: crate::ribbon::owned::OwnedIconKind::Svg("<svg/>".into()),
+                action: crate::dialog::QuadActionDef::Command("FLIPALIGNED".to_owned()),
+            })
+            .with_item(crate::dialog::QuadItemDef {
+                control_id: "report".to_owned(),
+                label: "Report".to_owned(),
+                icon: crate::ribbon::owned::OwnedIconKind::Glyph("\u{1F4CA}".to_owned()),
+                action: crate::dialog::QuadActionDef::Callback,
+            })];
+        let bytes = bincode::serialize(&PluginRequest::RegisterQuadPanels {
+            panels: panels.clone(),
+        })
+        .unwrap();
+        assert!(
+            matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+            PluginRequest::RegisterQuadPanels { panels: got } if got == panels)
+        );
+        let bytes = bincode::serialize(&PluginRequest::UnregisterQuadPanels {
+            panel_ids: vec!["align_tools".to_owned()],
+        })
+        .unwrap();
+        assert!(
+            matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+            PluginRequest::UnregisterQuadPanels { panel_ids } if
+                panel_ids == vec!["align_tools".to_owned()])
+        );
+        let ok = vec![true, false];
+        let errors = vec![String::new(), "quad panel refused".to_owned()];
+        let bytes = bincode::serialize(&PluginResponse::QuadPanelsRegistered {
+            ok: ok.clone(),
+            errors: errors.clone(),
+        })
+        .unwrap();
+        assert!(
+            matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+            PluginResponse::QuadPanelsRegistered { ok: got, errors: got_errors } if
+                got == ok && got_errors == errors)
+        );
+    }
+
+    #[test]
+    fn quad_action_notification_roundtrips() {
+        // API v15: the QuadAction notification keeps the v4 notification
+        // discipline — byte-clean roundtrip; the Unknown passthrough covers
+        // peers that predate the discriminant.
+        let notification = HostNotification::QuadAction {
+            panel_id: "align_tools".to_owned(),
+            control_id: "flip".to_owned(),
+            handles: vec![document::Handle::new(9)],
+            type_keys: vec!["LWPOLYLINE".to_owned()],
+            pick_point: [1.0, 2.0, 0.0],
+        };
+        let bytes = bincode::serialize(&notification).unwrap();
+        let decoded: HostNotification = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, notification);
+        // One hop through the envelope, like PanelAction deliveries ride.
+        let frame = HostToPluginV4::Notification(NotificationEnvelope {
+            command_id: None,
+            payload: notification.clone(),
+        });
+        let bytes = bincode::serialize(&frame).unwrap();
+        let got: HostToPluginV4 = bincode::deserialize(&bytes).unwrap();
+        match got {
+            HostToPluginV4::Notification(env) => assert_eq!(env.payload, notification),
             other => panic!("unexpected: {other:?}"),
         }
     }

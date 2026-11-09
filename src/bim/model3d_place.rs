@@ -15,10 +15,10 @@
 //!   in basso a sinistra del loro insieme è l'angolo della posa successiva:
 //!   rigenerare lascia i modelli dove sono (come le sezioni, R117).
 
-use codec::entities::Face3D;
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle, Vector3};
+use document::entities::Face3D;
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle, Vector3};
 
 use super::mass3d_prism::{Face3, Tone};
 use super::model3d::Model3d;
@@ -283,15 +283,15 @@ mod tests {
         for e in place(&model(0.0), &model(0.0), [0.0, 0.0], 1.0) {
             doc.add_entity(e).unwrap();
         }
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
         let found = models_in(&read);
         assert_eq!(found.len(), 4, "DXF");
         assert!(!missing_layers(&read));
         assert_eq!(existing_anchor(&read), Some([0.0, 0.0]));
 
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
         assert_eq!(models_in(&read).len(), 4, "DWG");
         assert!(!missing_layers(&read), "layer e APPID devono sopravvivere al DWG");
     }

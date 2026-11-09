@@ -14,9 +14,9 @@
 use std::borrow::Cow;
 use std::iter;
 
-use codec::entities::hatch::BoundaryPathFlags;
-use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType, PolylineEdge};
-use codec::{EntityType, Handle, Vector2};
+use document::entities::hatch::BoundaryPathFlags;
+use document::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType, PolylineEdge};
+use document::{EntityType, Handle, Vector2};
 use glam::DVec3;
 use kernel::geom2d::{
     distance_to, segment_crossing, signed_area, Curve, Line, SegmentCrossing, Tolerance,
@@ -1289,8 +1289,8 @@ mod tests {
     use crate::bim::{walls, ACI_GIALLO, ACI_ROSSO, LAYER_DEMOLIZIONI, LAYER_NUOVE};
     use crate::command::InputKind;
     use crate::scene::model::wire_model::WireModel;
-    use codec::entities::{Arc, BoundaryEdge, Line, LwPolyline, LwVertex};
-    use codec::{Color, Vector2, Vector3};
+    use document::entities::{Arc, BoundaryEdge, Line, LwPolyline, LwVertex};
+    use document::{Color, Vector2, Vector3};
 
     const TOL: f64 = 1e-6;
 

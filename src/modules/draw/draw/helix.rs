@@ -1,6 +1,6 @@
-use codec::entities::{Helix, HelixConstraint, Spline};
-use codec::types::Vector3;
-use codec::EntityType;
+use document::entities::{Helix, HelixConstraint, Spline};
+use document::types::Vector3;
+use document::EntityType;
 use glam::DVec3;
 use kernel::space::{HelixCurve, HelixDirection, Vec3};
 
@@ -113,7 +113,7 @@ impl HelixCommand {
         })
     }
 
-    fn build(&self, height: f64, axis: DVec3) -> Option<EntityType> {
+    pub(crate) fn build(&self, height: f64, axis: DVec3) -> Option<EntityType> {
         let curve = self.kernel_curve(height, axis)?;
         let nurbs = curve.nurbs()?;
         let axis = DVec3::from_array(curve.axis_direction).normalize_or(self.plane.z);

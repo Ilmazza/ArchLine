@@ -56,6 +56,9 @@ pub enum DockMsg {
     /// Pallet menu pick: hide `panel` when it shows, else open it docked on
     /// the edge (as a new group unless it already has a group there).
     EdgeMenuToggle(DockSide, PanelId),
+    /// Show each pallet's name beside its icon in the strips (`true`), or
+    /// icons only.
+    StripLabels(bool),
     /// Begin dragging a whole group by its edge band in the icon strip.
     GroupGrab(DockSide, usize),
     /// The pointer entered a group's edge band (side, group).
@@ -72,6 +75,9 @@ pub enum DockMsg {
     FloatMenu(Option<PanelId>),
     /// Floating menu's Allow docking check: flip it for the panel.
     FloatDockingToggle(PanelId),
+    /// Desktop: move the pallet into a window of its own.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Detach(PanelId),
     /// The pointer moved over a floating title bar, at this point in it
     /// (where its right-click menu opens).
     FloatBarPointer(iced::Point),
@@ -107,6 +113,10 @@ pub enum PanelId {
     BlockPalette,
     /// Block Editor authoring tools.
     AuthoringPalettes,
+    /// Reusable block tools (TOOLPALETTES / TP).
+    ToolPalettes,
+    /// The Block Editor's Parameters Manager.
+    ParametersManager,
     ExternalReferences,
     /// Outline of the drawing's origin planes, open sketch and solid bodies.
     Browser,
@@ -124,17 +134,21 @@ pub enum PanelId {
     Laywalk,
     /// The calculator (QUICKCALC).
     QuickCalc,
+    /// The whole command history, kept open beside the drawing.
+    CommandHistory,
     /// Dynamic plugin dockable side panel / palette (identified by unique numeric ID).
     Plugin(u32),
 }
 
 impl PanelId {
     /// Every panel, in the order the pallet menu lists them.
-    pub const ALL: [PanelId; 13] = [
+    pub const ALL: [PanelId; 16] = [
         PanelId::Properties,
         PanelId::GraphicAttributes,
         PanelId::BlockPalette,
+        PanelId::ToolPalettes,
         PanelId::AuthoringPalettes,
+        PanelId::ParametersManager,
         PanelId::ExternalReferences,
         PanelId::Browser,
         PanelId::NodeGraph,
@@ -144,6 +158,7 @@ impl PanelId {
         PanelId::Layers,
         PanelId::Laywalk,
         PanelId::QuickCalc,
+        PanelId::CommandHistory,
     ];
 
     /// Localized-friendly display name used by the collapsed/edge chrome.
@@ -152,7 +167,9 @@ impl PanelId {
             PanelId::Properties => "Properties",
             PanelId::GraphicAttributes => "Graphic Attributes",
             PanelId::BlockPalette => "Block Palette",
+            PanelId::ToolPalettes => "Tool Palettes",
             PanelId::AuthoringPalettes => "Authoring Palettes",
+            PanelId::ParametersManager => "Parameters Manager",
             PanelId::ExternalReferences => "External References",
             PanelId::Browser => "Browser",
             PanelId::NodeGraph => "Node Graph",
@@ -162,6 +179,7 @@ impl PanelId {
             PanelId::Layers => "Layer Manager",
             PanelId::Laywalk => "Layer Walk",
             PanelId::QuickCalc => "QuickCalc",
+            PanelId::CommandHistory => "Command History",
             PanelId::Plugin(_) => "Plugin",
         }
     }
@@ -174,7 +192,9 @@ impl PanelId {
                 include_bytes!("../../assets/icons/graphic_attributes.svg")
             }
             PanelId::BlockPalette => include_bytes!("../../assets/icons/blocks/insert.svg"),
-            PanelId::AuthoringPalettes => include_bytes!("../../assets/icons/tool_palettes.svg"),
+            PanelId::ToolPalettes => include_bytes!("../../assets/icons/tool_palettes.svg"),
+            PanelId::AuthoringPalettes => include_bytes!("../../assets/icons/edit_block.svg"),
+            PanelId::ParametersManager => include_bytes!("../../assets/icons/table.svg"),
             PanelId::ExternalReferences => crate::ui::icons::FOLDER_OPEN,
             PanelId::Browser => include_bytes!("../../assets/icons/content_browser.svg"),
             PanelId::NodeGraph => crate::ui::icons::NODE_GRAPH,
@@ -184,17 +204,20 @@ impl PanelId {
             PanelId::Layers => include_bytes!("../../assets/icons/layers/panel.svg"),
             PanelId::Laywalk => include_bytes!("../../assets/icons/layers/laywalk.svg"),
             PanelId::QuickCalc => crate::ui::window::quick_calc::ICON,
+            PanelId::CommandHistory => include_bytes!("../../assets/icons/ui/list.svg"),
             PanelId::Plugin(_) => crate::ui::icons::MORE,
         }
     }
 
     /// Default dock width for a freshly-created panel instance.
-    fn default_width(self) -> f32 {
+    pub(crate) fn default_width(self) -> f32 {
         match self {
             PanelId::Properties => 250.0,
             PanelId::GraphicAttributes => 250.0,
             PanelId::BlockPalette => 260.0,
+            PanelId::ToolPalettes => 260.0,
             PanelId::AuthoringPalettes => 260.0,
+            PanelId::ParametersManager => 420.0,
             PanelId::ExternalReferences => 460.0,
             PanelId::Browser => 230.0,
             PanelId::NodeGraph => 220.0,
@@ -204,6 +227,7 @@ impl PanelId {
             PanelId::Layers => 560.0,
             PanelId::Laywalk => 420.0,
             PanelId::QuickCalc => 320.0,
+            PanelId::CommandHistory => 420.0,
             PanelId::Plugin(_) => 280.0,
         }
     }
@@ -508,6 +532,15 @@ pub struct DockState {
     /// Per-panel settings, keyed by `PanelId`: the width a pallet floats at
     /// (and starts a new group with) and its floating auto-hide.
     pub panels: BTreeMap<PanelId, DockPanel>,
+    /// Desktop: pallets shown in a window of their own, and where that window
+    /// was. Out of the layout above while they are here.
+    pub detached: BTreeMap<PanelId, crate::app::tool_windows::WindowPlacement>,
+    /// Desktop: where each dialog's window of its own last was, by dialog
+    /// name.
+    pub tool_windows: BTreeMap<String, crate::app::tool_windows::WindowPlacement>,
+    /// The icon strips label each pallet, sharing the edge's height between
+    /// them, instead of showing icons only.
+    pub strip_labels: bool,
 }
 
 impl Default for DockState {
@@ -519,6 +552,9 @@ impl Default for DockState {
             auto_hide: (false, false),
             floating: Vec::new(),
             panels: BTreeMap::new(),
+            detached: BTreeMap::new(),
+            tool_windows: BTreeMap::new(),
+            strip_labels: false,
         }
     }
 }
@@ -752,6 +788,18 @@ impl DockState {
         self.set_group_width(side, group, width);
     }
 
+    /// Take pallet `id` out of the layout into a window of its own at
+    /// `placement`. It stays out until it comes back (`detached` cleared).
+    pub fn separate(&mut self, id: PanelId, placement: crate::app::tool_windows::WindowPlacement) {
+        self.detach(id);
+        self.detached.insert(id, placement);
+    }
+
+    /// Whether pallet `id` is in a window of its own.
+    pub fn is_separate(&self, id: PanelId) -> bool {
+        self.detached.contains_key(&id)
+    }
+
     /// Take `id` out of the layout. Returns the group it left, its position
     /// and weight there, and whether the group disappeared (it held nothing
     /// else).
@@ -780,6 +828,9 @@ impl DockState {
     /// (0 = first, `len` = last), counted before the move, and show it.
     /// Returns whether the layout changed.
     pub fn dock(&mut self, id: PanelId, side: DockSide, index: usize) -> bool {
+        if self.is_separate(id) {
+            return false;
+        }
         let before = self.clone();
         let mut index = index;
         if let Some((old_side, old_gi, _, _, removed)) = self.detach(id) {
@@ -799,7 +850,7 @@ impl DockState {
     /// pallet already in the group moves within it; the group keeps its
     /// width. Returns whether the layout changed.
     pub fn join_group(&mut self, id: PanelId, side: DockSide, group: usize, index: usize) -> bool {
-        if group >= self.groups(side).len() {
+        if self.is_separate(id) || group >= self.groups(side).len() {
             return false;
         }
         // A pallet alone in its group has nowhere to move within it (and
@@ -856,6 +907,9 @@ impl DockState {
 
     /// Float `id` at `rect`, on top of the other floating panels.
     pub fn float(&mut self, rect: FloatPanel) -> bool {
+        if self.is_separate(rect.id) {
+            return false;
+        }
         let before = self.clone();
         self.detach(rect.id);
         self.floating.push(rect);
@@ -1075,6 +1129,12 @@ pub const DOCK_FLOAT_BAR_W: f32 = 28.0;
 pub const DOCK_STRIP_W: f32 = 40.0;
 /// Height of one pallet icon in the strip.
 pub const STRIP_CELL_H: f32 = 32.0;
+/// Text size of a strip tab's name.
+pub const STRIP_LABEL_SIZE: f32 = 13.0;
+/// Space after a strip tab's name.
+const STRIP_LABEL_PAD: f32 = 12.0;
+/// Height of the + button below a strip's groups.
+pub const STRIP_PLUS_H: f32 = 28.0;
 /// Space above and below a group's icons, inside the group.
 pub const STRIP_PAD: f32 = 6.0;
 /// Hairline divider between groups.
@@ -1089,7 +1149,7 @@ pub const STRIP_GRIP_W: f32 = 8.0;
 const STRIP_NEW_GROUP_SLOP: f32 = 4.0;
 
 /// Where one group sits in an edge's icon strip, top to bottom.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StripGroup {
     /// Group index on the edge.
     pub group: usize,
@@ -1097,14 +1157,19 @@ pub struct StripGroup {
     pub top: f32,
     /// Top of the group's first icon.
     pub icons_top: f32,
-    /// Number of icons (open pallets).
-    pub icons: usize,
+    /// Height of each open pallet's tab, top to bottom.
+    pub cells: Vec<f32>,
 }
 
 impl StripGroup {
+    /// Top of the tab at `index` (the bottom of the last one past the end).
+    pub fn cell_top(&self, index: usize) -> f32 {
+        self.icons_top + self.cells.iter().take(index).sum::<f32>()
+    }
+
     /// Bottom of the group's last icon.
     pub fn icons_bottom(&self) -> f32 {
-        self.icons_top + self.icons as f32 * STRIP_CELL_H
+        self.cell_top(self.cells.len())
     }
 
     /// Bottom of the group's row (where its divider starts).
@@ -1113,24 +1178,35 @@ impl StripGroup {
     }
 }
 
-/// Lay out the icon strip for `groups` = (group index, open pallet count),
-/// returning each group's place and the top of the + button below them.
-pub fn strip_layout(groups: &[(usize, usize)]) -> (Vec<StripGroup>, f32) {
+/// Lay out the icon strip for `groups` = (group index, tab height of each
+/// open pallet), returning each group's place and the top of the + button
+/// below them.
+pub fn strip_layout(groups: &[(usize, Vec<f32>)]) -> (Vec<StripGroup>, f32) {
     let mut y = 0.0;
     let placed = groups
         .iter()
-        .map(|&(group, icons)| {
+        .map(|(group, cells)| {
             let g = StripGroup {
-                group,
+                group: *group,
                 top: y,
                 icons_top: y + STRIP_PAD,
-                icons,
+                cells: cells.clone(),
             };
             y = g.bottom() + STRIP_DIVIDER_H;
             g
         })
         .collect();
     (placed, y + STRIP_PLUS_GAP)
+}
+
+/// Length of a pallet's tab in the strip: the icon alone, or labelled, the
+/// icon followed by its name read upward, as long as the name is.
+pub fn strip_tab_h(title: &str, labelled: bool) -> f32 {
+    if !labelled {
+        return STRIP_CELL_H;
+    }
+    STRIP_CELL_H - 4.0 + crate::ui::style::text_metrics::width(title, STRIP_LABEL_SIZE, false).ceil()
+        + STRIP_LABEL_PAD
 }
 
 /// What a dragged pallet released at height `y` over the icon strip joins.
@@ -1151,7 +1227,12 @@ pub fn strip_hit(y: f32, layout: &[StripGroup]) -> StripHit {
             return StripHit::NewGroup(Some(g.group));
         }
         if y < g.icons_bottom() - STRIP_NEW_GROUP_SLOP {
-            let index = (((y - g.icons_top) / STRIP_CELL_H).round().max(0.0) as usize).min(g.icons);
+            // The tab boundary nearest the pointer.
+            let index = (0..=g.cells.len())
+                .min_by(|&a, &b| {
+                    (g.cell_top(a) - y).abs().total_cmp(&(g.cell_top(b) - y).abs())
+                })
+                .unwrap_or(0);
             return StripHit::Join {
                 group: g.group,
                 index,
@@ -1204,9 +1285,9 @@ pub fn title_bar_with<'a>(
             None => Space::new().width(0).height(0).into(),
         };
     }
-    // The pallet's control, pin and close only show while the pointer is
-    // over the bar; the fixed height keeps the bar from jumping when they
-    // appear.
+    // The pallet's control and pin only show while the pointer is over the
+    // bar; close always shows. The fixed height keeps the bar from jumping
+    // when they appear.
     let mut bar = row![text(title).size(12), Space::new().width(Length::Fill)]
         .spacing(3)
         .height(Length::Fixed(TITLE_BUTTON_H))
@@ -1215,14 +1296,17 @@ pub fn title_bar_with<'a>(
         if let Some(extra) = extra {
             bar = bar.push(extra);
         }
-        bar = bar
-            .push(pin_button(
-                id,
-                chrome.auto_collapse,
-                tooltip::Position::Bottom,
-            ))
-            .push(close_button(id, tooltip::Position::Bottom));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            bar = bar.push(detach_button(id, tooltip::Position::Bottom));
+        }
+        bar = bar.push(pin_button(
+            id,
+            chrome.auto_collapse,
+            tooltip::Position::Bottom,
+        ));
     }
+    bar = bar.push(close_button(id, tooltip::Position::Bottom));
     mouse_area(
         container(bar)
             .style(|theme: &Theme| container::Style {
@@ -1268,6 +1352,23 @@ pub fn pin_button<'a>(
 }
 
 /// The close button of a panel's title bar.
+/// Desktop: move the pallet into a window of its own.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn detach_button<'a>(id: PanelId, tip: tooltip::Position) -> Element<'a, Message> {
+    let detach = button(crate::ui::icons::themed_secondary(
+        crate::ui::icons::DETACH,
+        12.0,
+    ))
+    .on_press(Message::Dock(DockMsg::Detach(id)))
+    .style(button::subtle)
+    .padding([3, 5]);
+    let detach =
+        container(detach).id(iced::widget::Id::new(crate::ui::modal::DETACH_BUTTON_ID));
+    tooltip(detach, text(crate::t!("Open in its own window")).size(10), tip)
+        .gap(4)
+        .into()
+}
+
 pub fn close_button<'a>(id: PanelId, tip: tooltip::Position) -> Element<'a, Message> {
     let close = button(crate::ui::icons::themed_secondary(
         crate::ui::icons::CLOSE,
@@ -1344,6 +1445,8 @@ pub fn frame<'a>(
 /// Rotated label shared by floating dock title bars and palette categories.
 pub(crate) struct VerticalLabel {
     pub text: String,
+    /// Centre the text along the bar instead of starting at its bottom.
+    pub centered: bool,
 }
 
 impl iced::widget::canvas::Program<crate::app::Message> for VerticalLabel {
@@ -1363,12 +1466,17 @@ impl iced::widget::canvas::Program<crate::app::Message> for VerticalLabel {
             frame.rotate(iced::Radians(-std::f32::consts::FRAC_PI_2));
             // After the rotation the text runs along local +x (upward), so
             // the bar's bottom end sits at -height/2.
+            let (start, align_x) = if self.centered {
+                (0.0, iced::advanced::text::Alignment::Center)
+            } else {
+                (-bounds.height / 2.0, iced::advanced::text::Alignment::Left)
+            };
             frame.fill_text(iced::widget::canvas::Text {
                 content: self.text.clone(),
-                position: iced::Point::new(-bounds.height / 2.0, 0.0),
+                position: iced::Point::new(start, 0.0),
                 color: theme.palette().background.base.text.scale_alpha(0.72),
-                size: iced::Pixels(13.0),
-                align_x: iced::advanced::text::Alignment::Left,
+                size: iced::Pixels(STRIP_LABEL_SIZE),
+                align_x,
                 align_y: iced::alignment::Vertical::Center,
                 shaping: iced::advanced::text::Shaping::Advanced,
                 ..Default::default()
@@ -1659,9 +1767,12 @@ mod tests {
     #[test]
     fn strip_hit_maps_dividers_icons_and_the_end() {
         // Two groups: three icons, then one.
-        let (layout, plus_top) = strip_layout(&[(0, 3), (2, 1)]);
-        let g0 = layout[0];
-        let g1 = layout[1];
+        let (layout, plus_top) = strip_layout(&[
+            (0, vec![STRIP_CELL_H; 3]),
+            (2, vec![STRIP_CELL_H]),
+        ]);
+        let g0 = layout[0].clone();
+        let g1 = layout[1].clone();
         assert_eq!(g0.icons_top, STRIP_PAD);
         assert_eq!(g1.top, g0.bottom() + STRIP_DIVIDER_H);
         assert_eq!(plus_top, g1.bottom() + STRIP_DIVIDER_H + STRIP_PLUS_GAP);

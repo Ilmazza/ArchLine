@@ -17,7 +17,7 @@
 //! ([`Cut::oriented`]). Ogni esclusione (massa o locale senza altezza, vano
 //! senza dati) è un avviso con il nome del taglio, senza doppioni.
 
-use codec::{Document, EntityType};
+use document::{Document, EntityType};
 use rustc_hash::FxHashMap;
 
 use super::aperture::{apertures_in, ApertureGeom, ApertureState};
@@ -478,7 +478,7 @@ pub fn build_elevations(
 mod tests {
     use super::*;
 
-    use codec::entities::Hatch;
+    use document::entities::Hatch;
 
     use crate::bim::aperture::{aperture_polyline, ensure_layer, Aperture, ApertureKind};
     use crate::bim::cut::Cut;
@@ -488,7 +488,7 @@ mod tests {
     use crate::bim::walls::rect_from_axis;
     use crate::bim::MAX_WALL_THICKNESS_M;
     use crate::scene::Scene;
-    use codec::Handle;
+    use document::Handle;
 
     const M: DrawingUnit = DrawingUnit::Metri;
     const TOL: f64 = 1e-6;
@@ -581,7 +581,7 @@ mod tests {
         }
     }
 
-    fn hatch_colours(entities: &[EntityType]) -> Vec<codec::Color> {
+    fn hatch_colours(entities: &[EntityType]) -> Vec<document::Color> {
         entities
             .iter()
             .filter_map(|e| match e {
@@ -614,7 +614,7 @@ mod tests {
             assert!(
                 hatch_colours(&drawing.entities)
                     .iter()
-                    .all(|c| *c == codec::Color::ByLayer),
+                    .all(|c| *c == document::Color::ByLayer),
                 "{:?}: senza lavori tutto ByLayer",
                 drawing.phase
             );
@@ -633,10 +633,10 @@ mod tests {
         demolish_tramezzo(&mut scene);
         let build = build_sections(&scene.document, &[cut_east()], &OPTS);
         let by = |p| build.drawings.iter().find(|d| d.phase == p).unwrap();
-        let yellow = codec::Color::from_index(2);
+        let yellow = document::Color::from_index(2);
         let comparison = hatch_colours(&by(SectionPhase::Comparativa).entities);
         assert!(comparison.contains(&yellow), "{comparison:?}");
-        assert!(!comparison.contains(&codec::Color::from_index(1)));
+        assert!(!comparison.contains(&document::Color::from_index(1)));
         assert!(
             !hatch_colours(&by(SectionPhase::Progetto).entities).contains(&yellow),
             "il progetto non è colorato"
@@ -788,7 +788,7 @@ mod tests {
                 .map(|d| {
                     d.entities
                         .iter()
-                        .filter(|e| matches!(e, EntityType::LwPolyline(p) if p.common.color == codec::Color::from_index(1)))
+                        .filter(|e| matches!(e, EntityType::LwPolyline(p) if p.common.color == document::Color::from_index(1)))
                         .count()
                 })
                 .unwrap_or(0)

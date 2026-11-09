@@ -6,7 +6,7 @@
 
 use std::iter;
 
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use glam::DVec3;
 use kernel::geom2d::{contains, distance_to, Tolerance};
 use rustc_hash::FxHashMap;
@@ -459,8 +459,8 @@ pub(crate) mod test_support {
     use crate::bim::fixtures::scene_with;
     use crate::bim::units::DrawingUnit;
     use crate::scene::Scene;
-    use codec::entities::{LwPolyline, LwVertex};
-    use codec::{EntityType, Vector3};
+    use document::entities::{LwPolyline, LwVertex};
+    use document::{EntityType, Vector3};
     use kernel::geom2d::signed_area;
 
     pub(crate) const TOL: f64 = 1e-6;
@@ -559,7 +559,7 @@ mod tests {
     use crate::bim::zone::{zone_hatch, Zone, ZoneOrigin};
     use crate::bim::{APP_LOCALE, LAYER_LOCALI, LAYER_LOCALI_PROGETTO, MAX_WALL_THICKNESS_M};
     use crate::scene::Scene;
-    use codec::{EntityType, Vector3};
+    use document::{EntityType, Vector3};
 
     fn case_snap(form: Form) -> RoomSnapshot {
         snap_of(&scene_of(case_a(form, M)))

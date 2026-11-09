@@ -13,14 +13,14 @@ mod ocs {
     use rustpython_vm::convert::TryFromObject;
     use rustpython_vm::{function::ArgIntoFloat, PyObjectRef, PyResult, VirtualMachine};
 
-    use codec::entities::{
+    use document::entities::{
         Arc, LwPolyline, LwVertex, MText, TableBuilder, Text, TextHorizontalAlignment,
         TextVerticalAlignment,
     };
-    use codec::objects::ObjectType;
-    use codec::types::{Transform, Vector2, Vector3};
+    use document::objects::ObjectType;
+    use document::types::{Transform, Vector2, Vector3};
     use ocs_plugin_api::host::{
-        codec, EntityType, ExtendedDataRecord, Handle, PluginClassParameterKind, ReaderEntityKind,
+        document, EntityType, ExtendedDataRecord, Handle, PluginClassParameterKind, ReaderEntityKind,
         XDataValue,
     };
 
@@ -52,7 +52,7 @@ mod ocs {
         Ok(())
     }
 
-    fn top_level_blocks(document: &codec::Document) -> std::collections::HashSet<Handle> {
+    fn top_level_blocks(document: &document::Document) -> std::collections::HashSet<Handle> {
         let mut blocks: std::collections::HashSet<Handle> = document
             .objects
             .values()
@@ -1009,7 +1009,7 @@ mod ocs {
         options: &rustpython_vm::builtins::PyDictRef,
         vm: &VirtualMachine,
     ) -> PyResult<ocs_plugin_api::host::LayerConfig> {
-        use codec::types::{Color, LineWeight, Transparency};
+        use document::types::{Color, LineWeight, Transparency};
         ensure_known_entity_keys(
             options,
             "layer",
@@ -1393,7 +1393,7 @@ mod ocs {
             let document = host.document();
             let mut inserts = std::collections::HashMap::<String, usize>::new();
             for entity in document.entities() {
-                if let codec::entities::EntityType::Insert(insert) = entity {
+                if let document::entities::EntityType::Insert(insert) = entity {
                     *inserts.entry(insert.block_name.to_uppercase()).or_default() += 1;
                 }
             }
@@ -1597,7 +1597,7 @@ mod ocs {
     #[cfg(feature = "experimental-host-model")]
     #[pyfunction]
     fn layout_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        use codec::objects::ObjectType;
+        use document::objects::ObjectType;
         let rows = host_ctx::with_host(|host| {
             let current = match host.system_variable("CTAB") {
                 Some(ocs_plugin_api::host::HostSettingValue::Text(name)) => name,
@@ -1609,7 +1609,7 @@ mod ocs {
             for entity in document.entities() {
                 let owner = entity.common().owner_handle.value();
                 *owned.entry(owner).or_default() += 1;
-                if matches!(entity, codec::entities::EntityType::Viewport(_)) {
+                if matches!(entity, document::entities::EntityType::Viewport(_)) {
                     *viewports.entry(owner).or_default() += 1;
                 }
             }
@@ -1721,7 +1721,7 @@ mod ocs {
     #[cfg(feature = "experimental-host-model")]
     #[pyfunction]
     fn layer_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        use codec::types::{LineWeight, Transparency};
+        use document::types::{LineWeight, Transparency};
         let rows = host_ctx::with_host(|host| {
             let document = host.document();
             let mut counts = std::collections::HashMap::<String, usize>::new();
@@ -1915,7 +1915,7 @@ mod ocs {
                     "ocs.export_layer_dwg: cannot create {output_path:?}: {error}"
                 ))
             })?;
-        if let Err(error) = codec::DwgWriter::write_to_writer(&mut file, &snapshot) {
+        if let Err(error) = document::DwgWriter::write_to_writer(&mut file, &snapshot) {
             drop(file);
             let _ = std::fs::remove_file(path);
             return Err(
@@ -3777,7 +3777,7 @@ mod ocs {
         y2: ArgIntoFloat,
         vm: &VirtualMachine,
     ) -> PyResult<u64> {
-        let line = codec::Line::from_coords(
+        let line = document::Line::from_coords(
             x1.into_float(),
             y1.into_float(),
             0.0,
@@ -3803,7 +3803,7 @@ mod ocs {
         vm: &VirtualMachine,
     ) -> PyResult<u64> {
         let circle =
-            codec::Circle::from_coords(x.into_float(), y.into_float(), 0.0, radius.into_float());
+            document::Circle::from_coords(x.into_float(), y.into_float(), 0.0, radius.into_float());
         host_ctx::with_host(|host| {
             host_ctx::ensure_undo_started(host);
             host.add_entity(EntityType::Circle(circle)).value()
@@ -3825,8 +3825,8 @@ mod ocs {
         end_deg: ArgIntoFloat,
         vm: &VirtualMachine,
     ) -> PyResult<u64> {
-        let center = codec::Vector3::new(x.into_float(), y.into_float(), 0.0);
-        let arc = codec::Arc::from_center_radius_angles(
+        let center = document::Vector3::new(x.into_float(), y.into_float(), 0.0);
+        let arc = document::Arc::from_center_radius_angles(
             center,
             radius.into_float(),
             start_deg.into_float().to_radians(),
@@ -3972,7 +3972,7 @@ mod ocs {
                     "ocs.add_points: each point must be [finite x, y, z]".to_owned(),
                 ));
             }
-            entities.push(EntityType::Point(codec::Point::from_coords(
+            entities.push(EntityType::Point(document::Point::from_coords(
                 point[0], point[1], point[2],
             )));
         }
@@ -4180,8 +4180,8 @@ mod ocs {
     /// `Color` as `{"kind": "ByLayer" | "None" | "ByBlock"}`,
     /// `{"kind": "Index", "value": n}` or
     /// `{"kind": "Rgb", "value": {"r": .., "g": .., "b": ..}}`.
-    fn color_to_py_dict(vm: &VirtualMachine, color: &codec::types::Color) -> PyResult<PyObjectRef> {
-        use codec::types::Color;
+    fn color_to_py_dict(vm: &VirtualMachine, color: &document::types::Color) -> PyResult<PyObjectRef> {
+        use document::types::Color;
         let dict = vm.ctx.new_dict();
         match color {
             Color::ByLayer => dict.set_item("kind", vm.new_pyobj("ByLayer"), vm)?,
@@ -4203,8 +4203,8 @@ mod ocs {
         Ok(dict.into())
     }
 
-    fn py_to_color_dict(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<codec::types::Color> {
-        use codec::types::Color;
+    fn py_to_color_dict(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<document::types::Color> {
+        use document::types::Color;
         let dict = value.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
         let kind = dict.get_item("kind", vm)?.try_into_value::<String>(vm)?;
         let byte = |v: PyObjectRef, what: &str| -> PyResult<u8> {
@@ -4739,7 +4739,7 @@ mod ocs {
         #[test]
         fn unmapped_canvas_kind_accepts_only_layer_patch() {
             with_vm(|vm| {
-                let entity = EntityType::MLine(codec::entities::MLine::default());
+                let entity = EntityType::MLine(document::entities::MLine::default());
                 let patch = vm.ctx.new_dict();
                 patch.set_item("handle", vm.new_pyobj(1_u64), vm).unwrap();
                 patch
@@ -4925,7 +4925,7 @@ mod ocs {
         fn insert_is_created_by_block_name_and_preserves_block_identity() {
             with_vm(|vm| {
                 let mut insert =
-                    codec::entities::Insert::new("DOOR", Vector3::new(1.0, 2.0, 0.0));
+                    document::entities::Insert::new("DOOR", Vector3::new(1.0, 2.0, 0.0));
                 insert.set_x_scale(2.0);
                 let original = EntityType::Insert(insert);
                 let rendered = entity_to_dict(vm, &original)
@@ -5107,7 +5107,7 @@ mod ocs {
                 assert_eq!(definition.tag, "PART_NO");
                 assert_eq!(definition.text_style, "Standard");
 
-                let mut embedded = codec::entities::MText::default();
+                let mut embedded = document::entities::MText::default();
                 embedded.value = "first\\Psecond".into();
                 definition.embedded_mtext = Some(Box::new(embedded));
                 let entity = EntityType::AttributeDefinition(definition);
@@ -5180,7 +5180,7 @@ mod ocs {
                 };
                 assert_eq!(attribute.common.owner_handle, Handle::new(50));
                 attribute.attdef_handle = Handle::new(42);
-                let mut embedded = codec::entities::MText::default();
+                let mut embedded = document::entities::MText::default();
                 embedded.value = "first\\Psecond".into();
                 attribute.embedded_mtext = Some(Box::new(embedded));
                 let entity = EntityType::AttributeEntity(attribute);
@@ -5331,7 +5331,7 @@ mod ocs {
         #[test]
         fn phase_seven_kinds_survive_dwg_round_trip() {
             with_vm(|vm| {
-                let mut doc = codec::Document::new();
+                let mut doc = document::Document::new();
                 let mut handles = Vec::new();
                 for kind in ["Ray", "XLine", "Solid", "Face3D"] {
                     let input = vm.ctx.new_dict();
@@ -5355,8 +5355,8 @@ mod ocs {
                 }
                 let path = std::env::temp_dir()
                     .join(format!("ocs_phase_seven_{}.dwg", std::process::id()));
-                codec::DwgWriter::write_to_file(&path, &doc).unwrap();
-                let reopened = codec::DwgReader::from_file(&path)
+                document::DwgWriter::write_to_file(&path, &doc).unwrap();
+                let reopened = document::DwgReader::from_file(&path)
                     .unwrap()
                     .read()
                     .unwrap();
@@ -5382,7 +5382,7 @@ mod ocs {
         #[test]
         fn text_is_in_editable_schema_and_keeps_unmentioned_fields() {
             with_vm(|vm| {
-                let mut text = codec::entities::Text::new();
+                let mut text = document::entities::Text::new();
                 text.value = "Before".into();
                 text.height = 3.5;
                 text.insertion_point = Vector3::new(1.0, 2.0, 0.0);
@@ -5420,7 +5420,7 @@ mod ocs {
                 dict.set_item("radius", vm.new_pyobj(5.0), vm).unwrap();
 
                 let entity = dict_to_entity(&dict, vm).expect("dict_to_entity");
-                let codec::EntityType::Circle(circle) = &entity else {
+                let document::EntityType::Circle(circle) = &entity else {
                     panic!("expected Circle, got {entity:?}");
                 };
                 assert_eq!(circle.common.layer, "Walls");
@@ -5519,7 +5519,7 @@ mod ocs {
                     .unwrap();
 
                 let entity = dict_to_entity(&dict, vm).expect("dict_to_entity");
-                let codec::EntityType::Polyline2D(polyline) = &entity else {
+                let document::EntityType::Polyline2D(polyline) = &entity else {
                     panic!("expected Polyline2D, got {entity:?}");
                 };
                 assert!(polyline.flags.is_closed());
@@ -5548,13 +5548,13 @@ mod ocs {
                     .unwrap();
 
                 let entity = dict_to_entity(&dict, vm).expect("dict_to_entity");
-                let codec::EntityType::MText(text) = &entity else {
+                let document::EntityType::MText(text) = &entity else {
                     panic!("expected MText, got {entity:?}");
                 };
                 assert_eq!(text.value, "hello");
                 assert_eq!(
                     text.attachment_point,
-                    codec::entities::AttachmentPoint::MiddleCenter
+                    document::entities::AttachmentPoint::MiddleCenter
                 );
 
                 let round_tripped = entity_to_dict(vm, &entity).expect("entity_to_dict");
@@ -5596,7 +5596,7 @@ mod ocs {
                 let updated = apply_dict_to_entity(&existing, &update_dict, vm)
                     .expect("apply_dict_to_entity");
 
-                let codec::EntityType::Line(line) = &updated else {
+                let document::EntityType::Line(line) = &updated else {
                     panic!("expected Line, got {updated:?}");
                 };
                 assert_eq!(line.common.layer, "Geometry", "layer must be preserved");
@@ -5619,7 +5619,7 @@ mod ocs {
                     .unwrap();
                 let updated =
                     apply_dict_to_entity(&updated, &update_dict, vm).expect("apply_dict_to_entity");
-                let codec::EntityType::Line(line) = &updated else {
+                let document::EntityType::Line(line) = &updated else {
                     panic!("expected Line, got {updated:?}");
                 };
                 assert_eq!(line.common.layer, "Renamed");
@@ -5631,7 +5631,7 @@ mod ocs {
         /// The concrete Phase 1 acceptance test: create, read,
         /// edit, delete, save, and reopen a Line and an Ellipse, with common
         /// properties preserved — exercised against a real
-        /// `codec::Document` and a real DWG round trip (not a fake
+        /// `document::Document` and a real DWG round trip (not a fake
         /// `HostApi`; `dict_to_entity`/`apply_dict_to_entity`/`entity_to_dict`
         /// are exactly what a live `HostApi`-backed `ocs.add`/`ocs.update`/
         /// `ocs.get_entity` call into, so this covers the same logic without
@@ -5639,14 +5639,14 @@ mod ocs {
         #[test]
         fn line_and_ellipse_survive_create_read_edit_delete_save_reopen() {
             with_vm(|vm| {
-                let mut doc = codec::Document::new();
+                let mut doc = document::Document::new();
                 // A layer must exist in the document's layer table before an
                 // entity can reference it — same requirement `set_entity_layer`
                 // above already enforces for a live document. Without this,
                 // the DWG writer silently falls back the entity to layer "0"
                 // instead of erroring, which this test caught the first time
                 // around (it used "Geometry" without registering it first).
-                doc.layers.add(codec::Layer::new("Geometry")).unwrap();
+                doc.layers.add(document::Layer::new("Geometry")).unwrap();
 
                 // --- CREATE ---
                 let add_line = vm.ctx.new_dict();
@@ -5700,7 +5700,7 @@ mod ocs {
                     .expect("apply_dict_to_entity Line");
                 *doc.get_entity_mut(line_handle).unwrap() = updated;
 
-                let codec::EntityType::Line(line) = doc.get_entity(line_handle).unwrap() else {
+                let document::EntityType::Line(line) = doc.get_entity(line_handle).unwrap() else {
                     panic!("expected Line");
                 };
                 assert_eq!(
@@ -5727,14 +5727,14 @@ mod ocs {
                     "ocs_entity_crud_acceptance_test_{}.dwg",
                     std::process::id()
                 ));
-                codec::DwgWriter::write_to_file(&path, &doc).expect("write dwg");
-                let reopened = codec::DwgReader::from_file(&path)
+                document::DwgWriter::write_to_file(&path, &doc).expect("write dwg");
+                let reopened = document::DwgReader::from_file(&path)
                     .expect("open dwg")
                     .read()
                     .expect("read dwg");
                 let _ = std::fs::remove_file(&path);
 
-                let codec::EntityType::Line(reopened_line) = reopened
+                let document::EntityType::Line(reopened_line) = reopened
                     .get_entity(line_handle)
                     .expect("line survives save/reopen")
                 else {
@@ -5760,6 +5760,221 @@ mod ocs {
                 );
             });
         }
+    }
+
+    // ── Quad cursor menu panels (API v15) ───────────────────────────────────
+
+    /// Register declarative quad cursor menu panels (API v15). Each panel is
+    /// a dict `{"panel_id", "title", "applies_to": [...], "items": [...]}`;
+    /// an item is `{"control_id", "label", "icon", "action"}` where `icon`
+    /// is `{"glyph": "X"}` or `{"svg": "<svg…>"}` (raw bytes, ≤ 8 KiB — an
+    /// oversized or malformed icon degrades to a glyph tile, per the §4
+    /// contract) and `action` is `{"command": "LINE"}` or `{"python":
+    /// "code"}` — code run when the item is picked, with `handles`,
+    /// `type_keys` and `pick_point` bound. The host attaches this plugin's identity from the transport;
+    /// the call returns one bool per panel (registration order), `False`
+    /// marking a refused panel (caps, duplicate control ids, an id another
+    /// plugin owns).
+    #[pyfunction]
+    fn register_quad_panels(
+        panels: Vec<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        // All parsing happens before `host_ctx::with_host`, per the module's
+        // sentinel-error discipline.
+        let parsed: Vec<(ocs_plugin_api::dialog::QuadPanelDef, Vec<(String, String)>)> = panels
+            .into_iter()
+            .map(|panel| py_to_quad_panel_def(panel, vm))
+            .collect::<PyResult<_>>()?;
+        let defs: Vec<ocs_plugin_api::dialog::QuadPanelDef> =
+            parsed.iter().map(|(def, _)| def.clone()).collect();
+        let results =
+            host_ctx::with_host(|host| host.register_quad_panels(crate::PLUGIN_ID, &defs))
+                .ok_or_else(|| {
+                    vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned())
+                })?;
+        // A registered panel's Python items keep their code for the plugin's
+        // session: the script itself is gone by the time an item is picked.
+        for ((def, scripts), registered) in parsed.iter().zip(&results) {
+            if *registered {
+                crate::quad_scripts::replace_panel(&def.panel_id, scripts.clone());
+            }
+        }
+        let items = results
+            .into_iter()
+            .map(|registered| vm.new_pyobj(registered))
+            .collect();
+        Ok(vm.ctx.new_list(items).into())
+    }
+
+    /// Remove quad panels this plugin registered earlier in the session
+    /// (API v15). One bool per id (order): `False` marks an id this plugin
+    /// does not own (another plugin's panel is refused, not removed).
+    #[pyfunction]
+    fn unregister_quad_panels(
+        panel_ids: Vec<String>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyObjectRef> {
+        let refs: Vec<&str> = panel_ids.iter().map(String::as_str).collect();
+        let results = host_ctx::with_host(|host| host.unregister_quad_panels(crate::PLUGIN_ID, &refs))
+            .ok_or_else(|| {
+                vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned())
+            })?;
+        for (panel_id, removed) in panel_ids.iter().zip(&results) {
+            if *removed {
+                crate::quad_scripts::replace_panel(panel_id, Vec::new());
+            }
+        }
+        let items = results
+            .into_iter()
+            .map(|removed| vm.new_pyobj(removed))
+            .collect();
+        Ok(vm.ctx.new_list(items).into())
+    }
+
+    /// One panel dict → [`QuadPanelDef`](ocs_plugin_api::dialog::QuadPanelDef).
+    fn py_to_quad_panel_def(
+        panel: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<(ocs_plugin_api::dialog::QuadPanelDef, Vec<(String, String)>)> {
+        use rustpython_vm::convert::TryFromObject;
+        let dict = panel.downcast::<rustpython_vm::builtins::PyDict>().map_err(|_| {
+            vm.new_type_error("each quad panel must be a dict".to_owned())
+        })?;
+        let panel_id = dict.get_item("panel_id", vm)?.try_into_value::<String>(vm)?;
+        let title = dict.get_item("title", vm)?.try_into_value::<String>(vm)?;
+        let mut def = ocs_plugin_api::dialog::QuadPanelDef::new(panel_id, title);
+        let mut scripts = Vec::new();
+        if let Some(applies_to) = dict.get_item_opt("applies_to", vm)? {
+            if !vm.is_none(&applies_to) {
+                let keys: Vec<String> = py_string_list(applies_to, vm)?;
+                def.applies_to = keys;
+            }
+        }
+        if let Some(items) = dict.get_item_opt("items", vm)? {
+            if !vm.is_none(&items) {
+                let raw_items: Vec<PyObjectRef> = Vec::try_from_object(vm, items)
+                    .map_err(|_| vm.new_type_error("items must be a list of dicts".to_owned()))?;
+                for item in raw_items {
+                    let (item, script) = py_to_quad_item_def(item, vm)?;
+                    if let Some(script) = script {
+                        scripts.push((item.control_id.clone(), script));
+                    }
+                    def.items.push(item);
+                }
+            }
+        }
+        Ok((def, scripts))
+    }
+
+    /// One item dict → [`QuadItemDef`](ocs_plugin_api::dialog::QuadItemDef).
+    fn py_to_quad_item_def(
+        item: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<(ocs_plugin_api::dialog::QuadItemDef, Option<String>)> {
+        use rustpython_vm::convert::TryFromObject;
+        let dict = item.downcast::<rustpython_vm::builtins::PyDict>().map_err(|_| {
+            vm.new_type_error("each quad item must be a dict".to_owned())
+        })?;
+        let control_id = dict.get_item("control_id", vm)?.try_into_value::<String>(vm)?;
+        let label = dict.get_item("label", vm)?.try_into_value::<String>(vm)?;
+        let icon = match dict.get_item_opt("icon", vm)? {
+            Some(icon) if !vm.is_none(&icon) => py_to_quad_icon(icon, vm)?,
+            // No icon: the glyph tile from the label (the §4 fallback).
+            _ => ocs_plugin_api::ribbon::owned::OwnedIconKind::Glyph(String::new()),
+        };
+        let (action, script) = match dict.get_item_opt("action", vm)? {
+            Some(action) if !vm.is_none(&action) => py_to_quad_action(action, vm)?,
+            _ => return Err(vm.new_value_error(QUAD_ACTION_FORMS.to_owned())),
+        };
+        Ok((
+            ocs_plugin_api::dialog::QuadItemDef {
+                control_id,
+                label,
+                icon,
+                action,
+            },
+            script,
+        ))
+    }
+
+    /// `{"svg": "<svg…>"}` → raw bytes, `{"glyph": "X"}` → the glyph.
+    fn py_to_quad_icon(
+        icon: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<ocs_plugin_api::ribbon::owned::OwnedIconKind> {
+        use rustpython_vm::convert::TryFromObject;
+        let dict = icon.downcast::<rustpython_vm::builtins::PyDict>().map_err(|_| {
+            vm.new_type_error(
+                "a quad icon must be {\"svg\": \"<svg…>\"} or {\"glyph\": \"X\"}".to_owned(),
+            )
+        })?;
+        if let Some(svg) = dict.get_item_opt("svg", vm)? {
+            if !vm.is_none(&svg) {
+                let text = svg.try_into_value::<String>(vm)?;
+                return Ok(ocs_plugin_api::ribbon::owned::OwnedIconKind::Svg(
+                    text.into_bytes(),
+                ));
+            }
+        }
+        if let Some(glyph) = dict.get_item_opt("glyph", vm)? {
+            if !vm.is_none(&glyph) {
+                return Ok(ocs_plugin_api::ribbon::owned::OwnedIconKind::Glyph(
+                    glyph.try_into_value::<String>(vm)?,
+                ));
+            }
+        }
+        Err(vm.new_value_error(
+            "a quad icon must be {\"svg\": \"<svg…>\"} or {\"glyph\": \"X\"}".to_owned(),
+        ))
+    }
+
+    /// The forms a Python quad item's action takes.
+    const QUAD_ACTION_FORMS: &str = "a quad action must be {\"command\": \"VERB\"} or \
+        {\"python\": \"code\"}: a script's own functions are gone by the time an item \
+        is picked, so a Python item carries the code to run";
+
+    /// `{"command": "LINE"}` → the verb dispatch; `{"python": "code"}` → the
+    /// quad-action notification, answered by running that code (see
+    /// `quad_scripts`) with `handles`, `type_keys` and `pick_point` bound.
+    fn py_to_quad_action(
+        action: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<(ocs_plugin_api::dialog::QuadActionDef, Option<String>)> {
+        use rustpython_vm::convert::TryFromObject;
+        let dict = action
+            .downcast::<rustpython_vm::builtins::PyDict>()
+            .map_err(|_| vm.new_type_error(QUAD_ACTION_FORMS.to_owned()))?;
+        if let Some(command) = dict.get_item_opt("command", vm)? {
+            if !vm.is_none(&command) {
+                return Ok((
+                    ocs_plugin_api::dialog::QuadActionDef::Command(
+                        command.try_into_value::<String>(vm)?,
+                    ),
+                    None,
+                ));
+            }
+        }
+        if let Some(code) = dict.get_item_opt("python", vm)? {
+            if !vm.is_none(&code) {
+                let code = code.try_into_value::<String>(vm)?;
+                // Compiled now, so a typo shows at registration, not on a pick.
+                vm.compile(&code, rustpython_vm::compiler::Mode::Exec, "<quad>".to_owned())
+                    .map_err(|err| vm.new_value_error(format!("quad python code: {err}")))?;
+                return Ok((ocs_plugin_api::dialog::QuadActionDef::Callback, Some(code)));
+            }
+        }
+        Err(vm.new_value_error(QUAD_ACTION_FORMS.to_owned()))
+    }
+
+    /// A Python list of strings → `Vec<String>` (the `applies_to` keys).
+    fn py_string_list(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<Vec<String>> {
+        use rustpython_vm::convert::TryFromObject;
+        let list: Vec<PyObjectRef> = Vec::try_from_object(vm, value)
+            .map_err(|_| vm.new_type_error("applies_to must be a list of strings".to_owned()))?;
+        list.into_iter()
+            .map(|key| key.try_into_value::<String>(vm))
+            .collect()
     }
 }
 
@@ -5797,7 +6012,7 @@ mod tests {
         let mut current = None;
         for line in converter.lines() {
             let line = line.trim();
-            if let Some(arm) = line.strip_prefix("codec::EntityType::") {
+            if let Some(arm) = line.strip_prefix("document::EntityType::") {
                 if let Some((kind, _)) = arm.split_once("(value) => {") {
                     current = Some(kind.to_owned());
                     emitted.entry(kind.to_owned()).or_default();
@@ -5857,8 +6072,8 @@ mod tests {
     #[cfg(feature = "experimental-host-model")]
     #[test]
     fn entity_snapshot_uses_catalog_variant_name() {
-        use ocs_plugin_api::host::codec;
-        let hatch = codec::EntityType::Hatch(codec::entities::Hatch::default());
+        use ocs_plugin_api::host::document;
+        let hatch = document::EntityType::Hatch(document::entities::Hatch::default());
         let value = serde_json::to_value(hatch).unwrap();
         let kind = value.as_object().unwrap().keys().next().unwrap();
         assert_eq!(kind, "Hatch");

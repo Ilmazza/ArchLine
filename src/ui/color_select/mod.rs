@@ -4,7 +4,7 @@
 //! behaves the same everywhere.
 
 pub mod book;
-pub mod document;
+pub mod drawing_colors;
 pub mod editor;
 pub mod eyedropper;
 pub mod math;
@@ -18,8 +18,8 @@ use crate::app::Message;
 use crate::t;
 use crate::ui::properties::acad_color_display;
 use crate::ui::ROW_H;
-use codec::types::Color as AcadColor;
-use iced::widget::{button, column, container, row, text};
+use document::types::Color as AcadColor;
+use iced::widget::{button, container, row, text};
 use iced::{Background, Border, Color, Element, Length, Theme};
 
 /// Which "logical" entries the colour list offers besides the standard ACI
@@ -30,6 +30,9 @@ pub struct ColorExtras {
     pub by_block: bool,
     pub none: bool,
     pub background: bool,
+    /// The closed selector as a plain table cell: swatch and name, no
+    /// button colour or arrow (the Layer manager's Color column).
+    pub flat: bool,
 }
 
 thread_local! {
@@ -139,6 +142,7 @@ pub fn color_selector_with_name<'a>(
     color_selector_with_indicator(
         swatch(cur_bg),
         cur_name,
+        Some(current),
         open,
         extras,
         on_select,
@@ -160,7 +164,16 @@ pub fn color_selector_labelled<'a>(
 ) -> Element<'a, Message> {
     let (bg, _) = acad_color_display(current);
     let name = label.unwrap_or_else(|| color_display_name(current));
-    color_selector_with_indicator(swatch(bg), name, open, extras, on_select, on_toggle, on_more)
+    color_selector_with_indicator(
+        swatch(bg),
+        name,
+        Some(current),
+        open,
+        extras,
+        on_select,
+        on_toggle,
+        on_more,
+    )
 }
 
 /// Build the shared colour selector for a mixed selection.
@@ -193,6 +206,7 @@ pub fn color_selector_varies<'a>(
     color_selector_with_indicator(
         indicator.into(),
         "*VARIES*".to_string(),
+        None,
         open,
         extras,
         on_select,
@@ -204,6 +218,7 @@ pub fn color_selector_varies<'a>(
 fn color_selector_with_indicator<'a>(
     indicator: Element<'a, Message>,
     name: String,
+    current: Option<AcadColor>,
     open: bool,
     extras: ColorExtras,
     on_select: impl Fn(AcadColor) -> Message + 'a,
@@ -213,26 +228,42 @@ fn color_selector_with_indicator<'a>(
     let on_dismiss = on_toggle.clone();
 
     // Closed button: current swatch + name + caret.
-    let head = button(
-        row![
-            indicator,
-            text(name).size(11),
-            iced::widget::Space::new().width(Length::Fill),
-            crate::ui::icons::themed_arrow_toggle(open, 9.0),
-        ]
-        .spacing(5)
-        .align_y(iced::Center),
-    )
-    .on_press(on_toggle)
-    .padding([3, 6])
-    .height(ROW_H)
-    .width(Length::Fill);
+    let mut head_row = row![
+        indicator,
+        text(name).size(11),
+        iced::widget::Space::new().width(Length::Fill),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    if !extras.flat || open {
+        head_row = head_row.push(crate::ui::icons::themed_arrow_toggle(open, 9.0));
+    }
+    let mut head = button(head_row)
+        .on_press(on_toggle)
+        .padding([3, 6])
+        .height(ROW_H)
+        .width(Length::Fill);
+    if extras.flat {
+        head = head.style(|theme: &Theme, status| {
+            let palette = theme.palette();
+            button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then(|| Background::Color(palette.background.strong.color)),
+                text_color: palette.background.base.text,
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        });
+    }
 
     if !open {
         return head.into();
     }
 
-    let popup = container(color_list(extras, on_select, on_more))
+    let popup = container(color_list_with_current(current, extras, on_select, on_more))
         .style(popup_panel_style)
         .padding(2);
 
@@ -286,49 +317,58 @@ pub fn color_list<'a>(
     on_select: impl Fn(AcadColor) -> Message + 'a,
     on_more: Message,
 ) -> Element<'a, Message> {
-    let named_row = |color: AcadColor| -> Element<'a, Message> {
-        let (bg, name) = acad_color_display(color);
-        button(
-            row![swatch(bg), text(t!(name)).size(11)]
-                .spacing(5)
-                .align_y(iced::Center),
-        )
-        .on_press(on_select(color))
-        .style(list_row_style)
-        .padding([2, 4])
-        .width(Length::Fill)
-        .into()
-    };
+    color_list_with_current(None, extras, on_select, on_more)
+}
 
-    let logical_row = |color: AcadColor, label: &'static str| -> Element<'a, Message> {
+pub fn color_list_with_current<'a>(
+    current: Option<AcadColor>,
+    extras: ColorExtras,
+    on_select: impl Fn(AcadColor) -> Message + 'a,
+    on_more: Message,
+) -> Element<'a, Message> {
+    use crate::ui::dropdown_list::{DropdownList, DropdownRow};
+
+    let mut rows: Vec<DropdownRow<'a, Message>> = Vec::new();
+    let mut initial_selected: Option<usize> = None;
+
+    let mut push_color = |color: AcadColor, label_str: String| {
         let (bg, _) = acad_color_display(color);
-        button(
-            row![swatch(bg), text(t!(label)).size(11)]
+        let msg = on_select(color);
+        if initial_selected.is_none() && current == Some(color) {
+            initial_selected = Some(rows.len());
+        }
+        let el: Element<'a, Message> = button(
+            row![swatch(bg), text(label_str.clone()).size(11)]
                 .spacing(5)
                 .align_y(iced::Center),
         )
-        .on_press(on_select(color))
+        .on_press(msg.clone())
         .style(list_row_style)
         .padding([2, 4])
         .width(Length::Fill)
-        .into()
+        .into();
+        rows.push(DropdownRow::item(el, label_str, msg));
     };
 
-    let mut list = column![].spacing(1);
     if extras.none {
-        list = list.push(named_row(AcadColor::None));
+        let (_, name) = acad_color_display(AcadColor::None);
+        push_color(AcadColor::None, t!(name).into_owned());
     }
     if extras.background {
-        list = list.push(logical_row(AcadColor::ByBlock, "Background"));
+        push_color(AcadColor::ByBlock, t!("Background").into_owned());
     }
     if extras.by_layer {
-        list = list.push(named_row(AcadColor::ByLayer));
+        let (_, name) = acad_color_display(AcadColor::ByLayer);
+        push_color(AcadColor::ByLayer, t!(name).into_owned());
     }
     if extras.by_block {
-        list = list.push(named_row(AcadColor::ByBlock));
+        let (_, name) = acad_color_display(AcadColor::ByBlock);
+        push_color(AcadColor::ByBlock, t!(name).into_owned());
     }
     for i in 1u8..=9 {
-        list = list.push(named_row(AcadColor::Index(i)));
+        let color = AcadColor::Index(i);
+        let (_, name) = acad_color_display(color);
+        push_color(color, t!(name).into_owned());
     }
     // Colours picked recently beyond the nine standard ones.
     let recent = RECENT.with(|recent| recent.borrow().clone());
@@ -336,27 +376,22 @@ pub fn color_list<'a>(
         .into_iter()
         .filter(|color| !matches!(color, AcadColor::Index(1..=9)))
     {
-        let (bg, _) = acad_color_display(color);
-        list = list.push(
-            button(
-                row![swatch(bg), text(color_display_name(color)).size(11)]
-                    .spacing(5)
-                    .align_y(iced::Center),
-            )
-            .on_press(on_select(color))
-            .style(list_row_style)
-            .padding([2, 4])
-            .width(Length::Fill),
-        );
+        push_color(color, color_display_name(color));
     }
-    list = list.push(
-        button(text(t!("Select Color...")).size(11))
-            .on_press(on_more)
+    let more_label = t!("Select Color...").into_owned();
+    rows.push(DropdownRow::item(
+        button(text(more_label.clone()).size(11))
+            .on_press(on_more.clone())
             .style(list_row_style)
             .padding([2, 4])
             .width(Length::Fill),
-    );
-    list.into()
+        more_label,
+        on_more,
+    ));
+
+    DropdownList::with_options(rows, Length::Shrink, Length::Fill, 1.0, 0.0)
+        .selected(initial_selected)
+        .into()
 }
 
 /// Render `base` inline with `popup` in an `iced_aw` dropdown.

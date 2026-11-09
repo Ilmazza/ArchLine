@@ -5,7 +5,7 @@
 //   2. Select the other dimensions to space (click each, Enter to finish)
 //   3. Enter a non-negative spacing value, or choose Auto
 
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use glam::DVec3;
 
 use crate::command::{CadCommand, CmdOption, CmdResult, InputKind, SelectionEntity};
@@ -73,11 +73,7 @@ impl CadCommand for DimSpaceCommand {
         }
         match &self.step {
             Step::PickBase => t!("DIMSPACE  Select base dimension:").into_owned(),
-            Step::PickOthers { others, .. } => t!(
-                "DIMSPACE  Select dimension to space (%{count} selected, Enter when done):",
-                count = others.len()
-            )
-            .into_owned(),
+            Step::PickOthers { .. } => t!("DIMSPACE  Select dimensions to space:").into_owned(),
             Step::EnterSpacing { .. } => {
                 t!("DIMSPACE  Specify distance between dimensions or [Auto] <Auto>:").into_owned()
             }
@@ -128,8 +124,8 @@ impl CadCommand for DimSpaceCommand {
                 && matches!(
                     crate::entities::dimension::as_dimension(&selected.entity),
                     Some(
-                        codec::entities::Dimension::Linear(_)
-                            | codec::entities::Dimension::Aligned(_)
+                        document::entities::Dimension::Linear(_)
+                            | document::entities::Dimension::Aligned(_)
                     )
                 )
                 && !others.contains(&selected.handle)
@@ -151,8 +147,8 @@ impl CadCommand for DimSpaceCommand {
                         .as_ref()
                         .and_then(crate::entities::dimension::as_dimension),
                     Some(
-                        codec::entities::Dimension::Linear(_)
-                            | codec::entities::Dimension::Aligned(_)
+                        document::entities::Dimension::Linear(_)
+                            | document::entities::Dimension::Aligned(_)
                     )
                 ) {
                     return CmdResult::ReportError(

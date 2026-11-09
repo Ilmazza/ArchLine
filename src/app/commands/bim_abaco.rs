@@ -64,7 +64,7 @@ use crate::bim::APP_ABACO;
 use crate::command::{CadCommand, CmdResult};
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::ui::window::bim_extract::BimMsg;
-use codec::{DxfVersion, EntityType, Handle};
+use document::{DxfVersion, EntityType, Handle};
 use glam::DVec3;
 use iced::Task;
 use std::path::{Path, PathBuf};

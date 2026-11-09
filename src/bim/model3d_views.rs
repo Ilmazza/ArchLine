@@ -10,9 +10,9 @@
 //!
 //! Logica pura: costruisce le viste e le mette nella tabella del documento.
 
-use codec::tables::View;
-use codec::types::Vector3;
-use codec::Document;
+use document::tables::View;
+use document::types::Vector3;
+use document::Document;
 
 /// Nome, direzione orizzontale dell'occhio (x, y), prospettiva?
 const VIEWS: [(&str, [f64; 2], bool); 5] = [
@@ -109,7 +109,7 @@ pub fn for_phase(src: &Document, phase: super::model3d_place::ModelPhase) -> Vec
         .into_iter()
         .filter(|(_, found)| *found == phase)
         .filter_map(|(handle, _)| match src.get_entity(handle) {
-            Some(codec::EntityType::Face3D(face)) => Some([
+            Some(document::EntityType::Face3D(face)) => Some([
                 face.first_corner,
                 face.second_corner,
                 face.third_corner,

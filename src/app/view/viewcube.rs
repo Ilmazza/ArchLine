@@ -48,7 +48,7 @@ fn vc_btn<'a>(content: Element<'a, Message>, size: f32, msg: Message) -> Element
 
 /// Overlay of home / roll / nudge controls sized to the whole nav region, so
 /// the caller can position it exactly like the cube hit area.
-pub(super) fn viewcube_nav_controls<'a>(viewport: Option<codec::Handle>) -> Element<'a, Message> {
+pub(super) fn viewcube_nav_controls<'a>(viewport: Option<document::Handle>) -> Element<'a, Message> {
     use crate::scene::NudgeDir;
     use crate::ui::icons;
     let r = VIEWCUBE_REGION_PX;
@@ -166,7 +166,7 @@ pub(super) fn viewcube_ucs_picker<'a>(
     } else {
         current
     };
-    iced::widget::pick_list(Some(selected), options, |value| value.to_string())
+    crate::ui::dropdown_list::pick_list(Some(selected), options, |value| value.to_string())
         .on_select(Message::SetViewcubeUcs)
         .text_size(11)
         .padding([2, 6])

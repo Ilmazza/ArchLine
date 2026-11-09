@@ -3,7 +3,7 @@ use crate::scene::{
     block_distance_parameter as distance, block_orientation_parameter as orientation,
     block_point_parameter as point,
 };
-use codec::{entities::Insert, DwgReader, DwgWriter, DxfReader, DxfWriter};
+use document::{entities::Insert, DwgReader, DwgWriter, DxfReader, DxfWriter};
 use std::io::Cursor;
 
 struct Fixture {
@@ -291,21 +291,40 @@ fn block_action_selection_editing_and_erase_preserve_owned_grip_links() {
 
 #[test]
 fn block_action_foreign_or_malformed_native_dependencies_fail_atomically() {
-    for invalid in 0..4 {
+    for invalid in 1..6 {
         let mut f = fixture(Kind::Move);
+        let mut scene = crate::scene::Scene::new();
+        scene.document = f.doc;
+        scene.define_block_raw("FOREIGN", Vector3::ZERO, vec![]);
+        f.doc = scene.document;
+        let foreign_definition = f.doc.block_records.get("FOREIGN").unwrap().handle;
         let foreign = point::create(
             &mut f.doc,
-            f.definition,
+            foreign_definition,
             Vector3::new(10., 10., 0.),
             Vector3::new(12., 12., 0.),
         )
         .unwrap();
         let foreign_grip =
-            crate::scene::block_grips::config::locations(&f.doc, f.definition, foreign).unwrap()[0]
+            crate::scene::block_grips::config::locations(&f.doc, foreign_definition, foreign)
+                .unwrap()[0]
                 .handle;
+        let owned = distance::create(
+            &mut f.doc,
+            f.definition,
+            distance::Kind::Linear,
+            Vector3::new(30., 0., 0.),
+            Vector3::new(40., 0., 0.),
+            Vector3::new(35., 2., 0.),
+        )
+        .unwrap();
+        let owned_grip = crate::scene::block_grips::config::locations(&f.doc, f.definition, owned)
+            .unwrap()[0]
+            .handle;
         let target = match invalid {
-            0 => foreign,
-            1 => foreign_grip,
+            1 => owned_grip,
+            4 => foreign,
+            5 => foreign_grip,
             2 => Handle::new(0xffff_ffff),
             _ => {
                 let ObjectType::DynamicBlock(grip) = f.doc.objects.get_mut(&f.grips[0]).unwrap()
@@ -335,15 +354,18 @@ fn block_action_foreign_or_malformed_native_dependencies_fail_atomically() {
         assert_eq!(f.doc, baseline);
         assert!(retarget(&mut f.doc, f.definition, f.action, &f.targets[..1], None).is_err());
         assert_eq!(f.doc, baseline);
-        if invalid < 2 {
+        if invalid < 2 || invalid >= 4 {
             prune_erased_targets(&mut f.doc, f.definition);
-            assert!(actions(&f.doc, f.definition)
-                .into_iter()
-                .find(|(h, ..)| *h == f.action)
-                .unwrap()
-                .1
-                .dependencies
-                .contains(&target));
+            assert_eq!(
+                actions(&f.doc, f.definition)
+                    .into_iter()
+                    .find(|(h, ..)| *h == f.action)
+                    .unwrap()
+                    .1
+                    .dependencies
+                    .contains(&target),
+                invalid < 2
+            );
         }
     }
     let mut f = fixture(Kind::Move);
@@ -379,7 +401,7 @@ fn an_evaluated_representation_ends_after_its_members() {
     let changed = instance::evaluate_value(&f.doc, f.first, f.parameter.handle, f.input)
         .unwrap()
         .unwrap();
-    let codec::EntityType::Insert(reference) = changed.get_entity(f.first).unwrap() else {
+    let document::EntityType::Insert(reference) = changed.get_entity(f.first).unwrap() else {
         panic!()
     };
     let record = changed.block_records.get(&reference.block_name).unwrap();
@@ -404,8 +426,8 @@ fn an_evaluated_representation_ends_after_its_members() {
     );
     assert!(
         matches!(
-            changed.get_entity(codec::types::Handle::new(end)),
-            Some(codec::EntityType::BlockEnd(_))
+            changed.get_entity(document::types::Handle::new(end)),
+            Some(document::EntityType::BlockEnd(_))
         ),
         "the record's end handle names an ENDBLK entity"
     );

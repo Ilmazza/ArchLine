@@ -694,7 +694,7 @@ mod tests {
     //! altezza predefinita 2,70 dove serve, nelle due forme del rilievo.
     use super::*;
 
-    use codec::{EntityType, Vector3};
+    use document::{EntityType, Vector3};
 
     use crate::bim::abaco::compute_abaco;
     use crate::bim::abaco::test_support::*;
@@ -1293,7 +1293,7 @@ mod tests {
             .map(|entity| entity.common().handle)
             .expect("faccia ovest di A");
         scene.erase_entities(&[west]);
-        let mut raised = codec::entities::Line::from_points(
+        let mut raised = document::entities::Line::from_points(
             Vector3::new(5.0, 1.0, 1.0),
             Vector3::new(7.0, 1.0, 1.0),
         );

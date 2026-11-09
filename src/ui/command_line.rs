@@ -103,6 +103,42 @@ fn strip_option_listing(s: &str, options: &[CmdOption]) -> String {
     out.replace(" :", ":").trim().to_string()
 }
 
+/// Whether pasted command-line text holds SVG markup, which the copy commands
+/// put on the system clipboard beside their own copy.
+fn is_svg_markup(text: &str) -> bool {
+    text.contains("<svg")
+}
+
+/// An option label split around the letters typed to pick it: the capitals
+/// (`T` in `Ttr`, `RE` in `REpeat`, `X` in `eXit`), or the whole label when
+/// it has no lower case (`3P`).
+fn option_shortcut(label: &str) -> (&str, &str, &str) {
+    if !label.chars().any(char::is_lowercase) {
+        return ("", label, "");
+    }
+    let Some(start) = label.find(|c: char| c.is_uppercase() || c.is_ascii_digit()) else {
+        return (label, "", "");
+    };
+    let len = label[start..]
+        .find(|c: char| c.is_lowercase() || c.is_whitespace())
+        .unwrap_or(label.len() - start);
+    (&label[..start], &label[start..start + len], &label[start + len..])
+}
+
+#[cfg(test)]
+mod option_shortcut_tests {
+    #[test]
+    fn the_capitals_are_the_shortcut() {
+        use super::option_shortcut as split;
+        assert_eq!(split("Ttr"), ("", "T", "tr"));
+        assert_eq!(split("REpeat"), ("", "RE", "peat"));
+        assert_eq!(split("eXit"), ("e", "X", "it"));
+        assert_eq!(split("3P"), ("", "3P", ""));
+        assert_eq!(split("2Point"), ("", "2P", "oint"));
+        assert_eq!(split("by line"), ("by line", "", ""));
+    }
+}
+
 // Font swaps must preserve U+276F, U+24D8, and U+2715.
 const COMMAND_PREFIX: &str = "❯ ";
 const INFO_PREFIX: &str = "ⓘ ";
@@ -432,6 +468,20 @@ impl CommandLine {
             format!("{COMMAND_PREFIX}{} {cmd}", t!("Command:")),
         );
     }
+    /// The latest command echo shows only `cmd`: a value typed on the same
+    /// line as a variable belongs to its prompt, not to the command line.
+    pub fn restate_last_command(&mut self, cmd: &str) {
+        if let Some(entry) = self.history.iter_mut().rev().find(|e| e.kind == EntryKind::Command) {
+            entry.text = format!("{COMMAND_PREFIX}{} {cmd}", t!("Command:"));
+        }
+    }
+    /// An answer given to the prompt just shown is written after it on the
+    /// same line (`Enter new value for X <1>: 0`), as the reference echoes it.
+    pub fn answer_last_prompt(&mut self, answer: &str) {
+        if let Some(entry) = self.history.last_mut().filter(|e| e.text.trim_end().ends_with(':')) {
+            entry.text = format!("{} {answer}", entry.text.trim_end());
+        }
+    }
     pub fn push_output(&mut self, msg: &str) {
         self.push(EntryKind::Output, msg.to_string());
     }
@@ -439,6 +489,15 @@ impl CommandLine {
         self.error_revision = self.error_revision.wrapping_add(1);
         self.last_error = Some(msg.to_owned());
         self.push(EntryKind::Error, format_error(msg));
+    }
+    /// A typed value or keyword the prompt refused (`Requires 0 or 1 only.`,
+    /// `Invalid option keyword.`): a plain line, as the reference prints it
+    /// before asking again. It still counts as a failed input for automation
+    /// (`last_error` / `error_revision`).
+    pub fn push_rejection(&mut self, msg: &str) {
+        self.error_revision = self.error_revision.wrapping_add(1);
+        self.last_error = Some(msg.to_owned());
+        self.push(EntryKind::Output, msg.to_string());
     }
     /// Append an error unless it is already the latest history line. Repeated
     /// retry failures should refresh the concise message, not flood history
@@ -489,6 +548,7 @@ impl CommandLine {
             // A quiet machine replay (API v13) leaves no echo; errors pass.
             return;
         }
+        crate::app::commands::write_log_line(&text);
         self.history.push(HistoryEntry {
             kind,
             text,
@@ -790,6 +850,74 @@ impl CommandLine {
         )
     }
 
+    /// The Command History pallet: the whole log in one read-only editor
+    /// (select across lines, Ctrl+C), with Copy and Clear, filling the
+    /// pallet. It stays open beside the drawing or in a window of its own.
+    pub fn history_panel<'a>(
+        &'a self,
+        history_content: &'a text_editor::Content,
+        width: f32,
+        chrome: crate::ui::dock::Chrome,
+    ) -> Element<'a, Message> {
+        let title_bar = crate::ui::dock::title_bar(
+            crate::ui::dock::PanelId::CommandHistory,
+            t!("Command History").into_owned(),
+            chrome,
+        );
+        let log = text_editor(history_content)
+            .on_action(Message::CommandHistoryEdit)
+            .size(11)
+            .padding([2, 8])
+            .height(Length::Shrink)
+            .highlight_with::<HistoryHighlighter>(
+                self.history_highlight_settings(),
+                history_highlight_format,
+            )
+            .style(|theme: &Theme, _status| {
+                let palette = theme.palette();
+                text_editor::Style {
+                    background: Background::Color(palette.background.base.color),
+                    border: Border::default(),
+                    placeholder: palette.background.base.text.scale_alpha(0.72),
+                    value: palette.background.base.text,
+                    selection: palette.primary.base.color.scale_alpha(0.5),
+                }
+            });
+        let log = scrollable(log)
+            .height(Length::Fill)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new().width(8).scroller_width(6),
+            ))
+            .anchor_bottom();
+        let tool = |icon: Element<'a, Message>, label: String, msg: Message| {
+            button(row![icon, text(label).size(11)].spacing(4).align_y(iced::Center))
+                .on_press(msg)
+                .style(header_btn_style)
+                .padding([2, 6])
+        };
+        let header = container(
+            row![
+                Space::new().width(Length::Fill),
+                tool(
+                    crate::ui::icons::themed_success(crate::ui::icons::COPY, 11.0),
+                    t!("Copy").into_owned(),
+                    Message::CommandHistoryCopy,
+                ),
+                tool(
+                    crate::ui::icons::themed_warning(crate::ui::icons::TRASH, 11.0),
+                    t!("Clear").into_owned(),
+                    Message::CommandHistoryClear,
+                ),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .width(Length::Fill)
+        .padding([2, 8]);
+        let body = container(column![header, log]).height(Length::Fill);
+        crate::ui::dock::frame(title_bar, body, width)
+    }
+
     pub fn view<'a>(
         &'a self,
         show_autocomplete: bool,
@@ -853,9 +981,30 @@ impl CommandLine {
                     let shown = strip_option_listing(&entry.text, &self.step_options);
                     let mut r = row![entry_text(shown)].spacing(6).align_y(iced::Center);
                     for opt in &self.step_options {
-                        let label = text(opt.label.to_uppercase())
-                            .size(11)
-                            .wrapping(iced::widget::text::Wrapping::None);
+                        // The letters to type are drawn in the accent colour,
+                        // so the short form of each option can be seen.
+                        let (before, short, after) = option_shortcut(&opt.label);
+                        let part = |s: &str| {
+                            text(s.to_string())
+                                .size(11)
+                                .wrapping(iced::widget::text::Wrapping::None)
+                        };
+                        let accent = |theme: &Theme| iced::widget::text::Style {
+                            color: Some(theme.palette().primary.base.color),
+                        };
+                        // A translated label whose capitals are not what is
+                        // typed shows the keyword itself instead.
+                        let keyword = opt.keyword.to_uppercase();
+                        let short_upper = short.to_uppercase();
+                        let label = if keyword.is_empty()
+                            || (!short.is_empty()
+                                && (keyword.starts_with(&short_upper)
+                                    || short_upper.starts_with(&keyword)))
+                        {
+                            row![part(before), part(short).style(accent), part(after)]
+                        } else {
+                            row![part(&opt.label), part(&format!(" ({keyword})")).style(accent)]
+                        };
                         let btn = button(label)
                             .on_press(Message::CommandOptionPick(opt.keyword.clone()))
                             .padding([1, 6])
@@ -945,6 +1094,13 @@ impl CommandLine {
         if !dyn_capturing {
             input = input
                 .on_input(Message::CommandInput)
+                .on_paste(|buffer| {
+                    if is_svg_markup(&buffer) {
+                        Message::CommandPasteMarkup
+                    } else {
+                        Message::CommandInput(buffer)
+                    }
+                })
                 .on_submit(Message::CommandSubmit);
         }
         let input = input
@@ -1019,12 +1175,20 @@ impl CommandLine {
                             label = label.push(swatch);
                         }
                     } else {
-                        // Normal command autocomplete keeps its existing command icon.
-                        let icon: Element<'_, Message> =
-                            match crate::modules::registry::command_icon(cmd) {
-                                Some(bytes) => crate::ui::icons::semantic(bytes, 14.0),
-                                None => Space::new().width(14.0).into(),
-                            };
+                        // Normal command autocomplete keeps its existing command icon,
+                        // falling back to the target command's icon for aliases.
+                        let icon_bytes =
+                            crate::modules::registry::command_icon(cmd).or_else(|| {
+                                self.command_aliases
+                                    .get(cmd.as_str())
+                                    .and_then(|target| {
+                                        crate::modules::registry::command_icon(target)
+                                    })
+                            });
+                        let icon: Element<'_, Message> = match icon_bytes {
+                            Some(bytes) => crate::ui::icons::semantic(bytes, 14.0),
+                            None => Space::new().width(14.0).into(),
+                        };
 
                         label = label.push(icon);
                     }
@@ -1123,7 +1287,24 @@ impl CommandLine {
             .padding([3, 6])
             .style(container::bordered_box);
         let graph_btn = tooltip(graph_btn, graph_tip, tooltip::Position::Top).gap(4);
-        let input_row = row![prompt, literal_btn, input_with_history, graph_btn, mcp_btn]
+        // Enter without a keyboard (touch screens): the same as the context
+        // menu's Enter.
+        let enter_btn = button(crate::ui::icons::themed(crate::ui::icons::CHECK, 13.0))
+            .on_press(Message::CommandFinalize)
+            .style(button::subtle)
+            .padding([2, 6]);
+        let enter_tip = container(text(t!("Enter")).size(11))
+            .padding([3, 6])
+            .style(container::bordered_box);
+        let enter_btn = tooltip(enter_btn, enter_tip, tooltip::Position::Top).gap(4);
+        let input_row = row![
+            prompt,
+            literal_btn,
+            input_with_history,
+            enter_btn,
+            graph_btn,
+            mcp_btn
+        ]
             .spacing(4)
             .align_y(iced::Center);
 
@@ -1749,5 +1930,35 @@ mod tests {
         let last = line.history.last().unwrap();
         assert!(last.pinned);
         assert_eq!(last.text, "ⓘ Specify first point:");
+    }
+}
+
+/// `Enter new value for NAME <current>:`, the one prompt every variable asks
+/// its value with, through one catalog entry so it is translated everywhere.
+pub fn value_prompt(name: &str, current: &dyn std::fmt::Display) -> String {
+    let current = current.to_string();
+    crate::tf!("Enter new value for {name} <{current}>:").into_owned()
+}
+
+/// [`value_prompt`] for a name-valued variable that `.` clears.
+pub fn value_prompt_or_none(name: &str, current: &dyn std::fmt::Display) -> String {
+    let current = current.to_string();
+    crate::tf!("Enter new value for {name}, or . for none <\"{current}\">:").into_owned()
+}
+
+/// [`value_prompt`] for a variable with no value to offer.
+pub fn value_prompt_bare(name: &str) -> String {
+    crate::tf!("Enter new value for {name}:").into_owned()
+}
+
+#[cfg(test)]
+mod svg_paste_tests {
+    #[test]
+    fn copied_svg_is_markup_and_commands_are_not() {
+        assert!(super::is_svg_markup(
+            r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#
+        ));
+        assert!(!super::is_svg_markup("LINE"));
+        assert!(!super::is_svg_markup("TEXT <value>"));
     }
 }

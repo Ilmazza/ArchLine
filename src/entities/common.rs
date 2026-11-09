@@ -37,7 +37,7 @@ impl UnitContext {
     /// The settings as this drawing holds them. Every place that formats or
     /// reads a number seeds the context from here, so none of them can be
     /// working from a different idea of the drawing's conventions.
-    pub fn from_header(header: &codec::document::HeaderVariables) -> Self {
+    pub fn from_header(header: &document::document::HeaderVariables) -> Self {
         Self {
             lunits: header.linear_unit_format,
             luprec: header.linear_unit_precision,
@@ -80,7 +80,7 @@ thread_local! {
 }
 
 /// Record which text styles fix their height, from the drawing's style table.
-pub fn set_fixed_text_heights(document: &codec::Document) {
+pub fn set_fixed_text_heights(document: &document::Document) {
     FIXED_TEXT_HEIGHTS.with(|cell| {
         let mut map = cell.borrow_mut();
         map.clear();
@@ -120,6 +120,17 @@ pub fn style_fixed_height(style: &str) -> Option<f64> {
 /// they format f64 values into display strings.
 pub fn set_unit_context(ctx: UnitContext) {
     UNIT_CTX.with(|c| c.set(ctx));
+}
+
+/// Runs `f` with DIMZIN off: a command-line measurement shows every place
+/// LUPREC asks for (`Area = 5000.0000`); zero suppression is for the
+/// Properties palette.
+pub fn with_all_places<T>(f: impl FnOnce() -> T) -> T {
+    let saved = unit_context();
+    set_unit_context(UnitContext { dimzin: 0, ..saved });
+    let out = f();
+    set_unit_context(saved);
+    out
 }
 
 pub fn unit_context() -> UnitContext {
@@ -208,8 +219,17 @@ fn format_signed_length(value: f64) -> String {
                 None => format!("{}{:.0}{}", sign, whole, frac_str),
             }
         }
-        _ => trailing_zeros(format!("{:.*}", prec, value), ctx.dimzin),
+        _ => trailing_zeros(fixed(value, prec), ctx.dimzin),
     }
+}
+
+/// `value` at `precision` decimals, a tie rounding away from zero as the
+/// drawing's own readouts do (878.90625 → 878.9063); plain `{:.4}` rounds a
+/// tie to even.
+fn fixed(value: f64, precision: usize) -> String {
+    let scale = 10f64.powi(precision as i32);
+    let rounded = (value * scale).round() / scale;
+    format!("{:.*}", precision, if rounded.is_finite() { rounded } else { value })
 }
 
 /// Drop the trailing zeros of a decimal (and a bare point) when DIMZIN asks
@@ -226,7 +246,7 @@ fn trailing_zeros(text: String, dimzin: i16) -> String {
 pub fn format_decimal(value: f64) -> String {
     let ctx = unit_context();
     let precision = ctx.luprec.max(0).min(15) as usize;
-    without_negative_zero(trailing_zeros(format!("{:.*}", precision, value), ctx.dimzin))
+    without_negative_zero(trailing_zeros(fixed(value, precision), ctx.dimzin))
 }
 
 /// Format an area with the drawing's linear precision. Area stays a decimal
@@ -237,7 +257,7 @@ pub fn format_area(value: f64) -> String {
     if ctx.lunits == 1 {
         format!("{:.*e}", precision, value)
     } else {
-        trailing_zeros(format!("{:.*}", precision, value), ctx.dimzin)
+        trailing_zeros(fixed(value, precision), ctx.dimzin)
     }
 }
 
@@ -1555,4 +1575,18 @@ mod negative_zero_format_tests {
         assert_eq!(length(2, 4, f64::NEG_INFINITY), "-inf");
         assert_eq!(angle(0, 0, f64::NEG_INFINITY), "-inf");
     }
+}
+
+/// An Enabled / Disabled list row (a polyline's linetype generation), as the
+/// reference shows it.
+pub(crate) fn enabled_choice(on: bool) -> crate::scene::model::object::PropValue {
+    crate::scene::model::object::PropValue::Choice {
+        selected: if on { crate::t!("Enabled") } else { crate::t!("Disabled") }.into_owned(),
+        options: vec![crate::t!("Enabled").into_owned(), crate::t!("Disabled").into_owned()],
+    }
+}
+
+/// Reads an Enabled / Disabled (or true / false) choice back.
+pub(crate) fn enabled_value(value: &str) -> bool {
+    value == "true" || value.eq_ignore_ascii_case("enabled") || value == crate::t!("Enabled").as_ref()
 }

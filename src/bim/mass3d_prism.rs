@@ -294,7 +294,7 @@ mod tests {
     use crate::bim::rooms::measure_at;
     use crate::bim::units::DrawingUnit;
     use crate::bim::walls::{faces as wall_faces, rect_from_axis_thickness, wall_set_without_rooms};
-    use codec::Handle;
+    use document::Handle;
     use kernel::geom2d::signed_area;
     use rustc_hash::FxHashMap;
 

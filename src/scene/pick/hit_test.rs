@@ -6,7 +6,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use codec::Handle;
+use document::Handle;
 use glam::Mat4;
 use iced::{Point, Rectangle};
 
@@ -862,7 +862,7 @@ pub fn click_hits_all<'a, W: WireSource + ?Sized>(
 type MeshPickItem<'a> = (
     Handle,
     &'a MeshModel,
-    Option<codec::types::Transform>,
+    Option<document::types::Transform>,
     [f64; 6],
 );
 
@@ -870,7 +870,7 @@ type MeshEdgePickItem<'a> = (
     Handle,
     &'a [[f32; 3]],
     &'a [[f32; 3]],
-    Option<codec::types::Transform>,
+    Option<document::types::Transform>,
 );
 
 /// Return the closest solid whose actual B-rep feature edge passes through the
@@ -1158,7 +1158,7 @@ fn mesh_click_result<'a>(
     best
 }
 
-fn codec_transform_matrix(transform: codec::types::Transform) -> glam::DMat4 {
+fn codec_transform_matrix(transform: document::types::Transform) -> glam::DMat4 {
     let matrix = transform.matrix.m;
     glam::DMat4::from_cols_array(&[
         matrix[0][0],
@@ -1250,7 +1250,7 @@ fn mesh_vert(hi: [f32; 3], low: &[[f32; 3]], i: usize) -> glam::DVec3 {
 /// lasso must not reach (#64).
 fn project_mesh_verts(
     mesh: &MeshModel,
-    transform: Option<codec::types::Transform>,
+    transform: Option<document::types::Transform>,
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
@@ -1261,7 +1261,7 @@ fn project_mesh_verts(
         .map(|(i, &w)| {
             let point = mesh_vert(w, &mesh.verts_low, i);
             let point = transform.map_or(point, |transform| {
-                let point = transform.apply(codec::types::Vector3::new(point.x, point.y, point.z));
+                let point = transform.apply(document::types::Vector3::new(point.x, point.y, point.z));
                 glam::DVec3::new(point.x, point.y, point.z)
             });
             projection::project_screen(view_rot, eye, bounds, point)
@@ -1295,7 +1295,7 @@ pub fn mesh_box_hit<'a>(
     a: Point,
     b: Point,
     crossing: bool,
-    meshes: impl Iterator<Item = (Handle, &'a MeshModel, Option<codec::types::Transform>)>,
+    meshes: impl Iterator<Item = (Handle, &'a MeshModel, Option<document::types::Transform>)>,
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
@@ -1334,7 +1334,7 @@ pub fn mesh_box_hit<'a>(
 pub fn mesh_poly_hit<'a>(
     poly: &[Point],
     crossing: bool,
-    meshes: impl Iterator<Item = (Handle, &'a MeshModel, Option<codec::types::Transform>)>,
+    meshes: impl Iterator<Item = (Handle, &'a MeshModel, Option<document::types::Transform>)>,
     view_rot: Mat4,
     eye: glam::DVec3,
     bounds: Rectangle,
@@ -2408,7 +2408,7 @@ fn marker_segment_hit(
 /// that the ray-cast doesn't draw a spurious closing edge between the
 /// end of one sub-path and the start of the next. Each sub-path with at
 /// least 2 finite vertices contributes its segments to the parity flip.
-fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
+pub(crate) fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
     // Ray-cast crossing test for a single edge a→b.
     fn cross(p: Point, a: Point, b: Point, inside: &mut bool) {
         if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
@@ -2454,7 +2454,7 @@ fn point_in_polygon(p: Point, poly: &[Point]) -> bool {
 }
 
 /// Does segment `[a, b]` cross any edge of the polygon?
-fn segment_crosses_polygon(a: Point, b: Point, poly: &[Point]) -> bool {
+pub(crate) fn segment_crosses_polygon(a: Point, b: Point, poly: &[Point]) -> bool {
     let n = poly.len();
     for i in 0..n {
         let c = poly[i];

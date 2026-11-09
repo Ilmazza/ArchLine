@@ -1,9 +1,9 @@
 // MLINE command — create a styled group of parallel lines.
 
-use codec::entities::{MLine, MLineFlags, MLineJustification, MLineSegment, MLineVertex};
-use codec::objects::MLineStyle;
-use codec::types::Vector3;
-use codec::{EntityType, Handle};
+use document::entities::{MLine, MLineFlags, MLineJustification, MLineSegment, MLineVertex};
+use document::objects::MLineStyle;
+use document::types::Vector3;
+use document::{EntityType, Handle};
 use glam::DVec3;
 
 use crate::command::{CadCommand, CmdOption, CmdResult, WorkingPlane};
@@ -187,7 +187,6 @@ impl MlineCommand {
             pick_tris: Vec::new(),
             pick_tris_low: Vec::new(),
             dash_from_start: false,
-            dash_align_end: None,
             text_verts: Vec::new(),
             name: "mline_preview".into(),
             points,
@@ -426,15 +425,9 @@ pub(crate) fn sync_mline_element_parameters(mline: &mut MLine, style: &MLineStyl
         MLineJustification::Zero => 0.0,
         MLineJustification::Bottom => -minimum,
     };
-    let normal = glam::DVec3::new(mline.normal.x, mline.normal.y, mline.normal.z)
-        .normalize_or(glam::DVec3::Z);
+    let normal = mline.normal;
     for vertex in &mut mline.vertices {
-        let direction =
-            glam::DVec3::new(vertex.direction.x, vertex.direction.y, vertex.direction.z)
-                .normalize_or(glam::DVec3::X);
-        let miter = glam::DVec3::new(vertex.miter.x, vertex.miter.y, vertex.miter.z)
-            .normalize_or(glam::DVec3::Y);
-        let factor = miter.dot(normal.cross(direction)).abs().max(1.0e-9);
+        let factor = crate::entities::mline::mline_miter_factor(vertex, normal);
         vertex
             .segments
             .resize_with(offsets.len(), MLineSegment::new);
@@ -451,7 +444,7 @@ pub(crate) fn sync_mline_element_parameters(mline: &mut MLine, style: &MLineStyl
     mline.style_element_count = offsets.len();
 }
 
-fn build_mline(
+pub(crate) fn build_mline(
     points: &[DVec3],
     scale: f64,
     justification: MLineJustification,

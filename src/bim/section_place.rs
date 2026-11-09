@@ -13,9 +13,9 @@
 //!   alto a sinistra del loro insieme è l'angolo di una nuova posa: rigenerare
 //!   lascia le sezioni dove sono (R117).
 
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle};
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle};
 use glam::DVec3;
 
 use super::section_build::{DrawingKind, SectionDrawing};

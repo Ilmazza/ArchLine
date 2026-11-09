@@ -24,7 +24,7 @@
 //!
 //! Distanze in unità del disegno, quote in metri.
 
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use kernel::geom2d::{contains, distance_to, signed_area, Tolerance};
 use rustc_hash::FxHashMap;
 
@@ -125,9 +125,9 @@ fn with_vano_sides(
         for i in 0..vano.ring.len() {
             let (a, b) = (vano.ring[i], vano.ring[(i + 1) % vano.ring.len()]);
             let handle = Handle::new(first.saturating_add(lines.len() as u64));
-            let mut line = codec::entities::Line::from_points(
-                codec::Vector3::new(a[0], a[1], 0.0),
-                codec::Vector3::new(b[0], b[1], 0.0),
+            let mut line = document::entities::Line::from_points(
+                document::Vector3::new(a[0], a[1], 0.0),
+                document::Vector3::new(b[0], b[1], 0.0),
             );
             line.common.layer = "0".to_string();
             line.common.handle = handle;

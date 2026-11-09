@@ -108,6 +108,12 @@ pub enum PdfDialogMsg {
     T2mWrap(bool),
     T2mUniform(bool),
     T2mOk,
+    // Property Settings (MATCHPROP Settings): flip one MATCHMODE bit, all
+    // on, all off, apply.
+    MpToggle(u32),
+    MpAll,
+    MpNone,
+    MpOk,
     // Import PDF
     ImportBrowse,
     ImportPage(usize),
@@ -226,9 +232,9 @@ pub fn page_thumbs(path: &str) -> Vec<PageThumb> {
 }
 
 /// Thumbnails of a file's pages (PDF), sheets (DWF) or models (DGN).
-pub fn item_thumbs(kind: codec::entities::UnderlayType, path: &str) -> Vec<PageThumb> {
+pub fn item_thumbs(kind: document::entities::UnderlayType, path: &str) -> Vec<PageThumb> {
     use crate::scene::model::underlay_vector;
-    if kind == codec::entities::UnderlayType::Pdf {
+    if kind == document::entities::UnderlayType::Pdf {
         return page_thumbs(path);
     }
     underlay_vector::item_names(kind, path)
@@ -559,7 +565,7 @@ pub static ATTACH_MEMORY: std::sync::Mutex<Option<AttachMemory>> = std::sync::Mu
 
 pub struct PdfAttachState {
     /// PDF pages, DWF sheets or DGN models.
-    pub kind: codec::entities::UnderlayType,
+    pub kind: document::entities::UnderlayType,
     /// DGN: sub units chosen (the scale then turns them into master units).
     pub sub_units: bool,
     /// DGN: sub units per master unit of the chosen model.
@@ -595,7 +601,7 @@ impl PdfAttachState {
             .unwrap_or_default();
         let names = existing.iter().map(|(name, _)| name.clone()).collect();
         Self {
-            kind: codec::entities::UnderlayType::Pdf,
+            kind: document::entities::UnderlayType::Pdf,
             sub_units: false,
             sub_per_master: 1.0,
             path: String::new(),
@@ -655,7 +661,7 @@ pub fn view_attach<'a>(
     .size(12)
     .padding([5, 8])
     .width(Fill);
-    use codec::entities::UnderlayType;
+    use document::entities::UnderlayType;
     let count_text = match state.kind {
         UnderlayType::Pdf => crate::tf!("{count} pages", count = state.pages.len()),
         UnderlayType::Dwf => crate::tf!("{count} sheets", count = state.pages.len()),
@@ -1040,7 +1046,7 @@ pub fn view_point_cloud_attach<'a>(
 #[derive(Clone)]
 pub struct LayerTarget {
     pub name: String,
-    pub handle: codec::Handle,
+    pub handle: document::Handle,
     pub layers: Vec<String>,
     pub hidden: Vec<String>,
 }
@@ -1456,6 +1462,166 @@ pub fn view_txt2mtxt_settings<'a>(
     .into()
 }
 
+// ── Property Settings (MATCHPROP) ──────────────────────────────────────────
+
+/// MATCHPROP's Property Settings window: the MATCHMODE being edited and the
+/// source object's basic values, in the order colour, layer, linetype,
+/// linetype scale, lineweight, transparency, thickness, plot style.
+#[derive(Debug, Clone)]
+pub struct MatchPropDialog {
+    pub mode: u32,
+    pub values: [String; 8],
+    /// The source colour as drawn (a by-layer colour through its layer).
+    pub swatch: Option<[u8; 3]>,
+    /// False under colour-dependent plot styles: the row is shown off.
+    pub plot_style: bool,
+}
+
+impl MatchPropDialog {
+    /// The bits a switch in the window stands for.
+    pub fn switchable(&self) -> u32 {
+        use crate::entities::match_props::MatchOpts as M;
+        M::NAMES
+            .iter()
+            .map(|(bit, _)| *bit)
+            .filter(|bit| self.plot_style || *bit != M::PLOTSTYLE)
+            .fold(0, |all, bit| all | bit)
+    }
+}
+
+pub fn view_matchprop_settings<'a>(
+    s: &'a MatchPropDialog,
+    sizing: crate::ui::modal::ModalSizing,
+) -> Element<'a, Message> {
+    use crate::entities::match_props::MatchOpts as M;
+    let dim = |theme: &Theme| text::Style {
+        color: Some(theme.palette().background.strong.color),
+    };
+    let basic = [
+        (M::COLOR, crate::tr!("matchprop-settings", "color")),
+        (M::LAYER, crate::tr!("matchprop-settings", "layer")),
+        (M::LTYPE, crate::tr!("matchprop-settings", "linetype")),
+        (M::LTSCALE, crate::tr!("matchprop-settings", "ltscale")),
+        (M::LINEWEIGHT, crate::tr!("matchprop-settings", "lineweight")),
+        (M::TRANSPARENCY, crate::tr!("matchprop-settings", "transparency")),
+        (M::THICKNESS, crate::tr!("matchprop-settings", "thickness")),
+        (M::PLOTSTYLE, crate::tr!("matchprop-settings", "plotstyle")),
+    ];
+    let rows = basic
+        .into_iter()
+        .zip(s.values.iter())
+        .map(|((bit, label), value)| {
+            let enabled = bit != M::PLOTSTYLE || s.plot_style;
+            let on = enabled && s.mode & bit != 0;
+            let mut switch = iced::widget::toggler(on).size(18.0);
+            if enabled {
+                switch = switch.on_toggle(move |_| msg(PdfDialogMsg::MpToggle(bit)));
+            }
+            let name = text(label).size(12).width(Length::Fixed(140.0));
+            let name = if enabled { name } else { name.style(dim) };
+            let mut shown = row![].spacing(6).align_y(iced::Center);
+            if let (M::COLOR, Some([r, g, b])) = (bit, s.swatch) {
+                shown = shown.push(crate::ui::color_select::swatch(iced::Color::from_rgb8(r, g, b)));
+            }
+            shown = shown.push(text(value.as_str()).size(11).style(if enabled { muted_style } else { dim }));
+            if !enabled {
+                shown = shown.push(
+                    text(crate::tr!("matchprop-settings", "plotstyle-off"))
+                        .size(10)
+                        .style(dim),
+                );
+            }
+            container(row![switch, name, shown].spacing(10).align_y(iced::Center))
+                .padding([3, 8])
+                .width(Fill)
+                .style(move |theme: &Theme| {
+                    if on {
+                        well_style(theme)
+                    } else {
+                        container::Style::default()
+                    }
+                })
+                .into()
+        })
+        .collect::<Vec<Element<'a, Message>>>();
+    let basic = card(
+        crate::tr!("matchprop-settings", "basic"),
+        column![
+            row![
+                Space::new().width(Length::Fixed(44.0)),
+                text(crate::tr!("matchprop-settings", "property"))
+                    .size(10)
+                    .style(muted_style)
+                    .width(Length::Fixed(146.0)),
+                text(crate::tr!("matchprop-settings", "source"))
+                    .size(10)
+                    .style(muted_style),
+            ],
+            iced::widget::Column::with_children(rows).spacing(2),
+        ]
+        .spacing(4),
+    );
+
+    let special = [
+        (M::DIM, crate::tr!("matchprop-settings", "dimension")),
+        (M::TEXT, crate::tr!("matchprop-settings", "text")),
+        (M::HATCH, crate::tr!("matchprop-settings", "hatch")),
+        (M::POLYLINE, crate::tr!("matchprop-settings", "polyline")),
+        (M::VIEWPORT, crate::tr!("matchprop-settings", "viewport")),
+        (M::TABLE, crate::tr!("matchprop-settings", "table")),
+        (M::MATERIAL, crate::tr!("matchprop-settings", "material")),
+        (M::MLEADER, crate::tr!("matchprop-settings", "multileader")),
+        (M::CENTER, crate::tr!("matchprop-settings", "center")),
+    ];
+    let mut grid = column![].spacing(6);
+    let mut chips = special.into_iter().peekable();
+    while chips.peek().is_some() {
+        let line = chips.by_ref().take(3).map(|(bit, label)| {
+            container(chip(label, s.mode & bit != 0, msg(PdfDialogMsg::MpToggle(bit))))
+                .width(Fill)
+                .into()
+        });
+        grid = grid.push(iced::widget::Row::with_children(line.collect::<Vec<_>>()).spacing(6));
+    }
+    let special = card(crate::tr!("matchprop-settings", "special"), grid);
+
+    let on = s.mode & s.switchable();
+    let quick = row![
+        button(text(crate::tr!("matchprop-settings", "all")).size(11))
+            .on_press(msg(PdfDialogMsg::MpAll))
+            .style(button_style(on == s.switchable()))
+            .padding([5, 10]),
+        button(text(crate::tr!("matchprop-settings", "none")).size(11))
+            .on_press(msg(PdfDialogMsg::MpNone))
+            .style(button_style(on == 0))
+            .padding([5, 10]),
+        text(crate::tr!(
+            "matchprop-settings",
+            "count",
+            on = on.count_ones(),
+            total = s.switchable().count_ones()
+        ))
+        .size(11)
+        .style(muted_style),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    column![
+        basic,
+        special,
+        footer(
+            "matchprop",
+            Some(quick.into()),
+            crate::tr!("matchprop-settings", "apply").into(),
+            PdfDialogMsg::MpOk,
+        ),
+    ]
+    .spacing(10)
+    .padding([10, 12])
+    .width(sizing.width)
+    .into()
+}
+
 // ── Import PDF (File) ──────────────────────────────────────────────────────
 
 pub struct PdfImportFileState {
@@ -1671,7 +1837,7 @@ pub struct MapSlot {
 /// a chosen cloud, its intensity and elevation colouring.
 pub struct PointCloudColorMapState {
     /// The cloud edited; `None` edits the drawing's default schemes.
-    pub cloud: Option<codec::Handle>,
+    pub cloud: Option<document::Handle>,
     /// Elevation tab (else intensity).
     pub elevation_tab: bool,
     pub ramps: Vec<MapRamp>,
@@ -2903,7 +3069,7 @@ fn adjust_card<'a>(state: &'a ViewBackgroundState) -> Element<'a, Message> {
 /// The Image Adjust dialog: brightness, contrast and fade (0–100) of the
 /// chosen raster images, with a before / after preview of the first.
 pub struct ImageAdjustState {
-    pub handles: Vec<codec::Handle>,
+    pub handles: Vec<document::Handle>,
     /// The first image's file name, shown over the preview.
     pub name: String,
     /// Brightness, contrast, fade.
@@ -2922,7 +3088,7 @@ pub struct ImageAdjustState {
 pub const IMAGE_ADJUST_DEFAULTS: [u8; 3] = [50, 50, 0];
 
 impl ImageAdjustState {
-    pub fn new(handles: Vec<codec::Handle>, path: &str, values: [u8; 3], canvas: [u8; 3]) -> Self {
+    pub fn new(handles: Vec<document::Handle>, path: &str, values: [u8; 3], canvas: [u8; 3]) -> Self {
         let name = std::path::Path::new(path.trim()).file_name().map_or_else(
             || path.trim().to_string(),
             |n| n.to_string_lossy().into_owned(),

@@ -25,8 +25,8 @@ use crate::manifest::ApiVersion;
 use crate::ribbon::owned::{OwnedEntityClasses, OwnedPluginManifest, OwnedRibbonGroup};
 
 pub use crate::host::PreviewWire;
-pub use codec::xdata::{ExtendedDataRecord, XDataValue};
-pub use codec::{Document, EntityType, Handle};
+pub use document::xdata::{ExtendedDataRecord, XDataValue};
+pub use document::{Document, EntityType, Handle};
 
 /// Events the host forwards to an active plugin `InteractiveCommand`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +366,22 @@ pub enum PluginRequest {
     QueryEntities {
         query: String,
     },
+    /// V15 (additive): register the declarative quad cursor menu panels this
+    /// plugin contributes (mirrors `RegisterPanel`; the owning plugin's id
+    /// comes from the transport, never the wire).
+    RegisterQuadPanels {
+        panels: Vec<crate::dialog::QuadPanelDef>,
+    },
+    /// V15 (additive): remove the named quad panels the plugin owns (ids
+    /// owned by another plugin are refused in the response).
+    UnregisterQuadPanels {
+        panel_ids: Vec<String>,
+    },
+    /// Additive: audit a declared chain without staging or mutating host state.
+    ValidateParametricChain {
+        chain: crate::host::ParametricChain,
+        tolerance: f64,
+    },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -449,6 +465,15 @@ pub enum PluginResponse {
     PanelToggled(bool),
     /// V14: answer to [`PluginRequest::QueryEntities`].
     EntityPage(Result<crate::host::EntityPage, String>),
+    /// V15 (additive): outcome of a quad panel registration or removal —
+    /// one `ok` entry per request panel (request order), plus a short reason
+    /// string for each refused entry.
+    QuadPanelsRegistered {
+        ok: Vec<bool>,
+        errors: Vec<String>,
+    },
+    /// Additive: outcome of pure parametric-chain validation.
+    ValidateParametricChainResult(Result<(), String>),
 }
 
 /// Messages sent from the host to the plugin runner.
