@@ -1,6 +1,6 @@
 use super::*;
 use crate::scene::{block_distance_parameter as distance, block_point_parameter as point, Scene};
-use codec::{DwgReader, DwgWriter, DxfReader, DxfWriter};
+use document::{DwgReader, DwgWriter, DxfReader, DxfWriter};
 use std::io::Cursor;
 
 #[test]
@@ -13,7 +13,7 @@ fn rotation_table_angles_match_across_pi_wrap() {
 
 #[test]
 fn angular_value_sets_wrap_and_choose_the_nearest_periodic_value() {
-    use codec::objects::BlockParameterValueSet;
+    use document::objects::BlockParameterValueSet;
     let quarter = std::f64::consts::FRAC_PI_2;
     let mut set = BlockParameterValueSet {
         flags: 3,
@@ -32,7 +32,7 @@ fn angular_value_sets_wrap_and_choose_the_nearest_periodic_value() {
 
 #[test]
 fn signed_value_set_increments_preserve_negative_axis_values() {
-    let set = codec::objects::BlockParameterValueSet {
+    let set = document::objects::BlockParameterValueSet {
         flags: 4,
         increment: 2.0,
         ..Default::default()
@@ -47,11 +47,11 @@ pub(super) fn fixture() -> (Document, Handle, Vec<Handle>) {
         "ACTIONS",
         Vector3::ZERO,
         vec![
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::UNIT_X,
                 Vector3::new(2., 0., 0.),
             )),
-            EntityType::Circle(codec::entities::Circle::from_center_radius(
+            EntityType::Circle(document::entities::Circle::from_center_radius(
                 Vector3::new(4., 3., 0.),
                 2.,
             )),
@@ -149,13 +149,13 @@ fn block_actions_rotate_flip_saved_values_compose_copy_and_roundtrip() {
     create(&mut doc, def, Kind::Rotate, r, &[targets[0]], DVec3::ZERO).unwrap();
     create(&mut doc, def, Kind::Flip, f, &[targets[0]], DVec3::ZERO).unwrap();
     let a = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let b = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(30., 0., 0.),
         )))
@@ -229,6 +229,93 @@ fn block_actions_rotate_flip_saved_values_compose_copy_and_roundtrip() {
             Value::Flip(true)
         );
     }
+}
+
+#[test]
+fn block_actions_evaluate_stretch_with_relocated_flip_reflection_line() {
+    use super::super::block_orientation_parameter::Kind as O;
+    let (mut doc, def, targets) = fixture();
+    let linear = linear(&mut doc, def);
+    let flip = orientation(&mut doc, def, O::Flip);
+    let stretch_frame = [DVec3::new(1.5, -5., 0.), DVec3::new(15., 15., 0.)];
+    create_with_frame(
+        &mut doc,
+        def,
+        Kind::Stretch,
+        linear,
+        &targets,
+        DVec3::ZERO,
+        Some(stretch_frame),
+    )
+    .unwrap();
+    create(&mut doc, def, Kind::Flip, flip, &targets, DVec3::ZERO).unwrap();
+    let insert = doc
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
+            "ACTIONS",
+            Vector3::ZERO,
+        )))
+        .unwrap();
+
+    let flip_p = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == flip)
+        .unwrap();
+    let mut owner = doc.ensure_extension_dictionary(insert);
+    for key in [
+        "AcDbBlockRepresentation",
+        "AppDataCache",
+        "ACAD_ENHANCEDBLOCKDATA",
+    ] {
+        owner = instance::ensure_dictionary(&mut doc, owner, key).unwrap();
+    }
+    let key = flip_p.id.to_string();
+    let h = doc.allocate_handle();
+    let mut r = document::objects::XRecord::named(&key);
+    r.handle = h;
+    r.owner = owner;
+    r.reactors.push(owner);
+    r.cloning_flags = document::objects::DictionaryCloningFlags::KeepExisting;
+    let shifted_base = flip_p.base + DVec3::new(25., 10., 0.);
+    let shifted_end = flip_p.end + DVec3::new(25., 10., 0.);
+    r.entries = vec![
+        document::objects::XRecordEntry::int32(1071, 0),
+        document::objects::XRecordEntry::int32(1071, 0),
+        document::objects::XRecordEntry::int16(70, 25),
+        document::objects::XRecordEntry::int16(70, 104),
+        document::objects::XRecordEntry::new(10, document::objects::XRecordValue::Point3D(shifted_base.x, shifted_base.y, shifted_base.z)),
+        document::objects::XRecordEntry::new(10, document::objects::XRecordValue::Point3D(shifted_end.x, shifted_end.y, shifted_end.z)),
+        document::objects::XRecordEntry::new(10, document::objects::XRecordValue::Point3D(0., 0., -1.)),
+        document::objects::XRecordEntry::int16(70, 0),
+    ];
+    doc.objects.insert(h, ObjectType::XRecord(r));
+    if let Some(ObjectType::Dictionary(d)) = doc.objects.get_mut(&owner) {
+        d.add_entry(&key, h);
+    }
+
+    let flip_val = instance::value(&doc, insert, &flip_p).unwrap();
+    assert_eq!(flip_val, Value::Flip(false));
+
+    let linear_p = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == linear)
+        .unwrap();
+    let new_pos = Value::Point(linear_p.end + DVec3::X * 10.);
+    let evaluated = instance::evaluate_value(&doc, insert, linear, new_pos)
+        .expect("Stretch evaluation must succeed despite relocated flip parameter")
+        .expect("Evaluation should change the document");
+
+    let EntityType::Insert(i) = evaluated.get_entity(insert).unwrap() else { panic!() };
+    let line_h = evaluated.block_records.get(&i.block_name).unwrap().entity_handles[0];
+    let EntityType::Line(l) = evaluated.get_entity(line_h).unwrap() else { panic!() };
+    assert_eq!(l.end, Vector3::new(12., 0., 0.));
+
+    let flipped_doc = instance::evaluate_value(&evaluated, insert, flip, Value::Flip(true))
+        .expect("Flip evaluation must succeed with relocated reflection line")
+        .expect("Flip should produce changes");
+    assert_eq!(
+        instance::value(&flipped_doc, insert, &flip_p).unwrap(),
+        Value::Flip(true)
+    );
 }
 
 #[test]
@@ -454,7 +541,7 @@ fn block_actions_saved_xy_polar_cache_metadata_and_rejections() {
         .unwrap();
         create(&mut doc, def, Kind::Move, p, &[handles[0]], DVec3::ZERO).unwrap();
         let a = doc
-            .add_entity(EntityType::Insert(codec::entities::Insert::new(
+            .add_entity(EntityType::Insert(document::entities::Insert::new(
                 "ACTIONS",
                 Vector3::ZERO,
             )))
@@ -477,7 +564,7 @@ fn block_actions_saved_xy_polar_cache_metadata_and_rejections() {
                 _ => None,
             })
             .unwrap();
-        r.entries.push(codec::objects::XRecordEntry::string(
+        r.entries.push(document::objects::XRecordEntry::string(
             1,
             "retain opaque metadata",
         ));
@@ -512,13 +599,13 @@ fn block_actions_saved_references_independent_absolute_and_roundtrip() {
     create(&mut doc, def, Kind::Scale, p, &[handles[1]], DVec3::ZERO).unwrap();
     create(&mut doc, def, Kind::Move, q, &[handles[0]], DVec3::ZERO).unwrap();
     let a = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let b = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(30., 0., 0.),
         )))
@@ -732,13 +819,13 @@ fn block_reset_restores_values_geometry_and_table_state_without_changing_other_r
     )
     .unwrap();
     let a = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let b = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(30., 0., 0.),
         )))
@@ -867,11 +954,11 @@ fn block_actions_reframe_moves_markers_and_retains_targets_and_connections() {
 
 fn stretch_fixture() -> (Document, Handle, Vec<Handle>, Handle, Handle) {
     let mut scene = Scene::new();
-    let mut poly = codec::entities::LwPolyline::from_points(vec![
-        codec::types::Vector2::new(0., 1.),
-        codec::types::Vector2::new(10., 1.),
-        codec::types::Vector2::new(10., 3.),
-        codec::types::Vector2::new(0., 3.),
+    let mut poly = document::entities::LwPolyline::from_points(vec![
+        document::types::Vector2::new(0., 1.),
+        document::types::Vector2::new(10., 1.),
+        document::types::Vector2::new(10., 3.),
+        document::types::Vector2::new(0., 3.),
     ]);
     poly.is_closed = true;
     poly.vertices[0].bulge = 0.2;
@@ -879,12 +966,12 @@ fn stretch_fixture() -> (Document, Handle, Vec<Handle>, Handle, Handle) {
         "STRETCH",
         Vector3::ZERO,
         vec![
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::ZERO,
                 Vector3::new(10., 0., 0.),
             )),
             EntityType::LwPolyline(poly),
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::new(20., 0., 0.),
                 Vector3::new(21., 0., 0.),
             )),
@@ -912,7 +999,7 @@ fn polar_stretch_fixture() -> (Document, Handle, Vec<Handle>, Handle, Handle) {
     scene.define_block_raw(
         "POLAR_STRETCH",
         Vector3::ZERO,
-        vec![EntityType::Line(codec::entities::Line::from_points(
+        vec![EntityType::Line(document::entities::Line::from_points(
             Vector3::UNIT_X,
             Vector3::new(2., 0., 0.),
         ))],
@@ -971,7 +1058,7 @@ fn polar_stretch_evaluates_test_block_and_saved_reference() {
 
     let mut source = baseline.clone();
     let insert = source
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "POLAR_STRETCH",
             Vector3::ZERO,
         )))
@@ -1007,11 +1094,11 @@ fn polar_stretch_retarget_rebinds_vertices_and_roundtrips() {
         "POLAR_RETARGET",
         Vector3::ZERO,
         vec![
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::UNIT_X,
                 Vector3::new(2., 0., 0.),
             )),
-            EntityType::Line(codec::entities::Line::from_points(
+            EntityType::Line(document::entities::Line::from_points(
                 Vector3::new(4., 0., 0.),
                 Vector3::new(5., 0., 0.),
             )),
@@ -1124,16 +1211,107 @@ fn block_actions_stretch_frozen_vertices_polyline_and_whole_objects_roundtrip() 
 }
 
 #[test]
+fn block_actions_stretch_legacy_polyline_vertices_and_solid_corners() {
+    use document::entities::{Insert, Polyline2D, Solid, Vertex2D};
+
+    let a = Vector3::ZERO;
+    let b = Vector3::new(10., 0., 0.);
+    let c = Vector3::new(0., 4., 0.);
+    let d = Vector3::new(10., 4., 0.);
+    let mut polyline = Polyline2D::new();
+    for point in [a, b, d] {
+        polyline.add_vertex(Vertex2D::new(point));
+    }
+    polyline.vertices[0].bulge = 0.2;
+    let mut scene = Scene::new();
+    scene.define_block_raw(
+        "PLANAR_STRETCH",
+        a,
+        vec![EntityType::Polyline2D(polyline), EntityType::Solid(Solid::new(a, b, c, d))],
+    );
+    let mut doc = scene.document;
+    let block = doc.block_records.get("PLANAR_STRETCH").unwrap();
+    let (def, targets) = (block.handle, block.entity_handles.clone());
+    let parameter = distance::create(&mut doc, def, distance::Kind::Linear, a, b, b).unwrap();
+    create_with_frame(
+        &mut doc, def, Kind::Stretch, parameter, &targets, DVec3::ZERO,
+        Some([DVec3::new(9., -1., 0.), DVec3::new(11., 5., 0.)]),
+    ).unwrap();
+    let insert = doc.add_entity(EntityType::Insert(Insert::new("PLANAR_STRETCH", a))).unwrap();
+    let result = instance::evaluate(&doc, insert, parameter, DVec3::new(20., 0., 0.))
+        .unwrap().unwrap();
+    let reopened = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&result).unwrap()))
+        .read().unwrap();
+    for drawing in [&result, &reopened] {
+        let EntityType::Insert(reference) = drawing.get_entity(insert).unwrap() else { panic!() };
+        let members = &drawing.block_records.get(&reference.block_name).unwrap().entity_handles;
+        let EntityType::Polyline2D(polyline) = drawing.get_entity(members[0]).unwrap() else { panic!() };
+        assert_eq!(polyline.vertices.iter().map(|v| v.location.x).collect::<Vec<_>>(), [0., 20., 20.]);
+        assert!((polyline.vertices[0].bulge - 0.1).abs() < 1e-8);
+        let EntityType::Solid(solid) = drawing.get_entity(members[1]).unwrap() else { panic!() };
+        assert_eq!(solid.first_corner, a);
+        assert_eq!(solid.third_corner, c);
+        assert_eq!(solid.second_corner, Vector3::new(20., 0., 0.));
+        assert_eq!(solid.fourth_corner, Vector3::new(20., 4., 0.));
+    }
+    assert_eq!(result.get_entity(targets[0]), doc.get_entity(targets[0]));
+    assert_eq!(result.get_entity(targets[1]), doc.get_entity(targets[1]));
+}
+
+#[test]
+fn block_actions_stretch_native_basepoint_binding_moves_the_reference_insertion_point() {
+    let (mut doc, def, _, parameter, action) = stretch_fixture();
+    let basepoint = crate::scene::block_basepoint::create(&mut doc, def, Vector3::ZERO).unwrap();
+    let (_, native) = crate::scene::block_basepoint::parameter(&doc, def).unwrap();
+    let node = native.parameter.parameter.element.eval.node_id;
+    let Some(ObjectType::DynamicBlock(object)) = doc.objects.get_mut(&action) else {
+        panic!()
+    };
+    let DynamicBlockData::StretchAction(action) = &mut object.data else {
+        panic!()
+    };
+    action.action.dependencies.push(basepoint);
+    action.action.action_ids.push(node);
+    action.codes.push(document::objects::BlockStretchCode {
+        code: node,
+        indexes: vec![0],
+    });
+    let insert = doc.add_entity(EntityType::Insert(document::entities::Insert::new(
+        "STRETCH", Vector3::new(40., 0., 0.),
+    ))).unwrap();
+    for length in [18., 22., 10.] {
+        doc = instance::evaluate(&doc, insert, parameter, DVec3::new(length, 0., 0.))
+            .unwrap().unwrap();
+        let EntityType::Insert(reference) = doc.get_entity(insert).unwrap() else { panic!() };
+        assert_eq!(reference.insert_point, Vector3::new(40. + length - 10., 0., 0.));
+        assert_eq!(
+            crate::scene::render_graph::block_base_point(&doc, &reference.block_name),
+            Vector3::new(length - 10., 0., 0.),
+        );
+        assert_eq!(
+            crate::scene::render_graph::block_base_point(&doc, "STRETCH"),
+            Vector3::ZERO,
+        );
+        assert_eq!(
+            crate::scene::render_graph::insert_transform(&doc, reference).apply(Vector3::ZERO),
+            Vector3::new(40., 0., 0.),
+        );
+        doc = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read().unwrap();
+    }
+}
+
+#[test]
 fn block_actions_stretch_saved_reference_independence_copy_and_reopen() {
     let (mut doc, def, handles, p, _) = stretch_fixture();
     let a = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "STRETCH",
             Vector3::ZERO,
         )))
         .unwrap();
     let b = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "STRETCH",
             Vector3::new(40., 0., 0.),
         )))
@@ -1475,13 +1653,13 @@ fn block_actions_retarget_refresh_resets_old_targets_and_keeps_each_reference_va
     let p = linear(&mut doc, def);
     let a = create(&mut doc, def, Kind::Move, p, &targets[..1], DVec3::ZERO).unwrap();
     let first = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let second = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(40., 0., 0.),
         )))
@@ -1585,7 +1763,7 @@ fn block_actions_topology_identity_reorder_add_delete_type_and_native_roundtrip(
     let p = linear(&mut doc, def);
     create(&mut doc, def, Kind::Move, p, &targets[..1], DVec3::ZERO).unwrap();
     let insert = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
@@ -1611,7 +1789,7 @@ fn block_actions_topology_identity_reorder_add_delete_type_and_native_roundtrip(
         .entity_handles
         .retain(|h| *h != targets[1]);
     let mut line =
-        codec::entities::Line::from_points(Vector3::new(20., 0., 0.), Vector3::new(21., 0., 0.));
+        document::entities::Line::from_points(Vector3::new(20., 0., 0.), Vector3::new(21., 0., 0.));
     line.common.owner_handle = def;
     let new = doc.add_entity(EntityType::Line(line)).unwrap();
     authoring::tag_members(&mut doc, def);
@@ -1634,7 +1812,7 @@ fn block_actions_topology_identity_reorder_add_delete_type_and_native_roundtrip(
     assert_eq!(start(&doc, members[1]), Vector3::new(3., 0., 0.));
     assert!(doc.get_entity(old[1]).is_none());
     let mut changed = doc.clone();
-    let mut circle = codec::entities::Circle::from_center_radius(Vector3::new(6., 6., 0.), 1.);
+    let mut circle = document::entities::Circle::from_center_radius(Vector3::new(6., 6., 0.), 1.);
     circle.common = changed.get_entity(new).unwrap().common().clone();
     *changed.get_entity_mut(new).unwrap() = EntityType::Circle(circle);
     let changed = instance::refresh_after_edit(&changed, &doc, def).unwrap();
@@ -1667,12 +1845,12 @@ fn block_actions_topology_identity_reorder_add_delete_type_and_native_roundtrip(
 
 #[test]
 fn block_actions_topology_copy_tags_and_extension_dictionary_do_not_share() {
-    use codec::objects::XRecord;
+    use document::objects::XRecord;
     let (mut doc, def, targets) = fixture();
     let p = linear(&mut doc, def);
     create(&mut doc, def, Kind::Move, p, &targets[..1], DVec3::ZERO).unwrap();
     let insert = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
@@ -1746,13 +1924,13 @@ fn block_actions_topology_preserves_visibility_choice_after_discriminator_delete
     visibility::set_visible(&mut doc, visibility, 1, &targets[1..], false);
     visibility::finish_editing(&mut doc, def);
     let first = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let second = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(40., 0., 0.),
         )))
@@ -1772,7 +1950,7 @@ fn block_actions_topology_preserves_visibility_choice_after_discriminator_delete
         .entity_handles
         .retain(|h| *h != targets[1]);
     let mut entity =
-        codec::entities::Line::from_points(Vector3::new(20., 0., 0.), Vector3::new(21., 0., 0.));
+        document::entities::Line::from_points(Vector3::new(20., 0., 0.), Vector3::new(21., 0., 0.));
     entity.common.owner_handle = def;
     let new = doc.add_entity(EntityType::Line(entity)).unwrap();
     visibility::set_visible(&mut doc, visibility, 0, &[new], false);
@@ -1802,7 +1980,7 @@ fn block_actions_topology_nested_insert_attribute_handles_remain_independent() {
     let p = linear(&mut doc, def);
     create(&mut doc, def, Kind::Move, p, &targets[..1], DVec3::ZERO).unwrap();
     let insert = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
@@ -1815,14 +1993,14 @@ fn block_actions_topology_nested_insert_attribute_handles_remain_independent() {
     scene.define_block_raw(
         "CHILD",
         Vector3::ZERO,
-        vec![EntityType::Line(codec::entities::Line::from_points(
+        vec![EntityType::Line(document::entities::Line::from_points(
             Vector3::ZERO,
             Vector3::UNIT_Y,
         ))],
     );
-    let mut child = codec::entities::Insert::new("CHILD", Vector3::new(20., 0., 0.));
+    let mut child = document::entities::Insert::new("CHILD", Vector3::new(20., 0., 0.));
     child.common.owner_handle = def;
-    let mut attribute = codec::entities::AttributeEntity::new("TAG".into(), "value".into());
+    let mut attribute = document::entities::AttributeEntity::new("TAG".into(), "value".into());
     attribute.common.handle = scene.document.allocate_handle();
     child.attributes.push(attribute);
     child.seqend_handle = Some(scene.document.allocate_handle());
@@ -2126,13 +2304,13 @@ fn block_actions_array_saved_references_independent_copy_and_roundtrip() {
     .unwrap();
 
     let a = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::ZERO,
         )))
         .unwrap();
     let b = doc
-        .add_entity(EntityType::Insert(codec::entities::Insert::new(
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
             "ACTIONS",
             Vector3::new(100., 0., 0.),
         )))
@@ -2285,7 +2463,7 @@ fn block_action_overrides_evaluate_and_roundtrip_without_accumulation() {
             assert_eq!(reopened.objects[&action], record);
             let name = reopened.block_records.iter().find(|r| r.handle==def).unwrap().name.clone();
             let mut source = reopened.clone();
-            let reference = source.add_entity(EntityType::Insert(codec::entities::Insert::new(name,Vector3::ZERO))).unwrap();
+            let reference = source.add_entity(EntityType::Insert(document::entities::Insert::new(name,Vector3::ZERO))).unwrap();
             let changed = instance::evaluate(&source,reference,parameter,DVec3::new(15.,0.,0.)).unwrap().unwrap();
             let EntityType::Insert(insert) = changed.get_entity(reference).unwrap() else { panic!() };
             let evaluated = changed.block_records.get(&insert.block_name).unwrap().entity_handles[0];
@@ -2299,7 +2477,7 @@ fn block_action_overrides_evaluate_and_roundtrip_without_accumulation() {
 
 #[test]
 fn block_stretch_supports_curves_points_and_text_with_native_vertex_membership() {
-    use codec::entities::{Arc,Circle,Ellipse,Point,Text,MText};
+    use document::entities::{Arc,Circle,Ellipse,Point,Text,MText};
     let mut text=Text::new();
     text.insertion_point=Vector3::new(-2.,0.,0.);
     text.normal=Vector3::new(0.,0.,-1.);
@@ -2364,7 +2542,7 @@ fn block_stretch_accepts_point_parameters_and_freezes_endpoint_membership() {
 #[test]
 fn block_polygon_stretch_frames_bind_concave_regions_and_replace_atomically() {
     let mut scene=Scene::new();
-    scene.define_block_raw("POLYGON_FRAME",Vector3::ZERO,vec![EntityType::Line(codec::entities::Line::from_points(
+    scene.define_block_raw("POLYGON_FRAME",Vector3::ZERO,vec![EntityType::Line(document::entities::Line::from_points(
         Vector3::new(0.5,3.,0.),Vector3::new(3.,3.,0.)))]);
     let record=scene.document.block_records.get("POLYGON_FRAME").unwrap();
     let (definition,targets)=(record.handle,record.entity_handles.clone());
@@ -2423,10 +2601,10 @@ fn polar_stretch_rotates_and_extends_separate_selections_with_native_overrides()
     assert_eq!(partial.objects[&partial_action], original);
     let mut scene=Scene::new();
     scene.define_block_raw("POLAR_GROUPS",Vector3::ZERO,vec![
-        EntityType::Line(codec::entities::Line::from_points(Vector3::ZERO,Vector3::new(10.,0.,0.))),
-        EntityType::Line(codec::entities::Line::from_points(Vector3::new(1.,1.,0.),Vector3::new(2.,1.,0.))),
-        EntityType::Circle(codec::entities::Circle::from_center_radius(Vector3::new(10.,2.,0.),1.)),
-        EntityType::Point(codec::entities::Point::from_coords(4.,4.,0.)),
+        EntityType::Line(document::entities::Line::from_points(Vector3::ZERO,Vector3::new(10.,0.,0.))),
+        EntityType::Line(document::entities::Line::from_points(Vector3::new(1.,1.,0.),Vector3::new(2.,1.,0.))),
+        EntityType::Circle(document::entities::Circle::from_center_radius(Vector3::new(10.,2.,0.),1.)),
+        EntityType::Point(document::entities::Point::from_coords(4.,4.,0.)),
     ]);
     let record=scene.document.block_records.get("POLAR_GROUPS").unwrap();
     let (definition,targets)=(record.handle,record.entity_handles.clone());
@@ -2461,7 +2639,7 @@ fn polar_stretch_rotates_and_extends_separate_selections_with_native_overrides()
         evaluate(&mut changed,&reopened,definition,parameter,DVec3::new(10.,0.,0.)).unwrap();
         for target in &targets {assert_eq!(changed.get_entity(*target),reopened.get_entity(*target));}
         let mut source=reopened.clone();
-        let insert=source.add_entity(EntityType::Insert(codec::entities::Insert::new("POLAR_GROUPS",Vector3::ZERO))).unwrap();
+        let insert=source.add_entity(EntityType::Insert(document::entities::Insert::new("POLAR_GROUPS",Vector3::ZERO))).unwrap();
         let changed=instance::evaluate(&source,insert,parameter,DVec3::new(0.,15.,0.)).unwrap().unwrap();
         let EntityType::Insert(reference)=changed.get_entity(insert).unwrap() else {panic!()};
         let members=&changed.block_records.get(&reference.block_name).unwrap().entity_handles;
@@ -2504,8 +2682,8 @@ fn block_actions_independent_bases_evaluate_save_reset_and_isolate_references() 
             assert_eq!(doc, before);
         }
         assert!(options::set_base(&mut doc, Handle::NULL, action, false, None).is_err());
-        let a = doc.add_entity(EntityType::Insert(codec::entities::Insert::new("ACTIONS", Vector3::ZERO))).unwrap();
-        let b = doc.add_entity(EntityType::Insert(codec::entities::Insert::new("ACTIONS", Vector3::new(30., 0., 0.)))).unwrap();
+        let a = doc.add_entity(EntityType::Insert(document::entities::Insert::new("ACTIONS", Vector3::ZERO))).unwrap();
+        let b = doc.add_entity(EntityType::Insert(document::entities::Insert::new("ACTIONS", Vector3::new(30., 0., 0.)))).unwrap();
         let end = if kind == Kind::Rotate { DVec3::new(0., 10., 0.) } else { DVec3::new(20., 0., 0.) };
         let expected = if kind == Kind::Rotate { Vector3::new(5., 0., 0.) } else { Vector3::new(-1., -2., 0.) };
         doc = instance::evaluate(&doc, a, parameter, end).unwrap().unwrap();
@@ -2614,7 +2792,7 @@ fn block_parameters_without_grips_remain_evaluable_and_roundtrip() {
         create(&mut doc, def, kind, parameter, &targets[..1], DVec3::ZERO).unwrap();
         assert_eq!(all_parameters(&doc, def).len(), 1);
         assert_eq!(all_parameters(&doc, def)[0].grip, Handle::NULL);
-        let insert = doc.add_entity(EntityType::Insert(codec::entities::Insert::new("ACTIONS", Vector3::ZERO))).unwrap();
+        let insert = doc.add_entity(EntityType::Insert(document::entities::Insert::new("ACTIONS", Vector3::ZERO))).unwrap();
         let input = if flip { Value::Flip(true) } else { Value::Point(DVec3::new(15., 0., 0.)) };
         let before = doc.objects[&parameter].clone();
         let changed = instance::evaluate_value(&doc, insert, parameter, input).unwrap().unwrap();
@@ -2630,4 +2808,1482 @@ fn block_parameters_without_grips_remain_evaluable_and_roundtrip() {
             assert_eq!(saved.objects[&parameter], before);
         }
     }
+}
+
+fn add_action(
+    doc: &mut Document,
+    def: Handle,
+    parameter: Handle,
+    target: Handle,
+    kind: Kind,
+) -> Handle {
+    create(doc, def, kind, parameter, &[target], DVec3::ZERO).unwrap()
+}
+
+fn mark_chained(doc: &mut Document, parameter: Handle) {
+    let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&parameter).unwrap() else {
+        panic!("the parameter is a dynamic block object")
+    };
+    let DynamicBlockData::LinearParameter(linear) = &mut object.data else {
+        panic!("the parameter is a linear parameter")
+    };
+    linear.parameter.parameter.chain_actions = true;
+}
+
+/// The action stored under a handle, whichever kind the definition gave it.
+fn action_object(doc: &Document, action: Handle) -> &BlockAction {
+    let ObjectType::DynamicBlock(object) = &doc.objects[&action] else {
+        panic!("the action is a dynamic block object")
+    };
+    match &object.data {
+        DynamicBlockData::MoveAction(a) => &a.action,
+        DynamicBlockData::StretchAction(a) => &a.action,
+        DynamicBlockData::PolarStretchAction(a) => &a.action,
+        DynamicBlockData::FlipAction(a) => &a.action,
+        DynamicBlockData::RotateAction(a) => &a.action.action,
+        DynamicBlockData::ScaleAction(a) => &a.action.action,
+        DynamicBlockData::ArrayAction(a) => &a.action,
+        _ => panic!("the action is one the definition can chain"),
+    }
+}
+
+fn action_object_mut(doc: &mut Document, action: Handle) -> &mut BlockAction {
+    let ObjectType::DynamicBlock(object) = doc.objects.get_mut(&action).unwrap() else {
+        panic!("the action is a dynamic block object")
+    };
+    match &mut object.data {
+        DynamicBlockData::MoveAction(a) => &mut a.action,
+        DynamicBlockData::StretchAction(a) => &mut a.action,
+        DynamicBlockData::PolarStretchAction(a) => &mut a.action,
+        DynamicBlockData::FlipAction(a) => &mut a.action,
+        DynamicBlockData::RotateAction(a) => &mut a.action.action,
+        DynamicBlockData::ScaleAction(a) => &mut a.action.action,
+        DynamicBlockData::ArrayAction(a) => &mut a.action,
+        _ => panic!("the action is one the definition can chain"),
+    }
+}
+
+/// The id a chain uses to name an action: the node the evaluation graph gives it,
+/// which is what a saved file carries.
+fn chain_id(doc: &Document, action: Handle) -> i32 {
+    action_object(doc, action).element.eval.node_id
+}
+
+/// Give an action the node a file would name it by.
+fn set_chain_id(doc: &mut Document, action: Handle, node_id: i32) {
+    action_object_mut(doc, action).element.eval.node_id = node_id;
+}
+
+/// Chain an action into the action whose effect it works on next.
+fn chain_after(doc: &mut Document, action: Handle, follow_up: Handle) {
+    chain_names(doc, action, &[follow_up]);
+}
+
+fn chain_names(doc: &mut Document, action: Handle, follow_ups: &[Handle]) {
+    let ids = follow_ups
+        .iter()
+        .map(|handle| chain_id(doc, *handle))
+        .collect::<Vec<i32>>();
+    action_object_mut(doc, action).action_ids = ids;
+}
+
+/// A chained linear parameter with a move and a scale both acting on the circle
+/// of the fixture, built in that order.
+fn chained_pair() -> (Document, Handle, Handle, Handle, Handle, Handle) {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let member = handles[1];
+    let move_action = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let scale_action = add_action(&mut doc, def, parameter, member, Kind::Scale);
+    mark_chained(&mut doc, parameter);
+    (doc, def, parameter, member, move_action, scale_action)
+}
+
+/// Drive the parameter to twenty and report where the member it acts on ends up.
+fn drive(doc: &mut Document, def: Handle, parameter: Handle, member: Handle) -> (DVec3, f64) {
+    let baseline = doc.clone();
+    evaluate(doc, &baseline, def, parameter, DVec3::new(20., 0., 0.)).unwrap();
+    let EntityType::Circle(circle) = doc.get_entity(member).unwrap() else {
+        panic!("the acted-on member is still a circle")
+    };
+    (v(circle.center), circle.radius)
+}
+
+/// The member starts at centre (4,3) with radius 2; the parameter is ten units
+/// long and is driven to twenty, so the move shifts ten and the scale doubles.
+fn chained_outcome(move_names_scale: bool, scale_names_move: bool) -> (DVec3, f64) {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    if move_names_scale {
+        chain_after(&mut doc, move_action, scale_action);
+    }
+    if scale_names_move {
+        chain_after(&mut doc, scale_action, move_action);
+    }
+    drive(&mut doc, def, parameter, member)
+}
+
+/// An action that names a follow-up action is a chain, and the chain says which
+/// action's effect the next one works on: running them the other way round gives
+/// different geometry. A parameter that declares its actions chained has to
+/// evaluate rather than be refused, because that declaration is the only record
+/// of the order the operator chose.
+#[test]
+fn a_chained_parameter_runs_its_actions_in_the_order_the_chain_names() {
+    let chained = chained_outcome(true, false);
+    let built_in_order = chained_outcome(false, false);
+    let reversed = chained_outcome(false, true);
+    assert_eq!(
+        built_in_order,
+        (DVec3::new(28., 6., 0.), 4.),
+        "move then scale doubles the member where the move left it"
+    );
+    assert_eq!(
+        chained, built_in_order,
+        "a chain that names the order the actions were built in asks for nothing else"
+    );
+    assert_eq!(
+        reversed,
+        (DVec3::new(18., 6., 0.), 4.),
+        "chained the other way round, the scale runs first and the move carries the doubled member"
+    );
+}
+
+/// A chain names its follow-up by the node the evaluation graph gives that action,
+/// which is the identity a saved file carries, rather than by the object's address
+/// in this document. A name that is only an address is a chain this definition
+/// cannot resolve, so it says which.
+#[test]
+fn a_chain_names_the_graph_node_rather_than_the_object_address() {
+    let (mut doc, def, parameter, _member, move_action, scale_action) = chained_pair();
+    let address = scale_action.value() as i32;
+    assert_ne!(
+        address,
+        chain_id(&doc, scale_action),
+        "the graph gives this action a node of its own"
+    );
+    action_object_mut(&mut doc, move_action).action_ids = vec![address];
+    let baseline = doc.clone();
+    let error = evaluate(&mut doc, &baseline, def, parameter, DVec3::new(20., 0., 0.)).unwrap_err();
+    assert_eq!(error, "An action chain names an object outside this block.");
+}
+
+/// A chain is a record in the file rather than a fact about the document that
+/// wrote it: written to both formats and read back, the same two actions still run
+/// in the order the chain names, because the graph node each action is known by
+/// comes back with it.
+#[test]
+fn a_chain_keeps_its_order_through_the_saved_file() {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    chain_after(&mut doc, scale_action, move_action);
+    let files = [
+        DxfReader::from_reader(Cursor::new(DxfWriter::new(&doc).write_to_vec().unwrap()))
+            .unwrap()
+            .read()
+            .unwrap(),
+        DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
+            .read()
+            .unwrap(),
+    ];
+    for mut reopened in files {
+        let saved = actions(&reopened, def)
+            .into_iter()
+            .find(|(handle, _, _, _)| *handle == scale_action)
+            .map(|(_, action, _, _)| action.action_ids.clone())
+            .expect("the scale action came back with the definition");
+        assert_eq!(
+            saved,
+            vec![chain_id(&reopened, move_action)],
+            "the saved chain names the follow-up by the node it keeps"
+        );
+        assert_eq!(
+            drive(&mut reopened, def, parameter, member),
+            (DVec3::new(18., 6., 0.), 4.),
+            "the chain read back from the file still runs the scale before the move"
+        );
+    }
+}
+
+/// A file that carries no evaluation expression leaves every action at node 0,
+/// which is the id for "no node" rather than one two chains could both answer to.
+/// With nothing to name, the actions keep the order the graph lists; a chain is
+/// not the only thing a definition has to evaluate.
+#[test]
+fn actions_that_carry_no_evaluation_node_still_run_in_the_graph_order() {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    set_chain_id(&mut doc, move_action, 0);
+    set_chain_id(&mut doc, scale_action, 0);
+    assert_eq!(
+        drive(&mut doc, def, parameter, member),
+        (DVec3::new(28., 6., 0.), 4.),
+        "the move still runs before the scale, in the order the graph lists them"
+    );
+}
+
+/// Two actions that answer to the same node make the chain ambiguous: naming that
+/// node does not say which action runs next, so it says which rather than picking.
+#[test]
+fn a_chain_that_two_actions_answer_to_is_refused() {
+    let (mut doc, def, parameter, _member, move_action, scale_action) = chained_pair();
+    let shared = chain_id(&doc, move_action);
+    set_chain_id(&mut doc, scale_action, shared);
+    chain_after(&mut doc, move_action, scale_action);
+    let baseline = doc.clone();
+    let error = evaluate(&mut doc, &baseline, def, parameter, DVec3::new(20., 0., 0.)).unwrap_err();
+    assert_eq!(error, "An action chain names more than one action.");
+}
+
+#[test]
+fn array_and_scale_use_the_authored_order_after_reload() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let scale = add_action(&mut doc, def, parameter, handles[1], Kind::Scale);
+    let array = create_array(&mut doc, def, parameter, &[handles[1]], DVec3::ZERO, 10., 1.)
+        .unwrap();
+    let insert = doc.add_entity(EntityType::Insert(document::entities::Insert::new(
+        "ACTIONS", Vector3::ZERO,
+    ))).unwrap();
+    for (head, next, expected) in [
+        (scale, array, [8., 18., 28.]),
+        (array, scale, [8., 28., 48.]),
+    ] {
+        let mut authored = doc.clone();
+        let name = action_object(&authored, next).element.name.clone();
+        assert!(super::chain::set_by_name(&mut authored, def, head, &name).unwrap());
+        for extension in ["dwg", "dxf"] {
+            let bytes = crate::io::save_to_bytes(&authored, extension, authored.version).unwrap();
+            let reopened = crate::io::load_bytes(&format!("array-chain.{extension}"), bytes).unwrap();
+            let evaluated = instance::evaluate(&reopened, insert, parameter, DVec3::X * 20.)
+                .unwrap().unwrap();
+            let EntityType::Insert(reference) = evaluated.get_entity(insert).unwrap() else {
+                panic!()
+            };
+            let mut positions: Vec<_> = evaluated.entities_in_block(&reference.block_name)
+                .filter_map(|entity| match entity {
+                    EntityType::Circle(circle) => {
+                        assert_eq!(circle.center.y, 6.);
+                        assert_eq!(circle.radius, 4.);
+                        Some(circle.center.x)
+                    }
+                    _ => None,
+                }).collect();
+            positions.sort_by(f64::total_cmp);
+            assert_eq!(positions, expected);
+            let refreshed = instance::refresh(&evaluated, def).unwrap();
+            assert_eq!(refreshed.block_records.get(&reference.block_name).unwrap().entity_handles,
+                evaluated.block_records.get(&reference.block_name).unwrap().entity_handles);
+        }
+    }
+}
+
+/// A chain the evaluator could not run is not a chain the operator can write, so
+/// the shapes the order refuses are refused here too, and the record is left as it
+/// was. An action without a graph node cannot be named as a follow-up.
+#[test]
+fn a_chain_refuses_an_unnamed_node_and_can_join_an_existing_sequence() {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    let scale_node = chain_id(&doc, scale_action);
+    set_chain_id(&mut doc, scale_action, 0);
+    assert_eq!(
+        super::chain::set(&mut doc, def, move_action, Some(scale_action)).unwrap_err(),
+        "Select a follow-up action the evaluation graph names."
+    );
+    set_chain_id(&mut doc, scale_action, scale_node);
+    assert!(super::chain::set(&mut doc, def, move_action, Some(scale_action)).unwrap());
+    let extra = add_action(&mut doc, def, parameter, member, Kind::Move);
+    assert!(super::chain::set(&mut doc, def, extra, Some(scale_action)).unwrap());
+    assert_eq!(drive(&mut doc, def, parameter, member), (DVec3::new(48., 6., 0.), 4.));
+}
+
+#[test]
+fn stretch_and_scale_follow_the_authored_order_with_frozen_vertices() {
+    let (mut doc, def, targets, parameter, stretch) = stretch_fixture();
+    let scale = add_action(&mut doc, def, parameter, targets[0], Kind::Scale);
+    let driver = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == parameter)
+        .unwrap()
+        .id;
+    action_object_mut(&mut doc, stretch).action_ids = vec![driver];
+    for (head, next, expected_end) in [(stretch, scale, 40.), (scale, stretch, 30.)] {
+        let mut authored = doc.clone();
+        let name = action_object(&authored, next).element.name.clone();
+        assert!(super::chain::set_by_name(&mut authored, def, head, &name).unwrap());
+        assert_eq!(action_object(&authored, stretch).action_ids.first(), Some(&driver));
+        let mut evaluated = authored.clone();
+        evaluate(&mut evaluated, &authored, def, parameter, DVec3::X * 20.).unwrap();
+        let EntityType::Line(line) = evaluated.get_entity(targets[0]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(line.start, Vector3::ZERO);
+        assert_eq!(line.end, Vector3::UNIT_X * expected_end);
+    }
+}
+
+/// Naming a follow-up action is the authoring route to the order: what it writes
+/// is the same chain a saved file carries, so it has to give the same geometry.
+#[test]
+fn naming_a_follow_up_action_reorders_the_actions_the_way_the_operator_chose() {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    assert!(super::chain::set(&mut doc, def, scale_action, Some(move_action)).unwrap());
+    assert_eq!(
+        actions(&doc, def)
+            .into_iter()
+            .find(|(handle, ..)| *handle == scale_action)
+            .unwrap()
+            .1
+            .action_ids,
+        vec![chain_id(&doc, move_action)],
+        "the chain names the follow-up by the node the graph gives it"
+    );
+    let staged = doc.clone();
+    assert_eq!(
+        drive(&mut doc, def, parameter, member),
+        (DVec3::new(18., 6., 0.), 4.),
+        "the chained scale runs before the move it hands its result to"
+    );
+    let mut cleared = staged;
+    assert!(super::chain::set(&mut cleared, def, scale_action, None).unwrap());
+    assert_eq!(
+        drive(&mut cleared, def, parameter, member),
+        (DVec3::new(28., 6., 0.), 4.),
+        "clearing the chain hands the order back to the graph"
+    );
+}
+
+/// A chain is a name inside one definition, so the shapes that could not be
+/// resolved are refused where the operator writes them rather than at evaluation,
+/// and a refusal leaves the action's own chain list alone.
+#[test]
+fn an_action_chains_only_to_another_action_of_the_same_definition() {
+    let (mut doc, def, _parameter, _member, move_action, scale_action) = chained_pair();
+    assert_eq!(
+        super::chain::set(&mut doc, def, move_action, Some(Handle::NULL)).unwrap_err(),
+        "Select a follow-up action belonging to the active block definition."
+    );
+    assert_eq!(
+        super::chain::set(&mut doc, def, move_action, Some(move_action)).unwrap_err(),
+        "An action cannot chain to itself."
+    );
+    assert_eq!(
+        super::chain::set(&mut doc, def, Handle::NULL, Some(scale_action)).unwrap_err(),
+        "Select an action belonging to the active block definition."
+    );
+    assert!(
+        actions(&doc, def)
+            .into_iter()
+            .find(|(handle, ..)| *handle == move_action)
+            .unwrap()
+            .1
+            .action_ids
+            .is_empty(),
+        "a refused chain leaves nothing half written"
+    );
+}
+
+/// Two actions that chain each other have no first action, so there is no order
+/// for the chains to decide. Evaluating them is still well defined: the pair
+/// keeps the order the evaluation graph lists instead of hanging on a loop.
+#[test]
+fn actions_that_chain_each_other_keep_the_order_the_graph_lists() {
+    assert_eq!(
+        chained_outcome(true, true),
+        chained_outcome(false, false),
+        "a chain that loops back on itself has no head, so nothing is reordered"
+    );
+}
+
+#[test]
+fn a_retained_loop_releases_its_exits_in_order_before_their_join() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let member = handles[1];
+    let join = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let move_exit = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let scale_exit = add_action(&mut doc, def, parameter, member, Kind::Scale);
+    let first = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let second = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let independent = add_action(&mut doc, def, parameter, member, Kind::Move);
+    chain_names(&mut doc, first, &[second, scale_exit, move_exit]);
+    chain_after(&mut doc, second, first);
+    chain_after(&mut doc, independent, scale_exit);
+    chain_after(&mut doc, scale_exit, join);
+    chain_after(&mut doc, move_exit, join);
+    for extension in ["dwg", "dxf"] {
+        let bytes = crate::io::save_to_bytes(&doc, extension, doc.version).unwrap();
+        let mut reopened = crate::io::load_bytes(&format!("cycle-exits.{extension}"), bytes)
+            .unwrap();
+        assert_eq!(
+            drive(&mut reopened, def, parameter, member),
+            (DVec3::new(88., 6., 0.), 4.)
+        );
+    }
+}
+
+#[test]
+fn independent_retained_loops_keep_their_interleaved_graph_order() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let member = handles[1];
+    let a = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let b = add_action(&mut doc, def, parameter, member, Kind::Scale);
+    let c = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let d = add_action(&mut doc, def, parameter, member, Kind::Scale);
+    chain_after(&mut doc, a, c);
+    chain_after(&mut doc, c, a);
+    chain_after(&mut doc, b, d);
+    chain_after(&mut doc, d, b);
+    assert_eq!(
+        drive(&mut doc, def, parameter, member),
+        (DVec3::new(76., 12., 0.), 8.)
+    );
+}
+
+/// A shared follow-up sees the effects of both predecessors, once.
+#[test]
+fn two_chains_join_before_applying_their_shared_follow_up_once() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let first_move = add_action(&mut doc, def, parameter, handles[1], Kind::Move);
+    let second_move = add_action(&mut doc, def, parameter, handles[1], Kind::Move);
+    let scale_action = add_action(&mut doc, def, parameter, handles[1], Kind::Scale);
+    mark_chained(&mut doc, parameter);
+    chain_after(&mut doc, first_move, scale_action);
+    chain_after(&mut doc, second_move, scale_action);
+    assert_eq!(
+        drive(&mut doc, def, parameter, handles[1]),
+        (DVec3::new(48., 6., 0.), 4.)
+    );
+}
+
+#[test]
+fn nested_arrays_reserve_the_full_copy_budget_atomically() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let first = create_array(&mut doc, def, parameter, &[handles[1]], DVec3::ZERO, 1., 1.)
+        .unwrap();
+    let second = create_array(&mut doc, def, parameter, &[handles[1]], DVec3::ZERO, 2., 1.)
+        .unwrap();
+    chain_after(&mut doc, first, second);
+    let baseline = doc.clone();
+    assert_eq!(
+        evaluate(&mut doc, &baseline, def, parameter, DVec3::X * 1_000.),
+        Err(super::array::LIMIT_ERROR)
+    );
+    assert_eq!(doc, baseline);
+}
+
+/// Sibling actions use the stored list order when both become eligible.
+#[test]
+fn retained_follow_up_branches_run_in_list_order_after_reload() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let head = add_action(&mut doc, def, parameter, handles[1], Kind::Move);
+    let first = add_action(&mut doc, def, parameter, handles[1], Kind::Move);
+    let second = add_action(&mut doc, def, parameter, handles[1], Kind::Scale);
+    mark_chained(&mut doc, parameter);
+    chain_names(&mut doc, head, &[second, first, second]);
+    for extension in ["dwg", "dxf"] {
+        let bytes = crate::io::save_to_bytes(&doc, extension, doc.version).unwrap();
+        let mut saved = crate::io::load_bytes(&format!("branched-chain.{extension}"), bytes).unwrap();
+        assert_eq!(
+            drive(&mut saved, def, parameter, handles[1]),
+            (DVec3::new(38., 6., 0.), 4.)
+        );
+    }
+}
+
+#[test]
+fn an_authored_follow_up_cannot_close_a_retained_branch_loop() {
+    let (mut doc, def, parameter, member, head, first) = chained_pair();
+    let second = add_action(&mut doc, def, parameter, member, Kind::Move);
+    chain_names(&mut doc, head, &[first, second]);
+    let before = doc.clone();
+    assert_eq!(
+        super::chain::set(&mut doc, def, second, Some(head)),
+        Err("An action chain cannot loop back to the action that started it.")
+    );
+    assert_eq!(doc, before);
+}
+
+#[test]
+fn action_follow_up_list_preserves_literal_names_and_retained_metadata() {
+    let (mut doc, def, parameter, member, head, first) = chained_pair();
+    let second = add_action(&mut doc, def, parameter, member, Kind::Move);
+    let names = ["  Move, north  ", r#"[Scale "north"]"#];
+    action_object_mut(&mut doc, first).element.name = names[0].into();
+    action_object_mut(&mut doc, second).element.name = names[1].into();
+    let driver = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == parameter)
+        .unwrap()
+        .id;
+    action_object_mut(&mut doc, head).action_ids = vec![driver];
+    let input = serde_json::to_string(&names).unwrap();
+    assert!(super::chain::set_by_name(&mut doc, def, head, &input).unwrap());
+    let expected = vec![driver, chain_id(&doc, first), chain_id(&doc, second)];
+    assert_eq!(action_object(&doc, head).action_ids, expected);
+    assert_eq!(super::chain::labels(&doc, def, head).unwrap(), names);
+    for extension in ["dwg", "dxf"] {
+        let bytes = crate::io::save_to_bytes(&doc, extension, doc.version).unwrap();
+        let mut saved = crate::io::load_bytes(&format!("authored-branches.{extension}"), bytes)
+            .unwrap();
+        assert_eq!(action_object(&saved, head).action_ids, expected);
+        assert!(!super::chain::set_by_name(&mut saved, def, head, &input).unwrap());
+        assert!(super::chain::set_by_name(&mut saved, def, head, "[]").unwrap());
+        assert_eq!(action_object(&saved, head).action_ids, [driver]);
+    }
+}
+
+#[test]
+fn a_named_array_of_an_array_passes_every_copy_to_its_follow_up_once() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let first = create_array(&mut doc, def, parameter, &[handles[1]], DVec3::ZERO, 5., 1.)
+        .unwrap();
+    let second = create_array(&mut doc, def, parameter, &[handles[1]], DVec3::ZERO, 10., 1.)
+        .unwrap();
+    let scale = add_action(&mut doc, def, parameter, handles[1], Kind::Scale);
+    chain_after(&mut doc, first, second);
+    chain_after(&mut doc, second, scale);
+    let baseline = doc.clone();
+    evaluate(&mut doc, &baseline, def, parameter, DVec3::X * 20.).unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut positions: Vec<_> = doc.entities_in_block("ACTIONS")
+        .filter_map(|entity| match entity {
+            EntityType::Circle(circle) => {
+                assert!(ids.insert(authoring::element_id(entity).unwrap()));
+                assert_eq!(circle.center.y, 6.);
+                assert_eq!(circle.radius, 4.);
+                Some(circle.center.x)
+            }
+            _ => None,
+        }).collect();
+    positions.sort_by(f64::total_cmp);
+    assert_eq!(positions, [8., 18., 28., 28., 38., 38., 48., 48., 48., 58., 58., 68., 68., 78., 88.]);
+}
+
+#[test]
+fn polar_stretch_and_move_follow_the_authored_order_after_reload() {
+    let (mut doc, def, targets, parameter, polar) = polar_stretch_fixture();
+    let movement = add_action(&mut doc, def, parameter, targets[0], Kind::Move);
+    let insert = doc.add_entity(EntityType::Insert(document::entities::Insert::new(
+        "POLAR_STRETCH", Vector3::ZERO,
+    ))).unwrap();
+    for (head, next, expected_y) in [(polar, movement, 11.), (movement, polar, -9.)] {
+        let mut authored = doc.clone();
+        let name = action_object(&authored, next).element.name.clone();
+        assert!(super::chain::set_by_name(&mut authored, def, head, &name).unwrap());
+        for extension in ["dwg", "dxf"] {
+            let bytes = crate::io::save_to_bytes(&authored, extension, authored.version).unwrap();
+            let reopened = crate::io::load_bytes(&format!("polar-chain.{extension}"), bytes).unwrap();
+            let changed = instance::evaluate(&reopened, insert, parameter, DVec3::Y * 10.)
+                .unwrap().unwrap();
+            let EntityType::Insert(reference) = changed.get_entity(insert).unwrap() else {
+                panic!()
+            };
+            let line = changed.entities_in_block(&reference.block_name).find_map(|e| {
+                if let EntityType::Line(line) = e { Some(line) } else { None }
+            }).unwrap();
+            assert!(v(line.start).distance(DVec3::new(-10., expected_y, 0.)) < 1e-8);
+        }
+    }
+}
+
+/// Nought is the id a file leaves on an action that carries no evaluation
+/// expression, so a row reading a chain back cannot treat it as a node: several
+/// actions of such a definition sit on that same default, and naming one of them
+/// would show the operator a chain the definition never recorded.
+#[test]
+fn a_chain_that_names_no_node_reads_back_as_no_chain() {
+    let (mut doc, def, parameter, _member, move_action, scale_action) = chained_pair();
+    set_chain_id(&mut doc, scale_action, 0);
+    action_object_mut(&mut doc, move_action).action_ids = vec![0];
+    assert_eq!(
+        super::chain::labels(&doc, def, move_action),
+        Some(vec![]),
+        "the row shows no chain rather than the action left on the default node"
+    );
+    assert_eq!(
+        super::chain::labels(&doc, def, parameter),
+        None,
+        "a parameter has no chain of its own to show"
+    );
+}
+
+/// The row is the only place the operator spells the follow-up out, so two actions
+/// that carry one name cannot be told apart: the write refuses instead of chaining
+/// to whichever one the evaluation graph happens to list first.
+#[test]
+fn a_name_that_two_actions_carry_cannot_be_chained_to() {
+    let (mut doc, def, _parameter, _member, move_action, scale_action) = chained_pair();
+    let name = action_object(&doc, move_action).element.name.clone();
+    action_object_mut(&mut doc, scale_action).element.name = name.clone();
+    let baseline = doc.clone();
+    assert_eq!(
+        super::chain::set_by_name(&mut doc, def, move_action, &name),
+        Err("Two actions in this block share that name.")
+    );
+    assert_eq!(doc, baseline, "an ambiguous name chains nothing");
+}
+
+/// Two actions that name each other have no first action, so the order they record is
+/// one nothing runs: the chain that would close the loop is refused where it is written
+/// rather than stored inert, which the row would otherwise show as a chosen order.
+#[test]
+fn a_chain_that_loops_back_to_the_action_that_started_it_is_refused() {
+    let (mut doc, def, _parameter, _member, move_action, scale_action) = chained_pair();
+    assert!(super::chain::set(&mut doc, def, move_action, Some(scale_action)).unwrap());
+    let baseline = doc.clone();
+    assert_eq!(
+        super::chain::set(&mut doc, def, scale_action, Some(move_action)),
+        Err("An action chain cannot loop back to the action that started it.")
+    );
+    assert_eq!(
+        doc, baseline,
+        "the refused link is not left half written on the second action"
+    );
+    assert_eq!(
+        super::chain::set(&mut doc, def, scale_action, None),
+        Ok(false),
+        "an action that names nothing still has nothing to clear"
+    );
+    assert!(super::chain::set(&mut doc, def, move_action, None).unwrap());
+    assert_eq!(
+        super::chain::labels(&doc, def, move_action),
+        Some(vec![]),
+        "the row reads the cleared chain back as no chain"
+    );
+}
+
+/// An action's name says what the action does. The definition's first Move is
+/// `Move`, a second one of the same kind takes the lowest number above 1 still
+/// free, and the count runs per kind rather than off a record slot.
+#[test]
+fn actions_are_named_for_their_kind_and_numbered_within_the_definition() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let member = handles[1];
+    let first = add_action(&mut doc, def, parameter, member, Kind::Move);
+    assert_eq!(
+        action_object(&doc, first).element.name,
+        "Move",
+        "the first action of a kind carries the kind's own name"
+    );
+    let second = add_action(&mut doc, def, parameter, member, Kind::Move);
+    assert_eq!(
+        action_object(&doc, second).element.name,
+        "Move2",
+        "a second action of that kind is numbered within the definition"
+    );
+    let other = add_action(&mut doc, def, parameter, member, Kind::Scale);
+    assert_eq!(
+        action_object(&doc, other).element.name,
+        "Scale",
+        "the count runs per kind"
+    );
+    action_object_mut(&mut doc, first).element.name = "Move9".into();
+    let third = add_action(&mut doc, def, parameter, member, Kind::Move);
+    assert_eq!(
+        action_object(&doc, third).element.name,
+        "Move",
+        "the kind's own name is used again once it is free"
+    );
+    let fourth = add_action(&mut doc, def, parameter, member, Kind::Move);
+    assert_eq!(
+        action_object(&doc, fourth).element.name,
+        "Move3",
+        "a number another action already carries is skipped"
+    );
+}
+
+#[test]
+fn chain_order_distinguishes_same_parameter_actions_from_other_graph_nodes() {
+    let (mut doc, def, parameter, member, move_action, scale_action) = chained_pair();
+    let other = linear(&mut doc, def);
+    let other_action = add_action(&mut doc, def, other, member, Kind::Move);
+    let other_id = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == other)
+        .unwrap()
+        .id;
+    let base = crate::scene::block_basepoint::create(&mut doc, def, Vector3::ZERO).unwrap();
+    let lookup = crate::scene::block_lookup::create(&mut doc, def, Vector3::ZERO).unwrap();
+    let ObjectType::DynamicBlock(base) = &doc.objects[&base] else {
+        panic!()
+    };
+    let DynamicBlockData::BasePointParameter(base) = &base.data else {
+        panic!()
+    };
+    let base_id = base.parameter.parameter.element.eval.node_id;
+    let ObjectType::DynamicBlock(lookup) = &doc.objects[&lookup] else {
+        panic!()
+    };
+    let DynamicBlockData::LookupParameter(lookup) = &lookup.data else {
+        panic!()
+    };
+    let lookup_id = lookup.parameter.parameter.element.eval.node_id;
+    let other_action_id = chain_id(&doc, other_action);
+    let follow_up = chain_id(&doc, move_action);
+    action_object_mut(&mut doc, scale_action).action_ids =
+        vec![base_id, lookup_id, other_id, other_action_id, follow_up];
+    let links = action_object_mut(&mut doc, scale_action).action_ids.clone();
+    assert_eq!(
+        drive(&mut doc, def, parameter, member),
+        (DVec3::new(18., 6., 0.), 4.)
+    );
+    assert_eq!(action_object_mut(&mut doc, scale_action).action_ids, links);
+}
+
+#[test]
+fn inactive_flip_with_retained_action_targets_does_not_block_other_parameters() {
+    use super::super::block_orientation_parameter::Kind as O;
+    let (mut doc, def, parameter, member, move_action, _) = chained_pair();
+    let flip = orientation(&mut doc, def, O::Flip);
+    let flip_action = create(&mut doc, def, Kind::Flip, flip, &[member], DVec3::ZERO).unwrap();
+    action_object_mut(&mut doc, flip_action)
+        .dependencies
+        .push(move_action);
+    let baseline = doc.clone();
+    assert_eq!(
+        drive(&mut doc, def, parameter, member),
+        (DVec3::new(28., 6., 0.), 4.)
+    );
+    let mut active = baseline.clone();
+    assert_eq!(
+        evaluate_value(&mut active, &baseline, def, flip, Value::Flip(true)).unwrap_err(),
+        "This action targets another parameter or an unsupported native object."
+    );
+    assert_eq!(active, baseline);
+}
+
+#[test]
+fn flip_linear_frames_survive_reload_and_remain_reference_local() {
+    use super::super::block_orientation_parameter::Kind as O;
+    for testing in [false, true] {
+        let (mut doc, def, targets) = fixture();
+        let linear = distance::create(
+            &mut doc,
+            def,
+            distance::Kind::Linear,
+            Vector3::new(0., 2., 0.),
+            Vector3::new(10., 2., 0.),
+            Vector3::new(5., 4., 0.),
+        )
+        .unwrap();
+        let move_action = create(
+            &mut doc,
+            def,
+            Kind::Move,
+            linear,
+            &[targets[1]],
+            DVec3::ZERO,
+        )
+        .unwrap();
+        let flip = orientation(&mut doc, def, O::Flip);
+        let flip_action =
+            create(&mut doc, def, Kind::Flip, flip, &[targets[1]], DVec3::ZERO).unwrap();
+        action_object_mut(&mut doc, flip_action)
+            .dependencies
+            .extend([linear, move_action]);
+        let first = doc
+            .add_entity(EntityType::Insert(document::entities::Insert::new(
+                "ACTIONS",
+                Vector3::ZERO,
+            )))
+            .unwrap();
+        let other = doc
+            .add_entity(EntityType::Insert(document::entities::Insert::new(
+                "ACTIONS",
+                Vector3::UNIT_X * 40.,
+            )))
+            .unwrap();
+        let p = all_parameters(&doc, def)
+            .into_iter()
+            .find(|p| p.handle == linear)
+            .unwrap();
+        let baseline = doc.clone();
+        let eval = |d: &Document, parameter, input| {
+            if testing {
+                instance::evaluate_test_value(d, &baseline, def, first, parameter, input)
+            } else {
+                instance::evaluate_value(d, first, parameter, input)
+            }
+            .unwrap()
+            .unwrap()
+        };
+        doc = eval(&doc, linear, Value::Point(DVec3::new(12., 2., 0.)));
+        doc = eval(&doc, flip, Value::Flip(true));
+        doc = eval(&doc, linear, Value::Point(DVec3::new(15., -2., 0.)));
+        let (cache_handle, cache_owner) = doc
+            .objects
+            .iter()
+            .find_map(|(h, object)| match object {
+                ObjectType::XRecord(record) if record.name == p.id.to_string() => {
+                    Some((*h, record.owner))
+                }
+                _ => None,
+            })
+            .unwrap();
+        for missing in [false, true] {
+            let mut damaged = doc.clone();
+            if missing {
+                let ObjectType::Dictionary(dictionary) =
+                    damaged.objects.get_mut(&cache_owner).unwrap()
+                else {
+                    panic!()
+                };
+                dictionary
+                    .entries
+                    .retain(|(_, handle)| *handle != cache_handle);
+            } else {
+                let ObjectType::XRecord(record) = damaged.objects.get_mut(&cache_handle).unwrap()
+                else {
+                    panic!()
+                };
+                record.entries_complete = false;
+            }
+            let before = damaged.clone();
+            let result = if testing {
+                instance::evaluate_test_value(
+                    &damaged,
+                    &baseline,
+                    def,
+                    first,
+                    flip,
+                    Value::Flip(false),
+                )
+            } else {
+                instance::evaluate_value(&damaged, first, flip, Value::Flip(false))
+            };
+            assert!(
+                result.is_err(),
+                "damaged linked frames must not be replaced with defaults"
+            );
+            assert_eq!(damaged, before);
+        }
+
+        assert_eq!(
+            instance::frame(&doc, other, &p).unwrap(),
+            instance::ParameterFrame {
+                base: p.base,
+                end: p.end
+            }
+        );
+        for extension in ["dwg", "dxf"] {
+            let bytes = crate::io::save_to_bytes(&doc, extension, doc.version).unwrap();
+            let saved = crate::io::load_bytes(&format!("flip-linear.{extension}"), bytes).unwrap();
+            assert_eq!(
+                instance::frame(&saved, first, &p).unwrap(),
+                instance::ParameterFrame {
+                    base: DVec3::new(0., -2., 0.),
+                    end: DVec3::new(15., -2., 0.)
+                }
+            );
+            let unflipped = eval(&saved, flip, Value::Flip(false));
+            assert_eq!(
+                instance::frame(&unflipped, first, &p).unwrap(),
+                instance::ParameterFrame {
+                    base: DVec3::new(0., 2., 0.),
+                    end: DVec3::new(15., 2., 0.)
+                }
+            );
+            let EntityType::Insert(reference) = unflipped.get_entity(first).unwrap() else {
+                panic!()
+            };
+            let circle = unflipped
+                .entities_in_block(&reference.block_name)
+                .find_map(|e| {
+                    if let EntityType::Circle(c) = e {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert_eq!(circle.center, Vector3::new(9., 3., 0.));
+            let reset = if testing {
+                instance::reset_test(&saved, &baseline, def, first)
+            } else {
+                instance::reset(&saved, first)
+            }
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                instance::frame(&reset, first, &p).unwrap(),
+                instance::ParameterFrame {
+                    base: p.base,
+                    end: p.end
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn flip_does_not_drop_unmanaged_parameter_targets() {
+    use super::super::block_orientation_parameter::Kind as O;
+    let (mut doc, def, targets) = fixture();
+    let linear = linear(&mut doc, def);
+    create(
+        &mut doc,
+        def,
+        Kind::Move,
+        linear,
+        &[targets[0]],
+        DVec3::ZERO,
+    )
+    .unwrap();
+    let flip = orientation(&mut doc, def, O::Flip);
+    let flip_action = create(&mut doc, def, Kind::Flip, flip, &[targets[0]], DVec3::ZERO).unwrap();
+    action_object_mut(&mut doc, flip_action)
+        .dependencies
+        .push(linear);
+    let insert = doc
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
+            "ACTIONS",
+            Vector3::ZERO,
+        )))
+        .unwrap();
+    let baseline = doc.clone();
+    assert_eq!(
+        instance::evaluate_value(&doc, insert, flip, Value::Flip(true)).unwrap_err(),
+        "This action targets another parameter or an unsupported native object."
+    );
+    assert_eq!(doc, baseline);
+}
+
+#[test]
+fn active_flip_transports_linked_parameter_and_action_frames() {
+    use super::super::block_orientation_parameter::Kind as O;
+    let (mut doc, def, targets) = fixture();
+    let linear = distance::create(
+        &mut doc,
+        def,
+        distance::Kind::Linear,
+        Vector3::new(0., 2., 0.),
+        Vector3::new(10., 2., 0.),
+        Vector3::new(5., 4., 0.),
+    )
+    .unwrap();
+    let move_action = create(
+        &mut doc,
+        def,
+        Kind::Move,
+        linear,
+        &[targets[1]],
+        DVec3::ZERO,
+    )
+    .unwrap();
+    let flip = orientation(&mut doc, def, O::Flip);
+    let flip_action = create(&mut doc, def, Kind::Flip, flip, &[targets[1]], DVec3::ZERO).unwrap();
+    action_object_mut(&mut doc, flip_action)
+        .dependencies
+        .extend([linear, move_action]);
+    let insert = doc
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
+            "ACTIONS",
+            Vector3::ZERO,
+        )))
+        .unwrap();
+    let p = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == linear)
+        .unwrap();
+    doc = instance::evaluate(&doc, insert, linear, DVec3::new(12., 2., 0.))
+        .unwrap()
+        .unwrap();
+    doc = instance::evaluate_value(&doc, insert, flip, Value::Flip(true))
+        .unwrap()
+        .unwrap();
+    let frame = instance::frame(&doc, insert, &p).unwrap();
+    assert_eq!(frame.base, DVec3::new(0., -2., 0.));
+    assert_eq!(frame.end, DVec3::new(12., -2., 0.));
+    let EntityType::Insert(reference) = doc.get_entity(insert).unwrap() else {
+        panic!()
+    };
+    let circle = doc
+        .entities_in_block(&reference.block_name)
+        .find_map(|e| {
+            if let EntityType::Circle(c) = e {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(circle.center, Vector3::new(6., -3., 0.));
+    doc = instance::evaluate(&doc, insert, linear, DVec3::new(15., -2., 0.))
+        .unwrap()
+        .unwrap();
+    doc = instance::evaluate_value(&doc, insert, flip, Value::Flip(false))
+        .unwrap()
+        .unwrap();
+    let frame = instance::frame(&doc, insert, &p).unwrap();
+    assert_eq!(frame.base, DVec3::new(0., 2., 0.));
+    assert_eq!(frame.end, DVec3::new(15., 2., 0.));
+    let EntityType::Insert(reference) = doc.get_entity(insert).unwrap() else {
+        panic!()
+    };
+    let circle = doc
+        .entities_in_block(&reference.block_name)
+        .find_map(|e| {
+            if let EntityType::Circle(c) = e {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(circle.center, Vector3::new(9., 3., 0.));
+}
+
+#[test]
+fn single_flip_transports_relocated_linear_grip_offsets() {
+    use super::super::block_orientation_parameter::Kind as O;
+    let (mut doc, def, targets) = fixture();
+    let linear = linear(&mut doc, def);
+    let action = create(
+        &mut doc,
+        def,
+        Kind::Move,
+        linear,
+        &[targets[0]],
+        DVec3::ZERO,
+    )
+    .unwrap();
+    let flip = orientation(&mut doc, def, O::Flip);
+    let flip_action = create(&mut doc, def, Kind::Flip, flip, &[targets[0]], DVec3::ZERO).unwrap();
+    action_object_mut(&mut doc, flip_action)
+        .dependencies
+        .extend([linear, action]);
+    let grip = crate::scene::block_grips::config::locations(&doc, def, linear)
+        .unwrap()
+        .remove(0);
+    crate::scene::block_grips::config::set_location(
+        &mut doc,
+        def,
+        linear,
+        grip.role,
+        grip.point + Vector3::UNIT_Y * 2.,
+    )
+    .unwrap();
+    let insert = doc
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
+            "ACTIONS",
+            Vector3::ZERO,
+        )))
+        .unwrap();
+    let before = doc.clone();
+    let flipped = instance::evaluate_value(&doc, insert, flip, Value::Flip(true))
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc, before);
+    let parameter = all_parameters(&doc, def)
+        .into_iter()
+        .find(|p| p.handle == linear)
+        .unwrap();
+    let offset = |reference: &Document| {
+        let value = instance::value(reference, insert, &parameter).unwrap();
+        instance::action_grips(reference, &doc, def, insert, &parameter, value, false)
+            .into_iter()
+            .find(|marker| marker.role == grip.role)
+            .unwrap()
+            .offset
+    };
+    assert_eq!(offset(&doc), DVec3::Y * 2.);
+    assert_eq!(offset(&flipped), -DVec3::Y * 2.);
+    let edited = instance::evaluate_value(&flipped, insert, linear, Value::Point(DVec3::X * 15.))
+        .unwrap()
+        .unwrap();
+    let unflipped = instance::evaluate_value(&edited, insert, flip, Value::Flip(false))
+        .unwrap()
+        .unwrap();
+    assert_eq!(offset(&unflipped), DVec3::Y * 2.);
+    assert_eq!(instance::frame(&unflipped, insert, &parameter).unwrap().end, DVec3::X * 15.);
+}
+
+#[test]
+fn flip_uses_active_axis_after_incoming_moves_without_losing_linear_edits() {
+    use super::super::block_orientation_parameter::Kind as O;
+    for testing in [false, true] {
+        for chained in [false, true] {
+            let (mut doc, def, targets) = fixture();
+            let child = distance::create(
+                &mut doc,
+                def,
+                distance::Kind::Linear,
+                Vector3::new(0., 2., 0.),
+                Vector3::new(10., 2., 0.),
+                Vector3::new(5., 4., 0.),
+            )
+            .unwrap();
+            let linked =
+                create(&mut doc, def, Kind::Move, child, &[targets[1]], DVec3::ZERO).unwrap();
+            let flip = orientation(&mut doc, def, O::Flip);
+            let ObjectType::DynamicBlock(o) = doc.objects.get_mut(&flip).unwrap() else {
+                panic!()
+            };
+            let DynamicBlockData::FlipParameter(p) = &mut o.data else {
+                panic!()
+            };
+            p.parameter.parameter.chain_actions = chained;
+            let flip_action =
+                create(&mut doc, def, Kind::Flip, flip, &[targets[1]], DVec3::ZERO).unwrap();
+            action_object_mut(&mut doc, flip_action)
+                .dependencies
+                .extend([child, linked]);
+            let parent = distance::create(
+                &mut doc,
+                def,
+                distance::Kind::Linear,
+                Vector3::new(0., 10., 0.),
+                Vector3::new(0., 20., 0.),
+                Vector3::UNIT_X,
+            )
+            .unwrap();
+            let move_axis = create(
+                &mut doc,
+                def,
+                Kind::Move,
+                parent,
+                &[targets[0]],
+                DVec3::ZERO,
+            )
+            .unwrap();
+            action_object_mut(&mut doc, move_axis).dependencies = vec![flip];
+            let first = doc
+                .add_entity(EntityType::Insert(document::entities::Insert::new(
+                    "ACTIONS",
+                    Vector3::ZERO,
+                )))
+                .unwrap();
+            let other = doc
+                .add_entity(EntityType::Insert(document::entities::Insert::new(
+                    "ACTIONS",
+                    Vector3::UNIT_X * 40.,
+                )))
+                .unwrap();
+            let child_p = all_parameters(&doc, def)
+                .into_iter()
+                .find(|p| p.handle == child)
+                .unwrap();
+            let flip_p = all_parameters(&doc, def)
+                .into_iter()
+                .find(|p| p.handle == flip)
+                .unwrap();
+            let baseline = doc.clone();
+            let eval = |d: &Document, parameter, input| {
+                if testing {
+                    instance::evaluate_test_value(d, &baseline, def, first, parameter, input)
+                } else {
+                    instance::evaluate_value(d, first, parameter, input)
+                }
+                .unwrap()
+                .unwrap()
+            };
+            doc = eval(&doc, parent, Value::Point(DVec3::new(0., 24., 0.)));
+            doc = eval(&doc, flip, Value::Flip(true));
+            let initial_y = if chained { 6. } else { -2. };
+            assert_eq!(
+                instance::frame(&doc, first, &flip_p).unwrap().base,
+                DVec3::Y * 4.
+            );
+            assert_eq!(
+                instance::frame(&doc, first, &child_p).unwrap().base,
+                DVec3::Y * initial_y
+            );
+            doc = eval(&doc, child, Value::Point(DVec3::new(15., initial_y, 0.)));
+            doc = eval(&doc, parent, Value::Point(DVec3::new(0., 26., 0.)));
+            let final_y = if chained { 10. } else { -2. };
+            let current = instance::frame(&doc, first, &child_p).unwrap();
+            assert_eq!(current.base, DVec3::Y * final_y);
+            assert_eq!(current.end, DVec3::new(15., final_y, 0.));
+            assert_eq!(
+                instance::frame(&doc, other, &child_p).unwrap(),
+                instance::ParameterFrame {
+                    base: child_p.base,
+                    end: child_p.end
+                }
+            );
+            let EntityType::Insert(reference) = doc.get_entity(first).unwrap() else {
+                panic!()
+            };
+            let circle = doc
+                .entities_in_block(&reference.block_name)
+                .find_map(|e| {
+                    if let EntityType::Circle(c) = e {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert_eq!(
+                circle.center,
+                Vector3::new(9., if chained { 9. } else { -3. }, 0.)
+            );
+            for extension in ["dwg", "dxf"] {
+                let bytes = crate::io::save_to_bytes(&doc, extension, doc.version).unwrap();
+                let saved =
+                    crate::io::load_bytes(&format!("moving-flip.{extension}"), bytes).unwrap();
+                assert_eq!(instance::frame(&saved, first, &child_p).unwrap(), current);
+                let unflipped = eval(&saved, flip, Value::Flip(false));
+                let frame = instance::frame(&unflipped, first, &child_p).unwrap();
+                assert_eq!(frame.base, DVec3::new(0., 2., 0.));
+                assert_eq!(frame.end, DVec3::new(15., 2., 0.));
+                let EntityType::Insert(reference) = unflipped.get_entity(first).unwrap() else {
+                    panic!()
+                };
+                let circle = unflipped
+                    .entities_in_block(&reference.block_name)
+                    .find_map(|e| {
+                        if let EntityType::Circle(c) = e {
+                            Some(c)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(circle.center, Vector3::new(9., 3., 0.));
+                let reset = if testing {
+                    instance::reset_test(&saved, &baseline, def, first)
+                } else {
+                    instance::reset(&saved, first)
+                }
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    instance::frame(&reset, first, &child_p).unwrap(),
+                    instance::ParameterFrame {
+                        base: child_p.base,
+                        end: child_p.end
+                    }
+                );
+                assert_eq!(
+                    instance::frame(&reset, first, &flip_p).unwrap(),
+                    instance::ParameterFrame {
+                        base: flip_p.base,
+                        end: flip_p.end
+                    }
+                );
+                assert_eq!(
+                    instance::value(&reset, first, &flip_p).unwrap(),
+                    Value::Flip(false)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn linked_linear_flip_coexists_with_an_independent_geometry_flip() {
+    use crate::scene::block_orientation_parameter as orientation;
+    for testing in [false, true] {
+        let (mut doc, def, targets) = fixture();
+        let child = distance::create(
+            &mut doc,
+            def,
+            distance::Kind::Linear,
+            Vector3::new(0., 2., 0.),
+            Vector3::new(10., 2., 0.),
+            Vector3::UNIT_Y,
+        )
+        .unwrap();
+        let linked = create(&mut doc, def, Kind::Move, child, &[targets[1]], DVec3::ZERO).unwrap();
+        let flip = orientation(&mut doc, def, orientation::Kind::Flip);
+        let action = create(&mut doc, def, Kind::Flip, flip, &[targets[1]], DVec3::ZERO).unwrap();
+        action_object_mut(&mut doc, action)
+            .dependencies
+            .extend([child, linked]);
+        let independent = orientation::create(
+            &mut doc,
+            def,
+            orientation::Kind::Flip,
+            Vector3::ZERO,
+            Vector3::new(0., 10., 0.),
+            Vector3::UNIT_X,
+        )
+        .unwrap();
+        let independent_action = create(
+            &mut doc,
+            def,
+            Kind::Flip,
+            independent,
+            &[targets[0]],
+            DVec3::ZERO,
+        )
+        .unwrap();
+        let insert = doc
+            .add_entity(EntityType::Insert(document::entities::Insert::new(
+                "ACTIONS",
+                Vector3::ZERO,
+            )))
+            .unwrap();
+        let p = all_parameters(&doc, def)
+            .into_iter()
+            .find(|p| p.handle == child)
+            .unwrap();
+        let baseline = doc.clone();
+        let mut overlapping = doc.clone();
+        action_object_mut(&mut overlapping, independent_action).dependencies = vec![targets[1]];
+        let overlapping_baseline = overlapping.clone();
+        for handle in [flip, independent] {
+            overlapping = if testing {
+                instance::evaluate_test_value(
+                    &overlapping,
+                    &overlapping_baseline,
+                    def,
+                    insert,
+                    handle,
+                    Value::Flip(true),
+                )
+            } else {
+                instance::evaluate_value(&overlapping, insert, handle, Value::Flip(true))
+            }
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(
+            instance::frame(&overlapping, insert, &p).unwrap().end,
+            DVec3::new(10., -2., 0.)
+        );
+        let EntityType::Insert(reference) = overlapping.get_entity(insert).unwrap() else {
+            panic!()
+        };
+        let circle = overlapping
+            .entities_in_block(&reference.block_name)
+            .find_map(|entity| match entity {
+                EntityType::Circle(circle) => Some(circle),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(circle.center, Vector3::new(-4., -3., 0.));
+
+        let eval = |d: &Document, parameter, input| {
+            if testing {
+                instance::evaluate_test_value(d, &baseline, def, insert, parameter, input)
+            } else {
+                instance::evaluate_value(d, insert, parameter, input)
+            }
+            .unwrap()
+            .unwrap()
+        };
+        for reverse in [false, true] {
+            let mut changed = baseline.clone();
+            for handle in if reverse {
+                [independent, flip]
+            } else {
+                [flip, independent]
+            } {
+                changed = eval(&changed, handle, Value::Flip(true));
+            }
+            changed = eval(&changed, child, Value::Point(DVec3::new(15., -2., 0.)));
+            assert_eq!(
+                instance::frame(&changed, insert, &p).unwrap().end,
+                DVec3::new(15., -2., 0.)
+            );
+            for extension in ["dwg", "dxf"] {
+                let bytes = crate::io::save_to_bytes(&changed, extension, changed.version).unwrap();
+                let saved = crate::io::load_bytes(&format!("independent-flips.{extension}"), bytes)
+                    .unwrap();
+                let unflipped = eval(&saved, flip, Value::Flip(false));
+                assert_eq!(
+                    instance::frame(&unflipped, insert, &p).unwrap().end,
+                    DVec3::new(15., 2., 0.)
+                );
+                let EntityType::Insert(reference) = unflipped.get_entity(insert).unwrap() else {
+                    panic!()
+                };
+                let line = unflipped
+                    .entities_in_block(&reference.block_name)
+                    .find_map(|e| {
+                        if let EntityType::Line(l) = e {
+                            Some(l)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(line.start, -Vector3::UNIT_X);
+                let circle = unflipped
+                    .entities_in_block(&reference.block_name)
+                    .find_map(|e| {
+                        if let EntityType::Circle(c) = e {
+                            Some(c)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(circle.center, Vector3::new(9., 3., 0.));
+            }
+        }
+    }
+}
+
+#[test]
+fn dependent_scale_accumulates_base_edits_and_survives_refresh() {
+    let (mut doc, def, handles) = fixture();
+    let parameter = linear(&mut doc, def);
+    let _scale = add_action(&mut doc, def, parameter, handles[1], Kind::Scale);
+    let insert = doc
+        .add_entity(EntityType::Insert(document::entities::Insert::new(
+            "ACTIONS",
+            Vector3::ZERO,
+        )))
+        .unwrap();
+
+    // Edit 1: Move base outward to -10, end remains 10 (dist=20, 2x scale)
+    let edit1 = instance::evaluate_frame(
+        &doc,
+        insert,
+        parameter,
+        instance::ParameterFrame {
+            base: DVec3::new(-10., 0., 0.),
+            end: DVec3::new(10., 0., 0.),
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let EntityType::Insert(ins1) = edit1.get_entity(insert).unwrap() else { panic!() };
+    let c1 = edit1
+        .entities_in_block(&ins1.block_name)
+        .find_map(|e| if let EntityType::Circle(c) = e { Some(c) } else { None })
+        .unwrap();
+    // Center was (4,3). Scaled by 2 => (8,6). Transformed by action_base (10) => (18, 6).
+    assert_eq!(c1.center, Vector3::new(18., 6., 0.));
+    assert_eq!(c1.radius, 4.);
+
+    // Edit 2: Move base outward again to -20, end remains 10 (dist=30, 3x scale)
+    let edit2 = instance::evaluate_frame(
+        &edit1,
+        insert,
+        parameter,
+        instance::ParameterFrame {
+            base: DVec3::new(-20., 0., 0.),
+            end: DVec3::new(10., 0., 0.),
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let EntityType::Insert(ins2) = edit2.get_entity(insert).unwrap() else { panic!() };
+    let c2 = edit2
+        .entities_in_block(&ins2.block_name)
+        .find_map(|e| if let EntityType::Circle(c) = e { Some(c) } else { None })
+        .unwrap();
+    // Center was (4,3). Scaled by 3 => (12,9). Transformed by accumulated action_base (25) => (37, 9).
+    assert_eq!(c2.center, Vector3::new(37., 9., 0.));
+    assert_eq!(c2.radius, 6.);
+
+    // Refresh: Definition refresh reconstructs from definition baseline and must preserve accumulated action base!
+    let refreshed = instance::refresh_after_edit(&edit2, &edit1, def).unwrap();
+    let EntityType::Insert(ins_ref) = refreshed.get_entity(insert).unwrap() else { panic!() };
+    let c_ref = refreshed
+        .entities_in_block(&ins_ref.block_name)
+        .find_map(|e| if let EntityType::Circle(c) = e { Some(c) } else { None })
+        .unwrap();
+    assert_eq!(c_ref.center, Vector3::new(37., 9., 0.));
+    assert_eq!(c_ref.radius, 6.);
 }

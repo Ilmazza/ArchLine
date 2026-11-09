@@ -1,7 +1,7 @@
 //! Import named text and dimension styles into the open style manager.
 
 use crate::app::{Message, ModalKind, OpenCADStudio, StyleKind};
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use iced::Task;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -231,7 +231,7 @@ impl OpenCADStudio {
             StyleKind::Dim => ModalKind::DimStyle,
             _ => return Task::none(),
         };
-        if self.active_modal != Some(parent) {
+        if !self.focus_dialog(parent) {
             return Task::none();
         }
         match result {
@@ -309,7 +309,7 @@ impl OpenCADStudio {
         };
         let kind = draft.kind;
         match kind {
-            StyleKind::Text => self.stage_textstyle_bufs(),
+            StyleKind::Text => self.flush_textstyle_draft(),
             StyleKind::Dim => self.apply_dimstyle_bufs(self.active_tab),
             _ => return,
         }
@@ -337,7 +337,7 @@ impl OpenCADStudio {
             match kind {
                 StyleKind::Text => {
                     self.textstyle_selected = first.clone();
-                    self.load_textstyle_bufs(self.active_tab);
+                    self.load_textstyle_draft(self.active_tab);
                 }
                 StyleKind::Dim => {
                     self.dimstyle_selected = first.clone();
@@ -374,7 +374,7 @@ impl OpenCADStudio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::tables::{DimStyle, LineType, TextStyle};
+    use document::tables::{DimStyle, LineType, TextStyle};
 
     #[test]
     fn every_name_collision_gets_a_separate_decision() {

@@ -13,10 +13,15 @@
 //! sidecar) are also shared with the existing `parse_document` action, which
 //! returns documents over the same boundary in the opposite direction.
 
-use codec::{
+use document::{
     push_read_diagnostic, Document, DwgWriter, DxfWriter, Format, ReadDiagnostic, ReadOutcome,
     ReadStage, ReadStats,
 };
+
+mod dxf_reference_integrity;
+mod ifccad;
+
+pub use dxf_reference_integrity::{has_omitted_dxf_records, prune_omitted_dxf_records};
 
 /// Worker protocol version. Bumped whenever a request/response payload shape
 /// changes; the `?v=` cache-buster on the worker URL must match. v5 adds the
@@ -33,6 +38,14 @@ pub const PROTOCOL_VERSION: u16 = 5;
 pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     let ext = ext.to_lowercase();
     if ext == "dxf" {
+        let mut pruned;
+        let doc = if has_omitted_dxf_records(doc) {
+            pruned = doc.clone();
+            prune_omitted_dxf_records(&mut pruned);
+            &pruned
+        } else {
+            doc
+        };
         return DxfWriter::new(doc).write_to_vec().map_err(|e| e.to_string());
     }
     if let Some(format) = external_format(&ext) {
@@ -48,10 +61,27 @@ pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> 
 /// Converters for formats other than DWG/DXF, which keep their own richer read
 /// and write paths. A converter crate implementing [`Format`] is listed here to
 /// become available to open, save and the file dialogs.
-const EXTERNAL_FORMATS: &[&(dyn Format + Sync)] = &[&codec::Ifcx];
+const EXTERNAL_FORMATS: &[&(dyn Format + Sync)] = &[&ifccad::IfccadFormat];
 
 pub fn external_formats() -> &'static [&'static (dyn Format + Sync)] {
     EXTERNAL_FORMATS
+}
+
+/// Compact application label; the converter's machine identifier stays unchanged.
+pub fn external_format_label(format: &dyn Format) -> &str {
+    if format.extensions().contains(&"ifcx") {
+        "IFCCAD"
+    } else {
+        format.name()
+    }
+}
+
+/// Accept the display label and the old converter name in stored settings.
+pub fn external_format_by_label(label: &str) -> Option<&'static (dyn Format + Sync)> {
+    external_formats().iter().copied().find(|format| {
+        external_format_label(*format).eq_ignore_ascii_case(label)
+            || format.name().eq_ignore_ascii_case(label)
+    })
 }
 
 /// The listed converter for files with extension `ext`, if any.
@@ -60,6 +90,15 @@ pub fn external_format(ext: &str) -> Option<&'static (dyn Format + Sync)> {
         .iter()
         .copied()
         .find(|format| format.extensions().iter().any(|e| e.eq_ignore_ascii_case(ext)))
+}
+
+/// Filename gate shared by browser drop and URL opening. Matches the reader's
+/// extension convention, including dot-less names such as `DWG`.
+pub fn is_drawing_name(name: &str) -> bool {
+    let extension = name.rsplit('.').next().unwrap_or_default();
+    extension.eq_ignore_ascii_case("dwg")
+        || extension.eq_ignore_ascii_case("dxf")
+        || external_format(extension).is_some()
 }
 
 /// Write `doc` with a converter. Unless the user allowed it beforehand (see
@@ -92,7 +131,13 @@ pub const CONVERSION_LOSS: &str = "conversion-loss";
 /// read diagnostics, reported when the drawing opens; it is not damage, so the
 /// read does not count as recovered.
 pub fn read_external(format: &dyn Format, bytes: &[u8]) -> Result<ReadOutcome, String> {
-    let (document, losses) = format.read(bytes).map_err(|e| format!("{}: {e}", format.name()))?;
+    let (document, losses) = format.read(bytes).map_err(|error| {
+        if format.extensions().contains(&"ifcx") {
+            ifccad::read_error(bytes, &error.to_string())
+        } else {
+            format!("{}: {error}", format.name())
+        }
+    })?;
     let output_entities = document.entities().count();
     let output_objects = document.objects.len();
     // The open path refuses a read that decoded no records; an empty
@@ -146,7 +191,7 @@ pub fn extract_entity_runtime_fields(doc: &Document) -> Vec<EntityRuntimeFields>
     doc.entities()
         .map(|entity| {
             let common = entity.common();
-            let handle = |value: Option<codec::Handle>| value.map(|handle| handle.value());
+            let handle = |value: Option<document::Handle>| value.map(|handle| handle.value());
             EntityRuntimeFields {
                 handle: common.handle.value(),
                 linetype_handle: handle(common.linetype_handle),
@@ -170,9 +215,9 @@ pub fn extract_entity_runtime_fields(doc: &Document) -> Vec<EntityRuntimeFields>
 /// into a document that crossed a serde boundary. Entities whose handle no
 /// longer resolves are skipped silently (mirrors the parse direction).
 pub fn restore_entity_runtime_fields(document: &mut Document, fields: Vec<EntityRuntimeFields>) {
-    let handle = |value: Option<u64>| value.map(codec::Handle::new);
+    let handle = |value: Option<u64>| value.map(document::Handle::new);
     for fields in fields {
-        let Some(entity) = document.get_entity_mut(codec::Handle::new(fields.handle)) else {
+        let Some(entity) = document.get_entity_mut(document::Handle::new(fields.handle)) else {
             continue;
         };
         let common = entity.common_mut();
@@ -248,8 +293,8 @@ pub fn decode_response(bytes: &[u8]) -> Result<Result<Vec<u8>, String>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::{EntityType, Line, Point};
-    use codec::types::Vector3;
+    use document::entities::{EntityType, Line, Point};
+    use document::types::Vector3;
 
     fn sample_document() -> Document {
         let mut doc = Document::new();
@@ -257,12 +302,12 @@ mod tests {
         pt.common.handle = doc.allocate_handle();
         pt.common.layer = "RUNTIME-FIELDS".to_string();
         // Fill every serde-skipped field with a recognizable value.
-        pt.common.linetype_handle = Some(codec::Handle::new(0xABCD));
-        pt.common.color_book_handle = Some(codec::Handle::new(0x101));
+        pt.common.linetype_handle = Some(document::Handle::new(0xABCD));
+        pt.common.color_book_handle = Some(document::Handle::new(0x101));
         pt.common.material_flags = 0b11;
-        pt.common.material_handle = Some(codec::Handle::new(0x202));
+        pt.common.material_handle = Some(document::Handle::new(0x202));
         pt.common.plotstyle_flags = 0b11;
-        pt.common.plotstyle_handle = Some(codec::Handle::new(0x303));
+        pt.common.plotstyle_handle = Some(document::Handle::new(0x303));
         pt.common.shadow_flags = 7;
         pt.common.entity_mode = Some(2);
         pt.common.has_ds_data = true;
@@ -274,6 +319,95 @@ mod tests {
         line.common.handle = doc.allocate_handle();
         let _ = doc.add_entity(EntityType::Line(line));
         doc
+    }
+
+    #[test]
+    fn ifccad_names_pass_the_shared_web_open_filter() {
+        for name in [
+            "plan.ifccad", "PLAN.IFCCAD", "plan.ifcx", "PLAN.IFCX", "plan.dwg", "PLAN.DXF",
+        ] {
+            assert!(is_drawing_name(name), "{name}");
+        }
+        for name in ["plan.ifccad.txt", "image.png", "model.ifc", ""] {
+            assert!(!is_drawing_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn ifccad_extension_aliases_roundtrip_through_the_production_reader() {
+        let source = sample_document();
+        for extension in ["ifccad", "IFCCAD", "ifcx", "IFCX"] {
+            let format = external_format(extension).expect("native drawing extension");
+            let bytes = serialize_document(&source, extension).unwrap();
+            assert_eq!(bytes.first(), Some(&b'{'), "must not fall back to DWG");
+            let reopened = read_external(format, &bytes).unwrap();
+            assert!(reopened
+                .document
+                .entities()
+                .any(|e| matches!(e, EntityType::Line(_))));
+            assert!(read_external(format, b"{}").is_err());
+        }
+        for label in ["IFCCAD", "IFCX", "ifccad"] {
+            let format = external_format_by_label(label).unwrap();
+            assert_eq!(format.extensions().first(), Some(&"ifccad"));
+        }
+    }
+
+    #[test]
+    fn ifccad_read_explains_missing_drawing_without_calling_bim_invalid() {
+        let bytes = br#"{"header":{"ifcxVersion":"ifcx_alpha"},"imports":[],"schemas":{},"data":[{"path":"wall","attributes":{"usd::usdgeom::mesh":{"points":[]}}}]}"#;
+        let error = read_external(&document::Ifcx, bytes).unwrap_err();
+        assert!(
+            error.contains("does not contain an IFCCAD drawing"),
+            "{error}"
+        );
+        assert!(error.contains("BIM"), "{error}");
+        assert!(!error.contains("Invalid IFCX file"), "{error}");
+    }
+
+    #[test]
+    fn ifccad_read_keeps_malformed_input_distinct_from_missing_drawing() {
+        let error = read_external(&document::Ifcx, b"{broken").unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(
+            !error.contains("does not contain an IFCCAD drawing"),
+            "{error}"
+        );
+        assert!(error.contains("Details:"), "{error}");
+    }
+
+    #[test]
+    fn ifccad_read_explains_unsupported_profile_and_preserves_reader_details() {
+        let (bytes, _) = document::Ifcx.write(&Document::new()).unwrap();
+        // Change only the explicit profile version; retain all real writer output.
+        let text = String::from_utf8(bytes).unwrap();
+        let start = text.find("\"profileVersion\"").unwrap();
+        let value_start = start + text[start..].find(':').unwrap() + 1;
+        let quote_start = value_start + text[value_start..].find('"').unwrap();
+        let quote_end = quote_start + 1 + text[quote_start + 1..].find('"').unwrap();
+        let changed = format!("{}999.0.0{}", &text[..quote_start + 1], &text[quote_end..]);
+        let error = read_external(&document::Ifcx, changed.as_bytes()).unwrap_err();
+        assert!(
+            error.contains("unsupported IFCCAD profile version"),
+            "{error}"
+        );
+        assert!(error.contains("999.0.0"), "{error}");
+        assert!(error.contains("Details:"), "{error}");
+    }
+
+    #[test]
+    fn ifccad_read_accepts_empty_and_populated_production_output() {
+        for doc in [Document::new(), sample_document()] {
+            let (bytes, _) = document::Ifcx.write(&doc).unwrap();
+            let read = read_external(&document::Ifcx, &bytes).unwrap();
+            // The importer may add a model viewport helper to an empty drawing.
+            let geometry_count = |doc: &Document| {
+                doc.entities()
+                    .filter(|e| matches!(e, EntityType::Point(_) | EntityType::Line(_)))
+                    .count()
+            };
+            assert_eq!(geometry_count(&read.document), geometry_count(&doc));
+        }
     }
 
     // The sidecar is the whole reason documents don't lose raw DWG storage
@@ -344,7 +478,7 @@ mod tests {
     #[test]
     fn serialize_document_picks_format_by_extension() {
         let mut doc = Document::new();
-        doc.version = codec::DxfVersion::AC1032;
+        doc.version = document::DxfVersion::AC1032;
         let dxf = serialize_document(&doc, "dxf").expect("dxf bytes");
         assert!(!dxf.is_empty());
         assert!(

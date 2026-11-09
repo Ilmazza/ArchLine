@@ -5,13 +5,14 @@ use crate::modules::draw::draw::hatch_settings::{
     add_region, HatchRegion, RegionOrigin, ResolvedFill, ResolvedSettings,
 };
 use crate::modules::IconKind;
-use crate::scene::model::hatch_model::{HatchModel, HatchPattern, PatFamily};
+use crate::scene::model::hatch_model::{GradientKind, HatchModel, HatchPattern, PatFamily};
 use crate::scene::model::wire_model::WireModel;
 use crate::t;
-use codec::Handle;
+use super::polyline::{ArcStep, Sub};
+use document::Handle;
 use glam::DVec3;
 use kernel::geom2d::{
-    bounded_faces, contains, ring_nesting_depths, signed_area, Circle, Curve, Line, Tolerance,
+    bounded_faces, contains, ring_nesting_depths, signed_area, Curve, Line, Tolerance,
 };
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -37,14 +38,7 @@ pub const DROPDOWN_ITEMS: &[(&str, &str, IconKind)] = &[
     ("BOUNDARY", "Boundary", ICON_BOUNDARY),
 ];
 
-// ── Shared mode ────────────────────────────────────────────────────────────
-
-enum Mode {
-    /// Primary: click inside a closed shape → boundary auto-detected.
-    PickInside,
-    /// Fallback: user manually picks polygon vertices (type "S" to enter).
-    Manual,
-}
+// ── Shared ─────────────────────────────────────────────────────────────────
 
 /// The largest gap a boundary pick may bridge (HPGAPTOL range).
 pub const MAX_GAP_TOLERANCE: f64 = 5000.0;
@@ -117,7 +111,7 @@ fn polygon_contains_polygon(outer: &[[f64; 2]], inner: &[[f64; 2]]) -> bool {
 }
 
 /// Resolve the innermost clicked ring and its direct holes.
-fn resolve_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Vec<[f64; 2]>>> {
+pub(crate) fn resolve_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Vec<[f64; 2]>>> {
     let mut containing: Vec<(usize, f64)> = outlines
         .iter()
         .enumerate()
@@ -159,6 +153,25 @@ fn resolve_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Ve
     Some(rings)
 }
 
+/// HATCH's picked region: [`resolve_hatch_rings`] plus every outline nested
+/// deeper inside it. The reference keeps all of them, whatever the island
+/// style; the style picks the drawn loops from their path flags.
+fn picked_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Vec<[f64; 2]>>> {
+    let mut rings = resolve_hatch_rings(outlines, p)?;
+    let outer = rings[0].clone();
+    for outline in outlines {
+        if !rings.contains(outline)
+            && polygon_contains_polygon(&outer, outline)
+            && !point_in_polygon(p, outline)
+        {
+            rings.push(outline.clone());
+        }
+    }
+    Some(rings)
+}
+
+// ── ArchLine: the Hatch and Gradient window ──────────────────────────────
+
 /// The areas the chosen boundary objects enclose, one ring each. Open objects
 /// that together close an area count; handles that are not boundary sources
 /// are ignored.
@@ -185,37 +198,6 @@ pub fn object_regions_within(
         .into_iter()
         .map(|ring| HatchRegion { rings: vec![ring] })
         .collect()
-}
-
-/// Pack one or more rings (outer boundary + optional holes) into the Hatch
-/// model storage: the `boundary` f32 ring list (NaN-separated) plus the exact
-/// `boundary_wcs` (NaN-separated) used for persistence. The first vertex of the
-/// first ring anchors the shared origin.
-fn pack_rings(rings: &[Vec<[f64; 2]>]) -> (Vec<[f32; 2]>, [f64; 2], Vec<[f64; 2]>) {
-    let mut wcs: Vec<[f64; 2]> = Vec::new();
-    let mut first = true;
-    for ring in rings {
-        if !first {
-            wcs.push([f64::NAN, f64::NAN]);
-        }
-        first = false;
-        wcs.extend(ring.iter().copied());
-    }
-    let (rel, origin) = rte_boundary(wcs.iter().map(|&[x, y]| (x, y)));
-    (rel, origin, wcs)
-}
-
-/// Store boundary points as precise-origin-relative offsets.
-fn rte_boundary(pts: impl Iterator<Item = (f64, f64)>) -> (Vec<[f32; 2]>, [f64; 2]) {
-    let pts: Vec<(f64, f64)> = pts.collect();
-    let Some(&(ox, oy)) = pts.first() else {
-        return (vec![], [0.0; 2]);
-    };
-    let rel = pts
-        .iter()
-        .map(|&(x, y)| [(x - ox) as f32, (y - oy) as f32])
-        .collect();
-    (rel, [ox, oy])
 }
 
 /// Keep only the rings of a NaN-separated buffer whose entry in `keep` is true.
@@ -276,7 +258,431 @@ fn filter_rendered_rings(model: &mut HatchModel, depths: &[usize]) {
     }
 }
 
-// ── HATCH command ──────────────────────────────────────────────────────────
+/// Pack one or more rings (outer boundary + optional holes) into the Hatch
+/// model storage: the `boundary` f32 ring list (NaN-separated) plus the exact
+/// `boundary_wcs` (NaN-separated) used for persistence. The first vertex of the
+/// first ring anchors the shared origin.
+fn pack_rings(rings: &[Vec<[f64; 2]>]) -> (Vec<[f32; 2]>, [f64; 2], Vec<[f64; 2]>) {
+    let mut wcs: Vec<[f64; 2]> = Vec::new();
+    let mut first = true;
+    for ring in rings {
+        if !first {
+            wcs.push([f64::NAN, f64::NAN]);
+        }
+        first = false;
+        wcs.extend(ring.iter().copied());
+    }
+    let (rel, origin) = rte_boundary(wcs.iter().map(|&[x, y]| (x, y)));
+    (rel, origin, wcs)
+}
+
+/// Store boundary points as precise-origin-relative offsets.
+fn rte_boundary(pts: impl Iterator<Item = (f64, f64)>) -> (Vec<[f32; 2]>, [f64; 2]) {
+    let pts: Vec<(f64, f64)> = pts.collect();
+    let Some(&(ox, oy)) = pts.first() else {
+        return (vec![], [0.0; 2]);
+    };
+    let rel = pts
+        .iter()
+        .map(|&(x, y)| [(x - ox) as f32, (y - oy) as f32])
+        .collect();
+    (rel, [ox, oy])
+}
+
+// ── HATCH / GRADIENT command ───────────────────────────────────────────────
+
+thread_local! {
+    /// HPNAME: the pattern a new hatch starts with, for this session only.
+    static HPNAME: std::cell::RefCell<String> = std::cell::RefCell::new("_SOLID".to_string());
+}
+
+/// HPNAME as it is stored (`_SOLID` at first, `SOLID` after a gradient).
+pub fn hpname() -> String {
+    HPNAME.with(|name| name.borrow().clone())
+}
+
+pub fn set_hpname(name: &str) {
+    HPNAME.with(|hpname| *hpname.borrow_mut() = name.to_string());
+}
+
+/// The pattern a typed HPNAME names, spelled as the pattern file has it
+/// (a leading `_` kept); `.` is the first pattern of the file.
+pub fn hpname_value(typed: &str) -> Option<String> {
+    let typed = typed.trim().trim_matches('"');
+    if typed == "." {
+        return crate::scene::model::hatch_patterns::catalog()
+            .iter()
+            .find(|entry| matches!(entry.gpu, HatchPattern::Pattern(_)))
+            .map(|entry| entry.name.clone());
+    }
+    let bare = typed.strip_prefix('_').unwrap_or(typed);
+    crate::scene::model::hatch_patterns::find(bare).map(|entry| {
+        let prefix = if typed.starts_with('_') { "_" } else { "" };
+        format!("{prefix}{}", entry.name)
+    })
+}
+
+/// HPNAME when it names a pattern, else `fallback`.
+pub fn last_pattern_name(fallback: &str) -> String {
+    let name = hpname().trim_start_matches('_').to_string();
+    if name.eq_ignore_ascii_case("SOLID") {
+        fallback.to_string()
+    } else {
+        name
+    }
+}
+
+/// The boundary method and draw mode HATCH and GRADIENT start with, kept in
+/// the profile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HatchPrefs {
+    /// 0 pick internal point, 1 select objects, 2 draw.
+    pub method: u8,
+    /// Draw mode Path (else Area).
+    pub path: bool,
+    /// Path width.
+    pub width: f64,
+    /// Path alignment: 0 center, 1 inside, 2 outside.
+    pub alignment: u8,
+}
+
+impl Default for HatchPrefs {
+    fn default() -> Self {
+        Self {
+            method: 0,
+            path: false,
+            width: 0.25,
+            alignment: 0,
+        }
+    }
+}
+
+/// What a hatch is filled with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HatchFill {
+    Solid,
+    Pattern(String),
+    /// Parallel lines `spacing` apart, crossed at 90° when `double`.
+    User { spacing: f64, double: bool },
+    Gradient(GradientKind, bool),
+}
+
+/// HATCH's settings as the Hatch panel shows and edits them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HatchSettings {
+    /// Solid, a named pattern, user-defined lines or a gradient.
+    pub fill: HatchFill,
+    pub angle_deg: f64,
+    pub scale: f64,
+    pub origin: [f64; 2],
+    /// 0 pick internal point, 1 select objects, 2 draw.
+    pub method: u8,
+    pub islands: document::entities::HatchStyleType,
+    pub associative: bool,
+    pub separate: bool,
+    pub keep_boundaries: bool,
+    pub gap_tolerance: f64,
+    /// `None`: the current colour.
+    pub color: Option<document::types::Color>,
+    /// `None`: no background colour.
+    pub background: Option<document::types::Color>,
+    /// `None`: the current layer.
+    pub layer: Option<String>,
+    /// `None`: the current transparency; else 0–90 percent.
+    pub transparency: Option<u8>,
+    /// GFCLR1 / GFCLR2.
+    pub gradient_colors: [document::types::Color; 2],
+    /// HPDRAWORDER: 0 none, 1 back, 2 front, 3 behind the boundary,
+    /// 4 in front of the boundary.
+    pub draw_order: u8,
+    /// HPANNOTATIVE.
+    pub annotative: bool,
+}
+
+/// The prompt HATCH is at besides its boundary method's own prompt.
+#[derive(Clone, Copy, PartialEq)]
+enum HatchStep {
+    /// The method's prompt: pick, select, or the draw start / next point.
+    Main,
+    /// Draw: Mode's Area/Path question.
+    DrawMode,
+    /// Draw: Path alignment.
+    Alignment,
+    /// Draw: Path width.
+    Width,
+    /// Draw: Length's distance along the last segment.
+    Length,
+}
+
+/// A draw-mode boundary made by a drawing command's own steps.
+enum Shape {
+    Rect(super::shapes::RectCommand),
+    Circle(super::circle::CircleCommand),
+    ThreePoint(super::circle::Circle3PCommand),
+    TwoPoint(super::circle::Circle2PCommand),
+    Ttr(super::circle::CircleTTRCommand),
+}
+
+impl Shape {
+    fn command(&self) -> &dyn CadCommand {
+        match self {
+            Shape::Rect(c) => c,
+            Shape::Circle(c) => c,
+            Shape::ThreePoint(c) => c,
+            Shape::TwoPoint(c) => c,
+            Shape::Ttr(c) => c,
+        }
+    }
+
+    fn command_mut(&mut self) -> &mut dyn CadCommand {
+        match self {
+            Shape::Rect(c) => c,
+            Shape::Circle(c) => c,
+            Shape::ThreePoint(c) => c,
+            Shape::TwoPoint(c) => c,
+            Shape::Ttr(c) => c,
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self {
+            Shape::Rect(c) => c.hatch_prompt(),
+            Shape::Circle(c) => c.hatch_prompt(),
+            Shape::ThreePoint(c) => c.hatch_prompt(),
+            Shape::TwoPoint(c) => c.hatch_prompt(),
+            Shape::Ttr(c) => c.hatch_prompt(),
+        }
+    }
+
+    /// Ttr waiting for a tangent object.
+    fn wants_tangent(&self) -> bool {
+        matches!(self, Shape::Ttr(c) if c.needs_tangent_pick())
+    }
+}
+
+/// The method HATCH starts with, as the profile stores it.
+fn method_code(mode: HatchMode) -> u8 {
+    match mode {
+        HatchMode::PickInside => 0,
+        HatchMode::SelectObjects => 1,
+        HatchMode::Manual => 2,
+    }
+}
+
+fn parse_number(text: &str) -> Option<f64> {
+    text.trim()
+        .replace(',', ".")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+/// The pattern a fill draws with, and its name.
+/// GFCLR1 / GFCLR2: the two colours a new gradient starts with.
+pub const GRADIENT_COLORS: [document::types::Color; 2] =
+    [document::types::Color::Index(5), document::types::Color::Index(2)];
+
+/// A colour as the fill renders it.
+pub fn color_rgba(color: &document::types::Color, alpha: f32) -> [f32; 4] {
+    let (r, g, b) = match color {
+        document::types::Color::Rgb { r, g, b } => (*r, *g, *b),
+        document::types::Color::Index(index) => {
+            document::types::aci_table::aci_to_rgb(*index).unwrap_or((128, 128, 128))
+        }
+        _ => (255, 255, 255),
+    };
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, alpha]
+}
+
+pub fn fill_pattern(
+    fill: &HatchFill,
+    angle_deg: f32,
+    colors: &[document::types::Color; 2],
+) -> (String, HatchPattern) {
+    match fill {
+        HatchFill::Solid => ("SOLID".into(), HatchPattern::Solid),
+        HatchFill::Pattern(name) => crate::scene::model::hatch_patterns::find(name)
+            .map(|entry| (entry.name.clone(), entry.gpu.clone()))
+            .unwrap_or_else(|| ("SOLID".into(), HatchPattern::Solid)),
+        HatchFill::User { spacing, double } => {
+            let family = |angle_deg: f32| PatFamily {
+                angle_deg,
+                x0: 0.0,
+                y0: 0.0,
+                dx: 0.0,
+                dy: *spacing as f32,
+                dashes: vec![],
+            };
+            let mut families = vec![family(0.0)];
+            if *double {
+                families.push(family(90.0));
+            }
+            ("_USER".into(), HatchPattern::Pattern(families))
+        }
+        HatchFill::Gradient(kind, invert) => (
+            kind.dxf_name(*invert).into(),
+            HatchPattern::Gradient {
+                angle_deg,
+                color2: color_rgba(&colors[1], 0.0),
+                kind: *kind,
+                invert: *invert,
+                shift: 0.0,
+                // ArchLine: the one-colour fields of the Hatch and Gradient window.
+                one_color: false,
+                tint: 1.0,
+            },
+        ),
+    }
+}
+
+fn same_point(a: [f64; 2], b: [f64; 2]) -> bool {
+    let scale = 1.0 + a[0].abs().max(a[1].abs());
+    (a[0] - b[0]).abs() <= 1.0e-9 * scale && (a[1] - b[1]).abs() <= 1.0e-9 * scale
+}
+
+/// A loop of points and bulges with its arcs tessellated.
+fn bulged_ring(points: &[[f64; 2]], bulges: &[f64]) -> Vec<[f64; 2]> {
+    let count = points.len();
+    let mut ring = Vec::new();
+    for (index, &start) in points.iter().enumerate() {
+        let end = points[(index + 1) % count];
+        let bulge = bulges.get(index).copied().unwrap_or(0.0);
+        match kernel::geom2d::BulgeArc::from_bulge(start, end, bulge)
+            .filter(|_| bulge.abs() > 1.0e-12)
+        {
+            Some(arc) => {
+                let mut arc_points = arc.tessellate_angle(std::f64::consts::PI / 32.0);
+                arc_points.pop();
+                ring.extend(arc_points);
+            }
+            None => ring.push(start),
+        }
+    }
+    ring
+}
+
+/// One side of a path band: the path's segments moved `distance` to the left
+/// of travel (a negative distance to the right), joined where they meet.
+/// Lines meeting lines are mitred; segments that already meet (a tangent
+/// arc) join at that point. `None` for a joint it cannot make that way.
+fn offset_rail(
+    points: &[[f64; 2]],
+    bulges: &[f64],
+    closed: bool,
+    distance: f64,
+) -> Option<(Vec<[f64; 2]>, Vec<f64>)> {
+    let count = points.len();
+    let segments: Vec<([f64; 2], [f64; 2], f64)> = (0..bulges.len())
+        .map(|k| (points[k], points[(k + 1) % count], bulges[k]))
+        .collect();
+    let mut moved = Vec::with_capacity(segments.len());
+    for &(a, b, bulge) in &segments {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let length = dx.hypot(dy);
+        if length <= 0.0 {
+            return None;
+        }
+        if bulge.abs() <= 1.0e-12 {
+            let n = [-dy / length * distance, dx / length * distance];
+            moved.push(([a[0] + n[0], a[1] + n[1]], [b[0] + n[0], b[1] + n[1]], 0.0));
+            continue;
+        }
+        let arc = kernel::geom2d::BulgeArc::from_bulge(a, b, bulge)?;
+        // A counter-clockwise arc has its centre on the left.
+        let radius = if bulge > 0.0 {
+            arc.radius - distance
+        } else {
+            arc.radius + distance
+        };
+        if radius <= 0.0 {
+            return None;
+        }
+        let at = |p: [f64; 2]| {
+            let (vx, vy) = (p[0] - arc.center[0], p[1] - arc.center[1]);
+            let r = vx.hypot(vy);
+            [arc.center[0] + vx / r * radius, arc.center[1] + vy / r * radius]
+        };
+        moved.push((at(a), at(b), bulge));
+    }
+    let join = |k: usize, next: usize| -> Option<[f64; 2]> {
+        let (a0, a1, ab) = moved[k];
+        let (b0, b1, bb) = moved[next];
+        if same_point(a1, b0) {
+            return Some(a1);
+        }
+        if ab.abs() > 1.0e-12 || bb.abs() > 1.0e-12 {
+            return None;
+        }
+        let (d1, d2) = ([a1[0] - a0[0], a1[1] - a0[1]], [b1[0] - b0[0], b1[1] - b0[1]]);
+        let cross = d1[0] * d2[1] - d1[1] * d2[0];
+        if cross.abs() <= 1.0e-12 * d1[0].hypot(d1[1]) * d2[0].hypot(d2[1]) {
+            return Some(a1);
+        }
+        let t = ((b0[0] - a0[0]) * d2[1] - (b0[1] - a0[1]) * d2[0]) / cross;
+        Some([a0[0] + d1[0] * t, a0[1] + d1[1] * t])
+    };
+    let n = moved.len();
+    let mut out = Vec::with_capacity(n + 1);
+    if closed {
+        for k in 0..n {
+            out.push(join((k + n - 1) % n, k)?);
+        }
+    } else {
+        out.push(moved[0].0);
+        for k in 1..n {
+            out.push(join(k - 1, k)?);
+        }
+        out.push(moved[n - 1].1);
+    }
+    let mut out_bulges: Vec<f64> = segments.iter().map(|s| s.2).collect();
+    if !closed {
+        out_bulges.push(0.0);
+    }
+    Some((out, out_bulges))
+}
+
+/// Join boundary edges end to end into closed loops, dropping vertices in
+/// the middle of a straight run.
+fn chain_loops(mut edges: Vec<[[f64; 2]; 2]>) -> Vec<Vec<[f64; 2]>> {
+    let size = edges
+        .iter()
+        .flatten()
+        .fold(1.0_f64, |size, p| size.max(p[0].abs()).max(p[1].abs()));
+    let tolerance = size * 1.0e-9;
+    let same = |a: [f64; 2], b: [f64; 2]| {
+        (a[0] - b[0]).abs() <= tolerance && (a[1] - b[1]).abs() <= tolerance
+    };
+    let mut loops = Vec::new();
+    while let Some(first) = edges.pop() {
+        let mut ring = vec![first[0], first[1]];
+        loop {
+            let end = ring[ring.len() - 1];
+            if same(end, ring[0]) {
+                ring.pop();
+                break;
+            }
+            let Some(index) = edges.iter().position(|e| same(e[0], end) || same(e[1], end))
+            else {
+                break;
+            };
+            let edge = edges.swap_remove(index);
+            ring.push(if same(edge[0], end) { edge[1] } else { edge[0] });
+        }
+        let count = ring.len();
+        let ring: Vec<[f64; 2]> = (0..count)
+            .filter(|&i| {
+                let [a, b, c] = [ring[(i + count - 1) % count], ring[i], ring[(i + 1) % count]];
+                let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+                cross.abs() > tolerance * tolerance
+            })
+            .map(|i| ring[i])
+            .collect();
+        if ring.len() >= 3 {
+            loops.push(ring);
+        }
+    }
+    loops
+}
 
 pub struct HatchCommand {
     boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
@@ -284,43 +690,64 @@ pub struct HatchCommand {
     object_regions: Vec<Vec<Vec<[f64; 2]>>>,
     selected_objects: Vec<Handle>,
     mode: HatchMode,
+    step: HatchStep,
+    prefs: HatchPrefs,
+    /// The method or draw mode changed: kept for the next start.
+    prefs_changed: bool,
+    /// GRADIENT: the same prompts, a gradient fill.
+    gradient: bool,
+    /// A point was picked: later picks only analyse islands.
+    analyzed: bool,
     manual_pts: Vec<DVec3>,
     manual_bulges: Vec<f64>,
     manual_arc_mode: bool,
-    manual_arc_midpoint: Option<DVec3>,
-    missed: bool,
+    /// The arc option being answered (PLINE's arc steps); `None` asks for
+    /// the endpoint of a tangent arc.
+    arc_sub: Sub,
+    shape: Option<Shape>,
     retain_boundaries: bool,
-    pattern_override: Option<(String, HatchPattern)>,
+    /// The fill chosen in the settings (else the selected hatch's or HPNAME).
+    fill: Option<HatchFill>,
     angle_override: Option<f32>,
     scale_override: Option<f32>,
     default_origin: [f64; 2],
     associative: bool,
     separate_hatches: bool,
-    island_style: codec::entities::HatchStyleType,
-    inherited: Option<(HatchModel, codec::types::Color, codec::types::Transparency)>,
+    island_style: document::entities::HatchStyleType,
+    /// The Hatch panel's entity settings (see `HatchSettings`).
+    color: Option<document::types::Color>,
+    background: Option<document::types::Color>,
+    layer: Option<String>,
+    transparency: Option<u8>,
+    draw_order: u8,
+    annotative: bool,
+    gradient_colors: [document::types::Color; 2],
+    /// The elevation of the boundary being finished (a rectangle's).
+    elevation: f64,
+    inherited: Option<(HatchModel, document::types::Color, document::types::Transparency)>,
     plane: WorkingPlane,
-    /// The HATCH dialog's collector: Enter hands the regions back instead of
-    /// committing a hatch, and the settings keywords belong to the dialog.
-    collect_only: bool,
-    /// The dialog's Gradient tab; `None` for a pattern or solid hatch. Set by
-    /// `with_settings`.
-    gradient: Option<crate::entities::hatch_fill::GradientSpec>,
-    /// The colour and transparency the hatch is created with (resolved by the
-    /// app, "Use Current" included); `None` keeps the defaults.
-    creation_style: Option<(codec::types::Color, codec::types::Transparency)>,
-    /// The RGBA the preview of a pattern or solid is drawn with.
-    preview_color: Option<[f32; 4]>,
-    /// Largest gap in a boundary still treated as closed (`HPGAPTOL`).
+    /// HPGAPTOL: gaps up to this size count as closed for a picked point.
     gap_tolerance: f64,
-    /// The next typed value sets `gap_tolerance`.
-    gap_prompt: bool,
+    /// ArchLine, the Hatch and Gradient window's collector: Enter hands the
+    /// regions back instead of committing a hatch, and the settings keywords
+    /// belong to the window.
+    collect_only: bool,
+    /// ArchLine: the window's Gradient tab (one colour, tint, centred);
+    /// `None` for a pattern or solid hatch. Set by `with_settings`.
+    gradient_spec: Option<crate::entities::hatch_fill::GradientSpec>,
+    /// ArchLine: the colour and transparency the window creates the hatch
+    /// with (resolved by the app, "Use Current" included); `None` keeps the
+    /// defaults.
+    creation_style: Option<(document::types::Color, document::types::Transparency)>,
+    /// ArchLine: the RGBA the window's preview of a pattern or solid is drawn with.
+    preview_color: Option<[f32; 4]>,
 }
 
 impl HatchCommand {
     pub fn new(
         boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
         selected_objects: Vec<Handle>,
-        inherited: Option<(HatchModel, codec::types::Color, codec::types::Transparency)>,
+        inherited: Option<(HatchModel, document::types::Color, document::types::Transparency)>,
         plane: WorkingPlane,
     ) -> Self {
         let selected_objects: Vec<_> = selected_objects
@@ -338,13 +765,18 @@ impl HatchCommand {
             } else {
                 HatchMode::PickInside
             },
+            step: HatchStep::Main,
+            prefs: HatchPrefs::default(),
+            prefs_changed: false,
+            gradient: false,
+            analyzed: false,
             manual_pts: vec![],
             manual_bulges: vec![],
             manual_arc_mode: false,
-            manual_arc_midpoint: None,
-            missed: false,
+            arc_sub: Sub::None,
+            shape: None,
             retain_boundaries: false,
-            pattern_override: None,
+            fill: None,
             angle_override: None,
             scale_override: None,
             default_origin: [0.0, 0.0],
@@ -353,18 +785,53 @@ impl HatchCommand {
             island_style: inherited
                 .as_ref()
                 .map(|(model, _, _)| model.style)
-                .unwrap_or(codec::entities::HatchStyleType::Normal),
+                .unwrap_or(document::entities::HatchStyleType::Normal),
+            color: None,
+            background: None,
+            layer: None,
+            transparency: None,
+            // HPDRAWORDER starts behind the boundary.
+            draw_order: 3,
+            annotative: false,
+            gradient_colors: GRADIENT_COLORS,
+            elevation: 0.0,
             inherited,
             plane,
+            gap_tolerance: 0.0,
             collect_only: false,
-            gradient: None,
+            gradient_spec: None,
             creation_style: None,
             preview_color: None,
-            gap_tolerance: 1.0e-6,
-            gap_prompt: false,
         };
         command.set_object_selection(selected_objects);
         command
+    }
+
+    /// GRADIENT: the same boundary steps with a gradient fill.
+    pub fn gradient(mut self) -> Self {
+        self.gradient = true;
+        self.inherited = None;
+        self.fill = Some(HatchFill::Gradient(GradientKind::Linear, false));
+        self
+    }
+
+    /// The boundary method and draw mode used last. Preselected objects
+    /// still start in select mode.
+    pub fn with_prefs(mut self, prefs: HatchPrefs) -> Self {
+        self.prefs = prefs;
+        if self.selected_objects.is_empty() {
+            self.mode = match prefs.method {
+                1 => HatchMode::SelectObjects,
+                2 => HatchMode::Manual,
+                _ => HatchMode::PickInside,
+            };
+        }
+        self
+    }
+
+    /// The line printed before the first prompt (draw mode's current mode).
+    pub fn start_message(&self) -> Option<String> {
+        (self.mode == HatchMode::Manual).then(|| self.current_mode_text())
     }
 
     /// HPASSOC: whether the hatch starts out associative.
@@ -373,9 +840,10 @@ impl HatchCommand {
         self
     }
 
-    /// Close boundary gaps up to `tolerance` (`HPGAPTOL`); the caller built `outlines` with it.
-    pub fn with_gap_tolerance(mut self, tolerance: f64) -> Self {
-        self.gap_tolerance = tolerance;
+    /// HPGAPTOL: the largest gap a picked boundary may have.
+    pub fn with_gap_tolerance(mut self, gap_tolerance: f64) -> Self {
+        self.gap_tolerance = gap_tolerance;
+        // ArchLine: selected objects close their gaps up to HPGAPTOL too.
         self.set_object_selection(self.selected_objects.clone());
         self
     }
@@ -386,7 +854,12 @@ impl HatchCommand {
     }
 
     pub fn with_pattern(mut self, name: impl Into<String>, pattern: HatchPattern) -> Self {
-        self.pattern_override = Some((name.into(), pattern));
+        let name = name.into();
+        self.fill = Some(match pattern {
+            HatchPattern::Solid => HatchFill::Solid,
+            HatchPattern::Gradient { kind, invert, .. } => HatchFill::Gradient(kind, invert),
+            HatchPattern::Pattern(_) => HatchFill::Pattern(name),
+        });
         self
     }
 
@@ -394,11 +867,29 @@ impl HatchCommand {
         self.on_enter()
     }
 
+    /// Whether `handles` gave no closed boundary.
+    fn set_object_selection(&mut self, handles: Vec<Handle>) -> bool {
+        self.object_regions =
+            object_regions_within(&self.boundary_sources, &handles, self.boundary_tolerance())
+                .into_iter()
+                .map(|region| region.rings)
+                .collect();
+        let missed = !handles.is_empty() && self.object_regions.is_empty();
+        self.selected_objects = handles;
+        missed
+    }
+
+    /// ArchLine: the tolerance boundary sources are matched at, HPGAPTOL
+    /// with the kernel's floor (upstream uses the floor alone).
+    fn boundary_tolerance(&self) -> f64 {
+        self.gap_tolerance.max(1.0e-6)
+    }
+
     /// The colour and transparency the hatch is made with (the app resolves
     /// "Use Current"). `None`: as always, the entity takes the defaults.
     pub fn with_creation_style(
         mut self,
-        style: Option<(codec::types::Color, codec::types::Transparency)>,
+        style: Option<(document::types::Color, document::types::Transparency)>,
     ) -> Self {
         self.creation_style = style;
         self
@@ -412,7 +903,7 @@ impl HatchCommand {
 
     /// The style the commit carries: the one chosen at creation, else the one
     /// inherited from the source hatch (`-HATCH` Inherit).
-    fn entity_style(&self) -> Option<(codec::types::Color, codec::types::Transparency)> {
+    fn entity_style(&self) -> Option<(document::types::Color, document::types::Transparency)> {
         self.creation_style.clone().or_else(|| {
             self.inherited
                 .as_ref()
@@ -442,16 +933,19 @@ impl HatchCommand {
                 ..
             } => {
                 let entry = crate::scene::model::hatch_patterns::find(pattern);
-                self.pattern_override = entry.map(|entry| (entry.name.clone(), entry.gpu.clone()));
+                self.fill = entry.map(|entry| match entry.gpu {
+                    HatchPattern::Solid => HatchFill::Solid,
+                    _ => HatchFill::Pattern(entry.name.clone()),
+                });
                 self.angle_override = Some(*angle_rad);
                 self.scale_override = Some(*scale);
-                self.gradient = None;
+                self.gradient_spec = None;
             }
             ResolvedFill::Gradient(spec) => {
-                self.pattern_override = None;
+                self.fill = None;
                 self.angle_override = None;
                 self.scale_override = None;
-                self.gradient = Some(spec.clone());
+                self.gradient_spec = Some(spec.clone());
             }
         }
         self.associative = settings.associative;
@@ -515,17 +1009,20 @@ impl HatchCommand {
     /// separately, otherwise one for everything, each with the rings the island
     /// style hides taken out of what is rendered.
     pub fn preview_models(&self) -> Vec<HatchModel> {
-        let manual_ring = (matches!(self.mode, HatchMode::Manual) && self.manual_pts.len() >= 3)
-            .then(|| {
-                self.manual_pts
-                    .iter()
-                    .map(|point| [point.x, point.y])
-                    .collect::<Vec<[f64; 2]>>()
-            });
+        // What is being drawn, as upstream previews it (an area's ring, or a
+        // path's bands).
+        let mut drawn: Vec<Vec<[f64; 2]>> = Vec::new();
+        if self.mode == HatchMode::Manual && self.shape.is_none() {
+            if self.prefs.path {
+                drawn.extend(self.path_loops(false).iter().map(|(p, b)| bulged_ring(p, b)));
+            } else if self.manual_pts.len() >= 3 {
+                drawn.push(self.drawn_ring());
+            }
+        }
         // Manual mode always commits one combined hatch, so it previews one.
         let groups: Vec<Vec<Vec<[f64; 2]>>> = if self.separate_hatches
             && !self.retain_boundaries
-            && !matches!(self.mode, HatchMode::Manual)
+            && self.mode != HatchMode::Manual
         {
             let mut regions: Vec<Vec<Vec<[f64; 2]>>> = self
                 .point_regions
@@ -533,15 +1030,13 @@ impl HatchCommand {
                 .chain(self.object_regions.iter())
                 .cloned()
                 .collect();
-            if let Some(ring) = manual_ring {
-                regions.push(vec![ring]);
+            if !drawn.is_empty() {
+                regions.push(drawn);
             }
             regions
         } else {
             let mut rings = self.combined_rings();
-            if let Some(ring) = manual_ring {
-                rings.push(ring);
-            }
+            rings.extend(drawn);
             if rings.is_empty() {
                 Vec::new()
             } else {
@@ -567,15 +1062,6 @@ impl HatchCommand {
             .collect()
     }
 
-    fn set_object_selection(&mut self, handles: Vec<Handle>) {
-        self.object_regions = object_regions_within(&self.boundary_sources, &handles, self.gap_tolerance)
-            .into_iter()
-            .map(|region| region.rings)
-            .collect();
-        self.missed = !handles.is_empty() && self.object_regions.is_empty();
-        self.selected_objects = handles;
-    }
-
     fn add_point_region(&mut self, rings: Vec<Vec<[f64; 2]>>) {
         let duplicate = rings.first().is_some_and(|outer| {
             self.point_regions
@@ -591,12 +1077,451 @@ impl HatchCommand {
         self.point_regions.len() + self.object_regions.len()
     }
 
-    fn island_style_label(&self) -> &'static str {
-        match self.island_style {
-            codec::entities::HatchStyleType::Normal => "Normal",
-            codec::entities::HatchStyleType::Outer => "Outer",
-            codec::entities::HatchStyleType::Ignore => "Ignore",
+    /// Switch to a boundary method typed at a prompt.
+    fn choose(&mut self, mode: HatchMode) -> CmdResult {
+        self.mode = mode;
+        self.prefs.method = method_code(mode);
+        self.prefs_changed = true;
+        self.step = HatchStep::Main;
+        self.shape = None;
+        self.reset_drawing();
+        if mode == HatchMode::Manual {
+            self.current_mode()
+        } else {
+            CmdResult::NeedPoint
         }
+    }
+
+    fn alignment_label(&self) -> &'static str {
+        match self.prefs.alignment {
+            1 => "Inside",
+            2 => "Outside",
+            _ => "Center",
+        }
+    }
+
+    fn current_mode_text(&self) -> String {
+        if self.prefs.path {
+            crate::tr!(
+                "hatch-cmd",
+                "current-path",
+                width = format!("{:.4}", self.prefs.width),
+                alignment = self.alignment_label()
+            )
+        } else {
+            crate::tr!("hatch-cmd", "current-mode")
+        }
+    }
+
+    fn current_mode(&self) -> CmdResult {
+        CmdResult::ReportMeasurement(self.current_mode_text())
+    }
+
+    /// The fill a new hatch starts with: the setting chosen, else the
+    /// selected hatch's, else HPNAME.
+    fn current_fill(&self) -> HatchFill {
+        if let Some(fill) = &self.fill {
+            return fill.clone();
+        }
+        let name = match &self.inherited {
+            Some((model, _, _)) => model.name.clone(),
+            None => hpname().trim_start_matches('_').to_string(),
+        };
+        if name.eq_ignore_ascii_case("SOLID") {
+            HatchFill::Solid
+        } else {
+            HatchFill::Pattern(name)
+        }
+    }
+
+    /// The settings the Hatch panel shows.
+    fn current_settings(&self) -> HatchSettings {
+        let inherited = self.inherited.as_ref().map(|(model, _, _)| model);
+        HatchSettings {
+            fill: self.current_fill(),
+            angle_deg: f64::from(
+                self.angle_override
+                    .or(inherited.map(|model| model.angle_offset))
+                    .unwrap_or(0.0),
+            )
+            .to_degrees(),
+            scale: f64::from(
+                self.scale_override
+                    .or(inherited.map(|model| model.scale))
+                    .unwrap_or(1.0),
+            ),
+            origin: self.default_origin,
+            method: method_code(self.mode),
+            islands: self.island_style,
+            associative: self.associative,
+            separate: self.separate_hatches,
+            keep_boundaries: self.retain_boundaries,
+            gap_tolerance: self.gap_tolerance,
+            color: self.color.clone(),
+            background: self.background.clone(),
+            layer: self.layer.clone(),
+            transparency: self.transparency,
+            gradient_colors: self.gradient_colors.clone(),
+            draw_order: self.draw_order,
+            annotative: self.annotative,
+        }
+    }
+
+    /// Take what the Hatch panel changed; keeping boundaries and separate
+    /// hatches exclude each other as at the prompt.
+    fn apply_settings(&mut self, settings: HatchSettings) {
+        let now = self.current_settings();
+        if settings.fill != now.fill {
+            if matches!(settings.fill, HatchFill::Solid | HatchFill::Pattern(_)) && !self.gradient {
+                let (name, _) = fill_pattern(&settings.fill, 0.0, &self.gradient_colors);
+                set_hpname(&name);
+            }
+            self.fill = Some(settings.fill.clone());
+        }
+        if settings.angle_deg != now.angle_deg && settings.angle_deg.is_finite() {
+            self.angle_override = Some((settings.angle_deg as f32).to_radians());
+        }
+        if settings.scale != now.scale && settings.scale > 0.0 {
+            self.scale_override = Some(settings.scale as f32);
+        }
+        self.default_origin = settings.origin;
+        if settings.method != now.method {
+            let _ = self.choose(match settings.method {
+                1 => HatchMode::SelectObjects,
+                2 => HatchMode::Manual,
+                _ => HatchMode::PickInside,
+            });
+        }
+        self.island_style = settings.islands;
+        self.associative = settings.associative;
+        if settings.separate != now.separate {
+            self.separate_hatches = settings.separate;
+            self.retain_boundaries &= !settings.separate;
+        }
+        if settings.keep_boundaries != now.keep_boundaries {
+            self.retain_boundaries = settings.keep_boundaries;
+            self.separate_hatches &= !settings.keep_boundaries;
+        }
+        self.gap_tolerance = settings.gap_tolerance.clamp(0.0, MAX_GAP_TOLERANCE);
+        self.color = settings.color;
+        self.background = settings.background;
+        self.layer = settings.layer;
+        self.transparency = settings.transparency;
+        self.gradient_colors = settings.gradient_colors;
+        self.draw_order = settings.draw_order.min(4);
+        self.annotative = settings.annotative;
+    }
+
+    fn reset_drawing(&mut self) {
+        self.manual_pts.clear();
+        self.manual_bulges.clear();
+        self.manual_arc_mode = false;
+        self.arc_sub = Sub::None;
+    }
+
+    fn drawn_polyline(&self, closed: bool) -> kernel::geom2d::Polyline {
+        kernel::geom2d::Polyline {
+            vertices: self
+                .manual_pts
+                .iter()
+                .enumerate()
+                .map(|(index, point)| kernel::geom2d::PolylineVertex {
+                    position: [point.x, point.y],
+                    bulge: self.manual_bulges.get(index).copied().unwrap_or(0.0),
+                })
+                .collect(),
+            closed,
+        }
+    }
+
+    /// The drawn boundary: points and the bulge of the segment leaving each.
+    fn drawn_loop(&self) -> (Vec<[f64; 2]>, Vec<f64>) {
+        let points = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
+        let mut bulges = self.manual_bulges.clone();
+        bulges.resize(self.manual_pts.len(), 0.0);
+        (points, bulges)
+    }
+
+    /// The drawn boundary with its arcs tessellated.
+    fn drawn_ring(&self) -> Vec<[f64; 2]> {
+        let (points, bulges) = self.drawn_loop();
+        bulged_ring(&points, &bulges)
+    }
+
+    /// Path mode: the band the drawn path sweeps at the path width, on the
+    /// alignment's side (Inside = left of the direction of travel). Its
+    /// sides follow the path's lines and arcs; corners between lines are
+    /// mitred and the ends are square at the path's ends.
+    fn path_loops(&self, closed: bool) -> Vec<(Vec<[f64; 2]>, Vec<f64>)> {
+        let width = self.prefs.width;
+        let (points, mut bulges) = self.drawn_loop();
+        if points.len() < 2 || width <= 0.0 {
+            return Vec::new();
+        }
+        if !closed {
+            bulges.pop();
+        }
+        let (left, right) = match self.prefs.alignment {
+            1 => (width, 0.0),
+            2 => (0.0, -width),
+            _ => (width * 0.5, -width * 0.5),
+        };
+        let rails = (
+            offset_rail(&points, &bulges, closed, left),
+            offset_rail(&points, &bulges, closed, right),
+        );
+        let (Some(left), Some(right)) = rails else {
+            // ponytail: a rail with a non-tangent arc joint falls back to
+            // the kernel's tessellated band.
+            return self
+                .band_rings(closed)
+                .into_iter()
+                .map(|ring| {
+                    let bulges = vec![0.0; ring.len()];
+                    (ring, bulges)
+                })
+                .collect();
+        };
+        if closed {
+            return vec![left, right];
+        }
+        // Open: up one side, square across the end, back down the other.
+        let (mut points, mut out) = (left.0.clone(), left.1.clone());
+        out.pop();
+        out.push(0.0);
+        let count = right.0.len();
+        for k in (0..count).rev() {
+            points.push(right.0[k]);
+            out.push(if k == 0 { 0.0 } else { -right.1[k - 1] });
+        }
+        let mut ring: (Vec<[f64; 2]>, Vec<f64>) = (Vec::new(), Vec::new());
+        for (point, bulge) in points.into_iter().zip(out) {
+            if ring.0.last().is_some_and(|last: &[f64; 2]| same_point(*last, point)) {
+                *ring.1.last_mut().unwrap() = bulge;
+                continue;
+            }
+            ring.0.push(point);
+            ring.1.push(bulge);
+        }
+        if ring.0.len() > 1 && same_point(ring.0[0], *ring.0.last().unwrap()) {
+            ring.0.pop();
+            ring.1.pop();
+        }
+        vec![ring]
+    }
+
+    /// The kernel's band of the drawn path, its arcs tessellated.
+    fn band_rings(&self, closed: bool) -> Vec<Vec<[f64; 2]>> {
+        let width = self.prefs.width;
+        let mut source = self.drawn_polyline(closed);
+        if self.prefs.alignment != 0 {
+            let [a, b] = [source.vertices[0].position, source.vertices[1].position];
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            if length <= 0.0 {
+                return Vec::new();
+            }
+            let side = if self.prefs.alignment == 1 { 1.0 } else { -1.0 };
+            let normal = [-(b[1] - a[1]) / length * side, (b[0] - a[0]) / length * side];
+            let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+            let probe = [mid[0] + normal[0] * width, mid[1] + normal[1] * width];
+            match kernel::geom2d::offset_polyline(&source, width * 0.5, probe)
+                .into_iter()
+                .next()
+            {
+                Some(offset) => source = offset,
+                None => return Vec::new(),
+            }
+        }
+        let segments = if source.closed {
+            source.vertices.len()
+        } else {
+            source.vertices.len() - 1
+        };
+        let band = kernel::geom2d::polyline_band_boundary(
+            &source,
+            &vec![[width, width]; segments],
+            kernel::tessellation::DEFAULT_ANGLE,
+        );
+        chain_loops(band.edges.into_iter().map(|edge| edge.points).collect())
+    }
+
+    /// Hatch the drawn boundary (closed, or Path's open path) and go back to
+    /// the start prompt.
+    fn finish_drawn(&mut self, closed: bool) -> CmdResult {
+        // A rectangle drawn at an elevation is hatched in that plane.
+        let plane = self.plane;
+        self.plane.origin += self.plane.z.normalize_or(DVec3::Z) * self.elevation;
+        self.elevation = 0.0;
+        let loops = if self.prefs.path {
+            self.path_loops(closed)
+        } else {
+            vec![self.drawn_loop()]
+        };
+        let hatch = (!loops.is_empty()).then(|| {
+            let mut hatch = self.make_hatch(loops.iter().map(|(p, b)| bulged_ring(p, b)).collect());
+            hatch.boundary_paths = Some(std::sync::Arc::new(
+                loops
+                    .iter()
+                    .map(|(points, bulges)| {
+                        let vertices: Vec<[f64; 3]> = points
+                            .iter()
+                            .enumerate()
+                            .map(|(index, p)| [p[0], p[1], bulges.get(index).copied().unwrap_or(0.0)])
+                            .collect();
+                        crate::scene::drawn_hatch_path(&vertices)
+                    })
+                    .collect(),
+            ));
+            hatch
+        });
+        self.plane = plane;
+        self.reset_drawing();
+        let Some(hatch) = hatch else {
+            return CmdResult::NeedPoint;
+        };
+        if self.gradient {
+            set_hpname("SOLID");
+        }
+        self.step = HatchStep::Main;
+        CmdResult::CommitHatchContinue {
+            hatch,
+            entity_style: self
+                .inherited
+                .as_ref()
+                .map(|(_, color, transparency)| (color.clone(), *transparency)),
+            message: self.current_mode_text(),
+        }
+    }
+
+    /// The rectangle or circle a shape command finished becomes the boundary.
+    fn finish_shape(&mut self, result: CmdResult) -> CmdResult {
+        match result {
+            CmdResult::CommitAndExit(entity) => {
+                self.shape = None;
+                match entity {
+                    document::EntityType::Circle(circle) => {
+                        let centre = DVec3::new(circle.center.x, circle.center.y, 0.0);
+                        let offset = DVec3::new(circle.radius, 0.0, 0.0);
+                        self.manual_pts = vec![centre + offset, centre - offset];
+                        self.manual_bulges = vec![1.0, 1.0];
+                    }
+                    document::EntityType::LwPolyline(polyline) => {
+                        self.elevation = polyline.elevation;
+                        self.manual_pts = polyline
+                            .vertices
+                            .iter()
+                            .map(|v| DVec3::new(v.location.x, v.location.y, 0.0))
+                            .collect();
+                        self.manual_bulges = polyline.vertices.iter().map(|v| v.bulge).collect();
+                    }
+                    _ => return CmdResult::NeedPoint,
+                }
+                self.finish_drawn(true)
+            }
+            CmdResult::Dispatch(name) => {
+                let mut shape = match name.as_str() {
+                    "CIRCLE_3P" => Shape::ThreePoint(super::circle::Circle3PCommand::new()),
+                    "CIRCLE_2P" => Shape::TwoPoint(super::circle::Circle2PCommand::new()),
+                    "CIRCLE_TTR" => Shape::Ttr(super::circle::CircleTTRCommand::new()),
+                    _ => return CmdResult::NeedPoint,
+                };
+                shape.command_mut().set_working_plane(self.plane);
+                self.shape = Some(shape);
+                CmdResult::NeedPoint
+            }
+            // The shape gave up (Enter at its first step): back to the start.
+            CmdResult::Cancel => {
+                self.shape = None;
+                CmdResult::NeedPoint
+            }
+            other => other,
+        }
+    }
+
+    fn start_shape(&mut self, mut shape: Shape) -> CmdResult {
+        shape.command_mut().set_working_plane(self.plane);
+        let modes = match &shape {
+            Shape::Rect(rect) => rect.modes_line(),
+            _ => None,
+        };
+        self.shape = Some(shape);
+        modes.map_or(CmdResult::NeedPoint, CmdResult::ReportMeasurement)
+    }
+
+    /// The direction the drawn path leaves its last point in: along the last
+    /// line, or the last arc's end tangent; `None` before any segment.
+    fn end_tangent(&self) -> Option<glam::Vec2> {
+        let n = self.manual_pts.len();
+        (n >= 2).then(|| {
+            super::polyline::seg_exit_tangent(
+                self.manual_pts[n - 2],
+                self.manual_pts[n - 1],
+                self.manual_bulges.get(n - 2).copied().unwrap_or(0.0),
+            )
+        })?
+    }
+
+    fn last_point2(&self) -> Option<glam::DVec2> {
+        self.manual_pts.last().map(|p| glam::DVec2::new(p.x, p.y))
+    }
+
+    /// An arc from the last point to `end`, tangent to the path there.
+    fn add_tangent_arc(&mut self, end: DVec3) {
+        let Some(a) = self.last_point2() else {
+            return;
+        };
+        let tangent = self.end_tangent().map_or(glam::DVec2::X, |t| t.as_dvec2());
+        let bulge = super::polyline::compute_bulge(a, tangent, glam::DVec2::new(end.x, end.y));
+        self.manual_bulges.push(bulge);
+        self.manual_pts.push(end);
+    }
+
+    /// What an arc option step made of an input.
+    fn arc_step(&mut self, step: ArcStep) -> CmdResult {
+        match step {
+            ArcStep::Next(sub) => self.arc_sub = sub,
+            ArcStep::Arc(e, bulge) => {
+                let z = self.manual_pts.last().map_or(0.0, |p| p.z);
+                self.manual_bulges.push(bulge);
+                self.manual_pts.push(DVec3::new(e.x, e.y, z));
+                self.arc_sub = Sub::None;
+            }
+        }
+        CmdResult::NeedPoint
+    }
+
+    /// The next point `distance` along the last segment (+X after the start).
+    fn add_length(&mut self, distance: f64) -> CmdResult {
+        self.step = HatchStep::Main;
+        let Some(&last) = self.manual_pts.last() else {
+            return CmdResult::NeedPoint;
+        };
+        // ponytail: an arc's chord direction, not its end tangent.
+        let direction = match self.manual_pts.len() {
+            n if n >= 2 => (last - self.manual_pts[n - 2]).normalize_or(DVec3::X),
+            _ => DVec3::X,
+        };
+        self.manual_bulges.push(0.0);
+        self.manual_pts.push(last + direction * distance);
+        CmdResult::NeedPoint
+    }
+
+    fn undo_drawn_point(&mut self) -> CmdResult {
+        if self.arc_sub != Sub::None {
+            self.arc_sub = Sub::None;
+            return CmdResult::NeedPoint;
+        }
+        if self.manual_pts.len() > 1 {
+            self.manual_pts.pop();
+            self.manual_bulges.pop();
+            return CmdResult::NeedPoint;
+        }
+        CmdResult::ReportMeasurement(crate::tr!("hatch-cmd", "segments-undone"))
+    }
+
+    /// Enough points to finish: a closed area needs three, a path two.
+    fn can_finish(&self) -> bool {
+        self.manual_pts.len() >= if self.prefs.path { 2 } else { 3 }
     }
 
     fn combined_rings(&self) -> Vec<Vec<[f64; 2]>> {
@@ -651,14 +1576,27 @@ impl HatchCommand {
             .into_iter()
             .map(|depth| depth == 0)
             .collect();
-        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.gap_tolerance);
+        let near =
+            crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.boundary_tolerance());
         let near_source_count = near.len();
         let mut boundary_sources: Vec<Vec<Handle>> = rings
             .iter()
             .map(|ring| crate::scene::ring_source_handles(ring, &near))
             .collect();
-        let mut boundary_paths =
-            crate::scene::exact_hatch_paths(&rings, &exterior, &near, self.gap_tolerance);
+        let source_of = |index: usize| {
+            if self.point_regions.iter().flatten().any(|ring| *ring == rings[index]) {
+                crate::scene::HatchLoopSource::Picked
+            } else {
+                crate::scene::HatchLoopSource::Selected
+            }
+        };
+        let mut boundary_paths = crate::scene::new_hatch_paths(
+            &rings,
+            source_of,
+            &self.selected_objects,
+            &near,
+            self.boundary_tolerance(),
+        );
 
         if !self.associative {
             for handles in &mut boundary_sources {
@@ -666,10 +1604,10 @@ impl HatchCommand {
             }
             for path in &mut boundary_paths {
                 path.boundary_handles.clear();
-                path.flags.set_external(false);
             }
         }
-        if let Some(spec) = &self.gradient {
+        // ArchLine: the window's Gradient tab.
+        if let Some(spec) = &self.gradient_spec {
             let (pattern, color) = spec.model_pattern();
             return HatchModel {
                 pattern_origin: None,
@@ -694,10 +1632,14 @@ impl HatchCommand {
             };
         }
         if let Some((source, _, _)) = &self.inherited {
-            let (name, mut pattern) = self
-                .pattern_override
-                .clone()
-                .unwrap_or_else(|| (source.name.clone(), source.pattern.clone()));
+            let (name, mut pattern) = match &self.fill {
+                Some(fill) => fill_pattern(
+                    fill,
+                    self.angle_override.unwrap_or(0.0).to_degrees(),
+                    &self.gradient_colors,
+                ),
+                None => (source.name.clone(), source.pattern.clone()),
+            };
             let angle = self.angle_override.unwrap_or(source.angle_offset);
             let scale = self.scale_override.unwrap_or(source.scale).max(1.0e-6);
             if let HatchPattern::Pattern(families) = &mut pattern {
@@ -744,32 +1686,12 @@ impl HatchCommand {
                 draw_depth: source.draw_depth,
             };
         }
-        // Default: ANSI31 from catalog; fallback to a single 45° family.
-        let pat_name = "ANSI31";
-        let default_pattern = crate::scene::model::hatch_patterns::find(pat_name)
-            .and_then(|e| {
-                if let HatchPattern::Pattern(f) = &e.gpu {
-                    Some(HatchPattern::Pattern(f.clone()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| {
-                // 45° lines, perpendicular spacing ≈ 5 world units.
-                let dy = 5.0_f32 / (45.0_f32.to_radians().cos());
-                HatchPattern::Pattern(vec![PatFamily {
-                    angle_deg: 45.0,
-                    x0: 0.0,
-                    y0: 0.0,
-                    dx: 0.0,
-                    dy,
-                    dashes: vec![],
-                }])
-            });
-        let (name, mut pattern) = self
-            .pattern_override
-            .clone()
-            .unwrap_or_else(|| (pat_name.to_string(), default_pattern));
+        let (name, mut pattern) =
+            fill_pattern(
+                &self.current_fill(),
+                self.angle_override.unwrap_or(0.0).to_degrees(),
+                &self.gradient_colors,
+            );
         let angle = self.angle_override.unwrap_or(0.0);
         let scale = self.scale_override.unwrap_or(1.0).max(1.0e-6);
         if let (HatchPattern::Pattern(families), Some(anchor)) =
@@ -783,6 +1705,12 @@ impl HatchCommand {
                 family.y0 += ((-dx * sin + dy * cos) / scale as f64) as f32;
             }
         }
+        // GFCLR1 (blue) for a gradient fill, as the reference starts with.
+        let color = if matches!(pattern, HatchPattern::Gradient { .. }) {
+            color_rgba(&self.gradient_colors[0], 0.80)
+        } else {
+            [0.75, 0.75, 0.75, 0.85]
+        };
         let build_ms = crate::perf::elapsed_ms(build_started);
         if perf_build && build_ms >= 1.0 {
             crate::perf_record!(
@@ -796,7 +1724,7 @@ impl HatchCommand {
             boundary: std::sync::Arc::new(rel),
             pattern,
             name,
-            color: [0.75, 0.75, 0.75, 0.85],
+            color,
             aci: 0,
             line_weight_px: 1.0,
             angle_offset: self.angle_override.unwrap_or(0.0),
@@ -812,241 +1740,202 @@ impl HatchCommand {
             draw_depth: 0.0,
         }
     }
-
-    fn manual_boundary_path(&self) -> Option<codec::entities::BoundaryPath> {
-        use codec::entities::{BoundaryEdge, BoundaryPath, PolylineEdge};
-        use codec::types::Vector3;
-        if self.manual_pts.len() < 3 {
-            return None;
-        }
-        let vertices = self
-            .manual_pts
-            .iter()
-            .enumerate()
-            .map(|(index, point)| {
-                Vector3::new(
-                    point.x,
-                    point.y,
-                    self.manual_bulges.get(index).copied().unwrap_or(0.0),
-                )
-            })
-            .collect();
-        let mut path = BoundaryPath::new();
-        path.add_edge(BoundaryEdge::Polyline(PolylineEdge {
-            vertices,
-            is_closed: true,
-        }));
-        Some(path)
-    }
-}
-
-fn arc_bulge(start: DVec3, middle: DVec3, end: DVec3) -> Option<f64> {
-    let curvature = DVec3::from_array(kernel::space::curve::curvature_through(
-        start.to_array(),
-        middle.to_array(),
-        end.to_array(),
-    ));
-    let squared = curvature.length_squared();
-    if squared <= f64::MIN_POSITIVE {
-        return None;
-    }
-    let centre = start + curvature / squared;
-    let circle = Curve::Circle(Circle {
-        centre: [centre.x, centre.y],
-        radius: squared.sqrt().recip(),
-    });
-    let first = circle.parameter_at([start.x, start.y]);
-    let through = (circle.parameter_at([middle.x, middle.y]) - first).rem_euclid(1.0);
-    let ccw = (circle.parameter_at([end.x, end.y]) - first).rem_euclid(1.0);
-    let sweep = if through <= ccw + 1.0e-12 {
-        ccw * std::f64::consts::TAU
-    } else {
-        (ccw - 1.0) * std::f64::consts::TAU
-    };
-    Some((sweep * 0.25).tan())
 }
 
 impl CadCommand for HatchCommand {
     fn name(&self) -> &'static str {
-        "HATCH"
+        if self.gradient {
+            "GRADIENT"
+        } else {
+            "HATCH"
+        }
     }
 
     fn prompt(&self) -> String {
-        if self.gap_prompt {
-            return format!("HATCH  {} <{}>:", t!("Gap tolerance"), self.gap_tolerance);
-        }
-        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
-            let miss = if self.missed {
-                t!("  ⚠ No closed boundary found.").into_owned()
-            } else {
-                String::new()
-            };
+        if self.collect_only && self.mode != HatchMode::Manual && self.shape.is_none() {
             return match self.mode {
                 HatchMode::SelectObjects => t!(
-                    "HATCH  Select boundary objects (%{objects} objects, %{count} regions; Enter to return to the dialog):%{miss}",
+                    "HATCH  Select boundary objects (%{objects} objects, %{count} regions; Enter to return to the dialog):",
                     objects = self.selected_objects.len(),
-                    count = self.region_count(),
-                    miss = miss
+                    count = self.region_count()
                 )
                 .into_owned(),
                 _ => t!(
-                    "HATCH  Pick internal point (%{count} regions; Enter to return to the dialog):%{miss}",
-                    count = self.region_count(),
-                    miss = miss
+                    "HATCH  Pick internal point (%{count} regions; Enter to return to the dialog):",
+                    count = self.region_count()
                 )
                 .into_owned(),
             };
         }
-        match &self.mode {
-            HatchMode::PickInside => {
-                let miss = if self.missed {
-                    t!("  ⚠ No closed boundary found.").into_owned()
-                } else {
-                    String::new()
-                };
-                t!(
-                    "HATCH  Pick internal point (%{count} regions selected; P <pattern> / A <angle> / L <scale>; Enter to apply):%{miss}",
-                    count = self.region_count(),
-                    miss = miss
-                )
-                .into_owned()
-            }
-            HatchMode::SelectObjects => {
-                let miss = if self.missed {
-                    t!("  ⚠ Selection has no closed boundary.").into_owned()
-                } else {
-                    String::new()
-                };
-                t!(
-                    "HATCH  Select boundary objects (%{objects} objects, %{count} regions; P <pattern> / A <angle> / L <scale>; Enter to apply):%{miss}",
-                    objects = self.selected_objects.len(),
-                    count = self.region_count(),
-                    miss = miss
-                )
-                .into_owned()
-            }
-            HatchMode::Manual => {
-                if self.manual_pts.is_empty() {
-                    t!("HATCH  Boundary point 1:").into_owned()
-                } else {
-                    let n = self.manual_pts.len() + 1;
-                    t!("HATCH  Point %{n}:", n = n).into_owned()
+        let text = if let Some(shape) = &self.shape {
+            shape.prompt()
+        } else {
+            match self.step {
+                HatchStep::DrawMode => crate::tr!(
+                    "hatch-cmd",
+                    "mode",
+                    current = if self.prefs.path { "Path" } else { "Area" }
+                ),
+                HatchStep::Alignment => {
+                    crate::tr!("hatch-cmd", "alignment", current = self.alignment_label())
                 }
+                HatchStep::Width => crate::tr!(
+                    "hatch-cmd",
+                    "width",
+                    width = format!("{:.4}", self.prefs.width)
+                ),
+                HatchStep::Length => crate::tr!("hatch-cmd", "length"),
+                HatchStep::Main => match self.mode {
+                    HatchMode::PickInside => crate::tr!("hatch-cmd", "pick"),
+                    HatchMode::SelectObjects => crate::tr!("hatch-cmd", "select"),
+                    HatchMode::Manual if self.manual_pts.is_empty() => {
+                        if self.prefs.path {
+                            crate::tr!("hatch-cmd", "draw-start-path")
+                        } else {
+                            crate::tr!("hatch-cmd", "draw-start")
+                        }
+                    }
+                    HatchMode::Manual if self.manual_arc_mode => {
+                        if let Some(prompt) = self.arc_sub.arc_prompt(self.end_tangent()) {
+                            prompt
+                        } else if self.manual_pts.len() >= 2 {
+                            crate::tr!("hatch-cmd", "arc-endpoint-close")
+                        } else {
+                            crate::tr!("hatch-cmd", "arc-endpoint")
+                        }
+                    }
+                    HatchMode::Manual => {
+                        let close = self.manual_pts.len() >= 3;
+                        match (self.prefs.path, close) {
+                            (false, false) => crate::tr!("hatch-cmd", "next"),
+                            (false, true) => crate::tr!("hatch-cmd", "next-close"),
+                            (true, false) => crate::tr!("hatch-cmd", "next-path"),
+                            (true, true) => crate::tr!("hatch-cmd", "next-path-close"),
+                        }
+                    }
+                },
             }
-        }
+        };
+        format!("{}  {text}", self.name())
     }
 
     fn options(&self) -> Vec<crate::command::CmdOption> {
         use crate::command::CmdOption;
-        if self.gap_prompt {
-            return Vec::new();
-        }
-        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
-            // How areas are chosen is the dialog's Add button's business: a
+        if self.collect_only && self.mode != HatchMode::Manual && self.shape.is_none() {
+            // How areas are chosen is the window's Add button's business: a
             // switch here would bypass the selection it saved and restores.
             return vec![CmdOption::enter(t!("Back to dialog").as_ref())];
         }
-        match &self.mode {
-            HatchMode::PickInside => {
-                let mut options = vec![
-                    CmdOption::new(t!("Select objects").as_ref(), "O"),
-                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
-                    CmdOption::new(
-                        if self.retain_boundaries {
-                            "Keep boundaries: on"
-                        } else {
-                            "Keep boundaries: off"
-                        },
-                        "B",
-                    ),
-                    CmdOption::new(
-                        if self.associative {
-                            "Associative: on"
-                        } else {
-                            "Associative: off"
-                        },
-                        "N",
-                    ),
-                    CmdOption::new(
-                        if self.separate_hatches {
-                            "Separate hatches: on"
-                        } else {
-                            "Separate hatches: off"
-                        },
-                        "D",
-                    ),
-                    CmdOption::new(
-                        &crate::tf!("Island style: {}", self.island_style_label()),
-                        "Y",
-                    ),
-                    CmdOption::new(
-                        &format!("{}: {}", t!("Gap tolerance"), self.gap_tolerance),
-                        "G",
-                    ),
-                ];
-                if self.region_count() > 0 {
-                    options.push(CmdOption::enter(t!("Accept").as_ref()));
-                }
-                options
+        if let Some(shape) = &self.shape {
+            let mut options = shape.command().options();
+            options.retain(|option| option.keyword != "TTT");
+            return options;
+        }
+        let accept = |options: &mut Vec<CmdOption>| {
+            if self.region_count() > 0 {
+                options.push(CmdOption::enter(t!("Accept").as_ref()));
             }
-            HatchMode::SelectObjects => {
-                let mut options = vec![
-                    CmdOption::new(t!("Pick internal points").as_ref(), "I"),
-                    CmdOption::new(t!("Draw manually").as_ref(), "S"),
-                    CmdOption::new(
-                        if self.retain_boundaries {
-                            "Keep boundaries: on"
-                        } else {
-                            "Keep boundaries: off"
-                        },
-                        "B",
-                    ),
-                    CmdOption::new(
-                        if self.associative {
-                            "Associative: on"
-                        } else {
-                            "Associative: off"
-                        },
-                        "N",
-                    ),
-                    CmdOption::new(
-                        if self.separate_hatches {
-                            "Separate hatches: on"
-                        } else {
-                            "Separate hatches: off"
-                        },
-                        "D",
-                    ),
-                    CmdOption::new(
-                        &crate::tf!("Island style: {}", self.island_style_label()),
-                        "Y",
-                    ),
-                ];
-                if self.region_count() > 0 {
-                    options.push(CmdOption::enter(t!("Accept").as_ref()));
+        };
+        match self.step {
+            HatchStep::DrawMode => vec![CmdOption::new("Area", "A"), CmdOption::new("Path", "P")],
+            HatchStep::Alignment => vec![
+                CmdOption::new("Center", "C"),
+                CmdOption::new("Inside", "I"),
+                CmdOption::new("Outside", "O"),
+            ],
+            HatchStep::Main => match self.mode {
+                HatchMode::PickInside => {
+                    let mut options = vec![
+                        CmdOption::new("Select objects", "S"),
+                        CmdOption::new("Draw", "D"),
+                        CmdOption::new("Undo", "U"),
+                        CmdOption::new("seTtings", "T"),
+                    ];
+                    accept(&mut options);
+                    options
                 }
-                options
-            }
-            HatchMode::Manual => {
-                let mut options = vec![CmdOption::new(
-                    if self.manual_arc_mode { "Line" } else { "Arc" },
-                    if self.manual_arc_mode { "L" } else { "A" },
-                )];
-                if self.manual_pts.len() >= 3 {
-                    options.push(CmdOption::new("Close", "C"));
-                    options.push(CmdOption::enter(t!("Accept").as_ref()));
+                HatchMode::SelectObjects => {
+                    let mut options = vec![
+                        CmdOption::new("picK internal point", "K"),
+                        CmdOption::new("Draw", "D"),
+                        CmdOption::new("Undo", "U"),
+                        CmdOption::new("seTtings", "T"),
+                    ];
+                    accept(&mut options);
+                    options
                 }
-                options
-            }
+                HatchMode::Manual if self.manual_pts.is_empty() => {
+                    let mut options = vec![
+                        CmdOption::new("picK internal point", "K"),
+                        CmdOption::new("Select objects", "S"),
+                        CmdOption::new("Rectangle", "R"),
+                        CmdOption::new("Circle", "C"),
+                    ];
+                    if self.prefs.path {
+                        options.push(CmdOption::new("ALignment", "AL"));
+                        options.push(CmdOption::new("Width", "W"));
+                    }
+                    options.push(CmdOption::new("Mode", "M"));
+                    options.push(CmdOption::new("seTtings", "T"));
+                    options
+                }
+                HatchMode::Manual if self.manual_arc_mode => {
+                    if self.arc_sub != Sub::None {
+                        return self.arc_sub.arc_options();
+                    }
+                    let mut options =
+                        vec![CmdOption::new("Angle", "A"), CmdOption::new("CEnter", "CE")];
+                    if self.manual_pts.len() >= 2 {
+                        options.push(CmdOption::new("CLose", "CL"));
+                    }
+                    options.push(CmdOption::new("Direction", "D"));
+                    options.push(CmdOption::new("Line", "L"));
+                    options.push(CmdOption::new("Radius", "R"));
+                    options.push(CmdOption::new("Second pt", "S"));
+                    options.push(CmdOption::new("Undo", "U"));
+                    options
+                }
+                HatchMode::Manual => {
+                    let mut options = Vec::new();
+                    if self.prefs.path {
+                        options.push(CmdOption::new("ALignment", "AL"));
+                        options.push(CmdOption::new("Width", "W"));
+                    }
+                    options.push(CmdOption::new("Arc", "A"));
+                    if self.manual_pts.len() >= 3 {
+                        options.push(CmdOption::new("Close", "C"));
+                    }
+                    options.push(CmdOption::new("Length", "L"));
+                    options.push(CmdOption::new("Undo", "U"));
+                    options.push(CmdOption::enter("Exit"));
+                    options
+                }
+            },
+            _ => Vec::new(),
         }
     }
 
     fn on_point(&mut self, pt: DVec3) -> CmdResult {
-        if self.gap_prompt {
-            return CmdResult::NeedPoint;
+        if let Some(shape) = &mut self.shape {
+            if shape.wants_tangent() {
+                return CmdResult::ReportMeasurement(crate::tr!("hatch-cmd", "ttr-requires-star"));
+            }
+            let result = shape.command_mut().on_point(pt);
+            return self.finish_shape(result);
         }
         let pt = self.plane.to_local(pt);
-        match &self.mode {
+        match self.step {
+            HatchStep::DrawMode | HatchStep::Alignment => {
+                return CmdResult::ReportError(t!("Invalid option keyword.").into_owned());
+            }
+            HatchStep::Width => return CmdResult::NeedPoint,
+            HatchStep::Length => {
+                let last = self.manual_pts.last().copied().unwrap_or(pt);
+                return self.add_length(last.distance(pt));
+            }
+            HatchStep::Main => {}
+        }
+        match self.mode {
             HatchMode::PickInside => {
                 let xy = [pt.x, pt.y];
                 let faces = crate::scene::boundary_faces_around(
@@ -1054,16 +1943,35 @@ impl CadCommand for HatchCommand {
                     xy,
                     self.gap_tolerance,
                 );
-                match resolve_hatch_rings(&faces, xy) {
+                match picked_hatch_rings(&faces, xy) {
                     Some(rings) => {
-                        self.missed = false;
                         self.add_point_region(rings);
-                        CmdResult::NeedPoint
+                        let islands = crate::tr!("hatch-cmd", "analyzing-islands");
+                        let report = if std::mem::replace(&mut self.analyzed, true) {
+                            islands
+                        } else {
+                            [
+                                crate::tr!("hatch-cmd", "selecting"),
+                                crate::tr!("hatch-cmd", "selecting-visible"),
+                                crate::tr!("hatch-cmd", "analyzing-data"),
+                                islands,
+                            ]
+                            .join("\n")
+                        };
+                        CmdResult::ReportMeasurement(report)
                     }
-                    None => {
-                        self.missed = true;
-                        CmdResult::NeedPoint
-                    }
+                    // The search still reports its first steps, without islands.
+                    None => CmdResult::HatchBoundaryMissed(if self.analyzed {
+                        String::new()
+                    } else {
+                        [
+                            crate::tr!("hatch-cmd", "selecting"),
+                            crate::tr!("hatch-cmd", "selecting-visible"),
+                            crate::tr!("hatch-cmd", "analyzing-data"),
+                        ]
+                        .join("
+")
+                    }),
                 }
             }
             HatchMode::SelectObjects => CmdResult::NeedPoint,
@@ -1073,43 +1981,102 @@ impl CadCommand for HatchCommand {
                         self.manual_bulges.push(0.0);
                     }
                     self.manual_pts.push(pt);
-                } else if let Some(middle) = self.manual_arc_midpoint.take() {
-                    let start = *self.manual_pts.last().unwrap();
-                    self.manual_bulges
-                        .push(arc_bulge(start, middle, pt).unwrap_or(0.0));
-                    self.manual_pts.push(pt);
+                } else if self.arc_sub != Sub::None {
+                    let a = self.last_point2().unwrap_or_default();
+                    if let Some(step) =
+                        self.arc_sub.arc_point(glam::DVec2::new(pt.x, pt.y), a, self.end_tangent())
+                    {
+                        return self.arc_step(step);
+                    }
                 } else {
-                    self.manual_arc_midpoint = Some(pt);
+                    self.add_tangent_arc(pt);
                 }
                 CmdResult::NeedPoint
             }
         }
     }
 
+    fn needs_tangent_pick(&self) -> bool {
+        self.shape.as_ref().is_some_and(Shape::wants_tangent)
+    }
+
+    fn on_tangent_point(
+        &mut self,
+        obj: crate::command::TangentObject,
+        hit: DVec3,
+    ) -> CmdResult {
+        match &mut self.shape {
+            Some(shape) => {
+                let result = shape.command_mut().on_tangent_point(obj, hit);
+                self.finish_shape(result)
+            }
+            None => self.on_point(hit),
+        }
+    }
+
     fn on_enter(&mut self) -> CmdResult {
-        if self.gap_prompt {
-            self.gap_prompt = false;
-            return CmdResult::NeedPoint;
+        if let Some(shape) = &mut self.shape {
+            if shape.wants_tangent() {
+                return CmdResult::ReportMeasurement(crate::tr!("hatch-cmd", "ttr-requires"));
+            }
+            // Enter at a point the shape needs is no answer: it asks again.
+            let result = match shape.command_mut().on_enter() {
+                CmdResult::Cancel => CmdResult::ReportError(
+                    t!("Point or option keyword required.").into_owned(),
+                ),
+                result => result,
+            };
+            return self.finish_shape(result);
         }
-        if matches!(self.mode, HatchMode::Manual) && self.manual_arc_midpoint.is_some() {
-            return CmdResult::NeedPoint;
+        match self.step {
+            HatchStep::Alignment | HatchStep::Width | HatchStep::Length => {
+                self.step = HatchStep::Main;
+                return CmdResult::NeedPoint;
+            }
+            HatchStep::DrawMode => {
+                self.step = HatchStep::Main;
+                return self.current_mode();
+            }
+            HatchStep::Main => {}
         }
-        if matches!(self.mode, HatchMode::Manual) && self.manual_pts.len() >= 3 {
-            let ring = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
-            self.add_point_region(vec![ring]);
+        if self.mode == HatchMode::Manual {
+            if self.manual_arc_mode {
+                // A chord direction defaults to the path's direction.
+                if self.arc_sub.is_chord_step() {
+                    let a = self.last_point2().unwrap_or_default();
+                    let tangent = self.end_tangent();
+                    let t = tangent.map_or(glam::DVec2::X, |t| t.as_dvec2());
+                    let degrees = t.y.atan2(t.x).to_degrees();
+                    return match self.arc_sub.arc_chord(degrees, a, tangent) {
+                        Some(step) => self.arc_step(step),
+                        None => CmdResult::NeedPoint,
+                    };
+                }
+                if self.arc_sub != Sub::None {
+                    self.arc_sub = Sub::None;
+                    return CmdResult::NeedPoint;
+                }
+                self.manual_arc_mode = false;
+                return CmdResult::NeedPoint;
+            }
+            if !self.manual_pts.is_empty() {
+                if self.can_finish() {
+                    return self.finish_drawn(false);
+                }
+                self.reset_drawing();
+                return CmdResult::NeedPoint;
+            }
         }
         if self.collect_only {
             return self.collected();
         }
         let rings = self.combined_rings();
+        if self.gradient && !rings.is_empty() {
+            set_hpname("SOLID");
+        }
+        let entity_style = self.entity_style();
         if rings.is_empty() {
-            CmdResult::Cancel
-        } else if matches!(self.mode, HatchMode::Manual) {
-            let mut hatch = self.make_hatch(rings);
-            if let Some(path) = self.manual_boundary_path() {
-                hatch.boundary_paths = Some(std::sync::Arc::new(vec![path]));
-            }
-            self.commit_one(hatch)
+            CmdResult::Done
         } else if self.separate_hatches && !self.retain_boundaries {
             let hatches = self
                 .point_regions
@@ -1120,7 +2087,7 @@ impl CadCommand for HatchCommand {
                 .collect();
             CmdResult::CommitHatches {
                 hatches,
-                entity_style: self.entity_style(),
+                entity_style,
             }
         } else if self.retain_boundaries {
             CmdResult::CommitHatchWithBoundaries {
@@ -1129,9 +2096,9 @@ impl CadCommand for HatchCommand {
                     &rings,
                     self.plane,
                     &self.boundary_sources,
-                    self.gap_tolerance,
+                    self.boundary_tolerance(),
                 ),
-                entity_style: self.entity_style(),
+                entity_style,
             }
         } else {
             self.commit_one(self.make_hatch(rings))
@@ -1139,15 +2106,39 @@ impl CadCommand for HatchCommand {
     }
 
     fn wants_raw_point(&self) -> bool {
-        self.mode == HatchMode::PickInside && !self.gap_prompt
+        self.shape.is_none() && self.mode == HatchMode::PickInside && self.step == HatchStep::Main
     }
 
     fn hatch_gap_tolerance(&self) -> Option<f64> {
         Some(self.gap_tolerance)
     }
 
+    fn hatch_prefs(&self) -> Option<HatchPrefs> {
+        self.prefs_changed.then_some(self.prefs)
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        match &self.shape {
+            Some(shape) => shape.command().point_step_accepts_keywords(),
+            None => self.step == HatchStep::Main && self.mode == HatchMode::Manual,
+        }
+    }
+
+    fn hatch_settings(&self) -> Option<HatchSettings> {
+        // ArchLine: while the Hatch and Gradient window collects areas it
+        // owns the settings, so the Hatch panel stays away.
+        (!self.collect_only).then(|| self.current_settings())
+    }
+
+    fn set_hatch_settings(&mut self, settings: HatchSettings) {
+        self.apply_settings(settings);
+    }
+
     fn dyn_field(&self) -> crate::command::DynField {
-        if self.gap_prompt {
+        if let Some(shape) = &self.shape {
+            return shape.command().dyn_field();
+        }
+        if self.dyn_commit_as_text() {
             crate::command::DynField::Scalar
         } else {
             crate::command::DynField::Point
@@ -1155,40 +2146,51 @@ impl CadCommand for HatchCommand {
     }
 
     fn dyn_commit_as_text(&self) -> bool {
-        self.gap_prompt
+        match &self.shape {
+            Some(shape) => shape.command().dyn_commit_as_text(),
+            None => matches!(self.step, HatchStep::Width | HatchStep::Length),
+        }
+    }
+
+    fn dyn_spec(&self) -> Option<crate::command::DynSpec> {
+        self.shape.as_ref().and_then(|shape| shape.command().dyn_spec())
+    }
+
+    fn dyn_live_value(&self, cursor: DVec3) -> Option<f64> {
+        self.shape
+            .as_ref()
+            .and_then(|shape| shape.command().dyn_live_value(cursor))
     }
 
     fn is_selection_gathering(&self) -> bool {
-        matches!(self.mode, HatchMode::SelectObjects)
+        self.shape.is_none() && self.mode == HatchMode::SelectObjects && self.step == HatchStep::Main
     }
 
     fn selection_forces_add(&self) -> bool {
-        matches!(self.mode, HatchMode::SelectObjects)
+        self.is_selection_gathering()
     }
 
     fn on_selection_complete(&mut self, handles: Vec<Handle>) -> CmdResult {
-        if matches!(self.mode, HatchMode::SelectObjects) {
-            self.set_object_selection(handles);
-            CmdResult::NeedPoint
+        if !self.is_selection_gathering() {
+            return CmdResult::Cancel;
+        }
+        if self.set_object_selection(handles) {
+            CmdResult::HatchBoundaryMissed(String::new())
         } else {
-            CmdResult::Cancel
+            CmdResult::NeedPoint
         }
     }
 
     fn on_undo_step(&mut self) -> Option<CmdResult> {
-        if matches!(self.mode, HatchMode::Manual) {
-            if self.manual_arc_midpoint.take().is_some() {
-                return Some(CmdResult::NeedPoint);
-            }
-            if self.manual_pts.pop().is_some() {
-                self.manual_bulges.pop();
-                return Some(CmdResult::NeedPoint);
-            }
+        if self.step != HatchStep::Main || self.shape.is_some() {
+            return None;
         }
-        if matches!(self.mode, HatchMode::PickInside) && self.point_regions.pop().is_some() {
-            Some(CmdResult::NeedPoint)
-        } else {
-            None
+        match self.mode {
+            HatchMode::Manual if !self.manual_pts.is_empty() => Some(self.undo_drawn_point()),
+            HatchMode::PickInside if self.point_regions.pop().is_some() => {
+                Some(CmdResult::NeedPoint)
+            }
+            _ => None,
         }
     }
 
@@ -1210,374 +2212,206 @@ impl CadCommand for HatchCommand {
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         let input = text.trim();
         let upper = input.to_ascii_uppercase();
-        // The dialog owns the settings and the way areas are chosen (O / I
-        // would bypass the selection it saves and restores), and drawing a
-        // boundary by hand (arcs included) is outside what it can carry back,
-        // so none of them is offered here.
-        if self.collect_only && !matches!(self.mode, HatchMode::Manual) {
+        let point_or_keyword =
+            || CmdResult::ReportError(t!("Point or option keyword required.").into_owned());
+        let invalid_keyword = || CmdResult::ReportError(t!("Invalid option keyword.").into_owned());
+        // A typed coordinate is a point for whichever step asks for one.
+        let typed_point = input.contains(',') || input.starts_with('@') || input.starts_with('<');
+        // ArchLine: the window owns the settings and the way areas are chosen
+        // (O / I would bypass the selection it saves and restores).
+        if self.collect_only && self.mode != HatchMode::Manual && self.shape.is_none() {
             return None;
         }
-        if self.gap_prompt {
-            if let Some(value) = parse_gap_tolerance(input) {
-                self.gap_tolerance = value;
-                self.missed = false;
+        if let Some(shape) = &mut self.shape {
+            if shape.wants_tangent() {
+                return Some(CmdResult::ReportMeasurement(crate::tr!(
+                    "hatch-cmd",
+                    "ttr-requires-star"
+                )));
             }
-            self.gap_prompt = false;
-            return Some(CmdResult::NeedPoint);
-        }
-        if matches!(self.mode, HatchMode::PickInside) && matches!(upper.as_str(), "G" | "GAP") {
-            self.gap_prompt = true;
-            return Some(CmdResult::NeedPoint);
-        }
-        if matches!(self.mode, HatchMode::Manual) {
-            return match upper.as_str() {
-                "A" | "ARC" => {
-                    self.manual_arc_mode = true;
-                    self.manual_arc_midpoint = None;
-                    Some(CmdResult::NeedPoint)
-                }
-                "L" | "LINE" => {
-                    self.manual_arc_mode = false;
-                    self.manual_arc_midpoint = None;
-                    Some(CmdResult::NeedPoint)
-                }
-                "C" | "CLOSE" if self.manual_pts.len() >= 3 => Some(self.on_enter()),
-                _ => None,
+            if matches!(shape, Shape::Circle(_)) && upper == "TTT" {
+                return Some(point_or_keyword());
+            }
+            let point_step = shape.command().dyn_field() == crate::command::DynField::Point;
+            return match shape.command_mut().on_text_input(input) {
+                Some(result) => Some(self.finish_shape(result)),
+                None if typed_point => None,
+                None if point_step => Some(point_or_keyword()),
+                None => Some(CmdResult::ReportError(crate::tr!("hatch-cmd", "numeric"))),
             };
         }
-        if upper == "ASSOCIATIVE" {
-            self.associative = !self.associative;
-            return Some(CmdResult::NeedPoint);
-        }
-        if let Some(rest) = upper.strip_prefix('P') {
-            let name = rest.trim();
-            if !name.is_empty() {
-                if let Some(entry) = crate::scene::model::hatch_patterns::find(name) {
-                    self.pattern_override = Some((entry.name.clone(), entry.gpu.clone()));
-                }
-            }
-            return Some(CmdResult::NeedPoint);
-        }
-        if let Some(rest) = upper.strip_prefix('A') {
-            if let Ok(value) = rest.trim().replace(',', ".").parse::<f32>() {
-                self.angle_override = Some(value.to_radians());
-            }
-            return Some(CmdResult::NeedPoint);
-        }
-        if let Some(rest) = upper.strip_prefix('L') {
-            if let Ok(value) = rest.trim().replace(',', ".").parse::<f32>() {
-                if value > 0.0 {
-                    self.scale_override = Some(value);
-                }
-            }
-            return Some(CmdResult::NeedPoint);
-        }
-        match upper.as_str() {
-            "O" | "OBJECT" | "OBJECTS" => {
-                self.mode = HatchMode::SelectObjects;
-                self.missed = false;
-                Some(CmdResult::NeedPoint)
-            }
-            "I" | "INTERNAL" => {
-                self.mode = HatchMode::PickInside;
-                self.missed = false;
-                Some(CmdResult::NeedPoint)
-            }
-            "S" => {
-                self.mode = HatchMode::Manual;
-                self.missed = false;
-                Some(CmdResult::NeedPoint)
-            }
-            "B" | "BOUNDARY" | "BOUNDARIES" => {
-                self.retain_boundaries = !self.retain_boundaries;
-                if self.retain_boundaries {
-                    self.separate_hatches = false;
-                }
-                Some(CmdResult::NeedPoint)
-            }
-            "N" | "ASSOCIATIVE" => {
-                self.associative = !self.associative;
-                Some(CmdResult::NeedPoint)
-            }
-            "D" | "SEPARATE" => {
-                self.separate_hatches = !self.separate_hatches;
-                if self.separate_hatches {
-                    self.retain_boundaries = false;
-                }
-                Some(CmdResult::NeedPoint)
-            }
-            "Y" | "ISLAND" => {
-                self.island_style = match self.island_style {
-                    codec::entities::HatchStyleType::Normal => {
-                        codec::entities::HatchStyleType::Outer
+        match self.step {
+            HatchStep::DrawMode => {
+                return Some(match upper.as_str() {
+                    "A" | "AREA" | "P" | "PATH" => {
+                        self.prefs.path = upper.starts_with('P');
+                        self.prefs_changed = true;
+                        self.step = HatchStep::Main;
+                        self.current_mode()
                     }
-                    codec::entities::HatchStyleType::Outer => {
-                        codec::entities::HatchStyleType::Ignore
-                    }
-                    codec::entities::HatchStyleType::Ignore => {
-                        codec::entities::HatchStyleType::Normal
-                    }
-                };
-                Some(CmdResult::NeedPoint)
+                    _ => invalid_keyword(),
+                });
             }
-            _ => None,
-        }
-    }
-
-    fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
-        let pt = pt.as_vec3();
-        if let HatchMode::Manual = &self.mode {
-            if self.manual_pts.is_empty() {
-                return None;
-            }
-            let mut pts: Vec<[f32; 3]> = self
-                .manual_pts
-                .iter()
-                .map(|&p| self.plane.to_world(p).as_vec3().to_array())
-                .collect();
-            pts.push(pt.to_array());
-            pts.push(self.plane.to_world(self.manual_pts[0]).as_vec3().to_array());
-            return Some(WireModel::solid(
-                "rubber_band".into(),
-                pts,
-                WireModel::CYAN,
-                false,
-            ));
-        }
-        None
-    }
-}
-
-// ── GRADIENT command ───────────────────────────────────────────────────────
-
-pub struct GradientCommand {
-    boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
-    mode: Mode,
-    manual_pts: Vec<DVec3>,
-    missed: bool,
-    /// Gradient shape, switchable via the prompt options (#415).
-    kind: crate::scene::model::hatch_model::GradientKind,
-    /// Swap the two colour stops.
-    invert: bool,
-    /// Largest gap in a boundary still treated as closed (`HPGAPTOL`).
-    gap_tolerance: f64,
-}
-
-impl GradientCommand {
-    pub fn new(
-        boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
-    ) -> Self {
-        Self {
-            boundary_sources,
-            mode: Mode::PickInside,
-            manual_pts: vec![],
-            missed: false,
-            kind: crate::scene::model::hatch_model::GradientKind::Linear,
-            invert: false,
-            gap_tolerance: 1.0e-6,
-        }
-    }
-
-    /// Close boundary gaps up to `tolerance` (`HPGAPTOL`); the caller built `outlines` with it.
-    pub fn with_gap_tolerance(mut self, tolerance: f64) -> Self {
-        self.gap_tolerance = tolerance;
-        self
-    }
-
-    fn make_hatch(&self, rings: Vec<Vec<[f64; 2]>>) -> HatchModel {
-        let (rel, origin, wcs) = pack_rings(&rings);
-        let exterior: Vec<bool> = kernel::geom2d::ring_nesting_depths(&rings)
-            .into_iter()
-            .map(|depth| depth == 0)
-            .collect();
-        let near = crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.gap_tolerance);
-        let boundary_sources = rings
-            .iter()
-            .map(|ring| crate::scene::ring_source_handles(ring, &near))
-            .collect();
-        let boundary_paths = crate::scene::exact_hatch_paths(&rings, &exterior, &near, self.gap_tolerance);
-        HatchModel {
-            pattern_origin: None,
-            render_instance: None,
-            boundary: std::sync::Arc::new(rel),
-            pattern: HatchPattern::Gradient {
-                angle_deg: 0.0,
-                color2: [0.18, 0.18, 0.18, 0.0],
-                kind: self.kind,
-                invert: self.invert,
-                shift: 0.0,
-                one_color: false,
-                tint: 1.0,
-            },
-            name: self.kind.dxf_name(self.invert).into(),
-            color: [0.30, 0.60, 0.95, 0.80],
-            aci: 0,
-            line_weight_px: 1.0,
-            angle_offset: 0.0,
-            scale: 1.0,
-            world_origin: origin,
-            boundary_wcs: Some(std::sync::Arc::new(wcs)),
-            fill_plane: None,
-            fill_plane_boundary: None,
-            boundary_exterior: Some(std::sync::Arc::new(exterior)),
-            boundary_sources: Some(std::sync::Arc::new(boundary_sources)),
-            boundary_paths: Some(std::sync::Arc::new(boundary_paths)),
-            style: codec::entities::HatchStyleType::Normal,
-            draw_depth: 0.0,
-        }
-    }
-}
-
-impl CadCommand for GradientCommand {
-    fn name(&self) -> &'static str {
-        "GRADIENT"
-    }
-
-    fn prompt(&self) -> String {
-        match &self.mode {
-            Mode::PickInside => {
-                let miss = if self.missed {
-                    t!("  ⚠ No closed boundary found.")
-                } else {
-                    std::borrow::Cow::Borrowed("")
-                };
-                t!(
-                    "GRADIENT (%{kind}%{invert})  Pick internal point:%{miss}",
-                    kind = t!(self.kind.choice_label(self.invert)),
-                    invert = std::borrow::Cow::Borrowed(""),
-                    miss = miss
-                )
-                .into_owned()
-            }
-            Mode::Manual => {
-                if self.manual_pts.is_empty() {
-                    t!("GRADIENT  Boundary point 1:").into_owned()
-                } else {
-                    t!("GRADIENT  Point %{n}:", n = self.manual_pts.len() + 1).into_owned()
-                }
-            }
-        }
-    }
-
-    fn options(&self) -> Vec<crate::command::CmdOption> {
-        use crate::command::CmdOption;
-        match &self.mode {
-            Mode::PickInside => {
-                let mut opts = vec![CmdOption::new("Draw manually", "S")];
-                for (kind, inverted) in crate::scene::model::hatch_model::GradientKind::CHOICES {
-                    if kind != self.kind || inverted != self.invert {
-                        let label = kind.choice_label(inverted);
-                        opts.push(CmdOption::new(label, label));
-                    }
-                }
-                opts
-            }
-            Mode::Manual => {
-                // Enter accepts the boundary once at least 3 points are picked.
-                if self.manual_pts.len() >= 3 {
-                    vec![CmdOption::enter("Accept")]
-                } else {
-                    vec![]
-                }
-            }
-        }
-    }
-
-    fn on_point(&mut self, pt: DVec3) -> CmdResult {
-        match &self.mode {
-            Mode::PickInside => {
-                let xy = [pt.x, pt.y];
-                let faces = crate::scene::boundary_faces_around(
-                    &self.boundary_sources,
-                    xy,
-                    self.gap_tolerance,
-                );
-                match resolve_hatch_rings(&faces, xy) {
-                    Some(rings) => {
-                        self.missed = false;
-                        return CmdResult::CommitHatch(self.make_hatch(rings));
-                    }
-                    None => {
-                        self.missed = true;
+            HatchStep::Alignment => {
+                return Some(match upper.as_str() {
+                    "C" | "CENTER" | "I" | "INSIDE" | "O" | "OUTSIDE" => {
+                        self.prefs.alignment = match &upper[..1] {
+                            "I" => 1,
+                            "O" => 2,
+                            _ => 0,
+                        };
+                        self.prefs_changed = true;
+                        self.step = HatchStep::Main;
                         CmdResult::NeedPoint
                     }
+                    _ => invalid_keyword(),
+                });
+            }
+            HatchStep::Width => {
+                return match parse_number(input) {
+                    Some(value) if value > 0.0 => {
+                        self.prefs.width = value;
+                        self.prefs_changed = true;
+                        self.step = HatchStep::Main;
+                        Some(CmdResult::NeedPoint)
+                    }
+                    Some(_) => Some(CmdResult::ReportError(crate::tr!("hatch-cmd", "positive"))),
+                    None if typed_point => None,
+                    None => Some(CmdResult::ReportError(crate::tr!("hatch-cmd", "numeric"))),
+                };
+            }
+            HatchStep::Length => {
+                return match parse_number(input) {
+                    Some(value) => Some(self.add_length(value)),
+                    None if typed_point => None,
+                    None => Some(CmdResult::ReportError(crate::tr!("hatch-cmd", "numeric"))),
+                };
+            }
+            HatchStep::Main => {}
+        }
+        let path_option = |keyword: &str| -> Option<HatchStep> {
+            match keyword {
+                "AL" | "ALIGNMENT" => Some(HatchStep::Alignment),
+                "W" | "WIDTH" => Some(HatchStep::Width),
+                _ => None,
+            }
+        };
+        match self.mode {
+            HatchMode::Manual if self.manual_pts.is_empty() => {
+                if self.prefs.path {
+                    if let Some(step) = path_option(upper.as_str()) {
+                        self.step = step;
+                        return Some(CmdResult::NeedPoint);
+                    }
+                }
+                Some(match upper.as_str() {
+                    "K" | "PICK" => self.choose(HatchMode::PickInside),
+                    "S" | "SELECT" => self.choose(HatchMode::SelectObjects),
+                    "R" | "RECTANGLE" => {
+                        self.start_shape(Shape::Rect(super::shapes::RectCommand::for_hatch()))
+                    }
+                    "C" | "CIRCLE" => {
+                        self.start_shape(Shape::Circle(super::circle::CircleCommand::new()))
+                    }
+                    "M" | "MODE" => {
+                        self.step = HatchStep::DrawMode;
+                        CmdResult::NeedPoint
+                    }
+                    "T" | "SETTINGS" => CmdResult::ShowHatchPanel,
+                    _ if typed_point => return None,
+                    _ => point_or_keyword(),
+                })
+            }
+            HatchMode::Manual => {
+                if self.prefs.path && !self.manual_arc_mode {
+                    if let Some(step) = path_option(upper.as_str()) {
+                        self.step = step;
+                        return Some(CmdResult::NeedPoint);
+                    }
+                }
+                if self.manual_arc_mode && self.arc_sub != Sub::None && upper != "U" {
+                    let a = self.last_point2().unwrap_or_default();
+                    return match self.arc_sub.arc_text(upper.as_str(), a, self.end_tangent()) {
+                        Some(step) => Some(self.arc_step(step)),
+                        None if typed_point => None,
+                        None => Some(invalid_keyword()),
+                    };
+                }
+                if self.manual_arc_mode && upper != "CL" {
+                    if let Some(sub) = Sub::arc_option(upper.as_str()) {
+                        self.arc_sub = sub;
+                        return Some(CmdResult::NeedPoint);
+                    }
+                }
+                match upper.as_str() {
+                    "A" | "ARC" if !self.manual_arc_mode => {
+                        self.manual_arc_mode = true;
+                        self.arc_sub = Sub::None;
+                        Some(CmdResult::NeedPoint)
+                    }
+                    "L" | "LINE" if self.manual_arc_mode => {
+                        self.manual_arc_mode = false;
+                        self.arc_sub = Sub::None;
+                        Some(CmdResult::NeedPoint)
+                    }
+                    "CL" | "CLOSE" if self.manual_arc_mode && self.manual_pts.len() >= 2 => {
+                        let first = self.manual_pts[0];
+                        self.add_tangent_arc(first);
+                        self.manual_pts.pop();
+                        Some(self.finish_drawn(true))
+                    }
+                    "L" | "LENGTH" => {
+                        self.step = HatchStep::Length;
+                        Some(CmdResult::NeedPoint)
+                    }
+                    "C" | "CLOSE" if self.manual_pts.len() >= 3 && !self.manual_arc_mode => {
+                        Some(self.finish_drawn(true))
+                    }
+                    "U" | "UNDO" => Some(self.undo_drawn_point()),
+                    "E" | "EXIT" if !self.manual_arc_mode => Some(self.on_enter()),
+                    _ if self.manual_arc_mode && !typed_point => Some(point_or_keyword()),
+                    _ => None,
                 }
             }
-            Mode::Manual => {
-                // Keep the typed/snapped point exact (issue #311).
-                self.manual_pts.push(pt);
-                CmdResult::NeedPoint
-            }
-        }
-    }
-
-    fn on_enter(&mut self) -> CmdResult {
-        match &self.mode {
-            Mode::PickInside => CmdResult::Cancel,
-            Mode::Manual => {
-                if self.manual_pts.len() < 3 {
-                    return CmdResult::Cancel;
+            HatchMode::PickInside | HatchMode::SelectObjects => {
+                let picking = self.mode == HatchMode::PickInside;
+                match upper.as_str() {
+                    // The method already running is accepted too, as the
+                    // reference takes picK at its own pick prompt.
+                    "S" | "SELECT" => Some(self.choose(HatchMode::SelectObjects)),
+                    "K" | "PICK" => Some(self.choose(HatchMode::PickInside)),
+                    "D" | "DRAW" => Some(self.choose(HatchMode::Manual)),
+                    "T" | "SETTINGS" => Some(CmdResult::ShowHatchPanel),
+                    "U" | "UNDO" if picking => {
+                        self.point_regions.pop();
+                        Some(CmdResult::NeedPoint)
+                    }
+                    // Select mode's Undo takes back the last selection step.
+                    _ => None,
                 }
-                let wcs = self.manual_pts.iter().map(|p| [p.x, p.y]).collect();
-                CmdResult::CommitHatch(self.make_hatch(vec![wcs]))
             }
         }
-    }
-
-    fn on_escape(&mut self) -> CmdResult {
-        CmdResult::Cancel
-    }
-
-    fn wants_raw_point(&self) -> bool {
-        matches!(self.mode, Mode::PickInside)
-    }
-
-    fn wants_text_input(&self) -> bool {
-        matches!(self.mode, Mode::PickInside)
-    }
-
-    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
-        let t = text.trim();
-        if t.eq_ignore_ascii_case("s") {
-            self.mode = Mode::Manual;
-            self.missed = false;
-            return Some(CmdResult::NeedPoint);
-        }
-        if let Some((kind, inverted)) =
-            crate::scene::model::hatch_model::GradientKind::from_choice_label(t)
-        {
-            self.kind = kind;
-            self.invert = inverted;
-            return Some(CmdResult::NeedPoint);
-        }
-        None
     }
 
     fn on_mouse_move(&mut self, pt: DVec3) -> Option<WireModel> {
-        let pt = pt.as_vec3();
-        if let Mode::Manual = &self.mode {
-            if self.manual_pts.is_empty() {
-                return None;
-            }
-            let mut pts: Vec<[f32; 3]> = self
-                .manual_pts
-                .iter()
-                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                .collect();
-            pts.push([pt.x, pt.y, pt.z]);
-            pts.push([
-                self.manual_pts[0].x as f32,
-                self.manual_pts[0].y as f32,
-                self.manual_pts[0].z as f32,
-            ]);
-            return Some(WireModel::solid(
-                "rubber_band".into(),
-                pts,
-                WireModel::CYAN,
-                false,
-            ));
+        if let Some(shape) = &mut self.shape {
+            return shape.command_mut().on_mouse_move(pt);
         }
-        None
+        if self.mode != HatchMode::Manual || self.manual_pts.is_empty() {
+            return None;
+        }
+        let world = |p: DVec3| self.plane.to_world(p).as_vec3().to_array();
+        let mut points: Vec<[f32; 3]> = self.manual_pts.iter().map(|&p| world(p)).collect();
+        points.push(pt.as_vec3().to_array());
+        if !self.prefs.path {
+            points.push(world(self.manual_pts[0]));
+        }
+        Some(WireModel::solid(
+            "rubber_band".into(),
+            points,
+            WireModel::CYAN,
+            false,
+        ))
     }
 }
 
@@ -1741,7 +2575,7 @@ impl BoundaryCommand {
         }
     }
 
-    fn make_entities(&self) -> Vec<codec::EntityType> {
+    fn make_entities(&self) -> Vec<document::EntityType> {
         let sources = if self.restrict_sources {
             &self.active_sources
         } else {
@@ -2068,7 +2902,7 @@ inventory::submit!(crate::command::CommandRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::EntityType;
+    use document::EntityType;
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<[f64; 2]> {
         vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
@@ -2221,6 +3055,34 @@ mod tests {
         assert_eq!(region.wires.len(), 2);
     }
 
+    #[test]
+    fn hatch_panel_settings_reach_the_hatch() {
+        let mut command = HatchCommand::new(
+            Default::default(),
+            Vec::new(),
+            None,
+            WorkingPlane::default(),
+        );
+        let mut settings = command.hatch_settings().unwrap();
+        assert_eq!((settings.fill.clone(), settings.scale), (HatchFill::Solid, 1.0));
+        settings.fill = HatchFill::Pattern("ANSI37".into());
+        settings.scale = 2.5;
+        settings.angle_deg = 30.0;
+        settings.method = 2;
+        settings.keep_boundaries = true;
+        command.set_hatch_settings(settings);
+        // Separate hatches turned on drops keeping boundaries, as at the prompt.
+        let mut settings = command.hatch_settings().unwrap();
+        settings.separate = true;
+        command.set_hatch_settings(settings);
+        let settings = command.hatch_settings().unwrap();
+        assert_eq!(settings.method, 2);
+        assert!(settings.separate && !settings.keep_boundaries);
+        assert!((settings.angle_deg - 30.0).abs() < 1e-4);
+        let hatch = command.make_hatch(vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]]);
+        assert_eq!((hatch.name.as_str(), hatch.scale), ("ANSI37", 2.5));
+    }
+
     // ── HATCH dialog support ───────────────────────────────────────────────
 
     use crate::modules::draw::draw::hatch_settings::{
@@ -2285,28 +3147,22 @@ mod tests {
         let hatch_resolved = HatchSettings::default().resolve().unwrap();
 
         let by_gradient = command().with_settings(&gradient_resolved);
-        let spec = by_gradient.gradient.as_ref().expect("the gradient is kept");
+        let spec = by_gradient.gradient_spec.as_ref().expect("the gradient is kept");
         assert_eq!(spec, &gradient_settings.gradient.spec().unwrap());
-        assert!(by_gradient.pattern_override.is_none());
+        assert!(by_gradient.fill.is_none());
         assert!(by_gradient.angle_override.is_none() && by_gradient.scale_override.is_none());
 
         let by_pattern = command().with_settings(&hatch_resolved);
-        assert!(by_pattern.gradient.is_none());
-        assert_eq!(
-            by_pattern
-                .pattern_override
-                .as_ref()
-                .map(|(n, _)| n.as_str()),
-            Some("ANSI31")
-        );
+        assert!(by_pattern.gradient_spec.is_none());
+        assert_eq!(by_pattern.fill, Some(HatchFill::Pattern("ANSI31".into())));
         assert_eq!(by_pattern.angle_override, Some(0.0));
         assert_eq!(by_pattern.scale_override, Some(1.0));
 
         // Going back to a pattern clears the gradient, and the other way round.
         let back = by_gradient.with_settings(&hatch_resolved);
-        assert!(back.gradient.is_none() && back.pattern_override.is_some());
+        assert!(back.gradient_spec.is_none() && back.fill.is_some());
         let again = back.with_settings(&gradient_resolved);
-        assert!(again.gradient.is_some() && again.pattern_override.is_none());
+        assert!(again.gradient_spec.is_some() && again.fill.is_none());
         assert!(again.angle_override.is_none() && again.scale_override.is_none());
     }
 
@@ -2588,7 +3444,7 @@ mod tests {
 
     // ── Faithful preview ───────────────────────────────────────────────────
 
-    use codec::entities::HatchStyleType;
+    use document::entities::HatchStyleType;
 
     /// Rings in a NaN-separated buffer.
     fn ring_count(buffer: &[[f32; 2]]) -> usize {
@@ -2894,7 +3750,7 @@ mod tests {
                     halves.iter().map(|&h| rect(-h, -h, h, h)).collect();
                 let models = command_for(rings, style, WorkingPlane::default()).preview_models();
                 let preview = &models[0];
-                let mut dxf = codec::entities::Hatch::new();
+                let mut dxf = document::entities::Hatch::new();
                 dxf.is_solid = true;
                 dxf.style = style;
                 dxf.paths = preview.boundary_paths.as_ref().unwrap().as_ref().clone();
@@ -3311,15 +4167,15 @@ mod tests {
         let settings = gradient_settings(|g| {
             g.one_color = true;
             g.tint = 0.25;
-            g.color1 = codec::types::Color::Rgb {
+            g.color1 = document::types::Color::Rgb {
                 r: 200,
                 g: 100,
                 b: 50,
             };
-            g.color2 = codec::types::Color::Rgb { r: 1, g: 2, b: 3 }; // hidden
+            g.color2 = document::types::Color::Rgb { r: 1, g: 2, b: 3 }; // hidden
         });
         let model = committed(gradient_command(&settings).on_enter());
-        let base = rgba_of(codec::types::Color::Rgb {
+        let base = rgba_of(document::types::Color::Rgb {
             r: 200,
             g: 100,
             b: 50,
@@ -3347,7 +4203,7 @@ mod tests {
         settings.island_detection = false; // Ignore
         let model = committed(gradient_command(&settings).on_enter());
         assert!(matches!(model.pattern, HatchPattern::Gradient { .. }));
-        assert_eq!(model.style, codec::entities::HatchStyleType::Ignore);
+        assert_eq!(model.style, document::entities::HatchStyleType::Ignore);
         assert!(model.boundary_paths.is_some() && model.fill_plane.is_some());
         assert_eq!(model.boundary_exterior.as_deref().map(|e| e.len()), Some(1));
         // The one ring in world coordinates (a flat buffer: no separator).
@@ -3365,7 +4221,7 @@ mod tests {
 
     #[test]
     fn a_creation_style_turns_every_commit_into_a_styled_one() {
-        use codec::types::{Color, Transparency};
+        use document::types::{Color, Transparency};
         let style = (Color::Index(1), Transparency::ByLayer);
         let settings = HatchSettings::default();
         // One hatch.
@@ -3414,7 +4270,7 @@ mod tests {
 
     #[test]
     fn a_creation_style_also_styles_a_manual_boundary() {
-        use codec::types::{Color, Transparency};
+        use document::types::{Color, Transparency};
         let style = (Color::Index(3), Transparency::ByLayer);
         let mut command = HatchCommand::new(
             rustc_hash::FxHashMap::default(),
@@ -3472,8 +4328,8 @@ mod tests {
     #[test]
     fn the_gradient_preview_shows_both_real_colours_translucent() {
         let settings = gradient_settings(|g| {
-            g.color1 = codec::types::Color::Rgb { r: 255, g: 0, b: 0 };
-            g.color2 = codec::types::Color::Rgb { r: 0, g: 0, b: 255 };
+            g.color1 = document::types::Color::Rgb { r: 255, g: 0, b: 0 };
+            g.color2 = document::types::Color::Rgb { r: 0, g: 0, b: 255 };
         });
         let models = gradient_command(&settings)
             .with_preview_color(Some([0.0, 1.0, 0.0, 0.75])) // must not win over the gradient
@@ -3491,7 +4347,7 @@ mod tests {
             let settings = gradient_settings(|g| {
                 g.one_color = true;
                 g.tint = 0.25;
-                g.color1 = codec::types::Color::Rgb {
+                g.color1 = document::types::Color::Rgb {
                     r: 200,
                     g: 100,
                     b: 50,
@@ -3500,8 +4356,8 @@ mod tests {
             });
             gradient_command(&settings).preview_models().remove(0)
         };
-        let a = preview(codec::types::Color::Rgb { r: 1, g: 2, b: 3 });
-        let b = preview(codec::types::Color::Rgb {
+        let a = preview(document::types::Color::Rgb { r: 1, g: 2, b: 3 });
+        let b = preview(document::types::Color::Rgb {
             r: 250,
             g: 250,
             b: 250,
@@ -3515,7 +4371,7 @@ mod tests {
             colour2(&b),
             "the hidden Color 2 changes nothing"
         );
-        let base = rgba_of(codec::types::Color::Rgb {
+        let base = rgba_of(document::types::Color::Rgb {
             r: 200,
             g: 100,
             b: 50,

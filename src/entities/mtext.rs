@@ -1,9 +1,9 @@
-use codec::entities::{AttachmentPoint, DrawingDirection, MText};
+use document::entities::{AttachmentPoint, DrawingDirection, MText};
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
     edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, ro_prop as ro,
-    square_grip, triangle_grip,
+    oriented_triangle_grip, square_grip, triangle_grip,
 };
 use crate::entities::text_support::{
     clamp_mtext_column_count, layout_mtext, resolve_text_style, GlyphBox, MTextColumns,
@@ -84,13 +84,13 @@ fn drawing_dir_str(d: &DrawingDirection) -> &'static str {
 /// a field's value and a right-to-left word right after it read with that
 /// word — the reference draws `שלום 0 עולם` with no gap after the field
 /// (the spaces end up after the word), while plain text keeps the gap.
-fn display_text(t: &MText, document: &codec::Document) -> String {
+fn display_text(t: &MText, document: &document::Document) -> String {
     use crate::entities::text_support::is_rtl_char;
     let value = &t.value;
     if !value.chars().any(is_rtl_char) {
         return value.clone();
     }
-    let Some(spans) = codec::fields::field_spans(document, t.common.handle, value) else {
+    let Some(spans) = document::fields::field_spans(document, t.common.handle, value) else {
         return value.clone();
     };
     let mut out = value.clone();
@@ -113,15 +113,33 @@ fn display_text(t: &MText, document: &codec::Document) -> String {
 /// Per-visible-character world-space boxes for the MText editor's
 /// click-to-select preview. Uses the exact same layout opts as `to_render`
 /// so the boxes line up with the rendered glyphs.
-pub fn glyph_boxes(t: &MText, document: &codec::Document) -> Vec<GlyphBox> {
+pub fn glyph_boxes(t: &MText, document: &document::Document) -> Vec<GlyphBox> {
     layout_of(t, document, true).glyph_boxes
+}
+
+/// The colour of the MTEXT's layer, for its `\C256;` (ByLayer) runs.
+fn layer_inline_color(
+    t: &MText,
+    document: &document::Document,
+) -> Option<crate::entities::text_support::InlineColor> {
+    use crate::entities::text_support::InlineColor;
+    let layer = document.layers.get(&t.common.layer)?;
+    match layer.color {
+        document::types::Color::Index(index) => Some(InlineColor::Aci(index)),
+        document::types::Color::Rgb { r, g, b } => Some(InlineColor::True([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+        ])),
+        _ => None,
+    }
 }
 
 /// The MTEXT laid out as it is drawn: its sub-lines, their widths and the
 /// first baseline, in the entity's own (pre-rotation) frame.
 pub fn layout_of(
     t: &MText,
-    document: &codec::Document,
+    document: &document::Document,
     want_glyph_boxes: bool,
 ) -> crate::entities::text_support::MTextLayout {
     let resolved_style = resolve_text_style(&t.style, document);
@@ -154,6 +172,7 @@ pub fn layout_of(
     // events (open, save, plot, regen, UPDATEFIELD), never on a redraw.
     let display = display_text(t, document);
     layout_mtext(&MTextRenderOpts {
+        layer_color: layer_inline_color(t, document),
         value: &display,
         insertion: [
             t.insertion_point.x,
@@ -169,18 +188,19 @@ pub fn layout_of(
         line_spacing_factor: t.line_spacing_factor as f32,
         exact_line_spacing: matches!(
             t.line_spacing_style,
-            codec::entities::LineSpacingStyle::Exactly
+            document::entities::LineSpacingStyle::Exactly
         ),
         rectangle_height: t.rectangle_height.unwrap_or(0.0) as f32,
         vertical_text: matches!(t.drawing_direction, DrawingDirection::TopToBottom)
             || matches!(t.drawing_direction, DrawingDirection::ByStyle)
                 && resolved_style.is_vertical,
         want_glyph_boxes,
+        break_long_words: false,
         columns: columns_of(t),
     })
 }
 
-fn to_render(t: &MText, document: &codec::Document) -> RenderEntity {
+fn to_render(t: &MText, document: &document::Document) -> RenderEntity {
     let resolved_style = resolve_text_style(&t.style, document);
     let attach_h_anchor: f32 = match t.attachment_point {
         AttachmentPoint::TopCenter
@@ -211,6 +231,7 @@ fn to_render(t: &MText, document: &codec::Document) -> RenderEntity {
     // events (open, save, plot, regen, UPDATEFIELD), never on a redraw.
     let display = display_text(t, document);
     let layout = layout_mtext(&MTextRenderOpts {
+        layer_color: layer_inline_color(t, document),
         value: &display,
         insertion: [
             t.insertion_point.x,
@@ -226,13 +247,14 @@ fn to_render(t: &MText, document: &codec::Document) -> RenderEntity {
         line_spacing_factor: t.line_spacing_factor as f32,
         exact_line_spacing: matches!(
             t.line_spacing_style,
-            codec::entities::LineSpacingStyle::Exactly
+            document::entities::LineSpacingStyle::Exactly
         ),
         rectangle_height: t.rectangle_height.unwrap_or(0.0) as f32,
         vertical_text: matches!(t.drawing_direction, DrawingDirection::TopToBottom)
             || matches!(t.drawing_direction, DrawingDirection::ByStyle)
                 && resolved_style.is_vertical,
         want_glyph_boxes: false,
+        break_long_words: false,
         columns: columns_of(t),
     });
     let insertion = glam::DVec3::new(
@@ -254,7 +276,7 @@ fn to_render(t: &MText, document: &codec::Document) -> RenderEntity {
 /// origin, height, rotation and width, so the result sits where the MTEXT was
 /// drawn. Inline colours carry over, index colours as indices. (#760)
 // ponytail: one TEXT per run (word), not merged per line; merge same-format runs if users ask.
-pub(crate) fn explode_mtext(t: &MText, document: &codec::Document) -> Vec<codec::EntityType> {
+pub(crate) fn explode_mtext(t: &MText, document: &document::Document) -> Vec<document::EntityType> {
     let RenderObject::Text(strokes) = to_render(t, document).object else {
         return Vec::new();
     };
@@ -265,17 +287,17 @@ pub(crate) fn explode_mtext(t: &MText, document: &codec::Document) -> Vec<codec:
             if run.text.trim().is_empty() {
                 return None;
             }
-            let mut text = codec::entities::Text::with_value(
+            let mut text = document::entities::Text::with_value(
                 run.text,
-                codec::types::Vector3::new(stroke.origin[0], stroke.origin[1], t.insertion_point.z),
+                document::types::Vector3::new(stroke.origin[0], stroke.origin[1], t.insertion_point.z),
             );
             text.common = t.common.clone();
-            text.common.handle = codec::Handle::NULL;
+            text.common.handle = document::Handle::NULL;
             if let Some(index) = run.aci {
-                text.common.color = codec::types::Color::Index(index);
+                text.common.color = document::types::Color::Index(index);
             } else if let Some([r, g, b]) = stroke.color {
                 let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                text.common.color = codec::types::Color::Rgb {
+                text.common.color = document::types::Color::Rgb {
                     r: byte(r),
                     g: byte(g),
                     b: byte(b),
@@ -287,7 +309,7 @@ pub(crate) fn explode_mtext(t: &MText, document: &codec::Document) -> Vec<codec:
             text.width_factor = run.width_factor as f64;
             text.oblique_angle = run.oblique as f64;
             text.normal = t.normal;
-            Some(codec::EntityType::Text(text))
+            Some(document::EntityType::Text(text))
         })
         .collect()
 }
@@ -344,7 +366,10 @@ fn grips(t: &MText) -> Vec<GripDef> {
         t.rectangle_width.max(0.0)
     };
     let width_grip = p + dir * (k * block_width);
-    let mut result = vec![square_grip(0, p), triangle_grip(1, width_grip)];
+    let mut result = vec![
+        square_grip(0, p),
+        oriented_triangle_grip(1, width_grip, dir * k.signum()),
+    ];
 
     let height = t
         .rectangle_height
@@ -354,14 +379,18 @@ fn grips(t: &MText) -> Vec<GripDef> {
         let (sin, cos) = t.rotation.sin_cos();
         let down = glam::DVec3::new(sin, -cos, 0.0);
         let (_, vertical) = attach_anchors(t);
-        let factor = match vertical {
+        let factor: f64 = match vertical {
             MTextVAnchor::Top | MTextVAnchor::MiddleOfTopLine | MTextVAnchor::BottomOfTopLine => {
                 1.0
             }
             MTextVAnchor::Middle => 0.5,
             MTextVAnchor::Bottom | MTextVAnchor::MiddleOfBottomLine => -1.0,
         };
-        result.push(triangle_grip(2, p + down * (factor * height)));
+        result.push(oriented_triangle_grip(
+            2,
+            p + down * (factor * height),
+            down * factor.signum(),
+        ));
     }
     if columns_active {
         result.push(triangle_grip(3, p + dir * (k * t.column_data.width)));
@@ -373,7 +402,7 @@ fn grips(t: &MText) -> Vec<GripDef> {
     result
 }
 
-fn columns_str(c: &codec::entities::MTextColumnData) -> &'static str {
+fn columns_str(c: &document::entities::MTextColumnData) -> &'static str {
     match c.column_type {
         1 => "Static",
         2 => "Dynamic",
@@ -471,7 +500,7 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
                     field: "line_space_style",
                     value: PropValue::Choice {
                         selected: match t.line_spacing_style {
-                            codec::entities::LineSpacingStyle::Exactly => "Exactly",
+                            document::entities::LineSpacingStyle::Exactly => "Exactly",
                             _ => "At least",
                         }
                         .to_string(),
@@ -590,8 +619,8 @@ fn apply_geom_prop(t: &mut MText, field: &str, value: &str) {
         }
         "line_space_style" => {
             t.line_spacing_style = match value {
-                "Exactly" => codec::entities::LineSpacingStyle::Exactly,
-                "At least" => codec::entities::LineSpacingStyle::AtLeast,
+                "Exactly" => document::entities::LineSpacingStyle::Exactly,
+                "At least" => document::entities::LineSpacingStyle::AtLeast,
                 _ => return,
             };
             return;
@@ -676,7 +705,7 @@ fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
             let dx = p.x as f64 - t.insertion_point.x;
             let dy = p.y as f64 - t.insertion_point.y;
             let projected = dx * dir.x + dy * dir.y;
-            let width = (projected / k).max(0.0);
+            let width = (projected / k).max(0.01);
             let column_count = clamp_mtext_column_count(t.column_data.column_count);
             if t.column_data.column_type != 0 && column_count > 1 {
                 t.column_data.column_count = column_count;
@@ -749,7 +778,7 @@ fn apply_transform(t: &mut MText, tr: &EntityTransform) {
 }
 
 impl RenderConvertible for MText {
-    fn to_render(&self, document: &codec::Document) -> Option<RenderEntity> {
+    fn to_render(&self, document: &document::Document) -> Option<RenderEntity> {
         Some(to_render(self, document))
     }
 }
@@ -840,7 +869,7 @@ impl Transformable for MText {
     }
 }
 
-impl crate::entities::traits::TextContent for codec::entities::MText {
+impl crate::entities::traits::TextContent for document::entities::MText {
     fn text_content(&self) -> Option<String> {
         Some(self.value.clone())
     }
@@ -852,3 +881,44 @@ impl crate::entities::traits::TextContent for codec::entities::MText {
     }
 }
 
+
+#[cfg(test)]
+mod inline_bylayer_tests {
+    use super::*;
+    use crate::entities::text_support::{resolve_inline_color, InlineColor};
+
+    #[test]
+    fn inline_bylayer_run_takes_the_layer_colour() {
+        // A cyan MTEXT on a yellow layer whose second run is `\C256;`
+        // (ByLayer): that run is drawn in the layer's yellow. It used to keep
+        // the entity's cyan.
+        let mut document = document::Document::new();
+        let mut layer = document::tables::Layer::new("TITLES");
+        layer.color = document::types::Color::Index(2);
+        document.layers.add(layer).unwrap();
+        let mut t = MText::with_value(
+            r"TITLE \P{\H0.5x;\C256;SCALE 1:250}",
+            document::types::Vector3::new(0.0, 0.0, 0.0),
+        );
+        t.height = 4.0;
+        t.common.layer = "TITLES".to_string();
+        t.common.color = document::types::Color::Index(4);
+
+        let RenderObject::Text(strokes) = to_render(&t, &document).object else {
+            panic!("MTEXT renders as text")
+        };
+        let yellow = resolve_inline_color(&InlineColor::Aci(2), None);
+        let runs: Vec<_> = strokes
+            .iter()
+            .filter_map(|s| s.run.as_ref().map(|r| (r.text.clone(), s.color)))
+            .collect();
+        assert!(
+            runs.iter().any(|(text, c)| text.contains("SCALE") && *c == yellow),
+            "{runs:?}"
+        );
+        assert!(
+            runs.iter().any(|(text, c)| text.contains("TITLE") && c.is_none()),
+            "{runs:?}"
+        );
+    }
+}

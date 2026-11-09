@@ -45,14 +45,14 @@
 //!   ordinari ([`exploded`]): la griglia di [`build`] e il testo delle celle,
 //!   niente XDATA.
 
-use codec::entities::table::{
+use document::entities::table::{
     legacy_override_properties, CellRange, CellStyle, CellStylePropertyFlags, Table,
 };
-use codec::entities::{AttachmentPoint, Entity, EntityCommon, Line, MText, TableBuilder};
-use codec::objects::ObjectType;
-use codec::tables::{AppId, Layer};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Color, Document, EntityType, Handle, Vector3};
+use document::entities::{AttachmentPoint, Entity, EntityCommon, Line, MText, TableBuilder};
+use document::objects::ObjectType;
+use document::tables::{AppId, Layer};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Color, Document, EntityType, Handle, Vector3};
 
 use super::abaco::{Cell, TableKind, TableText};
 use super::rooms::{mtext_escape, DEFAULT_ROOM_TEXT_M};
@@ -748,11 +748,11 @@ fn runs(n: usize, on: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
 mod tests {
     use super::*;
 
-    use codec::entities::table::CellStylePropertyFlags;
-    use codec::entities::{Line, TableBuilder};
-    use codec::tables::AppId;
-    use codec::xdata::{ExtendedDataRecord, XDataValue};
-    use codec::{Color, Document, DxfVersion, EntityType, Vector3};
+    use document::entities::table::CellStylePropertyFlags;
+    use document::entities::{Line, TableBuilder};
+    use document::tables::AppId;
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+    use document::{Color, Document, DxfVersion, EntityType, Vector3};
 
     use crate::bim::abaco::{Cell, TableKind, TableText};
     use crate::bim::units::DrawingUnit;
@@ -833,7 +833,7 @@ mod tests {
         row: usize,
         col: usize,
         property: CellStylePropertyFlags,
-        from_content: impl Fn(&codec::entities::table::CellContent) -> T,
+        from_content: impl Fn(&document::entities::table::CellContent) -> T,
         from_style: impl Fn(&CellStyle) -> T,
     ) -> Option<T> {
         let cell = table.cell(row, col)?;
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(current_table_style(&doc), Some(standard));
 
         let mine = doc.allocate_handle();
-        let mut style = codec::objects::TableStyle::standard();
+        let mut style = document::objects::TableStyle::standard();
         style.name = "Abaco".into();
         style.handle = mine;
         doc.objects.insert(mine, ObjectType::TableStyle(style));
@@ -1487,10 +1487,10 @@ mod tests {
         // Stile tabella verso l'alto: le righe salgono dal punto.
         let mut doc = Document::new();
         let handle = doc.allocate_handle();
-        let mut style = codec::objects::TableStyle::standard();
+        let mut style = document::objects::TableStyle::standard();
         style.name = "Su".into();
         style.handle = handle;
-        style.flow_direction = codec::objects::TableFlowDirection::Up;
+        style.flow_direction = document::objects::TableFlowDirection::Up;
         doc.objects.insert(handle, ObjectType::TableStyle(style));
         table.table_style_handle = Some(handle);
         let (p, _) = title(&doc, &table);
@@ -1628,7 +1628,7 @@ mod tests {
             table.set_cell_text(1, 0, "D1");
             table.set_cell_text(1, 2, "0,81");
             table.set_cell_text(2, 0, "Varchi (fuori dal totale delle demolizioni)");
-            table.merge_cells(codec::entities::table::CellRange::new(2, 0, 2, 2));
+            table.merge_cells(document::entities::table::CellRange::new(2, 0, 2, 2));
             let mut rec = ExtendedDataRecord::new(APP_ABACO);
             for value in [
                 XDataValue::Integer16(1),

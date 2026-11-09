@@ -5,7 +5,7 @@
 
 use iced::Point;
 
-use codec::types::Handle;
+use document::types::Handle;
 
 use crate::app::OpenCADStudio;
 use crate::scene::viewport_ref::{AcceptedSnap, ViewportFrame};
@@ -48,6 +48,20 @@ impl OpenCADStudio {
     /// Forget the accepted snaps of a finished / abandoned command.
     pub(crate) fn clear_accepted_snaps(&mut self) {
         self.accepted_snaps.clear();
+    }
+
+    /// A hot grip is waiting for its placement point. Grip editing is not a
+    /// command, so this is the point prompt MTP / M2P serve there.
+    pub(crate) fn grip_point_prompt(&self, i: usize) -> bool {
+        self.tabs[i].active_cmd.is_none()
+            && self.tabs[i].suspended_cmd.is_none()
+            && self.tabs[i].active_grip.as_ref().is_some_and(|grip| {
+                matches!(
+                    grip.mode,
+                    crate::scene::pick::grip::GripEditMode::Stretch
+                        | crate::scene::pick::grip::GripEditMode::RectangleResize
+                )
+            })
     }
 
     /// The active command is at a point prompt (keywords allowed) and not
@@ -192,12 +206,12 @@ impl OpenCADStudio {
                     .scene
                     .document
                     .get_entity(source.source.handle),
-                Some(codec::EntityType::Insert(_))
+                Some(document::EntityType::Insert(_))
             ) {
                 return true;
             }
             if source.snap_type == SnapType::Insertion {
-                let Some(codec::EntityType::Insert(insert)) = self.tabs[tab]
+                let Some(document::EntityType::Insert(insert)) = self.tabs[tab]
                     .scene
                     .document
                     .get_entity(source.source.handle)

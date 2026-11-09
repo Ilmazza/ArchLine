@@ -1,5 +1,5 @@
-use super::document::DocumentTab;
-use super::document::DynComponent;
+use super::tab_document::DocumentTab;
+use super::tab_document::DynComponent;
 use super::history::history_dropdown_labels;
 use super::{ArrowKey, Message, OpenCADStudio};
 use crate::scene::pick::grip::{grips_to_screen, grips_to_screen_paper, grips_to_screen_rte};
@@ -18,6 +18,8 @@ use iced_aw::ContextMenu;
 
 #[cfg(test)]
 mod select_similar_clipboard_tests;
+#[cfg(test)]
+mod table_inplace_widget_tests;
 
 /// Invisible event surface for accurate point picking. MouseArea emits a
 /// positionless press message; capturing the cursor in the actual button
@@ -131,7 +133,7 @@ fn test_block_widget_picker<'a>(
 ) -> Element<'a, Message> {
     let labels = widget.items.clone();
     container(
-        iced::widget::pick_list(
+        crate::ui::dropdown_list::pick_list(
             widget.current,
             (0..widget.items.len()).collect::<Vec<_>>(),
             move |idx: &usize| labels.get(*idx).cloned().unwrap_or_default(),
@@ -285,7 +287,7 @@ mod viewcube;
 use controls::{dyn_component_value, viewport_controls};
 use overlay::{
     mtext_editor_overlay, position_canvas_overlay, position_canvas_overlay_near_cursor,
-    qselect_overlay, text_inline_overlay, viewport_context_menu_overlay,
+    qselect_overlay, text_inline_overlay, viewport_context_menu_overlay, viewport_quad_overlay,
 };
 use viewcube::{viewcube_nav_controls, viewcube_ucs_picker, UCS_PICKER_W};
 
@@ -309,6 +311,13 @@ fn ui_font_changes() -> Subscription<Message> {
     #[cfg(target_os = "windows")]
     return iced::time::every(std::time::Duration::from_secs(2))
         .map(|_| Message::UiFontSettingsChanged);
+    #[allow(unreachable_code)]
+    Subscription::none()
+}
+
+fn terminate_requests() -> Subscription<Message> {
+    #[cfg(unix)]
+    return Subscription::run(crate::sys::terminate_requests).map(|()| Message::Terminate);
     #[allow(unreachable_code)]
     Subscription::none()
 }
@@ -350,6 +359,261 @@ const VIEWCUBE_GAP: f32 = 12.0;
 /// no longer fits at all (its `DensitySwap`).
 fn viewcube_has_room(bar_w: f32, tile_w: f32) -> bool {
     bar_w + VIEWCUBE_GAP + VIEWCUBE_REGION_PX + VIEWCUBE_PAD <= tile_w
+}
+
+/// The app-wide input events: keys for the command line and shortcuts,
+/// pointer presses, window changes. Split out of `subscription` so tests
+/// can feed it real events.
+pub(crate) fn main_window_event(
+    ev: iced::Event,
+    status: iced::event::Status,
+    win_id: window::Id,
+) -> Option<Message> {
+    use iced::event::Status;
+    match ev {
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+            if crate::ui::ribbon::keytips_active() =>
+        {
+            crate::ui::ribbon::keytip_pointer_pressed();
+            Some(Message::KeyTip(crate::ui::ribbon::KeyTipInput::Hide))
+        }
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+            iced::mouse::Button::Left,
+        )) => {
+            crate::ui::ribbon::keytip_pointer_pressed();
+            Some(Message::PropPointerPressed)
+        }
+        iced::Event::Mouse(
+            iced::mouse::Event::ButtonPressed(_)
+            | iced::mouse::Event::ButtonReleased(_)
+            | iced::mouse::Event::WheelScrolled { .. },
+        ) => {
+            crate::ui::ribbon::keytip_pointer_pressed();
+            None
+        }
+        iced::Event::Window(window::Event::CloseRequested) => {
+            Some(Message::WindowCloseRequested(win_id))
+        }
+        iced::Event::Window(window::Event::Closed) => {
+            Some(Message::OsWindowClosed(win_id))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Window(window::Event::Resized(sz))
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            Some(Message::OsWindowResized(win_id, sz.width, sz.height))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Window(window::Event::Moved(at))
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            Some(Message::OsWindowMoved(win_id, at))
+        }
+        // Keys typed in a window of its own stay with its widgets; only Esc
+        // and an unclaimed Enter reach its dialog.
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            let name = match key {
+                keyboard::Key::Named(keyboard::key::Named::Escape) => "ESCAPE",
+                keyboard::Key::Named(keyboard::key::Named::Enter) if status == Status::Ignored => {
+                    "ENTER"
+                }
+                _ => return None,
+            };
+            Some(Message::OsWindowKey(win_id, name.to_string()))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Keyboard(keyboard::Event::KeyReleased { .. })
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            None
+        }
+        iced::Event::Window(window::Event::Resized(sz)) => {
+            Some(Message::WindowResized(sz.width as f32, sz.height as f32))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Window(window::Event::Opened { scale_factor, .. })
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            Some(Message::OsWindowScale(win_id, scale_factor))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        iced::Event::Window(window::Event::Rescaled(scale_factor))
+            if !crate::app::tool_windows::is_main_window(win_id) =>
+        {
+            Some(Message::OsWindowScale(win_id, scale_factor))
+        }
+        // The ribbon's arrows sit on whole physical pixels.
+        iced::Event::Window(window::Event::Opened {
+            scale_factor, size, ..
+        }) => {
+            crate::ui::icons::set_scale_factor(scale_factor);
+            Some(Message::WindowOpened(win_id, size.width, size.height))
+        }
+        iced::Event::Window(window::Event::Rescaled(scale_factor)) => {
+            crate::ui::icons::set_scale_factor(scale_factor);
+            None
+        }
+        iced::Event::Window(window::Event::FileDropped(path)) => {
+            Some(Message::FileDropped(path))
+        }
+        iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
+            crate::ui::ribbon::keytip_key_released(&key)
+        }
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+            // `command()` is Cmd on macOS, Ctrl elsewhere — the
+            // platform multi-select modifier for the layer list.
+            Some(Message::SetModifiers {
+                shift: m.shift(),
+                ctrl: m.command() || m.control(),
+                alt: m.alt(),
+            })
+        }
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            text,
+            repeat,
+            ..
+        }) => {
+            if let Some(keytip) =
+                crate::ui::ribbon::keytip_key_pressed(&key, modifiers, repeat)
+            {
+                return keytip;
+            }
+            #[cfg(target_arch = "wasm32")]
+            let accel = modifiers.command();
+            // AltGr reaches Windows apps as Ctrl+Alt, and a macOS
+            // layout types some characters with Option: when such a
+            // chord produces a printable glyph (`@`, `<`, `{` on many
+            // European layouts) it is typing, not a shortcut. (#1236)
+            let types_glyph = text.as_deref().is_some_and(|value| {
+                !value.is_empty()
+                    && value
+                        .chars()
+                        .all(|ch| !ch.is_control() && !ch.is_whitespace())
+            });
+            let altgr = modifiers.control() && modifiers.alt();
+            let mac_option = cfg!(target_os = "macos")
+                && modifiers.alt()
+                && !modifiers.control()
+                && !modifiers.logo();
+            let shortcut_modifier =
+                (modifiers.control() || modifiers.alt() || modifiers.logo())
+                    && !(types_glyph && (altgr || mac_option));
+            // Any key that produces a printable glyph types it,
+            // even when its logical key resolves to navigation
+            // (NumLock-on Numpad8 / Numpad2 arrive as
+            // ArrowUp / ArrowDown but still carry text "8" /
+            // "2"). Checked before the Arrow / history arms so
+            // those numpad digits aren't swallowed as history
+            // navigation. Whitespace / control text (Space,
+            // Enter, Tab) falls through to the named handlers.
+            // The numpad decimal key emits the OS-layout separator
+            // (a comma on German/European layouts), which the
+            // coordinate parser rejects. Force it to a decimal point
+            // from the physical key, independent of layout.
+            if !shortcut_modifier
+                && status == Status::Ignored
+                && matches!(
+                    physical_key,
+                    keyboard::key::Physical::Code(
+                        keyboard::key::Code::NumpadDecimal
+                            | keyboard::key::Code::NumpadComma
+                    )
+                )
+            {
+                return Some(Message::CommandAppendChar(".".to_string()));
+            }
+            if !shortcut_modifier && status == Status::Ignored {
+                if let Some(t) = text.as_deref() {
+                    if !t.is_empty()
+                        && t.chars().all(|c| !c.is_control() && !c.is_whitespace())
+                    {
+                        return Some(Message::CommandAppendChar(t.to_string()));
+                    }
+                }
+            }
+            let has_printable_text = text.as_deref().is_some_and(|value| {
+                !value.is_empty()
+                    && value
+                        .chars()
+                        .all(|ch| !ch.is_control() && !ch.is_whitespace())
+            });
+            let arrow = match &key {
+                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                    Some(ArrowKey::Up)
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                    Some(ArrowKey::Down)
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+                    Some(ArrowKey::Left)
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+                    Some(ArrowKey::Right)
+                }
+                _ => None,
+            };
+            if !has_printable_text && status == Status::Ignored {
+                if let Some(direction) = arrow {
+                    return Some(Message::ArrowKeyPressed {
+                        direction,
+                        shortcut: shortcut_key_name(&key, modifiers)?,
+                        extend_selection: modifiers.shift(),
+                    });
+                }
+            }
+            if !has_printable_text
+                && status == Status::Captured
+                && matches!(arrow, Some(ArrowKey::Up | ArrowKey::Down))
+                && !crate::ui::dropdown_list::take_dropdown_arrow_captured()
+            {
+                return Some(Message::CommandLineArrowProbe {
+                    direction: arrow?,
+                    extend_selection: modifiers.shift(),
+                });
+            }
+            // A focused web text field needs the browser clipboard;
+            // drawing shortcuts only run for ignored C/V events.
+            #[cfg(target_arch = "wasm32")]
+            if accel && status == Status::Captured {
+                if let keyboard::Key::Character(value) = &key {
+                    if value.eq_ignore_ascii_case("v") {
+                        return Some(Message::WebFieldPaste);
+                    }
+                    if value.eq_ignore_ascii_case("c") {
+                        return Some(Message::WebFieldCopy);
+                    }
+                }
+            }
+            let shortcut = shortcut_key_name(&key, modifiers)?;
+            if shortcut == "ESCAPE"
+                && status == Status::Captured
+                && crate::ui::dropdown_list::take_dropdown_escape_captured()
+            {
+                return None;
+            }
+            if status == Status::Ignored
+                || crate::app::shortcuts::is_global_key(&shortcut)
+            {
+                return Some(Message::ShortcutPressed(shortcut));
+            }
+            // A text field captured the key. SPACE rebound away from
+            // COMMANDSPACE still fires from the command line, but
+            // only there: other fields keep typing spaces. This
+            // closure is a plain fn, so the binding is read from a
+            // flag and the focus is asked for in update. (#1710)
+            (shortcut == "SPACE"
+                && crate::app::shortcuts::SPACE_REBOUND_OFF_COMMANDSPACE
+                    .load(std::sync::atomic::Ordering::Relaxed))
+            .then_some(Message::CommandLineSpaceProbe)
+        }
+        _ => None,
+    }
 }
 
 fn hatch_pattern_key_event(
@@ -452,7 +716,7 @@ fn shortcut_key_name(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Opt
 /// `ViewportRenderMode` enum carries the raw DXF integers, not a label,
 /// so wrap it locally with a friendly name renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct RenderModeChoice(pub codec::entities::ViewportRenderMode);
+pub(super) struct RenderModeChoice(pub document::entities::ViewportRenderMode);
 
 impl std::fmt::Display for RenderModeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -463,10 +727,10 @@ impl std::fmt::Display for RenderModeChoice {
 /// A named style (Realistic, …) the active viewport draws as, by name.
 fn named_visual_style(
     scene: &crate::scene::Scene,
-    mode: codec::entities::ViewportRenderMode,
+    mode: document::entities::ViewportRenderMode,
 ) -> Option<String> {
     match scene.document.objects.get(&scene.active_visual_style()) {
-        Some(codec::objects::ObjectType::VisualStyle(style)) => {
+        Some(document::objects::ObjectType::VisualStyle(style)) => {
             match crate::modules::view::visual_style::mode_for_style_name(&style.description) {
                 Some((named_mode, true)) if named_mode == mode => {
                     Some(crate::t!(style.description.as_str()).into_owned())
@@ -481,10 +745,15 @@ fn named_visual_style(
 impl OpenCADStudio {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // ── Floating panel windows ─────────────────────────────────────────
-        // All dialogs are in-canvas modals now (Plan B); view_main stacks the
-        // active one. `window_id` is unused — there is only the main window.
-        let _ = window_id;
+        crate::sys::startup_times::view_tick();
+        // ── Windows of their own ──────────────────────────────────────────
+        // A tool dialog or dock pallet moved out of the main window draws
+        // its content there; every other window is the main one.
+        if Some(window_id) != self.main_window {
+            if let Some(element) = self.os_window_view(window_id) {
+                return element;
+            }
+        }
         // Pan latency on a large drawing is ~120 ms while `update`, `prepare`
         // and `encode` together account for ~1 ms of it, the GPU sits at 0-8%,
         // and encoding no scene at all changes nothing. Widget-tree
@@ -701,7 +970,7 @@ impl OpenCADStudio {
                     .height(Fill)
                     .min_size(scene.model_pane_min_px())
                     .spacing(crate::scene::TILE_DIVIDER_PX)
-                    .on_resize(6.0, Message::PaneResized)
+                    .on_resize(crate::scene::TILE_RESIZE_LEEWAY_PX, Message::PaneResized)
                     .into(),
                 )
             };
@@ -806,7 +1075,10 @@ bg={bg_ms:.1}ms n={view_count}"
                 color: if in_block_editor { [0.27, 0.48, 0.91] } else { [0.80, 0.80, 0.80] },
                 axes: self.grid_axes,
             };
-            crate::ui::overlay::grid_overlay(grid, grid_style)
+            // Wipeouts hide the model-space grid (the grid is an
+            // overlay above the GPU scene, so it is cut around them instead).
+            let masks = (!is_paper && !grid.is_empty()).then(|| tab.scene.wipeout_models_arc());
+            crate::ui::overlay::grid_overlay_masked(grid, grid_style, masks)
         };
 
         mark("selection_overlay");
@@ -831,8 +1103,12 @@ bg={bg_ms:.1}ms n={view_count}"
                     .as_ref()
                     .is_some_and(|cmd| cmd.name() == "STRETCH");
 
-            let grips: Vec<crate::ui::overlay::GripMarker> = if show_grips
-                && !tab.selected_grips.is_empty()
+            // Screen grips with the object they belong to, for the frames.
+            let mut owned_grips: Vec<(document::Handle, iced::Point, crate::scene::model::object::GripShape)> =
+                Vec::new();
+            let mut grip_rubber: Option<(iced::Point, iced::Point)> = None;
+            let (grips, group_boxes): (Vec<crate::ui::overlay::GripMarker>, Vec<Vec<iced::Point>>) =
+                if show_grips && !tab.selected_grips.is_empty()
             {
                 let (vw, vh) = sel_ref.view.vp_size;
                 // Overlays project through the active tile's camera, so
@@ -855,12 +1131,12 @@ bg={bg_ms:.1}ms n={view_count}"
                     .flatten()
                     .and_then(|h| {
                         let indexed = match tab.scene.document.get_entity(h) {
-                            Some(codec::EntityType::LwPolyline(_))
-                            | Some(codec::EntityType::Polyline2D(_))
-                            | Some(codec::EntityType::Polyline3D(_))
-                            | Some(codec::EntityType::Spline(_))
-                            | Some(codec::EntityType::Face3D(_))
-                            | Some(codec::EntityType::PolygonMesh(_)) => true,
+                            Some(document::EntityType::LwPolyline(_))
+                            | Some(document::EntityType::Polyline2D(_))
+                            | Some(document::EntityType::Polyline3D(_))
+                            | Some(document::EntityType::Spline(_))
+                            | Some(document::EntityType::Face3D(_))
+                            | Some(document::EntityType::PolygonMesh(_)) => true,
                             _ => false,
                         };
                         indexed.then_some(tab.properties.prop_vertex)
@@ -869,27 +1145,81 @@ bg={bg_ms:.1}ms n={view_count}"
                 // viewport camera so they sit on the wire the GPU draws.
                 // Paper entities use the 2-D paper transform; the model tab
                 // uses the model camera.
-                let screen_grips = if let Some((cam, _)) = &edit_frame {
-                    grips_to_screen_rte(
-                        &tab.selected_grips,
-                        cam.view_proj_rte(bounds),
-                        cam.eye(),
-                        bounds,
-                    )
-                } else if is_paper {
-                    let cam = tab.scene.camera.borrow();
-                    let aspect = if vh > 0.0 { vw / vh } else { 1.0 };
-                    let half_h = cam.ortho_size();
-                    let half_w = half_h * aspect;
-                    let tx = cam.target.x as f32;
-                    let ty = cam.target.y as f32;
-                    drop(cam);
-                    grips_to_screen_paper(&tab.selected_grips, tx, ty, half_w, half_h, bounds)
-                } else {
-                    let cam = tab.scene.camera.borrow();
-                    grips_to_screen(&tab.selected_grips, &cam, bounds)
+                let project = |list: &[crate::scene::model::object::GripDef]| {
+                    if let Some((cam, _)) = &edit_frame {
+                        grips_to_screen_rte(list, cam.view_proj_rte(bounds), cam.eye(), bounds)
+                    } else if is_paper {
+                        let cam = tab.scene.camera.borrow();
+                        let aspect = if vh > 0.0 { vw / vh } else { 1.0 };
+                        let half_h = cam.ortho_size();
+                        let half_w = half_h * aspect;
+                        let tx = cam.target.x as f32;
+                        let ty = cam.target.y as f32;
+                        drop(cam);
+                        grips_to_screen_paper(list, tx, ty, half_w, half_h, bounds)
+                    } else {
+                        let cam = tab.scene.camera.borrow();
+                        grips_to_screen(list, &cam, bounds)
+                    }
                 };
-                screen_grips
+                // A dragged grip stays where the drag started, and so does a
+                // frame through it; a rubber band runs from it to the cursor.
+                let screen_grips = match tab.active_grip.as_ref() {
+                    Some(edit) => {
+                        // Every grip stays where it was when the drag
+                        // started; the dragged one marks its start point.
+                        let list = match &tab.drag_start_grips {
+                            Some(((handle, id, start), list, owners))
+                                if (*handle, *id, *start)
+                                    == (edit.handle, edit.grip_id, edit.origin_world)
+                                    && list.len() == tab.selected_grips.len()
+                                    && owners == &tab.selected_grip_handles =>
+                            {
+                                list.clone()
+                            }
+                            _ => tab.selected_grips.clone(),
+                        };
+                        // A circle's quadrant stretches from its centre.
+                        let base = match tab.scene.document.get_entity(edit.handle) {
+                            Some(document::EntityType::Circle(circle)) => {
+                                let centre = circle.center_wcs();
+                                glam::DVec3::new(centre.x, centre.y, centre.z)
+                            }
+                            _ => edit.origin_world,
+                        };
+                        let ends = project(&[
+                            crate::entities::common::square_grip(0, base),
+                            crate::entities::common::square_grip(1, edit.last_world),
+                        ]);
+                        if let [(_, from, ..), (_, to, ..)] = ends.as_slice() {
+                            grip_rubber = Some((*from, *to));
+                        }
+                        project(&list)
+                    }
+                    None => project(&tab.selected_grips),
+                };
+                owned_grips = screen_grips
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (_, screen, _, shape, _))| {
+                        Some((*tab.selected_grip_handles.get(index)?, *screen, *shape))
+                    })
+                    .collect();
+                // GROUPDISPLAYMODE 2: each group box's four corners on screen.
+                let boxes: Vec<Vec<iced::Point>> = tab
+                    .group_boxes
+                    .iter()
+                    .map(|[min, max]| {
+                        let z = (min.z + max.z) * 0.5;
+                        let corners: Vec<crate::scene::model::object::GripDef> =
+                            [(min.x, min.y), (max.x, min.y), (max.x, max.y), (min.x, max.y)]
+                                .into_iter()
+                                .map(|(x, y)| crate::entities::common::square_grip(0, glam::DVec3::new(x, y, z)))
+                                .collect();
+                        project(&corners).into_iter().map(|grip| grip.1).collect()
+                    })
+                    .collect();
+                let markers = screen_grips
                     .into_iter()
                     .enumerate()
                     .filter(|(_, (_, screen, _, _, _))| {
@@ -926,14 +1256,16 @@ bg={bg_ms:.1}ms n={view_count}"
                             is_authoring: crate::app::block_authoring_edit::is_editor_grip(grip_id),
                             is_dynamic: crate::app::block_actions::is_test_grip(grip_id)
                                 || grip_id == crate::app::visibility::VIS_GRIP_ID,
+                            is_filled: grip_id == crate::scene::GROUP_GRIP_ID,
                         }
                     })
-                    .collect()
+                    .collect();
+                (markers, boxes)
             } else {
-                vec![]
+                (vec![], vec![])
             };
             // API v11: plugin-declared custom grips render in the same overlay
-            // layer with a distinct accent (always-visible display state of a
+            // layer with native grip paint (always-visible display state of a
             // live declaring plugin; hover highlighting through the same
             // pipeline; the dragged grip is hot). Culling is the per-tab
             // uniform grid's view-rect query, not a scan of every grip.
@@ -957,35 +1289,62 @@ bg={bg_ms:.1}ms n={view_count}"
                             is_plugin: true,
                             is_authoring: false,
                             is_dynamic: false,
+                            is_filled: false,
                         });
                     }
                 }
                 grips
             };
-            let control_polygon = tab.selected_handle.and_then(|handle| {
-                let spline = match tab.scene.document.get_entity(handle) {
-                    Some(codec::EntityType::Spline(spline))
-                        if crate::entities::spline::shows_control_vertices(spline) =>
-                    {
-                        spline
-                    }
-                    _ => return None,
-                };
-                if tab
-                    .selected_grip_handles
-                    .iter()
-                    .any(|owner| *owner != handle)
-                {
-                    return None;
+            // The frame of every selected CV spline and spline-fit 2D or 3D
+            // polyline: its frame-vertex grips joined in order.
+            let mut framed: Vec<document::Handle> = Vec::new();
+            for (owner, _, _) in &owned_grips {
+                if !framed.contains(owner) {
+                    framed.push(*owner);
                 }
-                let points: Vec<_> = grips
-                    .iter()
-                    .filter(|grip| grip.shape == crate::scene::model::object::GripShape::Circle)
-                    .map(|grip| grip.pos)
-                    .collect();
-                (points.len() >= 2)
-                    .then_some((points, spline.flags.closed || spline.flags.periodic))
-            });
+            }
+            let control_polygons: Vec<(Vec<iced::Point>, bool, bool)> = framed
+                .into_iter()
+                .filter_map(|handle| {
+                    let (closed, dotted, grip_shape) = match tab.scene.document.get_entity(handle) {
+                        Some(document::EntityType::Spline(spline))
+                            if crate::entities::spline::shows_control_vertices(spline) =>
+                        {
+                            (
+                                spline.flags.closed || spline.flags.periodic,
+                                false,
+                                crate::scene::model::object::GripShape::Circle,
+                            )
+                        }
+                        Some(document::EntityType::Polyline2D(polyline))
+                            if polyline.flags.bits() & 4 != 0 =>
+                        {
+                            (
+                                polyline.is_closed(),
+                                true,
+                                crate::scene::model::object::GripShape::Square,
+                            )
+                        }
+                        Some(document::EntityType::Polyline3D(polyline))
+                            if polyline.smooth_type
+                                != document::entities::polyline3d::SmoothSurfaceType::None =>
+                        {
+                            (
+                                polyline.is_closed(),
+                                true,
+                                crate::scene::model::object::GripShape::Square,
+                            )
+                        }
+                        _ => return None,
+                    };
+                    let points: Vec<_> = owned_grips
+                        .iter()
+                        .filter(|(owner, _, shape)| *owner == handle && *shape == grip_shape)
+                        .map(|(_, pos, _)| *pos)
+                        .collect();
+                    (points.len() >= 2).then_some((points, closed, dotted))
+                })
+                .collect();
             let grip_clip = if grips.is_empty() {
                 None
             } else {
@@ -1247,6 +1606,13 @@ bg={bg_ms:.1}ms n={view_count}"
                 _ => (None, None),
             };
 
+            // VPHIGHLIGHT: faint outline of the Model viewport under the
+            // pointer (only with several viewports; none while it is away).
+            let pane_hover = if is_paper {
+                None
+            } else {
+                self.model_viewport_outline(tab)
+            };
             let hover_locked = tab
                 .scene
                 .hover_highlight
@@ -1327,7 +1693,7 @@ bg={bg_ms:.1}ms n={view_count}"
                         )
                         .into_iter()
                         .filter_map(|(handle, parameter)| {
-                            let project = |point: codec::types::Vector3| {
+                            let project = |point: document::types::Vector3| {
                                 let point = tab.scene.camera.borrow().project(
                                     glam::DVec3::new(point.x, point.y, point.z),
                                     vp_bounds,
@@ -1341,7 +1707,8 @@ bg={bg_ms:.1}ms n={view_count}"
                                 project(parameter.definition_label_point)?,
                                 parameter.position_name.clone(),
                                 vp_bounds,
-                                tab.selected_authoring == Some(handle),
+                                tab.selected_authoring == Some(handle)
+                                    || tab.active_cmd.as_ref().is_some_and(|command| command.selection_marker_selected(handle)),
                             ))
                         })
                         .collect()
@@ -1411,10 +1778,15 @@ bg={bg_ms:.1}ms n={view_count}"
                             ))
                         })
                         .map(|(handle, point)| {
-                            let mut g = crate::scene::block_distance_parameter::Graphic::default();
-                            g.base_grips.push(point);
-                            g.labels.push((point, "Basepoint".into()));
-                            (handle, g, point)
+                            (
+                                handle,
+                                crate::scene::block_basepoint::marker_graphic(
+                                    &tab.scene.document,
+                                    session.br_handle,
+                                    point,
+                                ),
+                                point,
+                            )
                         }),
                     )
                     .chain(
@@ -1433,7 +1805,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     )
                     .chain(crate::scene::block_authoring::edit::items(&tab.scene.document, session.br_handle).into_iter().filter_map(|item| {
                         let native = tab.scene.document.objects.get(&item.handle)?;
-                        if matches!(native, codec::objects::ObjectType::DynamicBlock(object) if matches!(object.data, codec::objects::DynamicBlockData::PropertiesTable(_))) {
+                        if matches!(native, document::objects::ObjectType::DynamicBlock(object) if matches!(object.data, document::objects::DynamicBlockData::PropertiesTable(_))) {
                             Some((item.handle, item.graphic, item.grips.first()?.1))
                         } else { None }
                     }))
@@ -1467,7 +1839,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     )
                     .filter_map(|(handle, mut graphic, marker_tail)| {
                         let native_grips = crate::scene::block_grips::config::apply_graphic(&tab.scene.document, session.br_handle, handle, &mut graphic);
-                        let project = |p: codec::types::Vector3| {
+                        let project = |p: document::types::Vector3| {
                             let p = tab
                                 .scene
                                 .camera
@@ -1503,7 +1875,8 @@ bg={bg_ms:.1}ms n={view_count}"
                             })
                             .collect::<Option<Vec<_>>>()?;
                         Some(crate::ui::overlay::AuthoringDimension {
-                            selected: tab.selected_authoring == Some(handle),
+                            selected: tab.selected_authoring == Some(handle)
+                                || tab.active_cmd.as_ref().is_some_and(|command| command.selection_marker_selected(handle)),
                             is_action: action_handles.contains(&handle),
                             lines,
                             base_grips: graphic
@@ -1541,7 +1914,9 @@ bg={bg_ms:.1}ms n={view_count}"
                 snap_ext_base2,
                 snap_ext_dir,
                 grips,
-                control_polygon,
+                control_polygons,
+                grip_rubber,
+                group_boxes,
                 grip_clip,
                 ucs_icons,
                 ost_points,
@@ -1552,6 +1927,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 dividers,
                 pane_move_rect,
                 pane_drop_rect,
+                pane_hover,
                 nav_cursor(tab),
                 self.ribbon.open_dropdown.is_some(),
                 hover_locked,
@@ -1683,8 +2059,12 @@ bg={bg_ms:.1}ms n={view_count}"
             .as_ref()
             .map(|c| c.needs_entity_pick() || c.needs_structure_point_pick())
             .unwrap_or(false);
+        #[cfg(not(target_arch = "wasm32"))]
+        let plugin_grip_active = tab.active_plugin_grip.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let plugin_grip_active = false;
         let dyn_input_overlay: Option<Element<'_, Message>> = if self.dyn_input
-            && (tab.active_cmd.is_some() || tab.active_grip.is_some())
+            && (tab.active_cmd.is_some() || tab.active_grip.is_some() || plugin_grip_active)
             && (!tab.dyn_fields.is_empty() || dyn_picks_object)
         {
             let w = tab.last_cursor_world;
@@ -1887,11 +2267,15 @@ bg={bg_ms:.1}ms n={view_count}"
                     }
                 })
                 .collect();
-            let prompt = tab
+            let mut prompt = tab
                 .active_cmd
                 .as_ref()
                 .map(|c| c.prompt())
                 .unwrap_or_default();
+            // The command line is hidden: what is typed shows here.
+            if self.command_line_hidden && !self.command_line.input.is_empty() {
+                prompt = format!("{prompt} {}", self.command_line.input);
+            }
 
             let tracking_hint = match self.otrack_kind {
                 Some(crate::snap::TrackingKind::Perpendicular) => {
@@ -2013,6 +2397,10 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.render_mode_menu_open,
                     self.render_mode_preview,
                     style_name,
+                    (
+                        self.model_space.viewport_hover_highlight,
+                        self.model_space.viewport_hover_opacity,
+                    ),
                 );
                 // Adaptive: DensitySwap measures the bar's real width every frame
                 // (reported into `render_bar_w`, which the ViewCube reads to decide
@@ -2044,7 +2432,7 @@ bg={bg_ms:.1}ms n={view_count}"
             // clicks (the shader viewport sits below it). Positioned with
             // leading Spaces sized to the viewport's screen rectangle.
             mark("active_vp_rect");
-            let active_vp_rect: Option<(codec::Handle, iced::Rectangle)> =
+            let active_vp_rect: Option<(document::Handle, iced::Rectangle)> =
                 if is_paper && !tab.is_start {
                     tab.scene.active_viewport.and_then(|h| {
                         let (cw, ch) = tab.scene.selection.borrow().view.vp_size;
@@ -2093,7 +2481,7 @@ bg={bg_ms:.1}ms n={view_count}"
                 let vp_mode = tab
                     .scene
                     .active_viewport_render_mode()
-                    .unwrap_or(codec::entities::ViewportRenderMode::Wireframe2D);
+                    .unwrap_or(document::entities::ViewportRenderMode::Wireframe2D);
                 // Adaptive (same as model): the picker measures its real width into
                 // `render_bar_w` and swaps to an empty spacer only when the viewport
                 // can't hold it; the ViewCube reads that width to decide overlap.
@@ -2106,6 +2494,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.render_mode_menu_open,
                     self.render_mode_preview,
                     named_visual_style(&tab.scene, vp_mode),
+                    (false, 0),
                 );
                 let adaptive: Element<'_, Message> = DensitySwap::new(vec![
                     iced::widget::opaque(bar),
@@ -2191,6 +2580,21 @@ bg={bg_ms:.1}ms n={view_count}"
                 }
             }
 
+            // HATCH's settings float at the drawing's top left (HPDLGMODE,
+            // or seTtings).
+            if self.model_space.hatch_dialog_mode != 0 || self.hatch_panel_shown {
+                if let Some(settings) =
+                    tab.active_cmd.as_ref().and_then(|command| command.hatch_settings())
+                {
+                    let mut layers: Vec<String> =
+                        tab.scene.document.layers.iter().map(|layer| layer.name.clone()).collect();
+                    layers.sort_by_key(|name| name.to_lowercase());
+                    viewport_stack = viewport_stack.push(position_canvas_overlay(
+                        iced::Point::new(12.0, 40.0),
+                        crate::ui::window::hatch_panel::view(settings, &self.hatch_drafts, layers),
+                    ));
+                }
+            }
             let (vw,vh)=tab.scene.selection.borrow().view.vp_size;
             let bar_bounds=tab.scene.active_model_tile_bounds(vw,vh);
             let bar_color=crate::ui::overlay::authoring::AuthoringVisualOptions::new(&self.block_editor_preferences,&tab.scene.document,crosshair_background(tab,is_paper)).action;
@@ -2294,67 +2698,6 @@ bg={bg_ms:.1}ms n={view_count}"
                 }
             }
 
-            // Dynamic-block flip-state list.
-            if let Some(popup) = self.flip_popup.as_ref() {
-                if !tab.is_start {
-                    let max_len = popup
-                        .labels
-                        .iter()
-                        .map(|s| s.chars().count())
-                        .max()
-                        .unwrap_or(4) as f32;
-                    // +2 chars for the leading "✓ " / "  " marker column.
-                    let row_w = (max_len + 2.0) * 7.0 + 24.0;
-                    let mut col = column![].spacing(0).width(iced::Length::Fixed(row_w));
-                    for (idx, name) in popup.labels.iter().enumerate() {
-                        let is_cur = popup.current == idx;
-                        let mark: Element<'_, Message> = if is_cur {
-                            crate::ui::icons::themed_check_cell(true)
-                        } else {
-                            Space::new().width(11).into()
-                        };
-                        let btn = button(
-                            row![container(mark).width(16), text(name).size(12),]
-                                .spacing(2)
-                                .align_y(iced::Center),
-                        )
-                        .on_press(Message::FlipPick(idx))
-                        .padding([3, 10])
-                        .width(Fill)
-                        .style(move |theme: &Theme, status| {
-                            let palette = theme.palette();
-                            iced::widget::button::Style {
-                                background: matches!(status, iced::widget::button::Status::Hovered)
-                                    .then_some(Background::Color(palette.primary.weak.color)),
-                                border: Border {
-                                    color: Color::TRANSPARENT,
-                                    width: 0.0,
-                                    radius: 0.0.into(),
-                                },
-                                text_color: palette.background.base.text,
-                                ..Default::default()
-                            }
-                        });
-                        col = col.push(btn);
-                    }
-                    let panel = container(col).padding(2).style(|theme: &Theme| {
-                        let palette = theme.palette();
-                        container::Style {
-                            background: Some(Background::Color(palette.background.weak.color)),
-                            border: Border {
-                                color: palette.background.neutral.color,
-                                width: 1.0,
-                                radius: 3.0.into(),
-                            },
-                            ..Default::default()
-                        }
-                    });
-                    let anchor = iced::Point::new(popup.anchor.x + 12.0, popup.anchor.y + 12.0);
-                    viewport_stack =
-                        viewport_stack.push(position_canvas_overlay(anchor, panel.into()));
-                }
-            }
-
             // Dynamic-block visibility-state dropdown.
             if let Some(popup) = self.visibility_popup.as_ref() {
                 if !tab.is_start {
@@ -2423,30 +2766,16 @@ bg={bg_ms:.1}ms n={view_count}"
             }
             if let Some(popup) = self.table_popup.as_ref() {
                 if !tab.is_start {
-                    let mut col = column![text(popup.header.clone()).size(12)].spacing(2);
-                    for (idx, name) in popup.rows.iter().enumerate() {
-                        let mark: Element<'_, Message> = if popup.current == Some(idx) {
-                            crate::ui::icons::themed_check_cell(true)
-                        } else {
-                            Space::new().width(11).into()
-                        };
-                        col = col.push(
-                            button(
-                                row![container(mark).width(16), text(name).size(12)]
-                                    .spacing(2)
-                                    .align_y(iced::Center),
-                            )
-                            .on_press(Message::TableRowPick(idx))
-                            .padding([3, 10])
-                            .width(Fill),
-                        );
+                    let panel = value_list_panel(popup);
+                    let (cw, ch) = tab.scene.selection.borrow().view.vp_size;
+                    let bounds = tab.scene.active_model_tile_bounds(cw, ch);
+                    if let Some(anchor) = self.table_popup_anchor(i, bounds) {
+                        viewport_stack = viewport_stack.push(position_canvas_overlay_near_cursor(
+                            anchor,
+                            command_line_inset(self),
+                            panel,
+                        ));
                     }
-                    let panel =
-                        container(iced::widget::scrollable(col).height(iced::Length::Shrink))
-                            .padding(2);
-                    let anchor = iced::Point::new(popup.anchor.x + 12.0, popup.anchor.y + 12.0);
-                    viewport_stack =
-                        viewport_stack.push(position_canvas_overlay(anchor, panel.into()));
                 }
             }
 
@@ -2457,6 +2786,22 @@ bg={bg_ms:.1}ms n={view_count}"
             // are ever needed together.
             let selection_tools = if tab.is_start {
                 None
+            } else if tab.scene.table_cells_handle().is_some() {
+                {
+                    let tools = crate::ui::ribbon::table_cell_tools();
+                    let align = crate::ui::ribbon::table_cell_alignments();
+                    // Rows and columns, merging and locking, the nine
+                    // alignments three to a row, formats, inserts, linked
+                    // data and the cell's text, two to a row.
+                    crate::ui::side_toolbar::view_grid(&[
+                        (&tools[..6], 2),
+                        (&tools[6..9], 2),
+                        (&align[..], 3),
+                        (&tools[9..12], 2),
+                        (&tools[12..16], 2),
+                        (&tools[16..], 2),
+                    ])
+                }
             } else if self.ribbon.xref_context() {
                 crate::ui::side_toolbar::view(&crate::ui::ribbon::xref_tools())
             } else if let Some(shown) = self.ribbon.point_cloud_context() {
@@ -2543,7 +2888,12 @@ bg={bg_ms:.1}ms n={view_count}"
             // Quick Properties: stay near the selection cursor, flipping around
             // it as needed to remain inside the visible drawing area.
             // Floating (QPLOCATION 1): where it was last dragged.
-            if self.quick_properties && !tab.is_start {
+            // It steps aside once a command runs or something is typed (#2458).
+            if self.quick_properties
+                && !tab.is_start
+                && tab.active_cmd.is_none()
+                && self.command_line.input.is_empty()
+            {
                 if let Some(panel) = tab.properties.quick_view() {
                     viewport_stack = viewport_stack.push(if self.quick_properties_float {
                         overlay::position_canvas_overlay_clamped(
@@ -2702,13 +3052,47 @@ bg={bg_ms:.1}ms n={view_count}"
                     (sel.menu.open_at, sel.menu.ui.highlighted)
                 };
                 if let Some(p) = ctx_pos {
-                    let menu = self.current_context_menu();
-                    viewport_stack = viewport_stack.push(viewport_context_menu_overlay(
-                        p,
-                        command_line_inset,
-                        &menu,
-                        highlighted,
-                    ));
+                    if let Some(draft) = &self.context_menu_editing {
+                        let raw = self.uncustomized_context_menu();
+                        viewport_stack = viewport_stack.push(overlay::context_menu_editor_overlay(
+                            p,
+                            command_line_inset,
+                            &raw.rows,
+                            &self.context_menu_custom,
+                            draft,
+                        ));
+                    } else {
+                        let menu = self.current_context_menu();
+                        viewport_stack = viewport_stack.push(viewport_context_menu_overlay(
+                            p,
+                            command_line_inset,
+                            &menu,
+                            highlighted,
+                        ));
+                    }
+                }
+            }
+
+            // Quad cursor menu — the selection-boundary popup state's quad
+            // sibling of the context menu. Its card is pushed after the
+            // context-menu panel so, while both would somehow be open, the
+            // quad card covers the menu (docs/quad-menu.md §3.5); the push
+            // above stays keyed to `open_at` and must not change.
+            if !tab.is_start {
+                let quad = tab.scene.selection.borrow().menu.quad.clone();
+                if let Some(quad) = quad {
+                    if self
+                        .quad_panels
+                        .first()
+                        .is_some_and(|panel| !panel.items.is_empty())
+                    {
+                        viewport_stack = viewport_stack.push(viewport_quad_overlay(
+                            &quad,
+                            &self.quad_panels,
+                            self.quad_width as usize,
+                            command_line_inset,
+                        ));
+                    }
                 }
             }
 
@@ -2716,7 +3100,12 @@ bg={bg_ms:.1}ms n={view_count}"
             // insertion-point click.
             if !tab.is_start {
                 let canvas = tab.scene.selection.borrow().view.vp_size;
-                if let Some(ed) = &self.mtext_editor {
+                // The editor's modal would swallow the clicks of a pick that
+                // the Field dialog started from it, so it waits meanwhile.
+                if let (Some(ed), Some(cell)) = (self.mtext_editor.as_ref(), self.table_cell_canvas()) {
+                    viewport_stack = viewport_stack.push(overlay::table_cell_editor_overlay(ed, cell, canvas));
+                }
+                if let Some(ed) = self.mtext_editor.as_ref().filter(|_| tab.active_cmd.is_none() && self.table_cell_editor.is_none()) {
                     let styles: Vec<String> = tab
                         .scene
                         .document
@@ -2805,17 +3194,27 @@ bg={bg_ms:.1}ms n={view_count}"
             .height(Fill)
             .into()
         } else {
-            let command_line_overlay = iced::widget::container(command_line)
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Bottom)
-                .padding(iced::Padding {
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 2.0,
-                    left: 0.0,
-                });
+            // Hidden (COMMANDLINEHIDE / Ctrl+9), the field stays in the tree,
+            // collapsed, so it keeps the keyboard; Dynamic Input shows the
+            // prompt and the typing at the cursor.
+            let command_line_overlay = if self.command_line_hidden {
+                iced::widget::container(command_line)
+                    .width(Fill)
+                    .height(iced::Length::Fixed(0.0))
+                    .clip(true)
+            } else {
+                iced::widget::container(command_line)
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Bottom)
+                    .padding(iced::Padding {
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 2.0,
+                        left: 0.0,
+                    })
+            };
             iced::widget::stack![workspace, command_line_overlay]
                 .width(Fill)
                 .height(Fill)
@@ -2987,6 +3386,7 @@ bg={bg_ms:.1}ms n={view_count}"
                             viewport_locked: tab.scene.viewports_display_locked(),
                             lineweight_display: tab.scene.document.header.lineweight_display,
                             constraint_status: tab.active_block_edit_session().map(|_| tab.scene.block_constraint_status_mode),
+                            geo_system: tab.scene.geo_data().map(crate::entities::object_data::geo_system_label),
                         },
                         crate::ui::statusbar::StatusBarModes {
                             grid_display: self.show_grid,
@@ -3080,12 +3480,24 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.tabs[self.active_tab].is_start,
                     &self.tabs[self.active_tab].recent_colors,
                     &self.recent_files,
+                    &self.open_drawing_names(),
                 )
                 .or_else(|| {
                     crate::ui::classic_toolbar::flyout_overlay(
                         &self.ribbon,
                         self.win_size.0,
                         self.win_size.1,
+                    )
+                })
+                .or_else(|| {
+                    // The Start tab has no drawing for the toolbar.
+                    if self.tabs[self.active_tab].is_start {
+                        return None;
+                    }
+                    self.ribbon.qat_customize_overlay(
+                        self.win_size,
+                        self.show_menu_bar,
+                        self.ribbon_closed,
                     )
                 })
                 .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into())
@@ -3098,9 +3510,18 @@ bg={bg_ms:.1}ms n={view_count}"
             iced::widget::Space::new().width(0).height(0).into()
         };
 
+        let filter_layer: Element<'_, Message> = match &self.filter_dialog {
+            Some(state) => self.filter_overlay(state),
+            None => iced::widget::Space::new().width(0).height(0).into(),
+        };
+        let layer_import_layer: Element<'_, Message> = match &self.layer_import {
+            Some(state) => self.layer_import_overlay(state),
+            None => iced::widget::Space::new().width(0).height(0).into(),
+        };
         let qselect_layer: Element<'_, Message> = if let Some(state) = &self.qselect {
             qselect_overlay(
                 state,
+                self.transparent_select.as_deref(),
                 &state.available_types,
                 &state.available_properties,
                 state.candidate_count,
@@ -3147,6 +3568,17 @@ bg={bg_ms:.1}ms n={view_count}"
         }
         .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into());
 
+        // Floating ribbon panels lie over the drawing and the palettes, under
+        // the ribbon's popups and menus. With the ribbon closed they stay:
+        // they are the classic toolbars then.
+        let floating_layer: Element<'_, Message> =
+            if self.clean_screen || self.tabs[self.active_tab].is_start {
+                None
+            } else {
+                self.ribbon.floating_layer(self.show_block_palette)
+            }
+            .unwrap_or_else(|| iced::widget::Space::new().width(0).height(0).into());
+
         // Pinned slide-outs hang under their panels, over the drawing.
         let pinned_layer: Element<'_, Message> = if self.clean_screen || self.ribbon_closed || crate::workspace::is_classic() {
             None
@@ -3180,6 +3612,7 @@ bg={bg_ms:.1}ms n={view_count}"
 
         let composed = stack![
             main_ui,
+            floating_layer,
             pinned_layer,
             ribbon_popup_layer,
             keytip_bar,
@@ -3187,6 +3620,8 @@ bg={bg_ms:.1}ms n={view_count}"
             search_layer,
             ribbon_menu_layer,
             qselect_layer,
+            filter_layer,
+            layer_import_layer,
             snap_override_layer,
             open_progress_layer,
             keytip_layer,
@@ -3215,10 +3650,19 @@ bg={bg_ms:.1}ms n={view_count}"
             composed.into()
         };
 
+        // Open tool dialogs float over the drawing without blocking it; a
+        // modal dialog below then covers them too.
+        let modal_underlay = self.with_tool_windows(modal_underlay);
+
         // ── In-canvas modal dialogs (Plan B) ───────────────────────────────
         // Former pop-up windows render as overlays here, so they work on both
         // the native (single main window) and web builds.
-        let base: Element<'_, Message> = match self.modal_content() {
+        // A dialog in a window of its own is drawn there, also while it is
+        // the active modal (the colour picker it opened holds it).
+        let in_own_window = self.active_modal.is_some_and(|kind| {
+            self.tool_windows.iter().any(|tool| tool.kind == kind && !tool.in_canvas())
+        });
+        let base: Element<'_, Message> = match self.modal_content().filter(|_| !in_own_window) {
             Some(content) => {
                 let modal_options = if cfg!(target_arch = "wasm32")
                     && matches!(self.active_modal, Some(super::ModalKind::PluginManager))
@@ -3272,6 +3716,9 @@ bg={bg_ms:.1}ms n={view_count}"
             if let Some(eyedropper) = picker.eyedropper_view() {
                 return iced::widget::stack![base, eyedropper].into();
             }
+            if in_own_window {
+                return base;
+            }
             crate::ui::modal::modal(
                 base,
                 t!("Select Color"),
@@ -3295,6 +3742,21 @@ bg={bg_ms:.1}ms n={view_count}"
 }
 
 impl OpenCADStudio {
+    /// The open drawings for the Quick Access Switch Windows menu, as
+    /// (tab index, name, is the current one); empty while that menu is
+    /// closed.
+    fn open_drawing_names(&self) -> Vec<(usize, String, bool)> {
+        if self.ribbon.open_dropdown.as_deref() != Some(crate::ui::ribbon::QAT_SWITCH_ID) {
+            return Vec::new();
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| !tab.is_start)
+            .map(|(index, tab)| (index, tab.tab_display_name(), index == self.active_tab))
+            .collect()
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         use iced::event;
         // Only request per-frame ticks while something on screen is animating
@@ -3306,7 +3768,7 @@ impl OpenCADStudio {
             .as_ref()
             .is_some_and(|progress| progress.recovery_error.is_none());
         let frames = if needs_frames {
-            window::frames().map(Message::Tick)
+            crate::app::tool_windows::main_window_frames().map(Message::Tick)
         } else {
             Subscription::none()
         };
@@ -3315,7 +3777,7 @@ impl OpenCADStudio {
         // entry disappears at the moment its visible window expires.
         // The subscription auto-stops once no entry is expiring.
         let history_tick = if self.command_line.has_expiring_history() {
-            window::frames().map(Message::Tick)
+            crate::app::tool_windows::main_window_frames().map(Message::Tick)
         } else {
             Subscription::none()
         };
@@ -3326,12 +3788,12 @@ impl OpenCADStudio {
         // already open.
         // Resume scene construction after the notice redraw.
         let layout_settle = if self.layout_settling {
-            window::frames().map(|_| Message::LayoutSettled)
+            crate::app::tool_windows::main_window_frames().map(|_| Message::LayoutSettled)
         } else {
             Subscription::none()
         };
         let grip_dwell = if self.grip_hover.is_some() && self.grip_popup.is_none() {
-            window::frames().map(|_| Message::GripDwellTick)
+            crate::app::tool_windows::main_window_frames().map(|_| Message::GripDwellTick)
         } else {
             Subscription::none()
         };
@@ -3339,7 +3801,7 @@ impl OpenCADStudio {
         // moment the cursor has been still for the dwell window — without
         // this `ViewportMove` alone never re-fires once the user stops.
         let hover_dwell = if self.hover_dwell.is_some() {
-            window::frames().map(|_| Message::HoverDwellTick)
+            crate::app::tool_windows::main_window_frames().map(|_| Message::HoverDwellTick)
         } else {
             Subscription::none()
         };
@@ -3348,7 +3810,7 @@ impl OpenCADStudio {
             .as_ref()
             .is_some_and(|dwell| !dwell.snap_resolved || dwell.preview_dirty)
         {
-            window::frames().map(|_| Message::SnapDwellTick)
+            crate::app::tool_windows::main_window_frames().map(|_| Message::SnapDwellTick)
         } else {
             Subscription::none()
         };
@@ -3361,7 +3823,7 @@ impl OpenCADStudio {
         let nav_settle = if self.tabs[self.active_tab].scene.is_settling()
             || self.tabs[self.active_tab].scene.underlay_resolution_stale()
         {
-            window::frames().map(Message::Tick)
+            crate::app::tool_windows::main_window_frames().map(Message::Tick)
         } else {
             Subscription::none()
         };
@@ -3373,7 +3835,7 @@ impl OpenCADStudio {
         let gpu_probe = if matches!(self.gpu_status, crate::scene::pipeline::GpuStatus::Unknown)
             && !self.tabs[self.active_tab].is_start
         {
-            window::frames().map(Message::Tick)
+            crate::app::tool_windows::main_window_frames().map(Message::Tick)
         } else {
             Subscription::none()
         };
@@ -3381,7 +3843,7 @@ impl OpenCADStudio {
         // window) must not hold the save: a timer goes ahead without it.
         let thumbnail_capture = if self.thumbnail_capture_clean {
             Subscription::batch([
-                window::frames().map(|_| Message::ThumbnailCaptureFrame),
+                crate::app::tool_windows::main_window_frames().map(|_| Message::ThumbnailCaptureFrame),
                 iced::time::every(std::time::Duration::from_millis(300))
                     .map(|_| Message::ThumbnailCaptureFrame),
             ])
@@ -3393,7 +3855,7 @@ impl OpenCADStudio {
         // pending.
         let capture_frame = if self.control.capture_frame_pending {
             Subscription::batch([
-                window::frames().map(|_| Message::ControlCaptureFrame { redrew: true }),
+                crate::app::tool_windows::main_window_frames().map(|_| Message::ControlCaptureFrame { redrew: true }),
                 iced::time::every(std::time::Duration::from_millis(50))
                     .map(|_| Message::ControlCaptureFrame { redrew: false }),
             ])
@@ -3483,6 +3945,7 @@ impl OpenCADStudio {
         let hatch_pattern_keys = if self.tabs[self.active_tab]
             .properties
             .hatch_pattern_picker_open
+            || self.graphic_attributes.hatch_editor.is_some()
         {
             event::listen_with(hatch_pattern_key_event)
         } else {
@@ -3494,201 +3957,7 @@ impl OpenCADStudio {
         let keyboard_events = if self.shortcut_capture_row.is_some() {
             event::listen_with(shortcut_capture_key_event)
         } else {
-            event::listen_with(|ev, status, win_id| {
-                use iced::event::Status;
-                match ev {
-                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
-                        if crate::ui::ribbon::keytips_active() =>
-                    {
-                        crate::ui::ribbon::keytip_pointer_pressed();
-                        Some(Message::KeyTip(crate::ui::ribbon::KeyTipInput::Hide))
-                    }
-                    iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-                        iced::mouse::Button::Left,
-                    )) => {
-                        crate::ui::ribbon::keytip_pointer_pressed();
-                        Some(Message::PropPointerPressed)
-                    }
-                    iced::Event::Mouse(
-                        iced::mouse::Event::ButtonPressed(_)
-                        | iced::mouse::Event::ButtonReleased(_)
-                        | iced::mouse::Event::WheelScrolled { .. },
-                    ) => {
-                        crate::ui::ribbon::keytip_pointer_pressed();
-                        None
-                    }
-                    iced::Event::Window(window::Event::CloseRequested) => {
-                        Some(Message::WindowCloseRequested(win_id))
-                    }
-                    iced::Event::Window(window::Event::Closed) => {
-                        Some(Message::OsWindowClosed(win_id))
-                    }
-                    iced::Event::Window(window::Event::Resized(sz)) => {
-                        Some(Message::WindowResized(sz.width as f32, sz.height as f32))
-                    }
-                    // The ribbon's arrows sit on whole physical pixels.
-                    iced::Event::Window(window::Event::Opened {
-                        scale_factor, size, ..
-                    }) => {
-                        crate::ui::icons::set_scale_factor(scale_factor);
-                        Some(Message::WindowOpened(win_id, size.width, size.height))
-                    }
-                    iced::Event::Window(window::Event::Rescaled(scale_factor)) => {
-                        crate::ui::icons::set_scale_factor(scale_factor);
-                        None
-                    }
-                    iced::Event::Window(window::Event::FileDropped(path)) => {
-                        Some(Message::FileDropped(path))
-                    }
-                    iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
-                        crate::ui::ribbon::keytip_key_released(&key)
-                    }
-                    iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-                        // `command()` is Cmd on macOS, Ctrl elsewhere — the
-                        // platform multi-select modifier for the layer list.
-                        Some(Message::SetModifiers {
-                            shift: m.shift(),
-                            ctrl: m.command() || m.control(),
-                            alt: m.alt(),
-                        })
-                    }
-                    iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                        key,
-                        physical_key,
-                        modifiers,
-                        text,
-                        repeat,
-                        ..
-                    }) => {
-                        if let Some(keytip) =
-                            crate::ui::ribbon::keytip_key_pressed(&key, modifiers, repeat)
-                        {
-                            return keytip;
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        let accel = modifiers.command();
-                        // AltGr reaches Windows apps as Ctrl+Alt, and a macOS
-                        // layout types some characters with Option: when such a
-                        // chord produces a printable glyph (`@`, `<`, `{` on many
-                        // European layouts) it is typing, not a shortcut. (#1236)
-                        let types_glyph = text.as_deref().is_some_and(|value| {
-                            !value.is_empty()
-                                && value
-                                    .chars()
-                                    .all(|ch| !ch.is_control() && !ch.is_whitespace())
-                        });
-                        let altgr = modifiers.control() && modifiers.alt();
-                        let mac_option = cfg!(target_os = "macos")
-                            && modifiers.alt()
-                            && !modifiers.control()
-                            && !modifiers.logo();
-                        let shortcut_modifier =
-                            (modifiers.control() || modifiers.alt() || modifiers.logo())
-                                && !(types_glyph && (altgr || mac_option));
-                        // Any key that produces a printable glyph types it,
-                        // even when its logical key resolves to navigation
-                        // (NumLock-on Numpad8 / Numpad2 arrive as
-                        // ArrowUp / ArrowDown but still carry text "8" /
-                        // "2"). Checked before the Arrow / history arms so
-                        // those numpad digits aren't swallowed as history
-                        // navigation. Whitespace / control text (Space,
-                        // Enter, Tab) falls through to the named handlers.
-                        // The numpad decimal key emits the OS-layout separator
-                        // (a comma on German/European layouts), which the
-                        // coordinate parser rejects. Force it to a decimal point
-                        // from the physical key, independent of layout.
-                        if !shortcut_modifier
-                            && status == Status::Ignored
-                            && matches!(
-                                physical_key,
-                                keyboard::key::Physical::Code(
-                                    keyboard::key::Code::NumpadDecimal
-                                        | keyboard::key::Code::NumpadComma
-                                )
-                            )
-                        {
-                            return Some(Message::CommandAppendChar(".".to_string()));
-                        }
-                        if !shortcut_modifier && status == Status::Ignored {
-                            if let Some(t) = text.as_deref() {
-                                if !t.is_empty()
-                                    && t.chars().all(|c| !c.is_control() && !c.is_whitespace())
-                                {
-                                    return Some(Message::CommandAppendChar(t.to_string()));
-                                }
-                            }
-                        }
-                        let has_printable_text = text.as_deref().is_some_and(|value| {
-                            !value.is_empty()
-                                && value
-                                    .chars()
-                                    .all(|ch| !ch.is_control() && !ch.is_whitespace())
-                        });
-                        let arrow = match &key {
-                            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                                Some(ArrowKey::Up)
-                            }
-                            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                                Some(ArrowKey::Down)
-                            }
-                            keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
-                                Some(ArrowKey::Left)
-                            }
-                            keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
-                                Some(ArrowKey::Right)
-                            }
-                            _ => None,
-                        };
-                        if !has_printable_text && status == Status::Ignored {
-                            if let Some(direction) = arrow {
-                                return Some(Message::ArrowKeyPressed {
-                                    direction,
-                                    shortcut: shortcut_key_name(&key, modifiers)?,
-                                    extend_selection: modifiers.shift(),
-                                });
-                            }
-                        }
-                        if !has_printable_text
-                            && status == Status::Captured
-                            && matches!(arrow, Some(ArrowKey::Up | ArrowKey::Down))
-                        {
-                            return Some(Message::CommandLineArrowProbe {
-                                direction: arrow?,
-                                extend_selection: modifiers.shift(),
-                            });
-                        }
-                        // A focused web text field needs the browser clipboard;
-                        // drawing shortcuts only run for ignored C/V events.
-                        #[cfg(target_arch = "wasm32")]
-                        if accel && status == Status::Captured {
-                            if let keyboard::Key::Character(value) = &key {
-                                if value.eq_ignore_ascii_case("v") {
-                                    return Some(Message::WebFieldPaste);
-                                }
-                                if value.eq_ignore_ascii_case("c") {
-                                    return Some(Message::WebFieldCopy);
-                                }
-                            }
-                        }
-                        let shortcut = shortcut_key_name(&key, modifiers)?;
-                        if status == Status::Ignored
-                            || crate::app::shortcuts::is_global_key(&shortcut)
-                        {
-                            return Some(Message::ShortcutPressed(shortcut));
-                        }
-                        // A text field captured the key. SPACE rebound away from
-                        // COMMANDSPACE still fires from the command line, but
-                        // only there: other fields keep typing spaces. This
-                        // closure is a plain fn, so the binding is read from a
-                        // flag and the focus is asked for in update. (#1710)
-                        (shortcut == "SPACE"
-                            && crate::app::shortcuts::SPACE_REBOUND_OFF_COMMANDSPACE
-                                .load(std::sync::atomic::Ordering::Relaxed))
-                        .then_some(Message::CommandLineSpaceProbe)
-                    }
-                    _ => None,
-                }
-            })
+            event::listen_with(main_window_event)
         };
         #[cfg(not(target_arch = "wasm32"))]
         let control = iced::Subscription::batch([
@@ -3701,7 +3970,7 @@ impl OpenCADStudio {
             .map(|_| Message::PollWebControl);
         iced::Subscription::batch([
             if self.spacemouse.moving() && self.spacemouse_focused && !self.spacemouse_paused {
-                window::frames().map(Message::SpaceMouseFrame)
+                crate::app::tool_windows::main_window_frames().map(Message::SpaceMouseFrame)
             } else {
                 Subscription::none()
             },
@@ -3742,10 +4011,14 @@ impl OpenCADStudio {
             hatch_pattern_keys,
             keyboard_events,
             ui_font_changes(),
+            terminate_requests(),
         ])
     }
 
     pub(super) fn focus_cmd_input(&self) -> Task<Message> {
+        if self.table_cell_editor.is_some() {
+            return self.unfocus_widgets();
+        }
         iced::widget::operation::focus(iced::widget::Id::new(crate::ui::command_line::CMD_INPUT_ID))
     }
 
@@ -5296,9 +5569,150 @@ pub(super) fn recent_files_panel<'a>(
     .into()
 }
 
+/// The open value list: a heading and one row per table row, the chosen row
+/// marked. Its width comes from the lines it shows, never from the canvas.
+fn value_list_panel(popup: &crate::app::visibility::TablePopup) -> Element<'_, Message> {
+    let mut col = column![text(popup.header.clone())
+        .size(12)
+        .wrapping(iced::widget::text::Wrapping::None)]
+    .spacing(2);
+    for (idx, name) in popup.rows.iter().enumerate() {
+        let mark: Element<'_, Message> = if popup.current == Some(idx) {
+            crate::ui::icons::themed_check_cell(true)
+        } else {
+            Space::new().width(11).into()
+        };
+        col = col.push(
+            button(
+                row![
+                    container(mark).width(16),
+                    text(name)
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                ]
+                .spacing(2)
+                .align_y(iced::Center),
+            )
+            .on_press(Message::TableRowPick(idx))
+            .padding([3, 10])
+            .width(Fill),
+        );
+    }
+    container(
+        iced::widget::scrollable(col)
+            .height(iced::Length::Shrink)
+            .width(iced::Length::Fixed(table_popup_width(
+                &popup.header,
+                &popup.rows,
+            ))),
+    )
+    .padding(2)
+    .id(iced::widget::Id::new("value-list"))
+    .into()
+}
+
+/// The value list is as wide as the widest line it shows, plus the marker
+/// column and the padding around it, and it has no opinion about the canvas.
+fn table_popup_width(header: &str, rows: &[String]) -> f32 {
+    let widest = rows
+        .iter()
+        .map(|row| row.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(header.chars().count());
+    (widest as f32 + 2.0) * 7.0 + 24.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A two-value list is a few characters wide, however large the canvas it
+    /// is painted over, and a longer line is what widens it — not the viewport.
+    #[test]
+    fn the_value_list_width_follows_the_lines_it_shows() {
+        let narrow = super::table_popup_width("Distance1", &["5.0000".into(), "25.0000".into()]);
+        assert!(
+            narrow < 120.0,
+            "a short list is not sized to the canvas: {narrow}"
+        );
+        let wide =
+            super::table_popup_width("Distance1", &["5.0000, 25.0000, 45.0000, 65.0000".into()]);
+        assert!(
+            wide > narrow * 2.0,
+            "a longer line widens the list: {narrow} → {wide}"
+        );
+        let headered = super::table_popup_width(
+            "Distance1, Distance2, Distance3, Distance4",
+            &["5.0".into()],
+        );
+        assert!(
+            headered > narrow,
+            "the header is one of the lines it shows: {narrow} → {headered}"
+        );
+    }
+
+    /// The panel that actually paints for an open value list — heading, rows
+    /// and the chosen row's mark — takes the side of its grip that has room for
+    /// it and stays between the top of the canvas and the command line. A list
+    /// too tall for that band scrolls inside it instead of growing past both
+    /// edges, so its painted rectangle is the safe band at most.
+    #[test]
+    fn the_open_value_list_paints_beside_its_grip_inside_the_canvas() {
+        let short = crate::app::visibility::TablePopup {
+            insert_handle: document::Handle::new(1),
+            header: "Distance1".into(),
+            rows: vec!["5.0000".into(), "25.0000".into()],
+            current: Some(1),
+        };
+        let tall = crate::app::visibility::TablePopup {
+            insert_handle: document::Handle::new(1),
+            header: "Distance1, Distance2".into(),
+            rows: (0..40)
+                .map(|row| format!("{row}: 5.0000, 25.0000"))
+                .collect(),
+            current: Some(7),
+        };
+        for (popup, anchor, on_the_right) in [
+            (&short, iced::Point::new(60.0, 300.0), true),
+            (&short, iced::Point::new(760.0, 300.0), false),
+            (&tall, iced::Point::new(60.0, 300.0), true),
+            (&tall, iced::Point::new(760.0, 300.0), false),
+        ] {
+            let mut ui = iced_test::simulator::Simulator::with_size(
+                Default::default(),
+                iced::Size::new(800.0, 600.0),
+                super::position_canvas_overlay_near_cursor(
+                    anchor,
+                    90.0,
+                    super::value_list_panel(popup),
+                ),
+            );
+            let bounds = ui
+                .find(iced::widget::Id::new("value-list"))
+                .expect("the open value list is painted")
+                .visible_bounds()
+                .expect("the open value list is visible");
+            let width = super::table_popup_width(&popup.header, &popup.rows) + 4.0;
+            assert_eq!(
+                bounds.width, width,
+                "the panel is as wide as its own lines, not the canvas: {bounds:?}"
+            );
+            let expected_x = if on_the_right {
+                anchor.x + 12.0
+            } else {
+                anchor.x - 12.0 - width
+            };
+            assert_eq!(
+                bounds.x, expected_x,
+                "the list takes the side of the grip that has room for it: {bounds:?}"
+            );
+            assert!(
+                bounds.y >= 4.0 && bounds.y + bounds.height <= 506.0,
+                "the list stays between the top edge and the command line: {bounds:?}"
+            );
+        }
+    }
 
     /// The visibility dropdown draws its entries in one left-aligned column,
     /// with a fixed leading slot for the tick of the state in use.
@@ -5311,7 +5725,7 @@ mod tests {
         let mut app = crate::app::OpenCADStudio::new_for_test();
         let _ = app.automation_op(r#"{"op":"new"}"#);
         app.visibility_popup = Some(crate::app::visibility::VisibilityPopup {
-            insert_handle: codec::Handle::new(1),
+            insert_handle: document::Handle::new(1),
             anchor: iced::Point::new(400.0, 300.0),
             items: vec!["VisibilityState0".into(), "WindowHidden".into()],
             current: Some(1),
@@ -5320,7 +5734,7 @@ mod tests {
         let mut renderer = iced_test::futures::futures::executor::block_on(
             <iced::Renderer as iced_test::core::renderer::Headless>::new(
                 iced_test::core::renderer::Settings::default(),
-                None,
+                std::env::var("ICED_TEST_BACKEND").ok().as_deref(),
             ),
         )
         .expect("headless renderer");
@@ -5407,7 +5821,7 @@ mod tests {
 
     #[test]
     fn test_crosshair_background_paper_space() {
-        let tab = crate::app::document::DocumentTab::new_drawing(1);
+        let tab = crate::app::tab_document::DocumentTab::new_drawing(1);
         let bg = crosshair_background(&tab, true);
         assert_eq!(bg, tab.scene.paper_bg_color);
         assert!(crate::ui::style::common::canvas_is_light(bg));
@@ -5486,5 +5900,30 @@ impl OpenCADStudio {
             && !interactive_value_grip)
             || self.mtext_editor.as_ref().is_some_and(|e| e.show_preview)
             || self.text_inline.is_some()
+    }
+}
+
+impl OpenCADStudio {
+    /// VPHIGHLIGHT: the Model viewport to outline and the outline's alpha.
+    /// The one under the pointer (only with several viewports; none while
+    /// the pointer is away), or the active one while the pointer is on the
+    /// chip's outline switch, so each wheel step shows on it at once.
+    pub(in crate::app) fn model_viewport_outline(
+        &self,
+        tab: &DocumentTab,
+    ) -> Option<(iced::Rectangle, f32)> {
+        if !self.model_space.viewport_hover_highlight {
+            return None;
+        }
+        let selection = tab.scene.selection.borrow();
+        let (vw, vh) = selection.view.vp_size;
+        let input = &selection.input;
+        let cursor = (!input.pointer_away).then_some(input.last_move_pos).flatten();
+        let rect = if self.outline_switch_hover && tab.scene.model_tiles.borrow().len() > 1 {
+            Some(tab.scene.active_model_tile_bounds(vw, vh))
+        } else {
+            tab.scene.hovered_model_pane_px(vw, vh, cursor)
+        };
+        rect.map(|r| (r, f32::from(self.model_space.viewport_hover_opacity.min(100)) / 100.0))
     }
 }

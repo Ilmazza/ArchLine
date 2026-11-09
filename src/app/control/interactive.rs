@@ -147,7 +147,7 @@ impl OpenCADStudio {
         // The filter only gates the answer, not the user's gestures: anything
         // that does not match is deselected (and reported) at confirm time.
         let picked = self.tabs[i].scene.selected_handles_in_order();
-        let mut handles: Vec<codec::Handle> = Vec::new();
+        let mut handles: Vec<document::Handle> = Vec::new();
         let mut ignored = 0usize;
         for handle in picked {
             let matches = self.tabs[i]
@@ -193,6 +193,7 @@ impl OpenCADStudio {
                     .get_entity(*handle)
                     .map(|entity| {
                         let mut json = entity_json(
+                            &self.tabs[i].scene.document,
                             entity,
                             &session.detail,
                             crate::plugin::entity_labels::custom_entity_class_label(
@@ -392,6 +393,7 @@ impl OpenCADStudio {
             .filter_map(|handle| {
                 scene.document.get_entity(*handle).map(|entity| {
                     let full = entity_json(
+                        &scene.document,
                         entity,
                         "full",
                         crate::plugin::entity_labels::custom_entity_class_label(

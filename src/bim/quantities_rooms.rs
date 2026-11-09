@@ -32,7 +32,7 @@
 //! - gli avvisi della geometria di progetto (`project::project_geometry`)
 //!   escono con le righe di progetto, come in `AL_ESTRAI`.
 
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use kernel::geom2d::{distance_to, Curve};
 use rustc_hash::FxHashMap;
 
@@ -467,9 +467,9 @@ mod tests {
     use super::*;
     use std::f64::consts::{FRAC_PI_2, PI};
 
-    use codec::entities::{Arc, Line, LwPolyline};
-    use codec::xdata::ExtendedDataRecord;
-    use codec::{EntityType, Handle, Vector2, Vector3};
+    use document::entities::{Arc, Line, LwPolyline};
+    use document::xdata::ExtendedDataRecord;
+    use document::{EntityType, Handle, Vector2, Vector3};
 
     use crate::bim::fixtures::{case_a, disturbi, pilastro, scene_with, Form, LAYER_MURI};
     use crate::bim::height::HeightState;

@@ -8,7 +8,7 @@
 use iced::wgpu;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EllipseInstance {
     pub center_high: [f32; 3],
     pub _pad0: f32,
@@ -284,7 +284,10 @@ pub fn extract_ellipse_instances(
 
 /// Allocation-free check whether this wire consists entirely of analytical ellipse instances.
 pub fn can_extract_ellipse_instances(wire: &crate::scene::WireModel) -> bool {
-    if wire.tangent_geoms.is_empty()
+    // A dashed ellipse stays on the wire pipeline with the circle (`circle_gpu`):
+    // the dash layout lives there.
+    if wire.pattern_length > 0.0
+        || wire.tangent_geoms.is_empty()
         || !wire.fill_tris.is_empty()
         || wire.fill_is_3d
         || !wire.text_verts.is_empty()

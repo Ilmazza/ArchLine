@@ -28,7 +28,7 @@ fn listed(name: &str, list: &str) -> bool {
         .any(|pattern| wildcard_match(name, pattern))
 }
 
-const LAYER_OPTIONS: [(&str, &str); 15] = [
+const LAYER_OPTIONS: [(&str, &str); 19] = [
     ("?", "?"),
     ("Make", "MAKE"),
     ("Set", "SET"),
@@ -39,7 +39,11 @@ const LAYER_OPTIONS: [(&str, &str); 15] = [
     ("Color", "COLOR"),
     ("Ltype", "LTYPE"),
     ("LWeight", "LWEIGHT"),
+    ("TRansparency", "TRANSPARENCY"),
+    ("Description", "DESCRIPTION"),
+    ("MATerial", "MATERIAL"),
     ("Plot", "PLOT"),
+    ("Pstyle", "PSTYLE"),
     ("Freeze", "FREEZE"),
     ("Thaw", "THAW"),
     ("LOck", "LOCK"),
@@ -50,7 +54,7 @@ fn layer_flow(current: String) -> PromptFlow {
     flow(move |q| {
         let option = q.keyword(
             crate::t!(
-                "-LAYER  Enter an option [?/Make/Set/New/Rename/ON/OFF/Color/Ltype/LWeight/Plot/Freeze/Thaw/LOck/Unlock]:"
+                "-LAYER  Enter an option [?/Make/Set/New/Rename/ON/OFF/Color/Ltype/LWeight/TRansparency/Description/MATerial/Plot/Pstyle/Freeze/Thaw/LOck/Unlock]:"
             )
             .into_owned(),
             None,
@@ -102,7 +106,7 @@ fn layer_flow(current: String) -> PromptFlow {
                 )?;
                 if !matches!(
                     crate::ui::window::attman_dialog::parse_color(&color),
-                    Some(codec::types::Color::Index(_))
+                    Some(document::types::Color::Index(_))
                 ) {
                     return Err(PromptStep::Retry("Invalid input."));
                 }
@@ -127,6 +131,46 @@ fn layer_flow(current: String) -> PromptFlow {
                 }
                 let names = current_list(q)?;
                 run("-LAYER", &[option, &weight, &names])
+            }
+            "TRANSPARENCY" => {
+                let value = q.text(
+                    crate::t!("-LAYER  Enter transparency value (0-100):").into_owned(),
+                    None,
+                )?;
+                if value
+                    .trim()
+                    .parse::<f64>()
+                    .map(|percent| (0.0..=100.0).contains(&percent))
+                    != Ok(true)
+                {
+                    return Err(PromptStep::Retry("Invalid input."));
+                }
+                let names = current_list(q)?;
+                run("-LAYER", &[option, &value, &names])
+            }
+            "DESCRIPTION" => {
+                let description = q.text(
+                    crate::t!("-LAYER  Enter a description for the layer(s):").into_owned(),
+                    None,
+                )?;
+                let names = current_list(q)?;
+                run("-LAYER", &[option, &description, &names])
+            }
+            "MATERIAL" => {
+                let material = q.text(
+                    crate::t!("-LAYER  Enter a material name <ByLayer>:").into_owned(),
+                    Some("ByLayer".into()),
+                )?;
+                let names = current_list(q)?;
+                run("-LAYER", &[option, &material, &names])
+            }
+            "PSTYLE" => {
+                let style = q.text(
+                    crate::t!("-LAYER  Enter a plot style name <Normal>:").into_owned(),
+                    Some("Normal".into()),
+                )?;
+                let names = current_list(q)?;
+                run("-LAYER", &[option, &style, &names])
             }
             "PLOT" => {
                 let plot = q.keyword(
@@ -781,14 +825,11 @@ impl OpenCADStudio {
     /// The document's layers named by a comma-separated, wildcard list;
     /// a plain name that matches nothing is reported.
     fn listed_layers(&mut self, i: usize, list: &str) -> Vec<String> {
-        let names: Vec<String> = self.tabs[i]
-            .scene
-            .document
-            .layers
-            .iter()
-            .filter(|layer| listed(&layer.name, list))
-            .map(|layer| layer.name.clone())
-            .collect();
+        let names = crate::app::layer_filters::expand_layer_list(
+            self.tabs[i].scene.document.layers.iter(),
+            &self.layer_filters,
+            list,
+        );
         if names.is_empty() {
             self.command_line
                 .push_error(crate::tf!("LAYER: '{}' not found.", list).as_ref());
@@ -797,12 +838,12 @@ impl OpenCADStudio {
     }
 
     /// Change `names` as one undo step and repaint what the change touches.
-    fn edit_layers(
+    pub(in crate::app) fn edit_layers(
         &mut self,
         i: usize,
         label: &str,
         names: &[String],
-        edit: impl Fn(&mut codec::tables::Layer),
+        edit: impl Fn(&mut document::tables::Layer),
     ) {
         if names.is_empty() {
             return;
@@ -834,7 +875,7 @@ impl OpenCADStudio {
         }
         let undo = self.begin_layer_undo(i, "LAYER NEW", &new);
         for name in &new {
-            let mut layer = codec::tables::Layer::new(name);
+            let mut layer = document::tables::Layer::new(name);
             // A layer needs a real handle or a DWG save drops it (#67).
             layer.handle = self.tabs[i].scene.document.allocate_handle();
             let _ = self.tabs[i].scene.document.layers.add(layer);
@@ -932,6 +973,71 @@ impl OpenCADStudio {
                     });
                 }
             }
+            "TRANSPARENCY" => {
+                let value = arg(1);
+                let Ok(percent) = value.trim().parse::<f64>() else {
+                    self.command_line
+                        .push_error(crate::t!("LAYER: transparency must be 0-100.").as_ref());
+                    return Task::none();
+                };
+                if !(0.0..=100.0).contains(&percent) {
+                    self.command_line
+                        .push_error(crate::t!("LAYER: transparency must be 0-100.").as_ref());
+                    return Task::none();
+                }
+                let transparency = document::types::Transparency::from_percent(percent / 100.0);
+                let names = self.listed_layers(i, &arg(2));
+                self.edit_layers(i, "LAYER TRANSPARENCY", &names, move |layer| {
+                    layer.transparency = transparency
+                });
+            }
+            "DESCRIPTION" => {
+                let description = arg(1);
+                let names = self.listed_layers(i, &arg(2));
+                self.edit_layers(i, "LAYER DESCRIPTION", &names, move |layer| {
+                    layer.description = description.clone()
+                });
+            }
+            "MATERIAL" => {
+                let name = arg(1);
+                let material = if name.is_empty() || name.eq_ignore_ascii_case("BYLAYER") {
+                    document::Handle::NULL
+                } else {
+                    let found = self.tabs[i].scene.document.objects.iter().find_map(
+                        |(handle, object)| match object {
+                            document::objects::ObjectType::Material(m)
+                                if m.name.eq_ignore_ascii_case(&name) =>
+                            {
+                                Some(*handle)
+                            }
+                            _ => None,
+                        },
+                    );
+                    let Some(handle) = found else {
+                        self.command_line.push_error(
+                            crate::tf!("LAYER: material '{}' not found.", name).as_ref(),
+                        );
+                        return Task::none();
+                    };
+                    handle
+                };
+                let names = self.listed_layers(i, &arg(2));
+                self.edit_layers(i, "LAYER MATERIAL", &names, move |layer| {
+                    layer.material = material
+                });
+            }
+            "PSTYLE" => {
+                let style = arg(1);
+                let style = if style.is_empty() || style.eq_ignore_ascii_case("NORMAL") {
+                    String::new()
+                } else {
+                    style
+                };
+                let names = self.listed_layers(i, &arg(2));
+                self.edit_layers(i, "LAYER PLOTSTYLE", &names, move |layer| {
+                    layer.plot_style = style.clone()
+                });
+            }
             "PLOT" => {
                 let names = self.listed_layers(i, &arg(2));
                 let plot = arg(1) == "PLOT";
@@ -948,13 +1054,13 @@ impl OpenCADStudio {
                     );
                     names.retain(|name| name != &current);
                 }
-                let edit: fn(&mut codec::tables::Layer) = match option {
-                    "ON" => codec::tables::Layer::turn_on,
-                    "OFF" => codec::tables::Layer::turn_off,
-                    "FREEZE" => codec::tables::Layer::freeze,
-                    "THAW" => codec::tables::Layer::thaw,
-                    "LOCK" => codec::tables::Layer::lock,
-                    _ => codec::tables::Layer::unlock,
+                let edit: fn(&mut document::tables::Layer) = match option {
+                    "ON" => document::tables::Layer::turn_on,
+                    "OFF" => document::tables::Layer::turn_off,
+                    "FREEZE" => document::tables::Layer::freeze,
+                    "THAW" => document::tables::Layer::thaw,
+                    "LOCK" => document::tables::Layer::lock,
+                    _ => document::tables::Layer::unlock,
                 };
                 let label = format!("LAYER {option}");
                 self.edit_layers(i, &label, &names, edit);
@@ -969,7 +1075,7 @@ impl OpenCADStudio {
         let undo = self.begin_text_style_undo(i, "STYLE", std::slice::from_ref(&name));
         let doc = &mut self.tabs[i].scene.document;
         if doc.text_styles.get(&name).is_none() {
-            let mut style = codec::tables::TextStyle::new(&name);
+            let mut style = document::tables::TextStyle::new(&name);
             style.handle = doc.allocate_handle();
             let _ = doc.text_styles.add(style);
         }
@@ -1041,11 +1147,11 @@ impl OpenCADStudio {
             }
             "APPLY_PICKED" => {
                 let scene = &self.tabs[i].scene;
-                let handles: Vec<codec::Handle> = scene
+                let handles: Vec<document::Handle> = scene
                     .selected_entities()
                     .into_iter()
                     .filter(|(handle, entity)| {
-                        matches!(entity, codec::EntityType::Dimension(_))
+                        matches!(entity, document::EntityType::Dimension(_))
                             && !scene.is_layer_locked(*handle)
                     })
                     .map(|(handle, _)| handle)
@@ -1057,7 +1163,7 @@ impl OpenCADStudio {
                 self.push_undo_snapshot(i, "DIMSTYLE APPLY");
                 for &handle in &handles {
                     let doc = &mut self.tabs[i].scene.document;
-                    if let Some(codec::EntityType::Dimension(dimension)) =
+                    if let Some(document::EntityType::Dimension(dimension)) =
                         doc.get_entity_mut(handle)
                     {
                         dimension.base_mut().style_name = current.clone();
@@ -1086,7 +1192,7 @@ impl OpenCADStudio {
                     .selected_entities()
                     .into_iter()
                     .find_map(|(_, entity)| match entity {
-                        codec::EntityType::Dimension(dimension) => {
+                        document::EntityType::Dimension(dimension) => {
                             Some(dimension.base().style_name.clone())
                         }
                         _ => None,
@@ -1272,7 +1378,7 @@ mod tests {
         }
         let doc = &app.tabs[app.active_tab].scene.document;
         let layer = doc.layers.get("SCANTEST").expect("-LAYER Make");
-        assert_eq!(layer.color, codec::types::Color::Index(1));
+        assert_eq!(layer.color, document::types::Color::Index(1));
         assert_eq!(doc.header.current_layer_name, "SCANTEST");
         assert!(doc.layers.get("KEEP").is_some_and(|l| l.flags.off));
         assert!(doc.layers.get("TMP2").is_none(), "-PURGE by name");

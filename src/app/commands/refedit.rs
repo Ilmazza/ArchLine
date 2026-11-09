@@ -9,7 +9,7 @@ use crate::modules::draw::modify::refedit::{
     RefEditPickCommand, RefEditSession, RefSetCommand, SymbolKind, NOT_CHECKED_OUT,
 };
 use crate::ui::window::refedit_dialog::{RefEditDialogMsg, RefEditDialogState, RefEditLevel};
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use iced::Task;
 use std::collections::HashSet;
 
@@ -566,6 +566,10 @@ impl OpenCADStudio {
         for entity in edited {
             let _ = self.tabs[i].scene.document.add_entity(entity);
         }
+        crate::scene::Scene::sync_attribute_flag(
+            &mut self.tabs[i].scene.document,
+            &session.block_name,
+        );
         let instances = self.tabs[i]
             .scene
             .document
@@ -681,7 +685,7 @@ impl OpenCADStudio {
         // and go back under their own names.
         let mut deps = crate::app::ClipboardDeps::capture(&self.tabs[i].scene.document, &edited);
         {
-            use codec::TableEntry;
+            use document::TableEntry;
             for layer in &mut deps.layers {
                 let name = strip(layer.name());
                 layer.name = name;
@@ -804,7 +808,7 @@ impl OpenCADStudio {
                 && name[..prefix.len()].eq_ignore_ascii_case(prefix))
             .then(|| name[prefix.len()..].to_string())
         };
-        let exists = |document: &codec::Document, kind: SymbolKind, name: &str| match kind {
+        let exists = |document: &document::Document, kind: SymbolKind, name: &str| match kind {
             SymbolKind::Layer => document.layers.contains(name),
             SymbolKind::Linetype => document.line_types.contains(name),
             SymbolKind::TextStyle => document.text_styles.contains(name),

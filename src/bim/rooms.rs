@@ -114,9 +114,9 @@
 //!    chiuso solo dalla tolleranza → [`Notice::ChiusoPerTolleranza`];
 //!    altrimenti area non esatta → [`Notice::ContornoApprossimato`].
 
-use codec::entities::{AttachmentPoint, EntityCommon, LwPolyline, LwVertex, MText};
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Document, EntityType, Handle, Vector2, Vector3};
+use document::entities::{AttachmentPoint, EntityCommon, LwPolyline, LwVertex, MText};
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Document, EntityType, Handle, Vector2, Vector3};
 use kernel::geom2d::{
     contains, distance_to, segment_crossing, signed_area, triangulate, triangulate_rings, Curve,
     Line, SegmentCrossing, Tolerance,
@@ -1619,8 +1619,8 @@ mod tests {
     use std::f64::consts::{FRAC_PI_2, PI};
     use std::io::Cursor;
 
-    use codec::entities::{Arc, AttachmentPoint, Line as LineEntity, LwPolyline, LwVertex, MText};
-    use codec::{Vector2, Vector3};
+    use document::entities::{Arc, AttachmentPoint, Line as LineEntity, LwPolyline, LwVertex, MText};
+    use document::{Vector2, Vector3};
     use kernel::geom2d::{signed_area, triangulate};
 
     use crate::bim::fixtures::{case_a, pilastro, scene_with, Form, LAYER_MURI};
@@ -2810,14 +2810,14 @@ mod tests {
                 .collect()
         };
         let want = strip(want);
-        let bytes = codec::DxfWriter::new(&doc).write_to_vec().unwrap();
-        let read = codec::DxfReader::from_reader(Cursor::new(bytes))
+        let bytes = document::DxfWriter::new(&doc).write_to_vec().unwrap();
+        let read = document::DxfReader::from_reader(Cursor::new(bytes))
             .unwrap()
             .read()
             .unwrap();
         assert_eq!(strip(rooms_in(&read)), want, "DXF (numero vuoto compreso)");
-        let bytes = codec::DwgWriter::write_to_vec(&doc).unwrap();
-        let read = codec::DwgReader::from_stream(Cursor::new(bytes))
+        let bytes = document::DwgWriter::write_to_vec(&doc).unwrap();
+        let read = document::DwgReader::from_stream(Cursor::new(bytes))
             .read()
             .unwrap();
         assert_eq!(strip(rooms_in(&read)), want, "DWG (numero vuoto compreso)");

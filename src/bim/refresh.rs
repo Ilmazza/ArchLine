@@ -2,8 +2,8 @@
 //! disegno ([`refresh_rooms`]), puro. Le modifiche ([`RoomEdit`]) le applica
 //! chi chiama: l'app sul disegno, l'estrazione sulla sua copia.
 
-use codec::entities::{LwPolyline, LwVertex, MText};
-use codec::{Document, EntityType, Handle};
+use document::entities::{LwPolyline, LwVertex, MText};
+use document::{Document, EntityType, Handle};
 use rustc_hash::FxHashMap;
 
 use super::report::Notice;
@@ -483,8 +483,8 @@ mod tests {
     use crate::bim::room_command::test_support::*;
     use crate::bim::room_command::{room_snapshot, RoomCommand};
     use crate::command::CadCommand;
-    use codec::entities::LwPolyline;
-    use codec::Vector2;
+    use document::entities::LwPolyline;
+    use document::Vector2;
 
     /// L'handle della `LINE` da `a` a `b`.
     fn line_handle(doc: &Document, a: [f64; 2], b: [f64; 2]) -> Handle {

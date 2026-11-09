@@ -5,7 +5,7 @@
 //! as TRIM, to nearby boundary entities. Keeping this compact command-local
 //! index avoids cloning/scanning the complete drawing on every mouse move.
 
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::scene::convert::tess::entity_world_aabb_f64;
@@ -116,6 +116,19 @@ impl ModifyEntityIndex {
             None => self.unbounded.push(handle),
         }
         entities.push(entity);
+    }
+
+    /// Query a selection rectangle against the already-built command index.
+    /// Entities without a finite AABB remain candidates for correctness
+    /// (rays, XLINEs and other unbounded/unsupported shapes).
+    pub(super) fn handles_in_aabb(&self, aabb: [f64; 4]) -> FxHashSet<Handle> {
+        let mut handles: FxHashSet<Handle> = self
+            .tree
+            .as_ref()
+            .map(|tree| tree.query_rect(aabb).into_iter().collect())
+            .unwrap_or_default();
+        handles.extend(self.unbounded.iter().copied());
+        handles
     }
 
     pub(super) fn nearby_handles(

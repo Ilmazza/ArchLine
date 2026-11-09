@@ -1,7 +1,7 @@
 //! Unità del disegno: millimetri, centimetri, metri. `INSUNITS` si legge e
 //! non si scrive mai; con 0 vale l'unità scelta da Mauro, nel record.
 
-use codec::Document;
+use document::Document;
 
 use super::{record, BASE_TOLERANCE_M};
 
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn resolve_reads_insunits_then_record() {
-        let mut doc = codec::Document::new();
+        let mut doc = document::Document::new();
         doc.header.insertion_units = 0;
         assert_eq!(resolve(&doc), UnitLookup::Unspecified);
         crate::bim::record::write(

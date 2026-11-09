@@ -1,4 +1,4 @@
-use codec::entities::Ellipse;
+use document::entities::Ellipse;
 use kernel::geom2d::{
     Curve as KernelCurve, EllipseArc as KernelEllipseArc, Tolerance, Vec2 as KernelVec2,
 };
@@ -223,24 +223,6 @@ fn properties(ell: &Ellipse) -> Vec<PropSection> {
                 format_length(minor_vec.z),
             ),
             ro(t!("Area").as_ref(), "area", format_area(props.area)),
-            ro(
-                t!("Start parameter").as_ref(),
-                "start_param",
-                format!("{:.4}", ell.start_parameter),
-            ),
-            ro(
-                t!("End parameter").as_ref(),
-                "end_param",
-                format!("{:.4}", ell.end_parameter),
-            ),
-            ro(
-                t!("Length").as_ref(),
-                "length",
-                format_length(props.perimeter),
-            ),
-            edit(t!("Normal X").as_ref(), "normal_x", ell.normal.x),
-            edit(t!("Normal Y").as_ref(), "normal_y", ell.normal.y),
-            edit(t!("Normal Z").as_ref(), "normal_z", ell.normal.z),
         ],
     }]
 }
@@ -271,26 +253,6 @@ fn apply_geom_prop(ell: &mut Ellipse, field: &str, value: &str) {
         "ratio" if v > 0.0 => ell.minor_axis_ratio = v,
         "start_angle" => ell.start_parameter = v.to_radians(),
         "end_angle" => ell.end_parameter = v.to_radians(),
-        "normal_x" | "normal_y" | "normal_z" => {
-            let mut normal = [ell.normal.x, ell.normal.y, ell.normal.z];
-            match field {
-                "normal_x" => normal[0] = v,
-                "normal_y" => normal[1] = v,
-                "normal_z" => normal[2] = v,
-                _ => {}
-            }
-            let Some(normal) = kernel::space::Vec3::from(normal).normalize() else {
-                return;
-            };
-            let Some(major) = kernel::space::reorient_axis_to_plane(
-                [ell.major_axis.x, ell.major_axis.y, ell.major_axis.z],
-                normal.to_array(),
-            ) else {
-                return;
-            };
-            ell.normal = codec::types::Vector3::new(normal.x, normal.y, normal.z);
-            ell.major_axis = codec::types::Vector3::new(major[0], major[1], major[2]);
-        }
         _ => {}
     }
 }
@@ -394,7 +356,7 @@ fn apply_transform(ell: &mut Ellipse, t: &EntityTransform) {
     // parameters — under rotate, scale, affine and mirror alike.
     crate::scene::view::transform::apply_standard_entity_transform(ell, t, |entity, p1, p2| {
         let normal = entity.normal;
-        codec::Entity::apply_mirror(
+        document::Entity::apply_mirror(
             entity,
             &crate::scene::view::transform::reflection_about_xy_line(p1, p2),
         );
@@ -413,14 +375,14 @@ fn apply_transform(ell: &mut Ellipse, t: &EntityTransform) {
 }
 
 impl RenderConvertible for Ellipse {
-    fn to_render(&self, _document: &codec::Document) -> Option<RenderEntity> {
+    fn to_render(&self, _document: &document::Document) -> Option<RenderEntity> {
         Some(to_render(self))
     }
 }
 
 crate::impl_entity_basics!(Ellipse);
 
-impl crate::entities::traits::MassPropsCalc for codec::entities::Ellipse {
+impl crate::entities::traits::MassPropsCalc for document::entities::Ellipse {
     fn mass_props(&self) -> crate::entities::traits::MassProps {
         use std::f64::consts::{PI, TAU};
         let e = self;
@@ -497,21 +459,8 @@ mod grip_tests {
         e.minor_axis_ratio = ratio;
         e
     }
-    fn xy_len(v: &codec::entities::Ellipse) -> f64 {
+    fn xy_len(v: &document::entities::Ellipse) -> f64 {
         (v.major_axis.x * v.major_axis.x + v.major_axis.y * v.major_axis.y).sqrt()
-    }
-
-    #[test]
-    fn editing_normal_reorients_major_axis_in_kernel() {
-        let mut e = ell(10.0, 0.5);
-
-        apply_geom_prop(&mut e, "normal_x", "1");
-
-        let normal = DVec3::new(e.normal.x, e.normal.y, e.normal.z);
-        let major = DVec3::new(e.major_axis.x, e.major_axis.y, e.major_axis.z);
-        assert!((normal.length() - 1.0).abs() < 1.0e-12);
-        assert!((major.length() - 10.0).abs() < 1.0e-9);
-        assert!(normal.dot(major).abs() < 1.0e-9);
     }
 
     #[test]

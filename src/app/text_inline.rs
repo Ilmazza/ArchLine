@@ -8,8 +8,8 @@
 // text-bearing entity, plus the field read/write helpers both editors use to
 // commit back to the correct entity slot.
 
-use codec::types::Vector3;
-use codec::{EntityType, Handle, Text};
+use document::types::Vector3;
+use document::{EntityType, Handle, Text};
 use glam::DVec3;
 
 /// Which text slot of which entity an editor session reads from and writes to.
@@ -112,11 +112,14 @@ pub struct TextInlineState {
     pub creation: Option<Text>,
     /// Canvas-space anchor where the field is drawn (the insertion-point click).
     pub screen_anchor: iced::Point,
+    /// The field's font size: the text's height on screen when the editor
+    /// opened, so it reads at the size the drawing shows it.
+    pub font_px: f32,
 }
-pub(super) fn can_edit_text(mut handle: Handle, document: &codec::Document) -> bool {
+pub(super) fn can_edit_text(mut handle: Handle, document: &document::Document) -> bool {
     for _ in 0..8 {
         match document.get_entity(handle) {
-            Some(codec::EntityType::Leader(l)) => {
+            Some(document::EntityType::Leader(l)) => {
                 let ann = l.annotation_handle;
                 if ann.is_null() || ann == handle {
                     return false;
@@ -167,15 +170,9 @@ impl super::OpenCADStudio {
             self.open_tolerance_dialog(Some(target));
             return iced::Task::none();
         }
-        // A table edits its first cell on the command line.
-        if let Some(EntityType::Table(table)) = self.tabs[i].scene.document.get_entity(target) {
-            let command = crate::modules::annotate::table_cmd::TableCellEditCommand::new(
-                target, table, 0, 0,
-            );
-            self.command_line
-                .push_info(&crate::command::CadCommand::prompt(&command));
-            self.tabs[i].active_cmd = Some(Box::new(command));
-            return iced::Task::none();
+        if matches!(self.tabs[i].scene.document.get_entity(target), Some(EntityType::Table(_))) {
+            self.open_table_cell_editor(target, 0, 0);
+            return self.unfocus_widgets();
         }
         if matches!(
             self.tabs[i].scene.document.get_entity(target),
@@ -241,7 +238,14 @@ impl super::OpenCADStudio {
             field,
             creation,
             screen_anchor: iced::Point::new(60.0, 90.0),
+            font_px: 13.0,
         };
+        if let Some(world_per_pixel) = self.tabs[self.active_tab].scene.world_per_pixel() {
+            let on_screen = (state.height / f64::from(world_per_pixel)) as f32;
+            if on_screen.is_finite() {
+                state.font_px = on_screen.clamp(13.0, 72.0);
+            }
+        }
         if let Some(p) = self.tabs[self.active_tab]
             .scene
             .selection
@@ -345,7 +349,7 @@ impl super::OpenCADStudio {
             if variable_height
                 && !matches!(
                     t.horizontal_alignment,
-                    codec::entities::TextHorizontalAlignment::Aligned
+                    document::entities::TextHorizontalAlignment::Aligned
                 )
             {
                 self.tabs[i].scene.document.header.text_height = paper_height;

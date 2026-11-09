@@ -111,7 +111,7 @@ impl SpellOptions {
 /// The word being shown.
 #[derive(Debug, Clone)]
 pub struct SpellFind {
-    pub handle: codec::Handle,
+    pub handle: document::Handle,
     pub word: String,
     /// Byte range of the word in `text`.
     pub start: usize,
@@ -123,7 +123,7 @@ pub struct SpellFind {
 #[derive(Debug, Clone, Default)]
 pub struct SpellState {
     pub scope: SpellScope,
-    pub selection: Vec<codec::Handle>,
+    pub selection: Vec<document::Handle>,
     /// BCP-47 tag of the main dictionary, and the ones offered (tag, name).
     pub language: String,
     pub languages: Vec<(String, String)>,
@@ -131,7 +131,7 @@ pub struct SpellState {
     pub show_settings: bool,
     /// The objects being checked, and where the check is: the object and the
     /// byte offset in its text.
-    pub targets: Vec<codec::Handle>,
+    pub targets: Vec<document::Handle>,
     pub cursor: (usize, usize),
     pub running: bool,
     pub current: Option<SpellFind>,
@@ -143,7 +143,7 @@ pub struct SpellState {
     pub custom: Vec<String>,
     /// Changes the Undo button takes back: the object as it was and where
     /// the check was.
-    pub undo: Vec<(Vec<(codec::Handle, codec::EntityType)>, (usize, usize))>,
+    pub undo: Vec<(Vec<(document::Handle, document::EntityType)>, (usize, usize))>,
     pub status: String,
 }
 
@@ -359,7 +359,7 @@ pub fn view<'a>(state: &'a SpellState, sizing: crate::ui::modal::ModalSizing) ->
         .iter()
         .find(|(tag, _)| *tag == state.language)
         .map(|(_, name)| name.clone());
-    let languages = iced::widget::pick_list(current, names, |name: &String| name.clone())
+    let languages = crate::ui::dropdown_list::pick_list(current, names, |name: &String| name.clone())
         .on_select(|name| msg(SpellMsg::Language(name)))
         .text_size(11)
         .padding([4, 8]);

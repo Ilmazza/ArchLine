@@ -2,7 +2,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use codec::{entities::Solid3D, EntityType, Handle};
+use document::{entities::Solid3D, EntityType, Handle};
 use glam::DVec3;
 
 use crate::command::{
@@ -14,6 +14,16 @@ use crate::scene::WireModel;
 use crate::t;
 
 // ── EXTRUDE command ────────────────────────────────────────────────────────
+
+/// The line EXTRUDE, REVOLVE, SWEEP and LOFT print as they start.
+fn wire_density_line(isolines: usize, solid: bool) -> String {
+    t!(
+        "Current wire frame density:  ISOLINES=%{n}, Closed profiles creation mode = %{mode}",
+        n = isolines,
+        mode = if solid { "Solid" } else { "Surface" }
+    )
+    .into_owned()
+}
 
 pub struct ExtrudeCommand {
     command_name: &'static str,
@@ -66,6 +76,9 @@ enum ExtrudeStep {
 }
 
 impl ExtrudeCommand {
+    pub fn wire_density_line(&self, isolines: usize) -> String {
+        wire_density_line(isolines, self.mode == ExtrudeMode::Solid)
+    }
     pub fn new_named(name: &str, color: [f32; 4]) -> Self {
         let defaults = *extrude_defaults()
             .lock()
@@ -215,7 +228,7 @@ impl CadCommand for ExtrudeCommand {
     fn prompt(&self) -> String {
         match self.step {
             ExtrudeStep::Pick => {
-                t!("EXTRUDE  Select objects to extrude or [Mode] (Enter to finish):").into_owned()
+                t!("EXTRUDE  Select objects to extrude or [MOde]:").into_owned()
             }
             ExtrudeStep::Mode => format!(
                 "{} <{}>:",
@@ -850,7 +863,7 @@ impl CadCommand for PresspullCommand {
     fn prompt(&self) -> String {
         match self.step {
             PresspullStep::Pick => {
-                t!("PRESSPULL  Select object or bounded area (Enter to finish):").into_owned()
+                t!("PRESSPULL  Select object or bounded area:").into_owned()
             }
             PresspullStep::Multiple => t!(
                 "PRESSPULL  Select additional objects or bounded areas [Undo] (Enter for height):"
@@ -985,7 +998,7 @@ impl CadCommand for PresspullCommand {
         self.hover_cache.clone()
     }
 
-    fn on_entity_pick(&mut self, handle: codec::Handle, point: DVec3) -> CmdResult {
+    fn on_entity_pick(&mut self, handle: document::Handle, point: DVec3) -> CmdResult {
         if !self.needs_entity_pick() {
             return CmdResult::NeedPoint;
         }
@@ -1180,6 +1193,9 @@ enum RevolveStep {
 }
 
 impl RevolveCommand {
+    pub fn wire_density_line(&self, isolines: usize) -> String {
+        wire_density_line(isolines, self.mode == ExtrudeMode::Solid)
+    }
     pub fn new(color: [f32; 4], isolines: usize) -> Self {
         let defaults = *revolve_defaults()
             .lock()
@@ -1355,7 +1371,7 @@ impl RevolveCommand {
 }
 
 fn revolve_axis(entity: &EntityType) -> Option<(DVec3, DVec3)> {
-    let point = |value: &codec::types::Vector3| DVec3::new(value.x, value.y, value.z);
+    let point = |value: &document::types::Vector3| DVec3::new(value.x, value.y, value.z);
     let (start, direction) = match entity {
         EntityType::Line(line) => (point(&line.start), point(&line.end) - point(&line.start)),
         EntityType::Ray(ray) => (point(&ray.base_point), point(&ray.direction)),
@@ -1377,7 +1393,7 @@ impl CadCommand for RevolveCommand {
     fn prompt(&self) -> String {
         match self.step {
             RevolveStep::Pick => {
-                t!("REVOLVE  Select objects to revolve or [Mode] (Enter to finish):").into_owned()
+                t!("REVOLVE  Select objects to revolve or [MOde]:").into_owned()
             }
             RevolveStep::Mode => format!(
                 "{} <{}>:",
@@ -1433,7 +1449,7 @@ impl CadCommand for RevolveCommand {
     fn needs_entity_pick(&self) -> bool {
         self.step == RevolveStep::AxisObject
     }
-    fn on_entity_pick(&mut self, handle: codec::Handle, _pt: DVec3) -> CmdResult {
+    fn on_entity_pick(&mut self, handle: document::Handle, _pt: DVec3) -> CmdResult {
         if handle.is_null() {
             return CmdResult::NeedPoint;
         }
@@ -1745,6 +1761,9 @@ enum SweepStep {
 }
 
 impl SweepCommand {
+    pub fn wire_density_line(&self, isolines: usize) -> String {
+        wire_density_line(isolines, self.mode == ExtrudeMode::Solid)
+    }
     pub fn new(color: [f32; 4], isolines: usize) -> Self {
         Self {
             step: SweepStep::PickProfiles,
@@ -1867,7 +1886,7 @@ impl CadCommand for SweepCommand {
     }
     fn prompt(&self) -> String {
         match self.step {
-            SweepStep::PickProfiles => t!("SWEEP  Select objects to sweep or [Mode] (Enter to finish):").into_owned(),
+            SweepStep::PickProfiles => t!("SWEEP  Select objects to sweep or [MOde]:").into_owned(),
             SweepStep::Mode => format!(
                 "{} <{}>:",
                 t!("SWEEP  Creation mode [Solid/Surface]"),
@@ -2306,6 +2325,9 @@ struct LoftPreviewKey {
 }
 
 impl LoftCommand {
+    pub fn wire_density_line(&self, isolines: usize) -> String {
+        wire_density_line(isolines, self.state.mode == ExtrudeMode::Solid)
+    }
     pub fn new(
         color: [f32; 4],
         isolines: usize,
@@ -2643,14 +2665,12 @@ impl LoftCommand {
 
     fn option_prompt(&self) -> String {
         match self.state.step {
-            LoftStep::Sections => format!(
-                "{} ({}):", t!("LOFT  Select cross-sections in order or [Point/Join/Mode] (Enter to finish)"),
-                self.state.sections.len(),
-            ),
-            LoftStep::Join => format!(
-                "{} ({}):", t!("LOFT  Select connected edges for one cross-section or [Undo] (Enter to finish)"),
-                self.state.join.len(),
-            ),
+            LoftStep::Sections => {
+                t!("LOFT  Select cross sections in lofting order or [POint/Join multiple edges/MOde]:").into_owned()
+            }
+            LoftStep::Join => {
+                t!("LOFT  Select connected edges for one cross-section or [Undo]:").into_owned()
+            }
             LoftStep::Point => t!("LOFT  Specify point end:").into_owned(),
             LoftStep::Mode => format!("{} <{}>:", t!("LOFT  Creation mode [Solid/Surface]"),
                 if self.state.mode == ExtrudeMode::Solid { "Solid" } else { "Surface" }),
@@ -2662,7 +2682,7 @@ impl LoftCommand {
                     t!("LOFT  Enter an option [Guides/Path/Cross sections only/Settings] <Cross sections only>:").into_owned()
                 }
             }
-            LoftStep::Guides => format!("{} ({}):", t!("LOFT  Select guide curves or [Undo] (Enter to finish)"), self.state.guides.len()),
+            LoftStep::Guides => t!("LOFT  Select guide curves or [Undo]:").into_owned(),
             LoftStep::Path => t!("LOFT  Select path or [Undo]:").into_owned(),
             LoftStep::Settings => {
                 let mut choices = vec![t!("Normals").into_owned()];
@@ -3086,8 +3106,8 @@ pub fn empty_solid3d() -> EntityType {
 }
 
 pub fn empty_extruded_surface(direction: DVec3, taper_angle: f64) -> EntityType {
-    use codec::entities::{Surface, SurfaceData, SurfaceKind};
-    use codec::types::Vector3;
+    use document::entities::{Surface, SurfaceData, SurfaceKind};
+    use document::types::Vector3;
 
     let mut surface = Surface::new(SurfaceKind::Extruded);
     surface.u_isolines = 6;
@@ -3112,8 +3132,8 @@ pub fn empty_revolved_surface(
     angle: f64,
     start_angle: f64,
 ) -> EntityType {
-    use codec::entities::{Surface, SurfaceData, SurfaceKind};
-    use codec::types::Vector3;
+    use document::entities::{Surface, SurfaceData, SurfaceKind};
+    use document::types::Vector3;
 
     let mut surface = Surface::new(SurfaceKind::Revolved);
     let axis = (axis_end - axis_start).normalize_or(DVec3::Z);
@@ -3164,7 +3184,7 @@ mod extrude_command_tests {
         command.set_preselection(
             vec![(
                 Handle::new(1),
-                EntityType::Circle(codec::entities::Circle::new()),
+                EntityType::Circle(document::entities::Circle::new()),
             )],
             DVec3::ZERO,
             Some(DVec3::Z),
@@ -3186,7 +3206,7 @@ mod revolve_tests {
 
     #[test]
     fn cursor_angle_is_measured_about_the_model_axis() {
-        let profile = EntityType::Line(codec::entities::Line::from_coords(
+        let profile = EntityType::Line(document::entities::Line::from_coords(
             2.0, 0.0, 0.0, 2.0, 4.0, 0.0,
         ));
         let mut command = RevolveCommand::new([1.0; 4], 0);
@@ -3221,12 +3241,12 @@ mod thicken_command_tests {
         let mut command = ThickenCommand::new(vec![
             (
                 Handle::new(1),
-                EntityType::Line(codec::entities::Line::default()),
+                EntityType::Line(document::entities::Line::default()),
             ),
             (
                 handle,
-                EntityType::Surface(Box::new(codec::entities::Surface::new(
-                    codec::entities::SurfaceKind::Plane,
+                EntityType::Surface(Box::new(document::entities::Surface::new(
+                    document::entities::SurfaceKind::Plane,
                 ))),
             ),
         ]);

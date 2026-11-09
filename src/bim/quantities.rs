@@ -21,7 +21,7 @@
 //!   e nota sulle due righe solo se l'area comune supera il 25% della più
 //!   piccola. Angoli e incroci a T non si correggono e non avvisano.
 
-use codec::Handle;
+use document::Handle;
 use kernel::geom2d::{signed_area, triangulate_rings};
 
 use super::height::{resolve, resolve_varco, Height};
@@ -500,8 +500,8 @@ mod tests {
     use super::*;
     use crate::bim::height::HeightState;
     use crate::bim::zone::{read_zone, zone_hatch, zone_hatch_from_paths, ZoneOrigin};
-    use codec::entities::{BoundaryEdge, BoundaryPath, PolylineEdge};
-    use codec::Vector2;
+    use document::entities::{BoundaryEdge, BoundaryPath, PolylineEdge};
+    use document::Vector2;
     use DrawingUnit::{Centimetri, Metri};
 
     const EPS: f64 = 1e-9;

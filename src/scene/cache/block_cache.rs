@@ -18,8 +18,8 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 
-use codec::types::{Color as AcadColor, LineWeight, Transform, Vector3};
-use codec::{Document, EntityType, Handle};
+use document::types::{Color as AcadColor, LineWeight, Transform, Vector3};
+use document::{Document, EntityType, Handle};
 use kernel::space::{Plane as KernelPlane, Vec3 as KernelVec3};
 
 use crate::scene::convert::tessellate;
@@ -40,6 +40,44 @@ const INLINE_NESTED_POINT_BUDGET: usize = 128;
 /// to the final image. Two pixels is a practical small-element floor:
 /// — visibly the same image, dramatically fewer wires.
 const MIN_PIXEL_SIZE: f32 = 2.0;
+
+use crate::scene::model::wire_model::DashClosure;
+
+/// A complex linetype and its name: two linetypes can share a dash pattern, so
+/// the name is what tells them apart in a prototype key.
+#[derive(Debug)]
+pub struct NamedComplexLinetype {
+    name: String,
+    linetype: crate::io::linetypes::ComplexLt,
+}
+
+fn named_complex_linetype(doc: &Document, name: &str) -> Option<Arc<NamedComplexLinetype>> {
+    crate::io::linetypes::resolve_complex_lt(doc, name).map(|linetype| {
+        Arc::new(NamedComplexLinetype {
+            name: name.to_string(),
+            linetype,
+        })
+    })
+}
+
+/// How a block child walks a complex linetype. The walk runs at expand time on
+/// the drawing-space path: it needs the linetype the child inherits there, and
+/// a block's scale must not reach the pattern.
+#[derive(Clone, Debug, Default)]
+pub enum ComplexWalk {
+    /// Never walks: a kind of entity the linetype does not follow.
+    #[default]
+    None,
+    /// Walks this wire's own points.
+    Points,
+    /// Walks the polyline's whole ordered path, kept in block-local coordinates,
+    /// and how the pattern closes around it. A polyline with arcs draws its
+    /// wires separately, which an inherited dash pattern needs walking as one.
+    /// A wide polyline also has its band width at each point of the path.
+    Path(Arc<Vec<[f64; 3]>>, DashClosure, Option<Arc<Vec<f32>>>),
+    /// A wire of a polyline whose path another wire walks.
+    Covered,
+}
 
 #[derive(Clone, Debug)]
 pub struct LocalWire {
@@ -106,6 +144,16 @@ pub struct LocalWire {
     pub color_is_byblock: bool,
     pub transparency_is_byblock: bool,
     pub lt_is_byblock: bool,
+    /// The child's own linetype scale. An inherited pattern is multiplied by it
+    /// at expand time, as the pattern baked here already is.
+    pub entity_lt_scale: f32,
+    pub complex_walk: ComplexWalk,
+    /// The child's own complex linetype, when it does not inherit one.
+    pub own_complex: Option<Arc<NamedComplexLinetype>>,
+    /// LTSCALE times the child's own linetype scale.
+    pub complex_lt_scale: f32,
+    /// How a pattern closes around this wire.
+    pub dash_closure: DashClosure,
     pub lw_is_byblock: bool,
     /// Set when this child sits on layer "0" and the matching property is
     /// ByLayer. At expand time the value is then taken from the INSERT's
@@ -127,11 +175,77 @@ pub struct LocalWire {
     pub local_rank: f32,
 }
 
+/// The linetype side of a nested INSERT's style, resolved the way
+/// `InsertStyleSpec::resolve` resolves its dash pattern.
+#[derive(Clone, Debug, Default)]
+pub struct NestedComplexStyle {
+    own: Option<Arc<NamedComplexLinetype>>,
+    layer: Option<Arc<NamedComplexLinetype>>,
+    byblock: bool,
+    bylayer: bool,
+    layer0: bool,
+}
+
+impl NestedComplexStyle {
+    fn new(doc: &Document, insert: &document::entities::Insert, viewport: Option<Handle>) -> Self {
+        let common = &insert.common;
+        let linetype = &common.linetype;
+        let mut style = Self {
+            byblock: linetype.eq_ignore_ascii_case("byblock"),
+            bylayer: linetype.is_empty() || linetype.eq_ignore_ascii_case("bylayer"),
+            layer0: crate::scene::view::render::is_effective_layer_zero(&common.layer),
+            ..Self::default()
+        };
+        if crate::io::linetypes::defines_complex_lt(doc) {
+            style.own = named_complex_linetype(
+                doc,
+                crate::scene::view::render::linetype_name_for_common_viewport(
+                    doc, common, viewport,
+                ),
+            );
+            style.layer = named_complex_linetype(
+                doc,
+                crate::scene::view::render::layer_linetype_name_for_viewport(
+                    doc,
+                    &common.layer,
+                    viewport,
+                ),
+            );
+        }
+        style
+    }
+
+    /// `(insert, layer 0)` for this INSERT's children.
+    fn resolve(
+        &self,
+        parent_insert: &Option<Arc<NamedComplexLinetype>>,
+        parent_layer0: &Option<Arc<NamedComplexLinetype>>,
+    ) -> (
+        Option<Arc<NamedComplexLinetype>>,
+        Option<Arc<NamedComplexLinetype>>,
+    ) {
+        let insert = if self.byblock {
+            parent_insert
+        } else if self.layer0 && self.bylayer {
+            parent_layer0
+        } else {
+            &self.own
+        };
+        let layer0 = if self.layer0 {
+            parent_layer0
+        } else {
+            &self.layer
+        };
+        (insert.clone(), layer0.clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NestedRef {
     pub block_name: String,
     pub xform: Transform,
     pub style: crate::scene::render_graph::InsertStyleSpec,
+    pub complex_style: NestedComplexStyle,
     /// ATTRIB geometry is stored in the parent definition's frame, but resolves
     /// ByBlock and layer-0 properties through this nested insert's style.
     pub attachments: Vec<LocalWire>,
@@ -191,6 +305,11 @@ pub struct BlockCache {
     >,
     clip_prototypes: std::sync::Mutex<HashMap<(u64, Vec<u64>), u64>>,
     cycle_warnings: std::sync::Mutex<HashSet<String>>,
+    /// [`crate::io::linetypes::defines_complex_lt`] at build time. Drawings with
+    /// none pay nothing for the walk: no path is kept and no linetype is looked up.
+    complex_possible: bool,
+    /// The viewport whose layer overrides this cache was built with.
+    viewport: Option<Handle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -302,17 +421,15 @@ impl BlockCache {
         solid_snaps: &HashMap<Handle, Vec<(glam::DVec3, SnapHint)>>,
     ) -> Self {
         use crate::par::prelude::*;
+        let perf = crate::perf::enabled();
+        let t_all = perf.then(iced::time::Instant::now);
         let _owners = crate::scene::block_authoring::DictionaryOwners::publish(doc);
         let mut cache = Self::new();
-        let referenced = collect_referenced_blocks(doc, anno_scale);
-        let mut reference_counts: HashMap<String, usize> = HashMap::default();
-        for entity in doc.entities() {
-            if let EntityType::Insert(insert) = entity {
-                *reference_counts
-                    .entry(insert.block_name.clone())
-                    .or_default() += insert.instance_count();
-            }
-        }
+        cache.complex_possible = crate::io::linetypes::defines_complex_lt(doc);
+        cache.viewport = viewport;
+        let t_refs = perf.then(iced::time::Instant::now);
+        let (referenced, reference_counts) = collect_referenced_blocks(doc, anno_scale);
+        let refs_ms = crate::perf::elapsed_ms(t_refs);
         cache.prototype_blocks = reference_counts
             .into_iter()
             .filter_map(|(name, count)| (count > 1).then_some(name))
@@ -323,6 +440,7 @@ impl BlockCache {
         // builds embarrassingly parallel over the read-only `doc` — no
         // topological ordering required. Metrics are resolved after all
         // definitions exist.
+        let t_defns = perf.then(iced::time::Instant::now);
         cache.defns = referenced
             .par_iter()
             .map(|name| {
@@ -338,11 +456,24 @@ impl BlockCache {
                         viewport,
                         depth_map,
                         solid_snaps,
+                        &HashSet::default(),
                     )),
                 )
             })
             .collect();
+        let defns_ms = crate::perf::elapsed_ms(t_defns);
+        let t_metrics = perf.then(iced::time::Instant::now);
         cache.compute_block_metrics(&referenced);
+        if perf {
+            crate::perf_record!(
+                "[perf] blk_cache-build total={:.1}ms refs={:.1} defns={:.1} metrics={:.1} blocks={}",
+                crate::perf::elapsed_ms(t_all),
+                refs_ms,
+                defns_ms,
+                crate::perf::elapsed_ms(t_metrics),
+                referenced.len(),
+            );
+        }
         cache
     }
 
@@ -358,9 +489,106 @@ impl BlockCache {
         viewport: Option<Handle>,
         depth_map: &HashMap<u64, [f32; 2]>,
     ) -> Self {
+        Self::build_for_block_excluding(
+            doc, block_name, anno_scale, annotation_scale_handle, all_visible,
+            bg_color, viewport, depth_map, &HashSet::default(),
+        )
+    }
+
+    /// This cache with the definitions named in `changed` rebuilt from `doc`
+    /// and the rest shared, for an edit that can only change those (a layer
+    /// switched on or off). The metrics of every definition that nests a
+    /// rebuilt one are worked out again.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_rebuilt_blocks(
+        &self,
+        doc: &Document,
+        changed: &HashSet<String>,
+        anno_scale: f32,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+        bg_color: [f32; 4],
+        viewport: Option<Handle>,
+        depth_map: &HashMap<u64, [f32; 2]>,
+        solid_snaps: &HashMap<Handle, Vec<(glam::DVec3, SnapHint)>>,
+    ) -> Self {
         use crate::par::prelude::*;
         let _owners = crate::scene::block_authoring::DictionaryOwners::publish(doc);
         let mut cache = Self::new();
+        cache.complex_possible = self.complex_possible;
+        cache.viewport = self.viewport;
+        cache.prototype_blocks = self.prototype_blocks.clone();
+        cache.defns = self.defns.clone();
+        let rebuilt: Vec<String> = cache
+            .defns
+            .keys()
+            .filter(|name| changed.iter().any(|c| c.eq_ignore_ascii_case(name)))
+            .cloned()
+            .collect();
+        let defns: Vec<(String, Arc<BlockDefn>)> = rebuilt
+            .par_iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Arc::new(build_defn(
+                        doc,
+                        name,
+                        anno_scale,
+                        annotation_scale_handle,
+                        all_visible,
+                        bg_color,
+                        viewport,
+                        depth_map,
+                        solid_snaps,
+                        &HashSet::default(),
+                    )),
+                )
+            })
+            .collect();
+        cache.defns.extend(defns);
+        // Every definition that reaches a rebuilt one through its nesting.
+        let mut affected: HashSet<String> = rebuilt.into_iter().collect();
+        loop {
+            let more: Vec<String> = cache
+                .defns
+                .iter()
+                .filter(|(name, defn)| {
+                    !affected.contains(*name)
+                        && defn.subs.iter().any(|sub| {
+                            matches!(sub, LocalSub::Nested(nref) if affected.contains(&nref.block_name))
+                        })
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            affected.extend(more);
+        }
+        let affected: Vec<String> = affected.into_iter().collect();
+        cache.compute_block_metrics(&affected);
+        cache
+    }
+
+    /// Build an isolated preview of a picture without the specified members.
+    /// The resident cache and the document remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_for_block_excluding(
+        doc: &Document,
+        block_name: &str,
+        anno_scale: f32,
+        annotation_scale_handle: Option<Handle>,
+        all_visible: bool,
+        bg_color: [f32; 4],
+        viewport: Option<Handle>,
+        depth_map: &HashMap<u64, [f32; 2]>,
+        excluded: &HashSet<Handle>,
+    ) -> Self {
+        use crate::par::prelude::*;
+        let _owners = crate::scene::block_authoring::DictionaryOwners::publish(doc);
+        let mut cache = Self::new();
+        cache.complex_possible = crate::io::linetypes::defines_complex_lt(doc);
+        cache.viewport = viewport;
         let referenced = referenced_block_tree(doc, block_name, anno_scale);
         cache.defns = referenced
             .par_iter()
@@ -377,6 +605,7 @@ impl BlockCache {
                         viewport,
                         depth_map,
                         &HashMap::default(),
+                        excluded,
                     )),
                 )
             })
@@ -500,12 +729,27 @@ fn block_object_names(doc: &Document, entity: &EntityType, anno_scale: f32) -> V
         .collect()
 }
 
-/// Collect block definitions needed by rendered representations.
-fn collect_referenced_blocks(doc: &Document, anno_scale: f32) -> Vec<String> {
+/// Collect block definitions needed by rendered representations, and, from the
+/// same walk, how many instances each top-level INSERT contributes — the two
+/// disjoint facts the build needs about the same entities. They used to be
+/// gathered by two full passes over `doc.entities()`; on a 1.17 M-entity
+/// drawing each pass is arena-latency bound, so they share one walk.
+fn collect_referenced_blocks(
+    doc: &Document,
+    anno_scale: f32,
+) -> (Vec<String>, HashMap<String, usize>) {
     let mut seen: HashSet<String> = HashSet::default();
     let mut queue: Vec<String> = Vec::new();
+    let mut reference_counts: HashMap<String, usize> = HashMap::default();
 
     for entity in doc.entities() {
+        // Reference counts are top-level INSERTs only, as before: the nested
+        // walk below never reaches this branch.
+        if let EntityType::Insert(insert) = entity {
+            *reference_counts
+                .entry(insert.block_name.clone())
+                .or_default() += insert.instance_count();
+        }
         for name in block_object_names(doc, entity, anno_scale) {
             if seen.insert(name.clone()) {
                 queue.push(name);
@@ -527,7 +771,7 @@ fn collect_referenced_blocks(doc: &Document, anno_scale: f32) -> Vec<String> {
             }
         }
     }
-    seen.into_iter().collect()
+    (seen.into_iter().collect(), reference_counts)
 }
 
 fn referenced_block_tree(doc: &Document, root: &str, anno_scale: f32) -> Vec<String> {
@@ -576,17 +820,35 @@ fn build_defn(
     viewport: Option<Handle>,
     depth_map: &HashMap<u64, [f32; 2]>,
     solid_snaps: &HashMap<Handle, Vec<(glam::DVec3, SnapHint)>>,
+    excluded: &HashSet<Handle>,
 ) -> BlockDefn {
+    let complex_possible = crate::io::linetypes::defines_complex_lt(doc);
     let br = match crate::scene::render_graph::block_record_by_name(doc, block_name) {
         Some(br) => br,
         None => return BlockDefn::default(),
     };
+
+    // An annotative member of a block that is not annotative itself follows
+    // the scale on its own, as it would outside the block: a 1:50 dimension's
+    // text is 50 times its style height. An annotative block scales as a
+    // whole at its insert instead.
+    let member_scale = annotation_scale_handle
+        .filter(|_| !crate::scene::annotative::block_is_annotative(doc, block_name))
+        .and_then(|handle| match doc.objects.get(&handle) {
+            Some(document::objects::ObjectType::Scale(scale)) => {
+                Some(scale.inverse_factor() as f32)
+            }
+            _ => None,
+        });
 
     // ── Pass 2: tessellate each sub with the chosen offset so stored
     // coordinates fit into f32 without precision loss.
     let cap = br.entity_handles.len();
     let mut subs: Vec<LocalSub> = Vec::with_capacity(cap);
     for &eh in &br.entity_handles {
+        if excluded.contains(&eh) {
+            continue;
+        }
         let Some(source_entity) = doc.get_entity(eh) else {
             continue;
         };
@@ -645,6 +907,7 @@ fn build_defn(
                 block_use.scale_policy,
                 doc,
                 anno_scale,
+                annotation_scale_handle,
                 bg_color,
                 viewport,
                 depth_map,
@@ -688,14 +951,18 @@ fn build_defn(
                 // so the shader band matches the scaled geometry (same band the
                 // top-level path draws — depth-tested + linetype-dashed).
                 let solid = solid_snaps.get(&entity.common().handle);
+                let sub_scale = member_scale
+                    .filter(|_| crate::scene::annotative::is_annotative(doc, entity))
+                    .unwrap_or(anno_scale);
                 for mut lw in tessellate_sub_local(
                     doc,
                     entity,
-                    anno_scale,
+                    sub_scale,
                     annotation_scale_handle,
                     bg_color,
                     viewport,
                     depth_map,
+                    complex_possible,
                 ) {
                     // A solid's shell wire carries its corner snaps, as at
                     // the top level; its box grows to hold them.
@@ -730,15 +997,17 @@ fn inline_wire_point_cost(wire: &LocalWire) -> Option<usize> {
         && wire.fill_tris.is_empty()
         && wire.pick_tris.is_empty()
         && wire.pattern_stations.is_empty()
-        && wire.world_width == 0.0)
+        && wire.world_width == 0.0
+        && matches!(wire.complex_walk, ComplexWalk::None))
         .then_some(wire.points.len())
 }
 
 fn build_nested_ref(
-    nested_ins: &codec::entities::Insert,
+    nested_ins: &document::entities::Insert,
     scale_policy: crate::scene::BlockScalePolicy,
     doc: &Document,
     anno_scale: f32,
+    annotation_scale_handle: Option<Handle>,
     bg_color: [f32; 4],
     viewport: Option<Handle>,
     depth_map: &HashMap<u64, [f32; 2]>,
@@ -764,11 +1033,14 @@ fn build_nested_ref(
         doc,
         nested_ins,
         anno_scale,
+        annotation_scale_handle,
         scale_policy,
     )
     .into_iter()
     .flat_map(|attribute| {
-        tessellate_sub_local(doc, &attribute, 1.0, None, bg_color, viewport, depth_map)
+        tessellate_sub_local(
+            doc, &attribute, 1.0, None, bg_color, viewport, depth_map, false,
+        )
     })
     .collect();
 
@@ -776,6 +1048,7 @@ fn build_nested_ref(
         block_name: nested_ins.block_name.clone(),
         xform,
         style: crate::scene::render_graph::InsertStyleSpec::new(doc, nested_ins, viewport),
+        complex_style: NestedComplexStyle::new(doc, nested_ins, viewport),
         attachments,
         instance_offsets: crate::scene::render_graph::array_offsets(nested_ins),
         plot_visible,
@@ -800,6 +1073,7 @@ fn tessellate_sub_local(
     bg_color: [f32; 4],
     viewport: Option<Handle>,
     depth_map: &HashMap<u64, [f32; 2]>,
+    complex_possible: bool,
 ) -> Vec<LocalWire> {
     let h = sub.common().handle;
 
@@ -892,6 +1166,44 @@ fn tessellate_sub_local(
 
     let frame_mode =
         crate::scene::frame::entity_kind(sub).map(|kind| crate::scene::frame::mode(doc, kind));
+
+    // A complex linetype follows the same entities it follows at the top level.
+    // A child walks when it has one of its own, or when it can inherit one.
+    let linetype_follows_path = matches!(
+        sub,
+        EntityType::Line(_)
+            | EntityType::Arc(_)
+            | EntityType::Circle(_)
+            | EntityType::Ellipse(_)
+            | EntityType::LwPolyline(_)
+            | EntityType::Polyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+            | EntityType::Spline(_)
+    );
+    let own_complex = linetype_follows_path
+        .then(|| {
+            named_complex_linetype(
+                doc,
+                crate::scene::view::render::linetype_name_for_viewport(doc, sub, viewport),
+            )
+        })
+        .flatten();
+    let inherits = lt_is_byblock || lt_l0;
+    let walks_complex =
+        linetype_follows_path && (own_complex.is_some() || (complex_possible && inherits));
+    let inherits_over_split_wires = inherits
+        && wires_out.iter().any(|wire| {
+            wire.tangent_geoms
+                .iter()
+                .any(|t| matches!(t, TangentGeom::Arc { .. }))
+        });
+    let mut polyline_path = (walks_complex || inherits_over_split_wires)
+        .then(|| crate::scene::convert::tess::polyline_lt_path(doc, sub))
+        .flatten();
+    let walks_whole_path = polyline_path.is_some();
+    let complex_lt_scale = (doc.header.linetype_scale * sub.common().linetype_scale) as f32;
+
     let mut result = Vec::with_capacity(wires_out.len());
     for wire in wires_out {
         // Per-wire point-count cap: a single wire that exceeds this is skipped
@@ -942,7 +1254,86 @@ fn tessellate_sub_local(
         // colour would collapse colour-split geometry to one colour. (PR #301,
         // Kevin Griffin — extended to SDF text per-vertex in emit_wire.)
         let wire_on_base_color = wire.color == sub_color;
+        // Only a polyline walks a band, with the widths of its whole path.
+        // Hidden reference geometry is never drawn, so it has no linetype to
+        // walk.
+        let complex_walk = if !(walks_complex || walks_whole_path)
+            || wire.snap_only
+            || wire.points.len() < 2
+            || (!walks_whole_path && (wire.world_width != 0.0 || !wire.taper_widths.is_empty()))
+            || !wire.fill_tris.is_empty()
+        {
+            ComplexWalk::None
+        } else if let Some((path, closure, band)) = polyline_path.take() {
+            ComplexWalk::Path(Arc::new(path), closure, band.map(Arc::new))
+        } else if walks_whole_path {
+            ComplexWalk::Covered
+        } else {
+            ComplexWalk::Points
+        };
 
+        // An MLINE element is the line it explodes to, resolved in this
+        // viewport: its colour (like its linetype) inherits from the INSERT when
+        // ByBlock, and from the INSERT's layer when ByLayer on layer 0.
+        let element = match (sub, wire.element_color, wire.element_linetype.as_deref()) {
+            (EntityType::MLine(mline), Some(color), Some(linetype)) => Some((
+                color,
+                crate::entities::mline::element_style(doc, mline, color, linetype, viewport),
+            )),
+            _ => None,
+        };
+        let (wire_color, wire_aci, wire_pattern_length, wire_pattern) = match element {
+            Some((_, (color, pattern_length, pattern, aci))) => {
+                (color, aci, pattern_length, pattern)
+            }
+            None => (wire.color, aci, pat_len, pat),
+        };
+        let (wire_color_is_byblock, wire_color_l0) = match element {
+            Some((color, _)) => (
+                color == AcadColor::ByBlock,
+                on_l0 && color == AcadColor::ByLayer,
+            ),
+            None => (
+                color_is_byblock && wire_on_base_color,
+                color_l0 && wire_on_base_color,
+            ),
+        };
+        // An MLINE's linetypes are its elements': ByBlock and a layer-0 ByLayer
+        // inherit from the INSERT, anything else is the element's own.
+        let (lt_is_byblock, lt_l0, own_complex, complex_walk) =
+            match wire.element_linetype.as_deref() {
+                Some(element) => {
+                    let byblock = element.eq_ignore_ascii_case("byblock");
+                    let bylayer = element.is_empty() || element.eq_ignore_ascii_case("bylayer");
+                    let own = if byblock {
+                        None
+                    } else {
+                        named_complex_linetype(
+                            doc,
+                            crate::entities::mline::element_linetype_name(
+                                doc,
+                                &sub.common().layer,
+                                element,
+                                viewport,
+                            ),
+                        )
+                    };
+                    let inherited_l0 = bylayer && on_l0;
+                    let walks = wire.points.len() >= 2
+                        && (own.is_some() || (complex_possible && (byblock || inherited_l0)));
+                    (
+                        byblock,
+                        inherited_l0,
+                        own,
+                        if walks {
+                            ComplexWalk::Points
+                        } else {
+                            ComplexWalk::None
+                        },
+                    )
+                }
+                None => (lt_is_byblock, lt_l0, own_complex.clone(), complex_walk),
+            };
         result.push(LocalWire {
             points: wire.points,
             points_low: wire.points_low,
@@ -959,14 +1350,14 @@ fn tessellate_sub_local(
             fill_is_2d_solid: wire.fill_is_2d_solid,
             pick_tris: wire.pick_tris,
             pick_tris_low: wire.pick_tris_low,
-            color: wire.color,
+            color: wire_color,
             layer_locked,
             contrast_bg,
             preserve_color,
             canvas_color,
-            aci,
-            pattern_length: pat_len,
-            pattern: pat,
+            aci: wire_aci,
+            pattern_length: wire_pattern_length,
+            pattern: wire_pattern,
             line_weight_px: lw_px,
             pattern_stations: wire.pattern_stations,
             world_width: wire.world_width,
@@ -980,11 +1371,16 @@ fn tessellate_sub_local(
             plot_l0: on_l0,
             hide_unselected: frame_mode == Some(0),
             is_fill_only,
-            color_is_byblock: color_is_byblock && wire_on_base_color,
+            color_is_byblock: wire_color_is_byblock,
             transparency_is_byblock,
             lt_is_byblock,
+            entity_lt_scale: sub.common().linetype_scale as f32,
+            complex_walk,
+            own_complex,
+            complex_lt_scale,
+            dash_closure: wire.dash_closure,
             lw_is_byblock,
-            color_l0: color_l0 && wire_on_base_color,
+            color_l0: wire_color_l0,
             transparency_l0,
             lt_l0,
             lw_l0,
@@ -1087,7 +1483,7 @@ pub fn aabb_disjoint_xy(a: [f32; 4], b: [f32; 4]) -> bool {
 pub fn expand_insert(
     doc: &Document,
     cache: &BlockCache,
-    ins: &codec::entities::Insert,
+    ins: &document::entities::Insert,
     ins_handle: Handle,
     ins_resolved_color: [f32; 4],
     ins_aci: u8,
@@ -1119,8 +1515,34 @@ pub fn expand_insert(
     // Dimension picture blocks store definition POINTs at their root. They are
     // metadata, not visible geometry; nested POINTs remain regular block data.
     suppress_root_points: bool,
+    // The annotation ratio a child's complex linetype bakes in
+    // (`tess::complex_linetype_anno`).
+    complex_lt_anno: f32,
 ) -> Option<Vec<WireModel>> {
     let defn = cache.defn(&ins.block_name)?;
+    // What this INSERT hands its children for ByBlock and layer-0 ByLayer.
+    let (ins_complex, l0_complex) = if cache.complex_possible {
+        (
+            named_complex_linetype(
+                doc,
+                crate::scene::view::render::linetype_name_for_common_viewport(
+                    doc,
+                    &ins.common,
+                    cache.viewport,
+                ),
+            ),
+            named_complex_linetype(
+                doc,
+                crate::scene::view::render::layer_linetype_name_for_viewport(
+                    doc,
+                    &ins.common.layer,
+                    cache.viewport,
+                ),
+            ),
+        )
+    } else {
+        (None, None)
+    };
     let xform = crate::scene::render_graph::insert_transform_with_policy(
         doc,
         ins,
@@ -1138,32 +1560,34 @@ pub fn expand_insert(
         LocalSub::Wire(wire) => wire.canvas_color,
         LocalSub::Nested(_) => false,
     });
-    let prototype_key =
-        if !crate::scene::block_construction::is_construction(&ins.common)
-            && !ins.is_array() && !has_masks && cache.prototype_blocks.contains(&ins.block_name) {
-            Some(expansion_prototype_key(
-                ins,
-                &xform,
-                ins_resolved_color,
-                ins_pat_len,
-                ins_pat,
-                ins_lw_px,
-                ins_layer,
-                ins_layer_plottable,
-                selected,
-                pslt_factor,
-                is_xref,
-                bg_color,
-                anno_scale,
-                suppress_root_points,
-                crate::scene::view::render::layer_locked(
-                    doc,
-                    &EntityType::Insert(ins.clone()),
-                ),
-            ))
-        } else {
-            None
-        };
+    let prototype_key = if !crate::scene::block_construction::is_construction(&ins.common)
+        && !ins.is_array()
+        && !has_masks
+        && cache.prototype_blocks.contains(&ins.block_name)
+    {
+        Some(expansion_prototype_key(
+            ins,
+            &xform,
+            ins_resolved_color,
+            ins_pat_len,
+            ins_pat,
+            ins_lw_px,
+            ins_layer,
+            ins_layer_plottable,
+            selected,
+            pslt_factor,
+            is_xref,
+            bg_color,
+            anno_scale,
+            suppress_root_points,
+            crate::scene::view::render::layer_locked(doc, &EntityType::Insert(ins.clone())),
+            &ins_complex,
+            &l0_complex,
+            complex_lt_anno,
+        ))
+    } else {
+        None
+    };
     let prototype_slot = prototype_key.as_ref().map(|key| {
         let mut prototypes = cache
             .expansion_prototypes
@@ -1268,6 +1692,9 @@ pub fn expand_insert(
             doc,
             &EntityType::Insert(ins.clone()),
         ),
+        ins_complex,
+        l0_complex,
+        complex_lt_anno,
     };
     if offsets.len() > 1 {
         let first_xform = cell_xform(&offsets[0]);
@@ -1361,9 +1788,25 @@ fn transform_translation(transform: &Transform) -> [f64; 3] {
     ]
 }
 
+/// The complex-linetype inputs of an expansion, for a prototype key.
+fn push_complex_key(
+    key: &mut Vec<u32>,
+    ins_complex: &Option<Arc<NamedComplexLinetype>>,
+    l0_complex: &Option<Arc<NamedComplexLinetype>>,
+    complex_lt_anno: f32,
+) {
+    key.push(complex_lt_anno.to_bits());
+    for linetype in [ins_complex, l0_complex] {
+        key.push(u32::MAX);
+        if let Some(linetype) = linetype {
+            key.extend(linetype.name.chars().map(u32::from));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn expansion_prototype_key(
-    ins: &codec::entities::Insert,
+    ins: &document::entities::Insert,
     transform: &Transform,
     ins_color: [f32; 4],
     ins_pat_len: f32,
@@ -1378,6 +1821,9 @@ fn expansion_prototype_key(
     anno_scale: f32,
     suppress_root_points: bool,
     insert_layer_locked: bool,
+    ins_complex: &Option<Arc<NamedComplexLinetype>>,
+    l0_complex: &Option<Arc<NamedComplexLinetype>>,
+    complex_lt_anno: f32,
 ) -> ExpansionPrototypeKey {
     let matrix = &transform.matrix.m;
     let linear = [
@@ -1405,6 +1851,7 @@ fn expansion_prototype_key(
     insert_style.push(pslt_factor.to_bits());
     insert_style.extend(bg_color.map(f32::to_bits));
     insert_style.push(anno_scale.to_bits());
+    push_complex_key(&mut insert_style, ins_complex, l0_complex, complex_lt_anno);
     ExpansionPrototypeKey {
         block_name: ins.block_name.clone(),
         linear,
@@ -1556,6 +2003,11 @@ struct ExpandCtx<'a> {
     bg_color: [f32; 4],
     /// True when the current INSERT is on a locked layer.
     insert_layer_locked: bool,
+    /// The linetypes this INSERT's children inherit when they are complex:
+    /// ByBlock takes `ins_complex`, a layer-0 ByLayer child takes `l0_complex`.
+    ins_complex: Option<Arc<NamedComplexLinetype>>,
+    l0_complex: Option<Arc<NamedComplexLinetype>>,
+    complex_lt_anno: f32,
 }
 
 fn nested_prototype_key(
@@ -1591,6 +2043,12 @@ fn nested_prototype_key(
     style.push(ctx.insert_layer_locked as u32);
     style.push(ctx.pslt_factor.to_bits());
     style.extend(ctx.bg_color.map(f32::to_bits));
+    push_complex_key(
+        &mut style,
+        &ctx.ins_complex,
+        &ctx.l0_complex,
+        ctx.complex_lt_anno,
+    );
     NestedPrototypeKey {
         block_name: block_name.to_string(),
         linear,
@@ -1690,6 +2148,7 @@ struct StyleKey {
     fill_is_2d_solid: bool,
     fill_is_3d: bool,
     snap_only: bool,
+    dash_closure: DashClosure,
     region_boundary_click: bool,
     plot_visible: bool,
     hide_unselected: bool,
@@ -1746,6 +2205,7 @@ struct BatchEntry {
     fill_is_3d: bool,
     fill_is_2d_solid: bool,
     snap_only: bool,
+    dash_closure: DashClosure,
     region_boundary_click: bool,
     plot_visible: bool,
     hide_unselected: bool,
@@ -1942,7 +2402,9 @@ impl Batches {
                     pick_tris: b.pick_tris,
                     pick_tris_low: b.pick_tris_low,
                     dash_from_start: false,
-                    dash_align_end: None,
+                    element_linetype: None,
+                    element_color: None,
+                    dash_closure: b.dash_closure,
                     text_verts: b.text_verts,
                     searchable_text: b.searchable_text,
                     name: name.to_string(),
@@ -2032,6 +2494,7 @@ fn style_key(
         fill_is_2d_solid,
         fill_is_3d,
         snap_only: false,
+        dash_closure: DashClosure::Open,
         region_boundary_click: false,
         plot_visible,
         hide_unselected,
@@ -2101,6 +2564,9 @@ fn expand_defn(
                     layer0_aci: ctx.l0_aci,
                 };
                 let nested_style = nref.style.resolve(parent_style);
+                let (ins_complex, l0_complex) = nref
+                    .complex_style
+                    .resolve(&ctx.ins_complex, &ctx.l0_complex);
                 let nested_layer_plottable = if nref.plot_l0 {
                     ctx.l0_plottable
                 } else {
@@ -2124,6 +2590,9 @@ fn expand_defn(
                     is_xref: ctx.is_xref,
                     bg_color: ctx.bg_color,
                     insert_layer_locked: ctx.insert_layer_locked || nref.layer_locked,
+                    ins_complex,
+                    l0_complex,
+                    complex_lt_anno: ctx.complex_lt_anno,
                 };
                 for offset in &nref.instance_offsets {
                     let attachment_transform =
@@ -2385,7 +2854,7 @@ fn resolve_wire_color(lw: &LocalWire, ctx: &ExpandCtx) -> [f32; 4] {
     color
 }
 
-/// Effective linetype scale along this wire after an INSERT transform.
+/// How much an INSERT transform stretches this wire's length.
 ///
 /// A non-uniform INSERT has no single global scale. Weight each segment by its
 /// local length, producing the exact factor for a line and a stable
@@ -2604,6 +3073,196 @@ fn transformed_marker_point(
         + KernelVec3::from(target.normal.to_array()) * axial * axial_scale
 }
 
+/// Draw a block child with a complex linetype: walk its drawing-space path, so
+/// the block's scale stretches the path and never the pattern. The child's own
+/// wire stays as hidden reference geometry, which keeps its snaps and tangents.
+fn emit_complex_walk(
+    lw: &LocalWire,
+    linetype: &crate::io::linetypes::ComplexLt,
+    accum_xform: &Transform,
+    ctx: &ExpandCtx,
+    out: &mut Batches,
+    d_range: (f32, f32),
+) {
+    let Some((path, closure, band, mut plain)) =
+        emit_path_reference(lw, accum_xform, ctx, out, d_range)
+    else {
+        return;
+    };
+    let identity = Transform::identity();
+
+    // Glyphs carry this wire's colour, which `emit_wire` reads as "the base
+    // colour": they follow a ByBlock or layer-0 colour like the strokes do.
+    let walked = crate::scene::convert::tess::walk_complex_linetype(
+        "",
+        &path,
+        linetype,
+        (lw.complex_lt_scale * ctx.complex_lt_anno * ctx.pslt_factor).max(1e-4),
+        closure,
+        lw.color,
+        false,
+        lw.line_weight_px,
+        band.as_deref(),
+    );
+    let Some(walked) = walked else {
+        // Nothing to walk (pattern blow-up guard): the whole path, solid.
+        set_path_points(&mut plain, &path, band.as_deref());
+        emit_wire(&plain, &identity, ctx, out, d_range);
+        return;
+    };
+    for wire in walked {
+        let mut piece = plain.clone();
+        piece.points = wire.points;
+        piece.points_low = wire.points_low;
+        piece.world_width = wire.world_width;
+        piece.taper_widths = wire.taper_widths;
+        piece.text_verts = wire.text_verts;
+        piece.searchable_text = wire.searchable_text;
+        emit_wire(&piece, &identity, ctx, out, d_range);
+    }
+}
+
+/// Draw a polyline with arcs, whose wires are separate, as one path under the
+/// dash pattern it inherits.
+fn emit_inherited_dash_path(
+    lw: &LocalWire,
+    pattern_length: f32,
+    pattern: [f32; 8],
+    accum_xform: &Transform,
+    ctx: &ExpandCtx,
+    out: &mut Batches,
+    d_range: (f32, f32),
+) {
+    let Some((path, closure, band, mut piece)) =
+        emit_path_reference(lw, accum_xform, ctx, out, d_range)
+    else {
+        return;
+    };
+    set_path_points(&mut piece, &path, band.as_deref());
+    piece.pattern_length = pattern_length;
+    piece.pattern = pattern;
+    piece.plinegen = !path.iter().any(|p| p[0].is_nan());
+    piece.dash_closure = closure;
+    emit_wire(&piece, &Transform::identity(), ctx, out, d_range);
+}
+
+fn set_path_points(wire: &mut LocalWire, path: &[[f64; 3]], band: Option<&[f32]>) {
+    (wire.world_width, wire.taper_widths) =
+        crate::scene::text::complex_lt::band_widths(band.unwrap_or_default());
+    let (points, points_low) = path
+        .iter()
+        .map(|p| {
+            if p[0].is_nan() {
+                return ([f32::NAN; 3], [0.0; 3]);
+            }
+            let (hx, lx) = WireModel::split_ds(p[0]);
+            let (hy, ly) = WireModel::split_ds(p[1]);
+            let (hz, lz) = WireModel::split_ds(p[2]);
+            ([hx, hy, hz], [lx, ly, lz])
+        })
+        .unzip();
+    wire.points = points;
+    wire.points_low = points_low;
+}
+
+/// Keep a walked child's own wire as hidden reference geometry. When this wire
+/// is the one that walks, gives the drawing-space path, how the pattern closes
+/// around it, its band widths at drawing scale, and an empty wire of the child's
+/// style to draw it with.
+fn emit_path_reference(
+    lw: &LocalWire,
+    accum_xform: &Transform,
+    ctx: &ExpandCtx,
+    out: &mut Batches,
+    d_range: (f32, f32),
+) -> Option<(Vec<[f64; 3]>, DashClosure, Option<Vec<f32>>, LocalWire)> {
+    let mut plain = lw.clone();
+    plain.complex_walk = ComplexWalk::None;
+    plain.own_complex = None;
+    plain.lt_is_byblock = false;
+    plain.lt_l0 = false;
+    plain.pattern_length = 0.0;
+    plain.pattern = [0.0; 8];
+    plain.pattern_stations.clear();
+    plain.plinegen = false;
+    plain.dash_closure = DashClosure::Open;
+
+    let mut reference = plain.clone();
+    reference.snap_only = true;
+    reference.plot_visible = false;
+    emit_wire(&reference, accum_xform, ctx, out, d_range);
+
+    let to_world = |x: f64, y: f64, z: f64| {
+        let point = accum_xform.apply(Vector3::new(x, y, z));
+        [point.x, point.y, point.z]
+    };
+    let (path, closure, band): (Vec<[f64; 3]>, DashClosure, Option<Vec<f32>>) =
+        match &lw.complex_walk {
+            ComplexWalk::None | ComplexWalk::Covered => return None,
+            ComplexWalk::Path(path, closure, band) => (
+                path.iter()
+                    .map(|p| {
+                        if p[0].is_nan() {
+                            [f64::NAN; 3]
+                        } else {
+                            to_world(p[0], p[1], p[2])
+                        }
+                    })
+                    .collect(),
+                *closure,
+                band.as_ref().map(|band| {
+                    let scale = band_scale(accum_xform);
+                    band.iter().map(|width| width * scale).collect()
+                }),
+            ),
+            ComplexWalk::Points => (
+                lw.points
+                    .iter()
+                    .enumerate()
+                    .map(|(index, p)| {
+                        if p[0].is_nan() {
+                            return [f64::NAN; 3];
+                        }
+                        let low = lw.points_low.get(index).copied().unwrap_or([0.0; 3]);
+                        to_world(
+                            p[0] as f64 + low[0] as f64,
+                            p[1] as f64 + low[1] as f64,
+                            p[2] as f64 + low[2] as f64,
+                        )
+                    })
+                    .collect(),
+                lw.dash_closure,
+                None,
+            ),
+        };
+
+    // Everything here is already in drawing space and takes no further pattern.
+    plain.world_width = 0.0;
+    plain.taper_widths = Vec::new();
+    plain.points = Vec::new();
+    plain.points_low = Vec::new();
+    plain.key_vertices = Vec::new();
+    plain.snap_pts = Vec::new();
+    plain.tangent_geoms = Vec::new();
+    plain.pick_tris = Vec::new();
+    plain.pick_tris_low = Vec::new();
+    plain.searchable_text = Vec::new();
+    Some((path, closure, band, plain))
+}
+
+/// A wide polyline's band width is baked in block-local units; this scales it by
+/// the insert transform so the shader band matches the scaled geometry. The
+/// average of the X and Y axis image lengths is exact for a uniform insert and a
+/// sensible mean for a non-uniform one (the band carries one width).
+fn band_scale(accum_xform: &Transform) -> f32 {
+    let o = accum_xform.apply(Vector3::new(0.0, 0.0, 0.0));
+    let ax = accum_xform.apply(Vector3::new(1.0, 0.0, 0.0));
+    let ay = accum_xform.apply(Vector3::new(0.0, 1.0, 0.0));
+    let sx = ((ax.x - o.x).powi(2) + (ax.y - o.y).powi(2) + (ax.z - o.z).powi(2)).sqrt();
+    let sy = ((ay.x - o.x).powi(2) + (ay.y - o.y).powi(2) + (ay.z - o.z).powi(2)).sqrt();
+    ((sx + sy) * 0.5) as f32
+}
+
 fn emit_wire(
     lw: &LocalWire,
     accum_xform: &Transform,
@@ -2620,6 +3279,38 @@ fn emit_wire(
         return;
     }
 
+    if !matches!(lw.complex_walk, ComplexWalk::None) {
+        let complex = if lw.lt_is_byblock {
+            ctx.ins_complex.as_ref()
+        } else if lw.lt_l0 {
+            ctx.l0_complex.as_ref()
+        } else {
+            lw.own_complex.as_ref()
+        };
+        if let Some(complex) = complex {
+            let linetype = &complex.linetype;
+            emit_complex_walk(lw, linetype, accum_xform, ctx, out, d_range);
+            return;
+        }
+        if matches!(
+            lw.complex_walk,
+            ComplexWalk::Path(..) | ComplexWalk::Covered
+        ) && (lw.lt_is_byblock || lw.lt_l0)
+        {
+            let (pat_len, pat) = if lw.lt_is_byblock {
+                (ctx.ins_pat_len, ctx.ins_pat)
+            } else {
+                (ctx.l0.pat_len, ctx.l0.pat)
+            };
+            if pat_len > 0.0 {
+                let pat_len = pat_len * lw.entity_lt_scale;
+                let pat = pat.map(|value| value * lw.entity_lt_scale);
+                emit_inherited_dash_path(lw, pat_len, pat, accum_xform, ctx, out, d_range);
+                return;
+            }
+        }
+    }
+
     // Resolve final style for this LocalWire against the outer Insert ctx
     // before we hash it into a batch.
     let final_color = resolve_wire_color(lw, ctx);
@@ -2630,10 +3321,16 @@ fn emit_wire(
     } else {
         lw.aci
     };
+    let inherit = |pat_len: f32, pat: [f32; 8]| {
+        (
+            pat_len * lw.entity_lt_scale,
+            pat.map(|value| value * lw.entity_lt_scale),
+        )
+    };
     let (final_pat_len, final_pat) = if lw.lt_is_byblock {
-        (ctx.ins_pat_len, ctx.ins_pat)
+        inherit(ctx.ins_pat_len, ctx.ins_pat)
     } else if lw.lt_l0 {
-        (ctx.l0.pat_len, ctx.l0.pat)
+        inherit(ctx.l0.pat_len, ctx.l0.pat)
     } else {
         (lw.pattern_length, lw.pattern)
     };
@@ -2645,21 +3342,9 @@ fn emit_wire(
         lw.line_weight_px
     };
 
-    // A wide polyline's band width is baked in block-local units; scale it by
-    // the insert transform so the shader band matches the scaled geometry.
-    // Average the X and Y axis image lengths — exact for a uniform insert, a
-    // sensible mean for a non-uniform one (the band carries one width).
-    // A taper's per-point widths scale the same way.
-    let band_scale = || {
-        let o = accum_xform.apply(Vector3::new(0.0, 0.0, 0.0));
-        let ax = accum_xform.apply(Vector3::new(1.0, 0.0, 0.0));
-        let ay = accum_xform.apply(Vector3::new(0.0, 1.0, 0.0));
-        let sx = ((ax.x - o.x).powi(2) + (ax.y - o.y).powi(2) + (ax.z - o.z).powi(2)).sqrt();
-        let sy = ((ay.x - o.x).powi(2) + (ay.y - o.y).powi(2) + (ay.z - o.z).powi(2)).sqrt();
-        ((sx + sy) * 0.5) as f32
-    };
+    // A taper's per-point widths scale the same way as a constant band.
     let final_world_width = if lw.world_width > 0.0 {
-        lw.world_width * band_scale()
+        lw.world_width * band_scale(accum_xform)
     } else if lw.world_width < 0.0 {
         lw.world_width
     } else {
@@ -2668,7 +3353,7 @@ fn emit_wire(
     let final_taper_widths: Vec<f32> = if lw.taper_widths.is_empty() {
         Vec::new()
     } else {
-        let scale = band_scale();
+        let scale = band_scale(accum_xform);
         lw.taper_widths.iter().map(|width| width * scale).collect()
     };
 
@@ -2787,7 +3472,7 @@ fn emit_wire(
                     pick_tris: Vec::new(),
                     pick_tris_low: Vec::new(),
                     dash_from_start: false,
-                    dash_align_end: None,
+                    dash_closure: lw.dash_closure,
                     text_verts: Vec::new(),
                     name: String::new(),
                     points,
@@ -2822,9 +3507,12 @@ fn emit_wire(
             .and_then(|map| transformed_station_data(values, map, lw.plinegen, accum_xform))
     });
     let has_stations = station_values.is_some();
-    let pattern_scale = transformed_stations.as_ref().map_or_else(
+    // The stations measure this wire's own length, which the insert stretches.
+    // The dash pattern is not scaled with them: a dash is as long in a scaled
+    // block as outside one.
+    let station_scale = transformed_stations.as_ref().map_or_else(
         || {
-            if final_pat_len > 0.0 || has_stations {
+            if has_stations {
                 transformed_wire_length_scale(lw, accum_xform)
             } else {
                 1.0
@@ -2840,10 +3528,10 @@ fn emit_wire(
             })
         },
     );
-    let final_pat_len = final_pat_len * ctx.pslt_factor * pattern_scale;
-    let final_pat = final_pat.map(|v| v * ctx.pslt_factor * pattern_scale);
+    let final_pat_len = final_pat_len * ctx.pslt_factor;
+    let final_pat = final_pat.map(|v| v * ctx.pslt_factor);
     let source_length = transformed_stations.as_ref().map_or_else(
-        || station_values.map_or(0.0, |(_, length)| length * pattern_scale),
+        || station_values.map_or(0.0, |(_, length)| length * station_scale),
         |data| data.source_length,
     );
 
@@ -2905,11 +3593,18 @@ fn emit_wire(
     );
     // Never fold reference-only boundaries into a visible geometry batch.
     key.snap_only = lw.snap_only;
+    // A closed path is a wire of its own: its pattern fits its whole length.
+    let dash_closure = if final_pat_len > 0.0 {
+        lw.dash_closure
+    } else {
+        DashClosure::Open
+    };
+    key.dash_closure = dash_closure;
     key.region_boundary_click = lw.region_boundary_click;
 
     // Keep snap-only edges separate: concatenating key_vertices across
     // disconnected boundaries would invent midpoint references between them.
-    if lw.snap_only || transformed_stations.is_some() {
+    if lw.snap_only || transformed_stations.is_some() || dash_closure != DashClosure::Open {
         if let Some(closed) = out.by_style.remove(&key) {
             out.closed.push(closed);
         }
@@ -2947,6 +3642,7 @@ fn emit_wire(
     });
     entry.local_depth = local_depth;
     entry.snap_only = lw.snap_only;
+    entry.dash_closure = dash_closure;
     entry.region_boundary_click = lw.region_boundary_click;
     if let Some(data) = &transformed_stations {
         entry.pattern_station_pieces.clone_from(&data.pieces);
@@ -2985,7 +3681,7 @@ fn emit_wire(
             let station = transformed_stations
                 .as_ref()
                 .map(|data| data.values[idx])
-                .or_else(|| has_stations.then(|| lw.pattern_stations[idx] * pattern_scale));
+                .or_else(|| has_stations.then(|| lw.pattern_stations[idx] * station_scale));
             let station_segment = transformed_stations
                 .as_ref()
                 .map(|data| data.point_segments[idx]);
@@ -3461,13 +4157,13 @@ mod bg_resolution_tests {
             [1.0, 1.0, 1.0, 1.0]
         );
         assert_eq!(adapt_to_bg(NEAR_WHITE, LIGHT), NEAR_WHITE);
-        let mask = crate::scene::convert::tess_util::aci_to_rgba(&codec::types::Color::Rgb {
+        let mask = crate::scene::convert::tess_util::aci_to_rgba(&document::types::Color::Rgb {
             r: 255,
             g: 255,
             b: 255,
         });
         assert_eq!(adapt_to_bg(mask, LIGHT), mask);
-        let seven = crate::scene::convert::tess_util::aci_to_rgba(&codec::types::Color::Index(7));
+        let seven = crate::scene::convert::tess_util::aci_to_rgba(&document::types::Color::Index(7));
         assert_eq!(adapt_to_bg(seven, LIGHT), [0.0, 0.0, 0.0, 1.0]);
     }
 }
@@ -3476,8 +4172,8 @@ mod bg_resolution_tests {
 mod compact_nested_tests {
     use super::*;
     use crate::scene::view::render::InheritStyle;
-    use codec::entities::{Insert, Line};
-    use codec::tables::BlockRecord;
+    use document::entities::{Insert, Line};
+    use document::tables::BlockRecord;
 
     fn add_block(document: &mut Document, name: &str) -> Handle {
         let mut block = BlockRecord::new(name);
@@ -3565,6 +4261,7 @@ mod compact_nested_tests {
             1.0,
             crate::scene::BlockScalePolicy::FromInsert,
             false,
+            1.0,
         )
         .unwrap();
 
@@ -3584,8 +4281,8 @@ mod compact_nested_tests {
     /// rectangle. A constant wide polyline batched alongside keeps its band.
     #[test]
     fn tapered_polyline_keeps_its_taper_inside_an_insert() {
-        use codec::entities::{LwPolyline, LwVertex};
-        use codec::types::Vector2;
+        use document::entities::{LwPolyline, LwVertex};
+        use document::types::Vector2;
 
         let mut document = Document::new();
         let arrow = add_block(&mut document, "FLE");
@@ -3640,6 +4337,7 @@ mod compact_nested_tests {
             1.0,
             crate::scene::BlockScalePolicy::FromInsert,
             false,
+            1.0,
         )
         .unwrap();
 
@@ -3743,8 +4441,8 @@ mod compact_nested_tests {
 #[cfg(test)]
 mod metrics_depth_tests {
     use super::*;
-    use codec::entities::{Insert, Line};
-    use codec::tables::BlockRecord;
+    use document::entities::{Insert, Line};
+    use document::tables::BlockRecord;
 
     fn add_block(document: &mut Document, name: &str) -> Handle {
         let mut block = BlockRecord::new(name);
@@ -3933,6 +4631,7 @@ mod metrics_depth_tests {
             1.0,
             crate::scene::BlockScalePolicy::FromInsert,
             false,
+            1.0,
         );
 
         assert!(result.is_some());
@@ -3945,5 +4644,52 @@ mod metrics_depth_tests {
         // Subsequent expansion does not warn again because warned set retains it
         let warnings_after = cache.drain_cycle_warnings();
         assert!(warnings_after.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod picture_preview_tests {
+    use super::*;
+
+    #[test]
+    fn command_preview_visibility_does_not_regenerate_table_documents() {
+        let mut scene = crate::scene::Scene::new();
+        let mut table = document::entities::Table::new(document::types::Vector3::ZERO, 1, 1);
+        table.set_cell_text(0, 0, "original");
+        let handle = scene.document.add_entity(EntityType::Table(Box::new(table))).unwrap();
+        let before: Vec<_> = scene.document.entities().cloned().collect();
+        scene.set_command_preview_hidden(&[handle]);
+        assert_eq!(scene.document.entities().cloned().collect::<Vec<_>>(), before);
+        scene.set_command_preview_hidden(&[]);
+        assert_eq!(scene.document.entities().cloned().collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn picture_preview_omits_only_requested_members_without_changing_document() {
+        let mut doc = Document::new();
+        let mut block = document::tables::BlockRecord::new("CELL_PREVIEW");
+        block.handle = doc.allocate_handle();
+        let owner = block.handle;
+        doc.block_records.add(block).unwrap();
+        let mut handles = Vec::new();
+        for y in [0.0, 10.0] {
+            let mut line = document::entities::Line::from_points(
+                document::types::Vector3::new(0.0, y, 0.0),
+                document::types::Vector3::new(10.0, y, 0.0),
+            );
+            line.common.owner_handle = owner;
+            handles.push(doc.add_entity(EntityType::Line(line)).unwrap());
+        }
+        let preview = BlockCache::build_for_block_excluding(
+            &doc, "CELL_PREVIEW", 1.0, None, true, [0.0, 0.0, 0.0, 1.0],
+            None, &HashMap::default(), &[handles[0]].into_iter().collect(),
+        );
+        assert_eq!(preview.defn("CELL_PREVIEW").unwrap().subs.len(), 1);
+        let complete = BlockCache::build_for_block(
+            &doc, "CELL_PREVIEW", 1.0, None, true, [0.0, 0.0, 0.0, 1.0],
+            None, &HashMap::default(),
+        );
+        assert_eq!(complete.defn("CELL_PREVIEW").unwrap().subs.len(), 2);
+        assert!(handles.iter().all(|h| doc.get_entity(*h).is_some()));
     }
 }

@@ -62,6 +62,7 @@ Le specifiche di progetto sono in [docs/superpowers/specs/](docs/superpowers/spe
 | DXF | Lettura e scrittura; versioni di salvataggio da R14 a 2018 |
 | BAK / SV$ | Apertura di backup e salvataggi automatici |
 | OBJ | Importazione di mesh poligonali |
+| SVG / SVGZ | Importazione di forme vettoriali come blocco (`SVGIN` o `IMPORT`) |
 | LandXML | Importazione dei punti `CgPoint` |
 | STL | Esportazione mesh 3D |
 | STEP AP203 | Esportazione mesh 3D |
@@ -95,9 +96,9 @@ sudo snap install --dangerous OpenCADStudio-*-linux-x86_64.snap
 
 ### macOS
 
-The published macOS package supports Apple Silicon:
+Packages are published for Apple Silicon and Intel Macs:
 
-1. Download `OpenCADStudio-*-macos-arm64.dmg`.
+1. Download `OpenCADStudio-*-macos-arm64.dmg` (Apple Silicon) or `OpenCADStudio-*-macos-x86_64.dmg` (Intel).
 2. Open the image and drag `OpenCADStudio.app` into **Applications**.
 3. If Gatekeeper blocks the first launch, approve the app from **System Settings → Privacy & Security**.
 

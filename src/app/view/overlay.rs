@@ -7,6 +7,7 @@ use crate::t;
 use crate::ui::popup::context_menu::{
     ContextMenu, MenuIcon, MenuItem, MenuRow, MENU_PAD_TOP, MENU_ROW_H,
 };
+use crate::ui::popup::quad_menu::{QuadMsg, QuadPanel, QuadUi};
 use iced::advanced::layout;
 use iced::advanced::mouse;
 use iced::advanced::overlay;
@@ -44,13 +45,16 @@ pub(super) fn text_inline_overlay(
     ed: &super::super::text_inline::TextInlineState,
     canvas: (f32, f32),
 ) -> Element<'_, Message> {
+    // The box grows with the text's on-screen size, up to the canvas width.
+    let (cw, ch) = canvas;
+    let field_w = (240.0 * ed.font_px / 13.0).min((cw - 20.0).max(240.0));
     let field = text_input(t!("Text").as_ref(), &ed.value)
         .id(iced::widget::Id::new(TEXT_INLINE_ID))
         .on_input(Message::TextInlineInput)
         .on_submit(Message::TextInlineOk)
         .padding(6)
-        .size(13)
-        .width(iced::Length::Fixed(240.0));
+        .size(ed.font_px)
+        .width(iced::Length::Fixed(field_w));
 
     let panel = container(field)
         .style(move |theme: &Theme| {
@@ -68,29 +72,15 @@ pub(super) fn text_inline_overlay(
         .padding(4);
 
     // Keep the box on-screen so its field stays clickable at the edges.
-    const PANEL_W: f32 = 240.0 + 20.0;
-    const PANEL_H: f32 = 46.0;
-    let (cw, ch) = canvas;
+    let panel_w = field_w + 20.0;
+    let panel_h = ed.font_px * 1.3 + 29.0;
     let anchor = iced::Point::new(
-        (ed.screen_anchor.x - 6.0).clamp(0.0, (cw - PANEL_W).max(0.0)),
-        (ed.screen_anchor.y - 18.0).clamp(0.0, (ch - PANEL_H).max(0.0)),
+        (ed.screen_anchor.x - 6.0).clamp(0.0, (cw - panel_w).max(0.0)),
+        (ed.screen_anchor.y - panel_h * 0.4).clamp(0.0, (ch - panel_h).max(0.0)),
     );
     position_canvas_overlay(anchor, panel.into())
 }
 
-// Stroke-font families bundled with the renderer; see scene/lff.rs.
-const MTEXT_FONTS: [&str; 10] = [
-    "[Style default]",
-    "Standard",
-    "ISO",
-    "Simplex",
-    "RomanS",
-    "RomanD",
-    "ItalicC",
-    "ScriptS",
-    "GothGBT",
-    "RomanC",
-];
 /// (label, ACI). 256 = ByLayer.
 /// Canvas program that renders the tessellated MText strokes inside the
 /// editor's own preview area (never on the drawing). Strokes lie in the
@@ -127,6 +117,7 @@ struct MTextPreview {
     /// upright; the preview turns them only when drawing, and turns pointer
     /// positions back, so caret and selection stay in the layout frame.
     rotation: (f32, f32),
+    cell: Option<super::super::table_cell_edit::CellCanvas>,
 }
 
 /// Height of the box-width ruler band at the top of the preview.
@@ -184,6 +175,9 @@ impl MTextPreview {
     /// at the real size, Y flipped (world up → screen down).
     fn to_screen(&self, x: f32, y: f32) -> iced::Point {
         let (x, y) = turn(self.rotation, x, y);
+        if let Some(cell) = self.cell {
+            return cell.project(x, y);
+        }
         iced::Point::new(
             MTEXT_PREVIEW_PAD + (x - self.minx) * self.scale,
             self.content_h - (MTEXT_PREVIEW_PAD + (y - self.miny) * self.scale),
@@ -210,8 +204,12 @@ impl MTextPreview {
         if self.boxes.is_empty() {
             return 0;
         }
-        let rx = self.minx + (p.x - MTEXT_PREVIEW_PAD) / self.scale;
-        let ry = self.miny + (self.content_h - p.y - MTEXT_PREVIEW_PAD) / self.scale;
+        let (rx, ry) = if let Some(cell) = self.cell {
+            cell.unproject(p)
+        } else {
+            (self.minx + (p.x - MTEXT_PREVIEW_PAD) / self.scale,
+                self.miny + (self.content_h - p.y - MTEXT_PREVIEW_PAD) / self.scale)
+        };
         let (wx, wy) = turn((self.rotation.0, -self.rotation.1), rx, ry);
         let mut best = 0usize;
         let mut best_d = f32::MAX;
@@ -275,6 +273,9 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
         match event {
             Event::Mouse(Me::ButtonPressed(Button::Left)) => {
                 if let Some(p) = cursor.position_in(bounds) {
+                    if self.cell.is_some_and(|cell| !cell.contains(p)) {
+                        return Some(Action::publish(Message::TableEditorClick(p)).and_capture());
+                    }
                     if let Some(ruler) = self.ruler.filter(|_| self.on_handle(p)) {
                         state.width_drag = Some((p.x, ruler.right - ruler.left));
                         return Some(Action::capture());
@@ -328,6 +329,8 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
         if grabbing {
             iced::mouse::Interaction::ResizingHorizontally
         } else {
+            // No pointer of its own over a cell: any would hide the drawing
+            // under it from the wheel, so zooming there would stop.
             iced::mouse::Interaction::default()
         }
     }
@@ -343,6 +346,15 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
         use iced::widget::canvas::{Frame, Path, Stroke};
         let mut frame = Frame::new(renderer, bounds.size());
         let map = |x: f32, y: f32| self.to_screen(x, y);
+        if let Some(cell) = self.cell {
+            let outline = Path::new(|p| {
+                p.move_to(cell.corners[0]);
+                for corner in &cell.corners[1..] { p.line_to(*corner); }
+                p.close();
+            });
+            frame.fill(&outline, theme.palette().primary.base.color.scale_alpha(0.08));
+            frame.stroke(&outline, Stroke::default().with_color(theme.palette().primary.base.color).with_width(2.0));
+        }
         // Selection highlight behind the glyphs, over the whole line height
         // (descenders and accents included), turned with the text.
         if let Some((a, b)) = self.sel {
@@ -406,6 +418,11 @@ impl iced::widget::canvas::Program<Message> for MTextPreview {
             // empty-editor caret isn't tiny.
             let top = MTEXT_PREVIEW_PAD + self.ruler.map_or(0.0, |_| MTEXT_RULER_H);
             let path = Path::new(|p| {
+                if let Some(cell) = self.cell {
+                    p.move_to(map(0.0, 0.0));
+                    p.line_to(map(0.0, -cell.height));
+                    return;
+                }
                 p.move_to(iced::Point::new(MTEXT_PREVIEW_PAD, top));
                 p.line_to(iced::Point::new(
                     MTEXT_PREVIEW_PAD,
@@ -504,6 +521,24 @@ fn mtext_preview_segments(
     out
 }
 
+/// The existing text surface projected into a table cell at drawing scale.
+pub(super) fn table_cell_editor_overlay(
+    ed: &super::super::mtext_editor::MTextEditorState,
+    cell: super::super::table_cell_edit::CellCanvas,
+    size: (f32, f32),
+) -> Element<'static, Message> {
+    let angle = ed.rotation_input_value().unwrap_or(0.0) as f32;
+    let prog = MTextPreview {
+        segments: mtext_preview_segments(ed), boxes: ed.glyph_boxes.clone(),
+        sel: ed.sel, caret: ed.caret, caret_on: ed.caret_blink_on,
+        minx: 0.0, miny: 0.0, scale: 1.0, content_h: size.1,
+        ruler: None, rotation: (angle.cos(), angle.sin()), cell: Some(cell),
+    };
+    crate::ui::ime_zone::ime_zone(
+        iced::widget::canvas(prog).width(size.0).height(size.1), Message::CommandAppendChar,
+    ).into()
+}
+
 pub(super) fn mtext_editor_overlay<'a>(
     ed: &'a super::super::mtext_editor::MTextEditorState,
     styles: Vec<String>,
@@ -545,6 +580,21 @@ pub(super) fn mtext_editor_overlay<'a>(
     )
 }
 
+/// The right-click menu of a first-row field with a value of its own. One
+/// `mouse_area` row: a button inside a `ContextMenu` overlay loses its press
+/// state on every rebuild and never publishes (see `xref_manager::menu_row`).
+fn reset_menu(field: &'static str, value: &str) -> Element<'static, Message> {
+    let row = iced::widget::mouse_area(
+        container(text(crate::tf!("Reset to style ({value})")).size(12)).padding([5, 12]),
+    )
+    .on_press(Message::MTextResetToStyle(field))
+    .interaction(iced::mouse::Interaction::Pointer);
+    container(row)
+        .style(container::bordered_box)
+        .padding(2)
+        .into()
+}
+
 fn mtext_editor_content<'a>(
     ed: &'a super::super::mtext_editor::MTextEditorState,
     styles: &[String],
@@ -574,30 +624,60 @@ fn mtext_editor_content<'a>(
     };
 
     // ── Row 1: the object's own values, each labelled ──────────────────────
-    // A label above its control; font and width also say where their value
-    // comes from (the style, the text's own, or the style with overrides).
+    // A label above its control; font, height, width and oblique also say,
+    // on a line of their own under the label, where their value comes from:
+    // the style (green), the text's own (red), or the style with overrides
+    // (orange).
     let labelled = |name: std::borrow::Cow<'static, str>,
                     origin: Option<super::super::mtext_editor::ValueOrigin>,
-                    control: Element<'static, Message>|
-     -> Element<'static, Message> {
+                    control: Element<'a, Message>|
+     -> Element<'a, Message> {
         use super::super::mtext_editor::ValueOrigin;
-        let mut caption = row![text(name).size(11)].spacing(4);
-        if let Some(origin) = origin {
-            let origin = match origin {
-                ValueOrigin::Style => crate::tr!("mtext-object-origin", "style"),
-                ValueOrigin::Custom => crate::tr!("mtext-object-origin", "custom"),
-                ValueOrigin::Mixed => crate::tr!("mtext-object-origin", "mixed"),
-            };
-            caption = caption.push(text(format!("· {origin}")).size(11).style(|theme: &Theme| {
-                text::Style {
-                    color: Some(theme.palette().background.strong.color),
-                }
-            }));
-        }
-        // Every control sits in a band of one height, so the captions and the
-        // controls each share one line whatever the control's own height.
+        let mark: Element<'a, Message> = match origin {
+            Some(origin) => {
+                let (label, accent): (_, fn(&Theme) -> iced::Color) = match origin {
+                    ValueOrigin::Style => (crate::tr!("mtext-object-origin", "style"), |theme| {
+                        theme.palette().success.base.color
+                    }),
+                    ValueOrigin::Custom => {
+                        (crate::tr!("mtext-object-origin", "custom"), |theme| {
+                            theme.palette().danger.base.color
+                        })
+                    }
+                    ValueOrigin::Mixed => (crate::tr!("mtext-object-origin", "mixed"), |theme| {
+                        theme.palette().warning.base.color
+                    }),
+                };
+                text(label)
+                    .size(10)
+                    .font(iced::Font {
+                        style: iced::font::Style::Italic,
+                        ..iced::Font::DEFAULT
+                    })
+                    .style(move |theme: &Theme| {
+                        // Readable on the editor's panel, lighter than the
+                        // base in a dark theme and darker in a light one.
+                        let background = theme.palette().background;
+                        text::Style {
+                            color: Some(crate::ui::style::common::readable_accent(
+                                accent(theme),
+                                background.weak.color,
+                                background.base.text,
+                            )),
+                        }
+                    })
+                    .into()
+            }
+            None => iced::widget::Space::new().into(),
+        };
+        // The mark keeps its line when there is none, and every control sits
+        // in a band of one height: the labels, the marks and the controls
+        // each share one line whatever the control's own height.
+        let mark = container(mark).height(13);
         let control = container(control).height(30).center_y(30);
-        iced::widget::column![caption, control].spacing(2).into()
+        iced::widget::column![text(name).size(11), mark, control]
+            .spacing(0)
+            .into()
     };
     let mut style_opts: Vec<String> = if styles.is_empty() {
         vec!["Standard".to_string()]
@@ -607,7 +687,7 @@ fn mtext_editor_content<'a>(
     if !style_opts.contains(&ed.style) {
         style_opts.push(ed.style.clone());
     }
-    let style_pl = iced::widget::pick_list(Some(ed.style.clone()), style_opts, |value| {
+    let style_pl = crate::ui::dropdown_list::pick_list(Some(ed.style.clone()), style_opts, |value| {
         value.to_string()
     })
     .on_select(Message::MTextStyle)
@@ -616,20 +696,25 @@ fn mtext_editor_content<'a>(
     let annotative = checkbox(ed.annotative)
         .on_toggle(Message::MTextAnnotative)
         .size(14);
-    let font_sel = match ed.font_field() {
-        font if font.trim().is_empty() => "[Style default]".to_string(),
-        font => font,
+    // Without a font of its own the text draws with the style's, which the
+    // field shows (the mark under the label says "By style").
+    let font = ed.font_field();
+    let selected = match &ed.object_style.font {
+        Some(style_font) if font.trim().is_empty() => style_font.clone(),
+        _ => crate::ui::font_picker::FontChoice::of_name(&font),
     };
-    let mut font_opts: Vec<String> = MTEXT_FONTS.iter().map(|s| s.to_string()).collect();
-    // The text's own font stays listed when it is not one of the bundled ones.
-    if !font_opts.contains(&font_sel) {
-        font_opts.push(font_sel.clone());
-    }
-    let font_pl =
-        iced::widget::pick_list(Some(font_sel), font_opts, |value| t!(value).into_owned())
-            .on_select(Message::MTextFont)
-            .text_size(11)
-            .width(iced::Length::Fixed(120.0));
+    let file = match &selected {
+        crate::ui::font_picker::FontChoice::Stroke(file) => file.clone(),
+        _ => font,
+    };
+    let font_pl = crate::ui::font_picker::view(crate::ui::font_picker::FontPicker {
+        state: &ed.font_picker,
+        selected,
+        file,
+        width: iced::Length::Fixed(150.0),
+        read_only: false,
+        on_event: Message::MTextFontPicker,
+    });
     // Same colour picker as the Properties panel (named swatches + "More…" full
     // palette), applied to the selection or the whole text.
     let color_pl = iced::widget::container(crate::ui::color_select::color_selector(
@@ -646,27 +731,81 @@ fn mtext_editor_content<'a>(
     ))
     .width(iced::Length::Fixed(150.0));
 
+    // A value of the text's own takes "Reset to style" on a right click.
+    let resettable = |field: &'static str,
+                      origin: Option<super::super::mtext_editor::ValueOrigin>,
+                      cell: Element<'a, Message>|
+     -> Element<'a, Message> {
+        if origin != Some(super::super::mtext_editor::ValueOrigin::Custom) {
+            return cell;
+        }
+        let value = ed.style_value(field);
+        iced_aw::ContextMenu::new(cell, move || reset_menu(field, &value)).into()
+    };
+    let font_origin = Some(ed.value_origin("font"));
+    let height_origin = ed.height_origin();
+    let width_origin = Some(ed.value_origin("width"));
+    let oblique_origin = Some(ed.value_origin("oblique"));
     let row1 = row![
-        labelled(t!("Style"), None, style_pl.into()),
-        labelled(t!("Font"), Some(ed.value_origin("font")), font_pl.into()),
         labelled(
-            t!("Height"),
+            t!("Style"),
             None,
-            small_input(
-                "2.5",
-                ed.span_field("height", &ed.height),
-                Message::MTextHeight,
-                64.0
+            row![style_pl, mtext_menu::style_menu(ed)]
+                .spacing(2)
+                .align_y(iced::Alignment::Center)
+                .into()
+        ),
+        resettable(
+            "font",
+            font_origin,
+            labelled(t!("Font"), font_origin, font_pl)
+        ),
+        resettable(
+            "height",
+            height_origin,
+            labelled(
+                t!("Height"),
+                height_origin,
+                small_input(
+                    "2.5",
+                    ed.span_field("height", &ed.height),
+                    Message::MTextHeight,
+                    64.0
+                )
             )
         ),
-        labelled(
-            t!("Width factor"),
-            Some(ed.value_origin("width")),
-            small_input(
-                "1",
-                ed.span_field("width", &ed.width),
-                Message::MTextWidth,
-                64.0
+        resettable(
+            "width",
+            width_origin,
+            labelled(
+                t!("Width factor"),
+                width_origin,
+                small_input(
+                    "1",
+                    ed.span_field("width", &ed.width),
+                    Message::MTextWidth,
+                    64.0
+                )
+            )
+        ),
+        resettable(
+            "oblique",
+            oblique_origin,
+            labelled(
+                crate::tr!("mtext-object-origin", "oblique").into(),
+                oblique_origin,
+                row![
+                    small_input(
+                        "0",
+                        ed.span_field("oblique", &ed.oblique),
+                        Message::MTextOblique,
+                        52.0
+                    ),
+                    text("°").size(12)
+                ]
+                .spacing(3)
+                .align_y(iced::Alignment::Center)
+                .into()
             )
         ),
         labelled(
@@ -736,9 +875,11 @@ fn mtext_editor_content<'a>(
             .into()
     } else {
         let segments = mtext_preview_segments(ed);
-        // The preview shows the text at the angle it will have in the drawing.
+        // The preview shows the text at the angle it will have in the drawing,
+        // unless that is steeper than 45°: vertical or upside-down text is
+        // laid out level, so it reads along the caret and the keyboard.
         let angle = ed.rotation_input_value().unwrap_or(0.0) as f32;
-        let rotation = if angle == 0.0 {
+        let rotation = if angle == 0.0 || angle.cos() < std::f32::consts::FRAC_1_SQRT_2 {
             (1.0, 0.0)
         } else {
             (angle.cos(), angle.sin())
@@ -822,6 +963,7 @@ fn mtext_editor_content<'a>(
             content_h,
             ruler,
             rotation,
+            cell: None,
         };
         let cv = canvas(prog)
             .width(iced::Length::Fixed(content_w))
@@ -1407,6 +1549,121 @@ fn context_menu_panel(
         .into()
 }
 
+/// The right-click menu turned into its editor, where it was: every row
+/// with a tick to show or hide it (submenu entries indented under their
+/// submenu), the user's own commands with up / down / remove, and a field
+/// to add a command by name or alias.
+pub(super) fn context_menu_editor_overlay(
+    pos: iced::Point,
+    bottom_inset: f32,
+    rows: &[MenuRow],
+    custom: &crate::ui::popup::context_menu::MenuCustomization,
+    draft: &str,
+) -> Element<'static, Message> {
+    use crate::app::ContextMenuEditMsg as E;
+    use crate::ui::popup::context_menu::row_key;
+    let edit = |msg: E| Message::ContextMenuEdit(msg);
+    let shown = |key: &str| !custom.hidden.iter().any(|hidden| hidden == key);
+    let tick = |key: String, label: String, indent: f32| -> Element<'static, Message> {
+        let on = shown(&key);
+        row![
+            iced::widget::Space::new().width(indent),
+            iced::widget::checkbox(on)
+                .label(label)
+                .text_size(12)
+                .size(13)
+                .on_toggle(move |_| Message::ContextMenuEdit(E::Toggle(key.clone()))),
+        ]
+        .into()
+    };
+    let mut items: Vec<Element<'static, Message>> = vec![text(crate::tr!("context-menu", "editor-title"))
+        .size(12)
+        .style(crate::ui::style::common::muted_style)
+        .into()];
+    for row in rows {
+        match row {
+            // Repeat stays: it is the menu's default row.
+            MenuRow::Item(item) if item.default => {}
+            MenuRow::Item(item) => {
+                if let Some(key) = row_key(row) {
+                    items.push(tick(key, item.label.clone(), 0.0));
+                }
+            }
+            MenuRow::Submenu { id, label, items: children, .. } => {
+                if let Some(key) = row_key(row) {
+                    items.push(tick(key, label.clone(), 0.0));
+                }
+                // Recent Input lists whatever ran last: only the whole of it hides.
+                let fixed = *id != crate::ui::popup::context_menu::SubmenuId::RecentInput;
+                for child in children.iter().filter(|_| fixed) {
+                    let key = row_key(&MenuRow::Item(child.clone())).unwrap_or_default();
+                    items.push(tick(key, child.label.clone(), 18.0));
+                }
+            }
+            MenuRow::Separator => {}
+        }
+    }
+    items.push(
+        text(crate::tr!("context-menu", "my-commands"))
+            .size(12)
+            .style(crate::ui::style::common::muted_style)
+            .into(),
+    );
+    let small = |glyph: &'static str, msg: Message| {
+        button(text(glyph).size(11))
+            .on_press(msg)
+            .padding([1, 6])
+            .style(button::text)
+    };
+    for (index, (label, command)) in custom.custom.iter().enumerate() {
+        items.push(
+            row![
+                text(format!("{label}  ({command})"))
+                    .size(12)
+                    .width(Fill)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                small("↑", edit(E::Move(index, true))),
+                small("↓", edit(E::Move(index, false))),
+                small("×", edit(E::Remove(index))),
+            ]
+            .align_y(iced::Center)
+            .into(),
+        );
+    }
+    items.push(
+        row![
+            iced::widget::text_input(&crate::tr!("context-menu", "command-placeholder"), draft)
+                .on_input(|typed| Message::ContextMenuEdit(E::Draft(typed)))
+                .on_submit(edit(E::Add))
+                .size(12)
+                .padding([3, 6])
+                .width(Fill),
+            button(text(crate::tr!("context-menu", "add")).size(12))
+                .on_press(edit(E::Add))
+                .padding([3, 8]),
+        ]
+        .spacing(4)
+        .into(),
+    );
+    items.push(
+        row![
+            iced::widget::Space::new().width(Fill),
+            button(text(crate::tr!("context-menu", "done")).size(12))
+                .on_press(edit(E::Done))
+                .style(button::primary)
+                .padding([3, 12]),
+        ]
+        .into(),
+    );
+    let body = scrollable(column(items).spacing(3).padding([4, 10]).width(Length::Fixed(300.0)))
+        .height(Length::Shrink);
+    let panel = container(body)
+        .style(container::bordered_box)
+        .padding([MENU_PAD_TOP as u16, 0])
+        .width(Length::Fixed(300.0));
+    position_canvas_overlay_clamped(pos, bottom_inset, Vector::new(-MENU_CURSOR_INSET_X, 0.0), panel.into())
+}
+
 /// One menu row: label (bold for the default row), the keyword hint
 /// right-aligned and dimmed, and a check mark in the trailing column (where
 /// submenu headers draw their caret) when checked, so checked labels stay
@@ -1507,6 +1764,86 @@ fn context_menu_row_style(
         },
         ..Default::default()
     }
+}
+
+// ── Quad cursor menu ────────────────────────────────────────────────────────
+
+/// Render the quad cursor menu (panels from
+/// `ui::popup::quad_menu::quad_panels_for_target`) on its anchor and a
+/// full-viewport click catcher: collapsed the single default-command tile,
+/// expanded the panel card with its tab strip, the default icon always under
+/// the pointer, so a follow-up click in place launches the command with the
+/// same cursor discipline as the context menu. The catcher sits *below* the
+/// card: an outside press closes the quad (docs/quad-menu.md §3.5).
+pub(super) fn viewport_quad_overlay<'a>(
+    quad: &QuadUi,
+    panels: &[QuadPanel],
+    quad_width: usize,
+    bottom_inset: f32,
+) -> Element<'a, Message> {
+    use crate::ui::popup::quad_overlay;
+
+    // Collapsed the quad is one tile; expanded the pinned panel card. An
+    // empty primary panel (nothing applicable) has nothing to show.
+    let quad_element = if quad.expanded {
+        Some(quad_overlay::quad_expanded_card(quad, panels, quad_width))
+    } else {
+        panels.first().and_then(|panel| {
+            panel
+                .items
+                .first()
+                .map(|item| quad_overlay::quad_collapsed_tile(item, &panel.id))
+        })
+    };
+
+    // The hover quad opens on its own beside the cursor: it catches no clicks
+    // and sits up and right of the pointer, so the hovered object can still
+    // be clicked, and it closes when the cursor leaves for elsewhere.
+    if quad.mode == crate::ui::popup::quad_menu::QuadMode::Hover {
+        let Some(content) = quad_element else {
+            return iced::widget::Space::new().into();
+        };
+        let gap = quad_overlay::QUAD_HOVER_GAP;
+        let offset = if quad.expanded {
+            Vector::new(
+                gap - quad_overlay::QUAD_PANEL_PAD,
+                -(gap + quad_overlay::QUAD_TILE + quad_overlay::QUAD_PANEL_PAD),
+            )
+        } else {
+            Vector::new(gap, -(gap + quad_overlay::QUAD_TILE))
+        };
+        return position_canvas_overlay_clamped(quad.anchor, bottom_inset, offset, content);
+    }
+
+    let catcher = mouse_area(
+        container(iced::widget::Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill),
+    )
+    .on_press(Message::Quad(QuadMsg::Close))
+    .on_right_press(Message::Quad(QuadMsg::Close));
+
+    let Some(content) = quad_element else {
+        // No commands at all: the catcher alone lets the next click close it.
+        return catcher.into();
+    };
+
+    // Keep the default icon's centre under the pointer: the grid pad plus
+    // the half tile (collapsed just the half tile).
+    let half_tile = quad_overlay::QUAD_TILE * 0.5;
+    let offset = if quad.expanded {
+        Vector::new(
+            -(quad_overlay::QUAD_PANEL_PAD + half_tile),
+            -(quad_overlay::QUAD_PANEL_PAD + half_tile),
+        )
+    } else {
+        Vector::new(-half_tile, -half_tile)
+    };
+    stack![
+        catcher,
+        position_canvas_overlay_clamped(quad.anchor, bottom_inset, offset, content)
+    ]
+    .into()
 }
 
 /// One-shot snap override menu (Shift+RMB, #337): a cursor-anchored grid of
@@ -1627,7 +1964,8 @@ const QSELECT_ANY_PROP: &str = "(Any property)";
 /// field and button styles as the other workspace dialogs.
 pub(super) fn qselect_overlay<'a>(
     state: &'a crate::app::QSelectState,
-    types: &[String],
+    transparent_for: Option<&'a str>,
+    types: &[(String, usize)],
     properties: &[crate::app::QSelectPropertyChoice],
     candidate_count: usize,
     modal_offset: iced::Vector,
@@ -1635,6 +1973,7 @@ pub(super) fn qselect_overlay<'a>(
 ) -> Element<'a, Message> {
     let measurement = qselect_content(
         state,
+        transparent_for,
         types,
         properties,
         candidate_count,
@@ -1642,6 +1981,7 @@ pub(super) fn qselect_overlay<'a>(
     );
     let content = qselect_content(
         state,
+        transparent_for,
         types,
         properties,
         candidate_count,
@@ -1651,13 +1991,16 @@ pub(super) fn qselect_overlay<'a>(
     let content = crate::ui::modal::intrinsic(
         measurement,
         content,
-        iced::Size::new(720.0, f32::INFINITY),
+        iced::Size::new(480.0, f32::INFINITY),
         modal_resize,
     );
 
     crate::ui::modal::modal(
         Space::new().width(Fill).height(Fill),
-        t!("Quick Select"),
+        match transparent_for {
+            Some(command) => crate::tf!("Quick Select · for {}", command),
+            None => t!("Quick Select"),
+        },
         content,
         Message::QSelectClose,
         modal_offset,
@@ -1676,334 +2019,630 @@ fn qselect_type_label(name: &str) -> String {
 
 fn qselect_content<'a>(
     state: &'a crate::app::QSelectState,
-    types: &[String],
+    transparent_for: Option<&'a str>,
+    types: &[(String, usize)],
     properties: &[crate::app::QSelectPropertyChoice],
     candidate_count: usize,
     sizing: crate::ui::modal::ModalSizing,
 ) -> Element<'a, Message> {
-    use crate::ui::style::form::{dialog_button, dialog_button_styled_opt, form_radio};
+    use crate::app::{QSelectMode, QSelectOp, QSelectResult, QSelectScope, QSelectValueEditor};
+    use crate::ui::style::form::{button_style, dialog_button, dialog_button_styled_opt};
     use iced::widget::{checkbox, rule};
+    let fill = matches!(sizing.width, iced::Length::Fill);
+    let field_width = if fill { Fill } else { iced::Length::Shrink };
+    let flex_width = field_width;
+
+    let muted = |s: std::borrow::Cow<'static, str>| {
+        text(s)
+            .size(11)
+            .style(|theme: &Theme| iced::widget::text::Style {
+                color: Some(theme.palette().background.base.text.scale_alpha(0.7)),
+            })
+    };
+    let heading = |s: std::borrow::Cow<'static, str>| text(s).size(12);
+    let label =
+        |s: std::borrow::Cow<'static, str>| text(s).size(12).width(iced::Length::Fixed(96.0));
+    // A row of buttons where one is chosen; the chosen one uses the theme's
+    // accent, the rest stay neutral (#2611: no colours of its own).
+    let segmented = |options: Vec<(Message, std::borrow::Cow<'static, str>, bool)>| {
+        let buttons: Vec<Element<'a, Message>> = options
+            .into_iter()
+            .map(|(message, caption, chosen)| {
+                button(
+                    text(caption)
+                        .size(12)
+                        .align_x(iced::Center)
+                        .width(field_width),
+                )
+                .on_press(message)
+                .style(button_style(chosen))
+                .padding([4, 10])
+                .width(field_width)
+                .into()
+            })
+            .collect();
+        iced::widget::Row::with_children(buttons)
+            .spacing(2)
+            .width(sizing.width)
+    };
+
+    // ── Search in ──────────────────────────────────────────────────────
+    let scopes = [QSelectScope::CurrentSpace, QSelectScope::CurrentSelection];
+    let search_in = column![
+        row![
+            heading(t!("Search in")),
+            Space::new().width(flex_width),
+            muted(crate::tf!(
+                "{} objects",
+                crate::ui::live_result::fmt_count(candidate_count)
+            )),
+        ]
+        .align_y(iced::Alignment::Center)
+        .width(sizing.width),
+        Space::new().height(5),
+        segmented(
+            scopes
+                .iter()
+                .map(|scope| {
+                    (
+                        Message::QSelectSetScope(*scope),
+                        match scope {
+                            QSelectScope::CurrentSelection => t!("Selection"),
+                            _ => std::borrow::Cow::Owned(scope.to_string()),
+                        },
+                        state.scope == *scope,
+                    )
+                })
+                // Window…: pick the objects to search in (#2611 mockup).
+                .chain(std::iter::once((
+                    Message::QSelectWindow,
+                    t!("Window…"),
+                    false,
+                )))
+                .collect()
+        ),
+        if state.scope == QSelectScope::CurrentSelection {
+            crate::ui::live_result::selection_note(
+                candidate_count,
+                Message::QSelectSetScope(QSelectScope::CurrentSpace),
+            )
+        } else {
+            Element::from(Space::new().height(0))
+        },
+    ];
+
+    // ── Object type · Property · Value ─────────────────────────────────
     let mut type_options: Vec<String> = vec![QSELECT_ANY_TYPE.to_string()];
-    type_options.extend(types.iter().cloned());
-
-    let mut prop_options: Vec<crate::app::QSelectPropertyChoice> =
-        vec![crate::app::QSelectPropertyChoice {
-            field: String::new(),
-            label: t!(QSELECT_ANY_PROP).into_owned(),
-            editor: crate::app::QSelectValueEditor::Text,
-        }];
-    prop_options.extend(properties.iter().cloned());
-
-    let number_property = state
-        .property
-        .as_ref()
-        .is_some_and(|property| matches!(property.editor, crate::app::QSelectValueEditor::Number));
-    let mut op_options: Vec<crate::app::QSelectOp> =
-        vec![crate::app::QSelectOp::Eq, crate::app::QSelectOp::Neq];
-    if number_property {
-        op_options.push(crate::app::QSelectOp::Gt);
-        op_options.push(crate::app::QSelectOp::Lt);
-    }
-    op_options.push(crate::app::QSelectOp::Any);
-
+    type_options.extend(types.iter().map(|(name, _)| name.clone()));
+    let counts: std::collections::HashMap<String, usize> = types.iter().cloned().collect();
     let type_sel = state
         .type_filter
         .clone()
         .unwrap_or_else(|| QSELECT_ANY_TYPE.to_string());
-    let prop_sel = state
+    let type_picker =
+        crate::ui::dropdown_list::pick_list(Some(type_sel), type_options, move |name| match counts
+            .get(name)
+        {
+            Some(count) => format!(
+                "{}   {}",
+                qselect_type_label(name),
+                crate::ui::live_result::fmt_count(*count)
+            ),
+            None => t!(QSELECT_ANY_TYPE).into_owned(),
+        })
+        .on_select(|s: String| {
+            if s == QSELECT_ANY_TYPE {
+                Message::QSelectSetType(None)
+            } else {
+                Message::QSelectSetType(Some(s))
+            }
+        })
+        .text_size(12)
+        .width(field_width);
+
+    let any_property = crate::app::QSelectPropertyChoice {
+        field: String::new(),
+        label: t!(QSELECT_ANY_PROP).into_owned(),
+        editor: QSelectValueEditor::Text,
+    };
+    let mut prop_options = vec![any_property.clone()];
+    prop_options.extend(properties.iter().cloned());
+    let prop_sel = state.property.clone().unwrap_or(any_property);
+    let property_picker =
+        crate::ui::dropdown_list::pick_list(Some(prop_sel), prop_options, |value| {
+            value.to_string()
+        })
+        .on_select(|p: crate::app::QSelectPropertyChoice| {
+            if p.field.is_empty() {
+                Message::QSelectSetProperty(None)
+            } else {
+                Message::QSelectSetProperty(Some(p))
+            }
+        })
+        .text_size(12)
+        .width(field_width);
+
+    let number_property = state
         .property
-        .clone()
-        .unwrap_or(crate::app::QSelectPropertyChoice {
-            field: String::new(),
-            label: t!(QSELECT_ANY_PROP).into_owned(),
-            editor: crate::app::QSelectValueEditor::Text,
-        });
+        .as_ref()
+        .is_some_and(|property| matches!(property.editor, QSelectValueEditor::Number));
+    let mut op_options = vec![QSelectOp::Eq, QSelectOp::Neq];
+    if number_property {
+        op_options.extend([QSelectOp::Gt, QSelectOp::Ge, QSelectOp::Lt, QSelectOp::Le]);
+    }
+    op_options.push(QSelectOp::Any);
+    let op_picker =
+        crate::ui::dropdown_list::pick_list(Some(state.operator), op_options, |value| {
+            value.to_string()
+        })
+        .on_select(Message::QSelectSetOperator)
+        .text_size(12)
+        .width(iced::Length::Fixed(120.0));
 
-    let value_enabled =
-        state.property.is_some() && !matches!(state.operator, crate::app::QSelectOp::Any);
-    let field_width = if matches!(sizing.width, iced::Length::Fill) {
-        Fill
-    } else {
-        iced::Length::Shrink
-    };
-    let flex_width = if matches!(sizing.width, iced::Length::Fill) {
-        Fill
-    } else {
-        iced::Length::Shrink
-    };
-
-    let label =
-        |s: std::borrow::Cow<'static, str>| text(s).size(12).width(iced::Length::Fixed(112.0));
-    let section_label = |s: std::borrow::Cow<'static, str>| {
-        text(s)
-            .size(11)
-            .style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(theme.palette().background.base.text.scale_alpha(0.65)),
-            })
-    };
-
+    let value_enabled = state.property.is_some() && !matches!(state.operator, QSelectOp::Any);
     let value_editor: Element<'a, Message> = match state.property.as_ref() {
         Some(property) => match &property.editor {
-            crate::app::QSelectValueEditor::Choice(options) => {
+            QSelectValueEditor::Choice(options) => {
                 let selected = (!state.value.is_empty()).then(|| state.value.clone());
                 let picker =
-                    iced::widget::pick_list(selected, options.clone(), |value| value.to_string())
-                        .width(field_width);
+                    crate::ui::dropdown_list::pick_list(selected, options.clone(), |value| {
+                        value.to_string()
+                    })
+                    .width(field_width);
                 if value_enabled {
                     picker.on_select(Message::QSelectSetValue).into()
                 } else {
                     picker.into()
                 }
             }
-            crate::app::QSelectValueEditor::Text | crate::app::QSelectValueEditor::Number => {
-                let mut input = text_input("", &state.value).size(12).width(field_width);
+            QSelectValueEditor::Text | QSelectValueEditor::Number => {
+                // Room to type even in the dialog's natural size.
+                let width = if fill {
+                    Fill
+                } else {
+                    iced::Length::Fixed(150.0)
+                };
+                let mut input = text_input("", &state.value).size(12).width(width);
                 if value_enabled {
                     input = input.on_input(Message::QSelectSetValue);
                 }
                 input.into()
             }
         },
-        None => text_input("", "").size(12).width(field_width).into(),
+        None => text_input("", "")
+            .size(12)
+            .width(if fill {
+                Fill
+            } else {
+                iced::Length::Fixed(150.0)
+            })
+            .into(),
     };
-
-    let derived_error = if candidate_count == 0 {
-        Some(crate::t!("No objects are available in this scope.").into_owned())
-    } else if state.type_filter.is_none() && state.property.is_none() {
-        // An empty draft is only an error once Apply is possible; the Add
-        // button already requires a type or property.
-        None
-    } else {
-        crate::app::QSelectCondition::validation_error_for(
-            state.type_filter.as_deref(),
-            state.property.as_ref(),
-            state.operator,
-            &state.value,
-        )
-    };
-    let error = state.error.clone().or(derived_error.clone());
-
-    let scope_options = vec![
-        crate::app::QSelectScope::CurrentSpace,
-        crate::app::QSelectScope::CurrentSelection,
-    ];
-    let scope_picker =
-        iced::widget::pick_list(Some(state.scope), scope_options, |value| value.to_string())
-            .on_select(Message::QSelectSetScope)
-            .width(field_width);
-
-    let mut append = checkbox(state.append).size(14);
-    if matches!(state.scope, crate::app::QSelectScope::CurrentSpace) {
-        append = append.on_toggle(Message::QSelectSetAppend);
+    // The most frequent values in the scope, one click each.
+    let mut shortcuts = row![].spacing(4);
+    if value_enabled {
+        for (value, count) in state.value_counts.iter().take(3) {
+            shortcuts = shortcuts.push(
+                button(text(format!("{value}  ({count})")).size(11))
+                    .on_press(Message::QSelectSetValue(value.clone()))
+                    .style(button_style(state.value == *value))
+                    .padding([2, 8]),
+            );
+        }
     }
 
-    let cancel = dialog_button(t!("Cancel"), Message::QSelectClose, false);
-    let apply = dialog_button_styled_opt(
-        t!("Apply"),
-        (candidate_count > 0
-            && state.editing_condition.is_none()
-            && (state.conditions.is_empty() && error.is_none() || !state.conditions.is_empty()))
-        .then_some(Message::QSelectApply),
-        button::primary,
+    // Conditions from a picked object (#2611 mockup: the pipette).
+    let pipette = iced::widget::tooltip(
+        button(crate::ui::icons::themed(crate::ui::icons::EYEDROPPER, 13.0))
+            .on_press_maybe(
+                (state.editing_condition.is_none() && state.sample.is_none())
+                    .then_some(Message::QSelectPickObject),
+            )
+            .style(button::secondary)
+            .padding([5, 7]),
+        container(text(t!("Select object")).size(11)).padding([3, 7]),
+        iced::widget::tooltip::Position::Bottom,
     );
-
-    let mut condition_rows = column![].spacing(5);
-    if state.conditions.is_empty() {
-        condition_rows = condition_rows.push(text(t!("No conditions added.")).size(12));
-    }
-    for (index, condition) in state.conditions.iter().enumerate() {
-        let type_label = condition
-            .type_filter
-            .as_deref()
-            .map(qselect_type_label)
-            .unwrap_or_else(|| t!(QSELECT_ANY_TYPE).into_owned());
-        let property_label = condition
-            .property
-            .as_ref()
-            .map(|property| property.to_string())
-            .unwrap_or_else(|| t!(QSELECT_ANY_PROP).into_owned());
-        let summary = format!(
-            "{}. {} | {} | {} | {}",
-            index + 1,
-            type_label,
-            property_label,
-            condition.operator,
-            condition.value
-        );
-        condition_rows = condition_rows.push(
-            row![
-                // The measuring copy must not fill the viewport's available width.
-                text(summary).size(12).width(flex_width),
-                dialog_button(t!("Edit"), Message::QSelectEditCondition(index), false),
-                dialog_button(t!("Delete"), Message::QSelectRemoveCondition(index), false),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center),
-        );
-    }
-    let add_condition = dialog_button_styled_opt(
-        if state.editing_condition.is_some() {
-            t!("Update condition")
+    let draft_ready = state.type_filter.is_some() || state.property.is_some();
+    let add_draft = button(
+        text(if state.editing_condition.is_some() {
+            t!("Update")
         } else {
-            t!("Add condition")
-        },
-        (derived_error.is_none() && (state.type_filter.is_some() || state.property.is_some()))
-            .then_some(Message::QSelectAddCondition),
-        button::secondary,
-    );
-    let condition_actions = row![
-        add_condition,
-        dialog_button_styled_opt(
-            t!("Cancel edit"),
-            state.editing_condition.map(|_| Message::QSelectCancelEdit),
-            button::secondary
-        ),
-        dialog_button_styled_opt(
-            t!("Clear conditions"),
-            (!state.conditions.is_empty()).then_some(Message::QSelectClearConditions),
-            button::secondary
-        ),
-    ]
-    .spacing(6);
-
-    let panel_body = column![
-        section_label(t!("Scope")),
-        Space::new().height(5),
-        row![label(t!("Apply to:")), scope_picker]
+            t!("Add")
+        })
+        .size(12),
+    )
+    .on_press_maybe(
+        (draft_ready
+            && state.sample.is_none()
+            && crate::app::QSelectCondition::validation_error_for(
+                state.type_filter.as_deref(),
+                state.property.as_ref(),
+                state.operator,
+                &state.value,
+            )
+            .is_none())
+        .then_some(Message::QSelectAddCondition),
+    )
+    .style(button::secondary)
+    .padding([5, 10]);
+    // A value typed that is not one (a word where a number goes): said under
+    // the field, not at the bottom.
+    let inline_error = (!state.value.is_empty())
+        .then(|| {
+            crate::app::QSelectCondition::validation_error_for(
+                state.type_filter.as_deref(),
+                state.property.as_ref(),
+                state.operator,
+                &state.value,
+            )
+        })
+        .flatten();
+    let fields = column![
+        row![label(t!("Object type")), type_picker, pipette]
             .align_y(iced::Alignment::Center)
             .spacing(8)
             .width(sizing.width),
-        Space::new().height(4),
-        text(crate::tf!("{} candidate object(s)", candidate_count))
-            .size(11)
-            .style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(theme.palette().background.base.text.scale_alpha(0.65)),
-            }),
-        Space::new().height(10),
-        container(rule::horizontal(1)).width(flex_width),
-        Space::new().height(10),
-        section_label(t!("Filter")),
-        Space::new().height(5),
-        row![
-            label(t!("Object type:")),
-            iced::widget::pick_list(Some(type_sel), type_options, |value| {
-                qselect_type_label(value)
-            })
-            .on_select(|s: String| {
-                if s == QSELECT_ANY_TYPE {
-                    Message::QSelectSetType(None)
-                } else {
-                    Message::QSelectSetType(Some(s))
-                }
-            })
-            .width(field_width),
-        ]
-        .align_y(iced::Alignment::Center)
-        .spacing(8)
-        .width(sizing.width),
+        Space::new().height(6),
+        row![label(t!("Property")), property_picker]
+            .align_y(iced::Alignment::Center)
+            .spacing(8)
+            .width(sizing.width),
         Space::new().height(6),
         row![
-            label(t!("Property:")),
-            iced::widget::pick_list(Some(prop_sel), prop_options, |value| value.to_string(),)
-                .on_select(|p: crate::app::QSelectPropertyChoice| {
-                    if p.field.is_empty() {
-                        Message::QSelectSetProperty(None)
-                    } else {
-                        Message::QSelectSetProperty(Some(p))
+            label(t!("Value")),
+            op_picker,
+            value_editor,
+            crate::ui::live_result::pattern_help(),
+            add_draft
+        ]
+        .align_y(iced::Alignment::Center)
+        .spacing(6)
+        .width(sizing.width),
+        // What is wrong with the value, right under it (mockup, States).
+        match (&inline_error, value_enabled) {
+            (Some(problem), true) => Element::from(row![
+                Space::new().width(iced::Length::Fixed(104.0)),
+                text(problem.clone()).size(11).style(|theme: &Theme| {
+                    iced::widget::text::Style {
+                        color: Some(theme.palette().danger.base.color),
                     }
                 })
-                .width(field_width),
-        ]
-        .align_y(iced::Alignment::Center)
-        .spacing(8)
-        .width(sizing.width),
-        Space::new().height(6),
-        row![
-            label(t!("Operator:")),
-            iced::widget::pick_list(Some(state.operator), op_options, |value| value.to_string(),)
-                .on_select(Message::QSelectSetOperator)
-                .width(field_width),
-        ]
-        .align_y(iced::Alignment::Center)
-        .spacing(8)
-        .width(sizing.width),
-        Space::new().height(6),
-        row![label(t!("Value:")), value_editor]
-            .align_y(iced::Alignment::Center)
-            .spacing(8)
-            .width(sizing.width),
-        Space::new().height(10),
-        container(rule::horizontal(1)).width(flex_width),
-        Space::new().height(10),
-        condition_actions,
-        Space::new().height(8),
-        dialog_button_styled_opt(
-            t!("Select object"),
-            state
-                .editing_condition
-                .is_none()
-                .then_some(Message::QSelectPickObject),
-            button::secondary,
-        ),
-        Space::new().height(8),
-        section_label(t!("Conditions (all must match)")),
-        Space::new().height(5),
-        iced::widget::scrollable(condition_rows)
-            .height(120)
-            .width(sizing.width),
-        Space::new().height(5),
-        text(t!(
-            "When the list is nonempty, only listed conditions are applied."
-        ))
-        .size(11),
-        Space::new().height(10),
-        section_label(t!("Result")),
-        Space::new().height(5),
+            ]),
+            _ => Element::from(Space::new().height(0)),
+        },
+        Space::new().height(4),
+        row![Space::new().width(iced::Length::Fixed(104.0)), shortcuts],
+    ];
+
+    // ── Conditions, or the picked object's properties to tick ─────────
+    let conditions_block: Element<'a, Message> = if let Some(sample) = &state.sample {
+        let mut rows = column![].spacing(4);
+        for (index, (condition, ticked)) in sample.rows.iter().enumerate() {
+            rows = rows.push(
+                checkbox(*ticked)
+                    .label(qselect_condition_summary(condition))
+                    .text_size(12)
+                    .size(14)
+                    .on_toggle(move |_| Message::QSelectSampleToggle(index)),
+            );
+        }
         column![
-            form_radio(
-                t!("Include matching objects"),
-                crate::app::QSelectMode::Include,
-                Some(state.mode),
-                Message::QSelectSetMode,
-            ),
-            form_radio(
-                t!("Exclude matching objects"),
-                crate::app::QSelectMode::Exclude,
-                Some(state.mode),
-                Message::QSelectSetMode,
-            ),
+            heading(crate::tf!(
+                "Properties of the picked {}",
+                qselect_type_label(&sample.type_name)
+            )),
+            Space::new().height(5),
+            iced::widget::scrollable(rows)
+                .height(150)
+                .width(sizing.width),
+            Space::new().height(6),
+            row![
+                dialog_button(t!("Add ticked conditions"), Message::QSelectSampleAdd, true),
+                dialog_button(t!("Cancel"), Message::QSelectSampleCancel, false),
+            ]
+            .spacing(6),
         ]
-        .spacing(5),
-        Space::new().height(8),
+        .into()
+    } else {
+        let mut rows = column![].spacing(2);
+        if state.conditions.is_empty() {
+            rows = rows.push(muted(t!("No conditions added.")));
+        }
+        // One block per object type, its count from the live result (#2611
+        // mockup: "Line · Layer = FAL* · 312").
+        let mut types_in_order: Vec<Option<String>> = Vec::new();
+        for condition in &state.conditions {
+            if !types_in_order.contains(&condition.type_filter) {
+                types_in_order.push(condition.type_filter.clone());
+            }
+        }
+        for type_filter in types_in_order {
+            let count = type_filter.as_ref().and_then(|t| {
+                state
+                    .live_by_type
+                    .iter()
+                    .find(|(name, _)| name == t)
+                    .map(|(_, n)| *n)
+            });
+            rows = rows.push(
+                row![
+                    text(
+                        type_filter
+                            .as_deref()
+                            .map(qselect_type_label)
+                            .unwrap_or_else(|| t!(QSELECT_ANY_TYPE).into_owned())
+                    )
+                    .size(12)
+                    .width(flex_width),
+                    muted(std::borrow::Cow::Owned(
+                        count
+                            .map(crate::ui::live_result::fmt_count)
+                            .unwrap_or_default()
+                    )),
+                ]
+                .align_y(iced::Alignment::Center),
+            );
+            for (index, condition) in state
+                .conditions
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.type_filter == type_filter)
+            {
+                if condition.property.is_none() {
+                    continue;
+                }
+                let editing = state.editing_condition == Some(index);
+                let mut summary = qselect_condition_summary(condition);
+                if let Some((_, rest)) = summary.split_once(" · ") {
+                    summary = rest.to_string();
+                }
+                rows = rows.push(
+                    row![
+                        Space::new().width(14),
+                        text(summary)
+                            .size(12)
+                            .width(flex_width)
+                            .style(move |theme: &Theme| iced::widget::text::Style {
+                                color: editing.then_some(theme.palette().primary.base.color),
+                            }),
+                        button(text(t!("Edit")).size(11))
+                            .on_press(Message::QSelectEditCondition(index))
+                            .style(button::text)
+                            .padding([2, 6]),
+                        button(crate::ui::icons::themed(crate::ui::icons::TRASH, 12.0))
+                            .on_press(Message::QSelectRemoveCondition(index))
+                            .style(button::text)
+                            .padding([2, 6]),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+        }
+        let mut heading_row =
+            row![heading(t!("Conditions (all of an object's type must match)")).width(flex_width)]
+                .align_y(iced::Alignment::Center);
+        if state.editing_condition.is_some() {
+            heading_row = heading_row.push(
+                button(text(t!("Cancel edit")).size(11))
+                    .on_press(Message::QSelectCancelEdit)
+                    .style(button::text)
+                    .padding([2, 6]),
+            );
+        }
+        if !state.conditions.is_empty() {
+            heading_row = heading_row.push(
+                button(text(t!("Clear")).size(11))
+                    .on_press(Message::QSelectClearConditions)
+                    .style(button::text)
+                    .padding([2, 6]),
+            );
+        }
+        column![
+            heading_row,
+            Space::new().height(5),
+            iced::widget::scrollable(rows)
+                .height(if fill { Fill } else { iced::Length::Shrink })
+                .width(sizing.width),
+        ]
+        .into()
+    };
+
+    // ── Live result ────────────────────────────────────────────────────
+    // The count large; with samples of several types, how many of each.
+    let of_scope = match state.scope {
+        QSelectScope::CurrentSelection => crate::tf!(
+            "of {} in the selection",
+            crate::ui::live_result::fmt_count(candidate_count)
+        ),
+        _ => crate::tf!(
+            "of {} in current space",
+            crate::ui::live_result::fmt_count(candidate_count)
+        ),
+    };
+    let first = if state.live_by_type.len() > 1 {
+        state
+            .live_by_type
+            .iter()
+            .map(|(name, n)| {
+                format!(
+                    "{} {}",
+                    crate::ui::live_result::fmt_count(*n),
+                    qselect_type_label(name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else if state.live_count == 0 {
+        t!("No match").into_owned()
+    } else {
+        t!("objects match").into_owned()
+    };
+    let live = container(
         row![
-            append,
-            Space::new().width(6),
-            text(t!("Append result to current selection")).size(12),
+            container(crate::ui::live_result::big_count_two_lines(
+                state.live_count,
+                first,
+                of_scope,
+            ))
+            .width(flex_width),
+            crate::ui::live_result::show_toggle(
+                state.show,
+                t!("Show").into_owned(),
+                Message::QSelectSetShow(!state.show),
+            ),
         ]
-        .align_y(iced::Alignment::Center),
-        Space::new().height(10),
-        if let Some(message) = error {
-            text(message)
-                .size(11)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().danger.base.color),
+        .align_y(iced::Alignment::Center)
+        .spacing(8)
+        .width(sizing.width),
+    )
+    .padding([8, 10])
+    .width(sizing.width)
+    .style(|theme: &Theme| {
+        let palette = theme.palette();
+        container::Style {
+            background: Some(Background::Color(palette.background.base.color)),
+            border: Border {
+                color: palette.background.neutral.color,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        }
+    });
+
+    // ── Result ─────────────────────────────────────────────────────────
+    let results = [
+        (QSelectResult::New, t!("New selection")),
+        (QSelectResult::Add, t!("Add")),
+        (QSelectResult::Remove, t!("Remove")),
+    ];
+    let result = column![
+        heading(t!("Result")),
+        Space::new().height(5),
+        segmented(
+            results
+                .into_iter()
+                .map(|(value, caption)| {
+                    (
+                        Message::QSelectSetResult(value),
+                        caption,
+                        state.result == value,
+                    )
                 })
+                .collect()
+        ),
+        Space::new().height(6),
+        checkbox(matches!(state.mode, QSelectMode::Exclude))
+            .label(t!("Select the objects that do not match"))
+            .text_size(12)
+            .size(14)
+            .on_toggle(|on| {
+                Message::QSelectSetMode(if on {
+                    QSelectMode::Exclude
+                } else {
+                    QSelectMode::Include
+                })
+            }),
+    ];
+
+    // ── Footer ─────────────────────────────────────────────────────────
+    // A half-made draft beside finished conditions is no error: Add stays
+    // off until it is complete (#2611 mockup, States).
+    let error = state.error.clone().or(if candidate_count == 0 {
+        Some(t!("No objects are available in this scope.").into_owned())
+    } else {
+        // A value's problem shows under the value; a missing value is said
+        // by the Select button.
+        None
+    });
+    // Numbers compare as numbers: say so where it matters (mockup Sample).
+    let numeric = state.conditions.iter().any(|c| {
+        c.property
+            .as_ref()
+            .is_some_and(|p| matches!(p.editor, QSelectValueEditor::Number))
+    });
+    let can_select = state.sample.is_none()
+        && state.editing_condition.is_none()
+        && state.live_count > 0
+        && !(state.conditions.is_empty()
+            && state.property.is_some()
+            && state.value.is_empty()
+            && !matches!(state.operator, QSelectOp::Any));
+    // A property chosen and no value yet, nothing else to go on (mockup).
+    let waiting_for_value = state.conditions.is_empty()
+        && state.property.is_some()
+        && state.value.is_empty()
+        && !matches!(state.operator, QSelectOp::Any);
+    let select = dialog_button_styled_opt(
+        match transparent_for {
+            _ if waiting_for_value => t!("Choose a value first"),
+            Some(command) => crate::tf!("Use {} in {}", state.live_count, command),
+            None => crate::tf!("Select {}", state.live_count),
+        },
+        can_select.then_some(Message::QSelectApply),
+        button::primary,
+    );
+    // The same conditions in FILTER, with groups and NOT (#2611).
+    let advanced = button(
+        row![
+            crate::ui::icons::themed(crate::ui::icons::ST_FILTER, 13.0),
+            text(t!("Advanced…")).size(12),
+        ]
+        .spacing(5)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press_maybe(state.sample.is_none().then_some(Message::QSelectAdvanced))
+    .style(button::secondary)
+    .padding([6, 12]);
+    let footer = row![
+        advanced,
+        Space::new().width(flex_width),
+        dialog_button(t!("Cancel"), Message::QSelectClose, false),
+        Space::new().width(8),
+        select,
+    ]
+    .align_y(iced::Alignment::Center);
+
+    let divider = || container(rule::horizontal(1)).width(flex_width);
+    let panel_body = column![
+        search_in,
+        Space::new().height(10),
+        divider(),
+        Space::new().height(10),
+        fields,
+        Space::new().height(10),
+        conditions_block,
+        Space::new().height(10),
+        live,
+        if numeric {
+            Element::from(
+                muted(t!("Numbers compare as numbers: 3 also finds 3.0000.")).width(sizing.width),
+            )
         } else {
-            text("").size(11)
+            Element::from(Space::new().height(0))
+        },
+        Space::new().height(10),
+        result,
+        Space::new().height(8),
+        match error {
+            Some(message) =>
+                text(message)
+                    .size(11)
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(theme.palette().danger.base.color),
+                    }),
+            None => text("").size(11),
         },
         Space::new().height(8),
-        row![
-            Space::new().width(flex_width),
-            cancel,
-            Space::new().width(8),
-            apply,
-        ]
-        .align_y(iced::Alignment::Center),
+        footer,
     ]
     .spacing(0)
     .width(sizing.width)
     .height(sizing.height);
 
-    let panel = container(panel_body)
+    container(panel_body)
         .padding(16)
         .width(sizing.width)
         .height(sizing.height)
@@ -2018,9 +2657,33 @@ fn qselect_content<'a>(
                 },
                 ..Default::default()
             }
-        });
+        })
+        .into()
+}
 
-    panel.into()
+/// One condition as a line: "Line · Layer = FAL*".
+fn qselect_condition_summary(condition: &crate::app::QSelectCondition) -> String {
+    let type_label = condition
+        .type_filter
+        .as_deref()
+        .map(qselect_type_label)
+        .unwrap_or_else(|| t!(QSELECT_ANY_TYPE).into_owned());
+    match &condition.property {
+        None => type_label,
+        Some(_) if condition.operator == crate::app::QSelectOp::Any => type_label,
+        Some(property) => {
+            let op = match condition.operator {
+                crate::app::QSelectOp::Eq => "=",
+                crate::app::QSelectOp::Neq => "!=",
+                crate::app::QSelectOp::Gt => ">",
+                crate::app::QSelectOp::Ge => ">=",
+                crate::app::QSelectOp::Lt => "<",
+                crate::app::QSelectOp::Le => "<=",
+                crate::app::QSelectOp::Any => "",
+            };
+            format!("{type_label} · {property} {op} {}", condition.value)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2092,6 +2755,278 @@ mod measurement_tests {
                 assert!(bounds.x + bounds.width <= 796.0 && bounds.y + bounds.height <= 506.0);
             }
         }
+    }
+
+    /// The value list is a panel with its own width, not a readout that
+    /// stretches to fit: it lands wholly inside the canvas, on the side of the
+    /// grip that has room for it.
+    #[test]
+    fn the_value_list_panel_sits_beside_the_grip_and_away_from_the_edges() {
+        for (anchor, expected_x) in [
+            (iced::Point::new(60.0, 300.0), 60.0 + 12.0),
+            (iced::Point::new(780.0, 300.0), 780.0 - 12.0 - 240.0),
+        ] {
+            let mut ui = iced_test::simulator::Simulator::with_size(
+                Default::default(),
+                iced::Size::new(800.0, 600.0),
+                position_canvas_overlay_near_cursor(
+                    anchor,
+                    90.0,
+                    container(Space::new().width(240).height(120))
+                        .id(iced::widget::Id::new("value-list"))
+                        .into(),
+                ),
+            );
+            let bounds = ui
+                .find(iced::widget::Id::new("value-list"))
+                .expect("the value list is drawn")
+                .visible_bounds()
+                .expect("the value list is visible");
+            assert_eq!(
+                bounds.x, expected_x,
+                "the list takes the side of the grip with room for it ({anchor:?})"
+            );
+            assert_eq!(
+                bounds.width, 240.0,
+                "the list keeps its own width rather than stretching"
+            );
+            assert!(
+                bounds.y >= 4.0 && bounds.y + bounds.height <= 506.0,
+                "the list stays between the top edge and the command line: {bounds:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cell_editor_wheel_tests {
+    use super::*;
+    #[test]
+    fn wheel_over_the_typed_in_cell_still_zooms_the_drawing() {
+        let p = |x, y| iced::Point::new(x, y);
+        let cell = crate::app::table_cell_edit::CellCanvas {
+            origin: p(100.0, 100.0),
+            x: iced::Vector::new(1.0, 0.0),
+            y: iced::Vector::new(0.0, 1.0),
+            corners: [p(100.0, 100.0), p(300.0, 100.0), p(300.0, 160.0), p(100.0, 160.0)],
+            height: 60.0,
+        };
+        let editor = MTextPreview {
+            segments: Vec::new(),
+            boxes: Vec::new(),
+            sel: None,
+            caret: 0,
+            caret_on: true,
+            minx: 0.0,
+            miny: 0.0,
+            scale: 1.0,
+            content_h: 600.0,
+            ruler: None,
+            rotation: (1.0, 0.0),
+            cell: Some(cell),
+        };
+        let drawing = mouse_area(Space::new().width(Fill).height(Fill)).on_scroll(Message::ViewportScroll);
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(800.0, 600.0),
+            stack![drawing, iced::widget::canvas(editor).width(Fill).height(Fill)],
+        );
+        ui.point_at(p(200.0, 130.0));
+        ui.simulate([Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+        })]);
+        assert!(ui.into_messages().any(|m| matches!(m, Message::ViewportScroll(_))));
+    }
+}
+
+#[cfg(test)]
+mod quad_view_tests {
+    use super::*;
+    use crate::ui::popup::quad_menu::{QuadIcon, QuadItem, QuadMode};
+
+    fn quad_item(label: &str, command: &str) -> QuadItem {
+        QuadItem {
+            label: label.to_string(),
+            command: command.to_string(),
+            // Distinct two-letter glyph per item so the sim can find each
+            // tile by its own text: the label itself only renders inside
+            // the bottom tooltip.
+            icon: QuadIcon::Glyph(label.chars().take(2).collect::<String>().to_uppercase()),
+        }
+    }
+
+    fn quad_panels() -> Vec<QuadPanel> {
+        vec![QuadPanel {
+            id: "quad.primary".to_string(),
+            label: String::new(),
+            items: vec![quad_item("Move", "MOVE"), quad_item("Copy", "COPY")],
+            applies_to: Vec::new(),
+        }]
+    }
+
+    fn collapsed_quad() -> Element<'static, Message> {
+        let quad = QuadUi::open(iced::Point::new(300.0, 225.0), QuadMode::Selection);
+        viewport_quad_overlay(&quad, &quad_panels(), 6, 60.0)
+    }
+
+    fn expanded_quad() -> Element<'static, Message> {
+        let mut quad = QuadUi::open(iced::Point::new(300.0, 225.0), QuadMode::Selection);
+        quad.expanded = true;
+        viewport_quad_overlay(&quad, &quad_panels(), 6, 60.0)
+    }
+
+    /// Press (down + up) at canvas point `at` over the given quad overlay on
+    /// a viewport with a passive click surface underneath.
+    fn press_at(overlay: Element<'static, Message>, at: iced::Point) -> Vec<Message> {
+        let underlay =
+            mouse_area(Space::new().width(Fill).height(Fill)).on_press(Message::ViewportLeftPress);
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(600.0, 450.0),
+            stack![underlay, overlay],
+        );
+        ui.point_at(at);
+        ui.simulate([Event::Mouse(iced::mouse::Event::ButtonPressed(
+            iced::mouse::Button::Left,
+        ))]);
+        ui.simulate([Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        ))]);
+        ui.into_messages().collect()
+    }
+
+    /// The glyph text of a quad tile, with its visible bounds, for
+    /// geometry asserts.
+    fn find_tile(
+        ui: &mut iced_test::simulator::Simulator<'static, Message>,
+        glyph: &str,
+    ) -> iced::Rectangle {
+        ui.find(glyph)
+            .expect("tile glyph is in the tree")
+            .visible_bounds()
+            .expect("tile glyph is visible")
+    }
+
+    #[test]
+    fn collapsed_quad_default_tile_picks_in_place_and_expands_on_hover() {
+        // The collapsed tile is centred on the anchor: its glyph text sits
+        // there, and clicking through (the sim's own click; the tile's
+        // bottom tooltip never intercepts) launches the default command in
+        // place, expanding the card. Nothing leaks into the viewport.
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(600.0, 450.0),
+            collapsed_quad(),
+        );
+        let bounds = find_tile(&mut ui, "MO");
+        assert_eq!(
+            (bounds.x + bounds.width / 2.0, bounds.y + bounds.height / 2.0),
+            (300.0, 225.0),
+            "the collapsed tile's glyph is centred on the anchor"
+        );
+        // A real cursor move at the resting anchor enters the tile first
+        // (the sim's cursor starts unavailable; point_at arms it), then the
+        // click picks the default command in place.
+        ui.point_at(iced::Point::new(300.0, 225.0));
+        ui.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: iced::Point::new(300.0, 225.0),
+        })]);
+        ui.click("MO");
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::Quad(QuadMsg::Expand(true)))));
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            Message::Quad(QuadMsg::Pick { panel_id, item_index: 0 }) if panel_id == "quad.primary"
+        )));
+        assert!(!messages
+            .iter()
+            .any(|m| matches!(m, Message::ViewportLeftPress)));
+    }
+
+    #[test]
+    fn expanded_quad_grid_tiles_pick_with_panel_id_and_index() {
+        // Grid order left-to-right: the second tile sits a tile plus the
+        // gap to the right of the anchor-centred first tile. The sim clicks
+        // the second tile's own glyph text.
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(600.0, 450.0),
+            expanded_quad(),
+        );
+        let second = find_tile(&mut ui, "CO");
+        assert_eq!(
+            second.x + second.width / 2.0,
+            300.0 + crate::ui::popup::quad_overlay::QUAD_TILE
+                + crate::ui::popup::quad_overlay::QUAD_TILE_GAP,
+            "the second tile's glyph centres a tile plus a gap right of the anchor"
+        );
+        ui.click("CO");
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            Message::Quad(QuadMsg::Pick { panel_id, item_index: 1 }) if panel_id == "quad.primary"
+        )));
+    }
+
+    #[test]
+    fn hover_quad_sits_beside_the_cursor_and_catches_no_click() {
+        // The hover quad opens unasked: its tile goes up and right of the
+        // cursor, so a click on the hovered object reaches the drawing.
+        use crate::ui::popup::quad_overlay::{QUAD_HOVER_GAP, QUAD_TILE};
+        let hover = || {
+            let quad = QuadUi::open(iced::Point::new(300.0, 225.0), QuadMode::Hover);
+            viewport_quad_overlay(&quad, &quad_panels(), 6, 60.0)
+        };
+        let at_cursor = press_at(hover(), iced::Point::new(300.0, 225.0));
+        assert!(!at_cursor.iter().any(|m| matches!(m, Message::Quad(_))), "{at_cursor:?}");
+        let middle = QUAD_HOVER_GAP + QUAD_TILE * 0.5;
+        let on_tile = press_at(hover(), iced::Point::new(300.0 + middle, 225.0 - middle));
+        assert!(on_tile.iter().any(|m| matches!(m, Message::Quad(QuadMsg::Pick { .. }))), "{on_tile:?}");
+    }
+
+    #[test]
+    fn quad_outside_press_closes() {
+        let messages = press_at(collapsed_quad(), iced::Point::new(40.0, 40.0));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::Quad(QuadMsg::Close))));
+        assert!(!messages
+            .iter()
+            .any(|m| matches!(m, Message::Quad(QuadMsg::Pick { .. }))));
+    }
+
+    #[test]
+    fn expanded_quad_card_hugs_the_grid() {
+        // The overlay is a full-viewport layer (click catcher + card); the
+        // card itself must be sized to its content — the grid's columns
+        // (tile + gap) plus the two panel pads — not stretch its panel
+        // background across the whole screen.
+        let items = quad_panels().first().expect("primary panel").items.len();
+        let mut ui = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(600.0, 450.0),
+            expanded_quad(),
+        );
+        let bounds = ui
+            .find(iced::widget::Id::new("quad-expanded-card"))
+            .expect("the expanded card is in the tree")
+            .visible_bounds()
+            .expect("the expanded card is visible");
+        use crate::ui::popup::quad_overlay::{QUAD_PANEL_PAD, QUAD_TILE, QUAD_TILE_GAP};
+        // One row of `min(cols, items)` tiles: widths (tile + gap) minus the
+        // trailing gap, then the two pads around the grid.
+        let expected = items.min(6) as f32 * (QUAD_TILE + QUAD_TILE_GAP) - QUAD_TILE_GAP
+            + 2.0 * QUAD_PANEL_PAD;
+        assert_eq!(
+            bounds.width, expected,
+            "the card hugs the icon grid plus padding (quad_width=6)"
+        );
+        assert!(
+            bounds.width < 300.0,
+            "the card must not stretch across the viewport"
+        );
     }
 }
 

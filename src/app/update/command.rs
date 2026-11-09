@@ -20,8 +20,8 @@ use crate::scene::{
 };
 use crate::ui::window::attribute_editor::{AttrRow, AttrTab};
 use crate::ui::PropertiesPanel;
-use codec::types::Color as AcadColor;
-use codec::{EntityType as AcadEntityType, Handle};
+use document::types::Color as AcadColor;
+use document::{EntityType as AcadEntityType, Handle};
 use iced::time::Instant;
 use iced::{mouse, Point, Task};
 
@@ -67,6 +67,25 @@ fn polyline_add_vertex_target(entity: &AcadEntityType, grip_id: usize) -> Option
         }
         _ => None,
     }
+}
+
+/// The modes Ctrl steps through after the one a polyline grip was picked up in.
+fn grip_ctrl_stages(
+    items: &[crate::scene::model::object::GripMenuItem],
+) -> Vec<crate::scene::model::object::GripMenuAction> {
+    use crate::scene::model::object::GripMenuAction as Action;
+    if !items.iter().any(|item| item.action == Action::AddVertex) {
+        return Vec::new();
+    }
+    [
+        Action::AddVertex,
+        Action::RemoveVertex,
+        Action::ConvertToArc,
+        Action::ConvertToLine,
+    ]
+    .into_iter()
+    .filter(|action| items.iter().any(|item| item.action == *action))
+    .collect()
 }
 
 fn polyline_vertex_count(entity: &AcadEntityType) -> Option<usize> {
@@ -195,7 +214,6 @@ impl OpenCADStudio {
                 self.grip_pending = None;
                 self.visibility_popup = None;
                 self.table_popup = None;
-                self.flip_popup = None;
                 self.grip_popup = None;
                 self.grip_hover = None;
             }
@@ -227,6 +245,15 @@ impl OpenCADStudio {
             .is_some_and(|(state, tab)| state.owner_tab_id == tab.id)
         {
             self.hatch_dialog_cancel();
+        }
+        // The Block Properties Table list names an insert of the tab being
+        // closed, so it goes with that tab.
+        self.table_popup = None;
+        // The insertion attribute form parks a placement on the tab it belongs
+        // to, so a closed tab has to take the form — and the placement — with it.
+        if self.focus_dialog(crate::app::ModalKind::InsertAttributes) {
+            self.cancel_insert_attr_dialog();
+            self.close_active_modal();
         }
         if self.tabs.get(idx).map_or(false, |t| t.dirty) {
             self.pending_close = Some(crate::app::PendingClose::Tab(self.tabs[idx].id));
@@ -264,12 +291,22 @@ impl OpenCADStudio {
         if let Some(closing_id) = closing_tab_id {
             crate::io::fs_access::drop_handle(closing_id);
         }
+        // The drawing is gone, and the positions it had placed are not the
+        // next drawing's: forget them with the tab.
+        if let Some(closing_id) = closing_tab_id {
+            crate::modules::draw::draw::attdef::session().forget_place_of(closing_id);
+            crate::modules::annotate::text::forget_place_of(closing_id);
+        }
+        // Tool dialogs on the closing drawing go with it.
+        if idx == self.active_tab {
+            self.close_document_tools(None);
+        }
         // Only-tab case: when the lone non-start tab closes, fall
         // back to the Start tab if it exists; otherwise spawn a
         // fresh blank drawing (legacy behaviour).
         if self.tabs.len() == 1 {
             self.tab_counter += 1;
-            self.tabs[0] = crate::app::document::DocumentTab::new_drawing(self.tab_counter);
+            self.tabs[0] = crate::app::tab_document::DocumentTab::new_drawing(self.tab_counter);
             self.active_tab = 0;
             self.apply_display_defaults(0);
         } else {
@@ -315,7 +352,11 @@ impl OpenCADStudio {
         }
         // A dialog owns the keyboard: typing while one is open (an open list
         // in it included) must not land in the command line behind it.
-        if self.active_modal.is_some() || self.qselect.is_some() {
+        if self.active_modal.is_some()
+            || self.qselect.is_some()
+            || self.filter_dialog.is_some()
+            || self.layer_import.is_some()
+        {
             return Task::none();
         }
         // Filter out control characters — only push the typed
@@ -505,11 +546,21 @@ impl OpenCADStudio {
         self.focus_cmd_input()
     }
 
-    pub(super) fn on_command_submit(&mut self) -> Task<Message> {
+    pub(in crate::app) fn on_command_submit(&mut self) -> Task<Message> {
+        if self.table_cell_editor.is_some() {
+            if self.field_dialog.is_some() && self.tabs[self.active_tab].active_cmd.is_some() {
+                return self.feed_command(crate::command::StepInput::Enter);
+            }
+            return self.table_editor_step(1, 0, false);
+        }
         // Submitting a command implicitly dismisses the history
         // dropdown so the dispatched command's new prompt is
         // immediately visible on the overlay.
         self.command_line.close_history();
+        // A table cell's editor: Enter writes the cell and moves down.
+        if let Some(task) = self.table_cell_enter() {
+            return task;
+        }
         if self.awaiting_fill_close_answer() {
             let input = std::mem::take(&mut self.command_line.input);
             return self.on_graphic_fill_close_input(&input);
@@ -631,6 +682,13 @@ impl OpenCADStudio {
             return Task::none();
         }
 
+        // Enter settles a custom grip at its current point. In particular it
+        // must never reach the empty-submit repeat-last-command shortcut.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.tabs[self.active_tab].active_plugin_grip.is_some() {
+            return self.settle_plugin_grip_from_enter();
+        }
+
         // Numeric entry while a normal grip stretch is active.
         //
         // With Dynamic Input enabled, typed values live in the shared
@@ -640,7 +698,23 @@ impl OpenCADStudio {
         {
             let i = self.active_tab;
 
-            if let Some(grip) = self.tabs[i].active_grip.clone() {
+            // MTP / M2P while a grip is hot (no command runs a grip edit):
+            // pick the two points, and their midpoint places the grip.
+            if self.grip_point_prompt(i) {
+                let raw = self.command_line.input.trim().trim_start_matches('_');
+                if raw.eq_ignore_ascii_case("MTP") || raw.eq_ignore_ascii_case("M2P") {
+                    self.command_line.input.clear();
+                    self.start_mtp_modifier(i);
+                    return self.focus_cmd_input();
+                }
+            }
+            let point_override = self.grip_point_override.take();
+
+            if let Some(grip) = self.tabs[i]
+                .active_grip
+                .clone()
+                .filter(|_| self.tabs[i].active_cmd.is_none())
+            {
                 if matches!(
                     grip.mode,
                     GripEditMode::Stretch | GripEditMode::RectangleResize
@@ -650,7 +724,9 @@ impl OpenCADStudio {
                         .iter()
                         .any(|field| field.buffer.is_some());
 
-                    let target = if matches!(grip.mode, GripEditMode::RectangleResize) {
+                    let target = if let Some(point) = point_override {
+                        Some(point)
+                    } else if matches!(grip.mode, GripEditMode::RectangleResize) {
                         grip.rectangle_frame
                             .map(|(opposite, width_axis, height_axis)| {
                                 let cursor_delta = self.tabs[i].last_cursor_world - opposite;
@@ -866,6 +942,7 @@ impl OpenCADStudio {
             if val.is_empty() {
                 return Task::none();
             }
+            self.command_line.answer_last_prompt(&val);
             return self.dispatch_command(&format!("SETVAR {name} {val}"));
         }
         let i_tab = self.active_tab;
@@ -873,6 +950,7 @@ impl OpenCADStudio {
             if let Some(command) = self.command_line.selected_suggestion() {
                 self.command_line.input.clear();
                 self.command_line.autocomplete_cursor = None;
+                self.command_line.push_command(&command);
                 return self.dispatch_command(&command);
             }
         } else if self.command_line.has_contextual_suggestions() {
@@ -912,6 +990,9 @@ impl OpenCADStudio {
                         }
                         return Task::batch(tasks);
                     }
+                    // Echo the line like a single word; a variable answered on
+                    // it is restated to its name when its prompt takes the value.
+                    self.command_line.push_command(raw.trim());
                     return self.run_command_line(&raw);
                 }
             }
@@ -1096,9 +1177,18 @@ impl OpenCADStudio {
                 return task;
             }
 
-            self.command_line.push_error(crate::tf!(
-                        "Expected Cartesian, polar, cylindrical or spherical coordinates, or a number; got: \"{text}\""
-                    ).as_ref());
+            // A point prompt refuses other text as the reference does, with
+            // a plain line before asking again.
+            let has_options = self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .is_some_and(|command| !command.options().is_empty());
+            self.command_line.push_rejection(if has_options {
+                crate::t!("Point or option keyword required.")
+            } else {
+                crate::t!("Invalid point.")
+            }
+            .as_ref());
             return self.focus_cmd_input();
         }
         if let Some(cmd) = self.command_line.submit() {
@@ -1210,6 +1300,56 @@ impl OpenCADStudio {
         Some(task)
     }
 
+    /// Shared Enter commit for a hot custom grip. Typed Dynamic Input and the
+    /// native direct-distance form both become one ordinary drag Move before
+    /// Settle, so the plugin sees the same lifecycle as a pointer placement.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn settle_plugin_grip_from_enter(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let Some(active) = self.tabs[i].active_plugin_grip.clone() else {
+            return Task::none();
+        };
+        let dyn_locked = self.dyn_input
+            && self.tabs[i]
+                .dyn_fields
+                .iter()
+                .any(|field| field.locked());
+        let target = if dyn_locked {
+            self.dyn_resolve_point()
+        } else {
+            // Mirror native grip Stretch's direct-distance entry, including
+            // its tracking-ray behavior. No custom-grip scalar/radius mode is
+            // introduced here: this is only a displacement from the origin.
+            let text = crate::app::expr_eval::eval_to_string(self.command_line.input.trim());
+            crate::app::expr_eval::eval_number(text.trim()).map(|dist| {
+                if let Some((base, dir)) = self.active_distance_ray(i) {
+                    base + dir * dist
+                } else {
+                    let direction = self.tabs[i].last_cursor_world - active.origin_world;
+                    let len = direction.length();
+                    if len <= 1e-12 {
+                        active.origin_world
+                    } else {
+                        active.origin_world + direction / len * dist
+                    }
+                }
+            })
+        };
+        self.command_line.input.clear();
+
+        let mut move_task = Task::none();
+        if let Some(mut point) = target {
+            // Typed input must not bypass the declaration's hard axis.
+            if let Some(axis) = active.axis.and_then(|axis| axis.try_normalize()) {
+                point = active.origin_world + axis * (point - active.origin_world).dot(axis);
+            }
+            move_task = self.move_plugin_grip_drag(i, point);
+        }
+        let settle_task = self.settle_plugin_grip_drag();
+        self.sync_dyn_fields();
+        Task::batch([move_task, settle_task])
+    }
+
     /// The active command's current step collects free-form prose from the
     /// command line. Single decision point for the routes that type into
     /// the buffer (CommandInput, Shift+Enter, the view's on_submit wiring).
@@ -1235,6 +1375,12 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_command_finalize(&mut self) -> Task<Message> {
+        if self.table_cell_editor.is_some() {
+            if self.field_dialog.is_some() && self.tabs[self.active_tab].active_cmd.is_some() {
+                return self.feed_command(crate::command::StepInput::Enter);
+            }
+            return self.table_editor_step(1, 0, false);
+        }
         // In the MText preview, Enter inserts a line break. The
         // free-text prompt case falls through deliberately: for it
         // Enter *finishes* the edit (Shift+Enter breaks the line,
@@ -1266,6 +1412,10 @@ impl OpenCADStudio {
         // fields use the same keyboard path. Route Enter through CommandSubmit,
         // whose grip branch resolves Distance / Angle and finalizes the edit.
         let i = self.active_tab;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.tabs[i].active_plugin_grip.is_some() && self.tabs[i].active_cmd.is_none() {
+            return self.settle_plugin_grip_from_enter();
+        }
         let grip_dyn_locked = self.tabs[i].active_grip.is_some()
             && self.dyn_input
             && self.tabs[i].dyn_fields.iter().any(|field| field.locked());
@@ -1302,6 +1452,7 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn on_command_escape(&mut self) -> Task<Message> {
+        self.table_edit_command_line = false;
         self.tabs[self.active_tab].measurement.clear();
         // Escape also closes the overlapping-objects list.
         if self.cycle_candidates.take().is_some() {
@@ -1337,6 +1488,12 @@ impl OpenCADStudio {
         self.snapper.clear_override();
         // Clear the deferred snap dwell — the command is being cancelled.
         self.snap_dwell = None;
+        if self.table_cell_editor.is_some()
+            && self.field_dialog.is_some()
+            && self.tabs[self.active_tab].active_cmd.is_some()
+        {
+            return self.feed_command(crate::command::StepInput::Escape);
+        }
         // Open MText editor swallows Escape (cancel without committing). An
         // open menu or the colour list closes first, one per Escape.
         if let Some(ed) = self.mtext_editor.as_mut() {
@@ -1414,9 +1571,6 @@ impl OpenCADStudio {
         if self.table_popup.take().is_some() {
             return Task::none();
         }
-        if self.flip_popup.take().is_some() {
-            return Task::none();
-        }
         if self.visibility_popup.take().is_some() {
             self.table_popup = None;
             return Task::none();
@@ -1435,24 +1589,23 @@ impl OpenCADStudio {
         // A hot grip (click-move-click placement in progress) rolls
         // back to its pre-drag image on Escape.
         if self.cancel_active_grip_edit() {
+            self.sync_dyn_fields();
             return Task::none();
         }
         // Cancel layout rename first, then fall through.
         let i_e = self.active_tab;
-        if let Some(state) = self.qselect.take() {
-            self.qselect_settings = Some((&state).into());
-            self.reset_modal_geometry();
-            if self.block_definition.is_some() {
-                self.active_modal = Some(crate::app::ModalKind::BlockDefinition);
-            } else if self.wblock.is_some() {
-                self.active_modal = Some(crate::app::ModalKind::WriteBlock);
-            }
-            return Task::none();
+        // Quick Select and FILTER close as their Cancel does: the preview
+        // goes and a parked 'QSELECT / 'FILTER command comes back.
+        if self.qselect.is_some() {
+            return self.update(Message::QSelectClose);
+        }
+        if self.filter_dialog.is_some() {
+            return self.on_filter_message(crate::app::filter_dialog::FilterMsg::Close);
         }
         {
             let mut sel = self.tabs[i_e].scene.selection.borrow_mut();
             if sel.menu.open_at.is_some() {
-                sel.menu.open_at = None;
+                sel.menu.close();
                 return Task::none();
             }
         }
@@ -1486,12 +1639,12 @@ impl OpenCADStudio {
             if let Some(r) = result {
                 return self.apply_cmd_result(r);
             }
-        } else if self.tabs[i].scene.active_viewport.is_some() {
-            // ESC while in MSPACE → exit back to paper space.
-            return Task::done(Message::ExitViewport);
         } else {
+            // In a viewport's model space Esc deselects too and the viewport
+            // stays active: PSPACE, or a double-click outside it, leaves it.
             self.tabs[i].selected_authoring = None;
             self.tabs[i].scene.deselect_all();
+            self.tabs[i].last_crossing_window = None;
             self.refresh_properties();
             self.tabs[i].scene.set_box_hover_highlights(&[]);
             let mut sel = self.tabs[i].scene.selection.borrow_mut();
@@ -1531,7 +1684,7 @@ impl OpenCADStudio {
 
                 // Toggle frozen_layers on the viewport entity
                 for e in self.tabs[i].scene.document.entities_mut() {
-                    if let codec::EntityType::Viewport(vp) = e {
+                    if let document::EntityType::Viewport(vp) = e {
                         if vp.common.handle == vp_handle {
                             if vp.frozen_layers.contains(&layer_handle) {
                                 vp.frozen_layers.retain(|h| h != &layer_handle);
@@ -1560,7 +1713,21 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_layer_new(&mut self) -> Task<Message> {
+        self.on_layer_new_with(false)
+    }
+
+    /// A new layer, taking its look from the selected layer (colour,
+    /// linetype, lineweight, transparency, plot) or the defaults without one
+    /// (#2610); `frozen_in_viewports` also freezes it in every layout
+    /// viewport. One undo step either way.
+    pub(super) fn on_layer_new_with(&mut self, frozen_in_viewports: bool) -> Task<Message> {
         let i = self.active_tab;
+        let template = self.tabs[i]
+            .layers
+            .selected
+            .and_then(|row| self.tabs[i].layers.layers.get(row))
+            .and_then(|row| self.tabs[i].scene.document.layers.get(&row.name))
+            .cloned();
         let mut n = 1;
         let new_name = loop {
             let candidate = format!("Layer{}", n);
@@ -1570,15 +1737,39 @@ impl OpenCADStudio {
             n += 1;
         };
         self.push_undo_snapshot(i, "LAYER NEW");
-        use codec::tables::layer::Layer as DocLayer;
+        use document::tables::layer::Layer as DocLayer;
         // A layer needs a real handle or it is dropped on a DWG save
         // (the format is handle-based; issue #67).
         let mut dl = DocLayer::new(&new_name);
+        if let Some(template) = template {
+            dl.color = template.color;
+            dl.color_name = template.color_name.clone();
+            dl.book_name = template.book_name.clone();
+            dl.line_type = template.line_type.clone();
+            dl.line_weight = template.line_weight;
+            dl.transparency = template.transparency;
+            dl.is_plottable = template.is_plottable;
+        }
         // `allocate_handle` advances the seed so the layer gets a
         // unique handle; the non-advancing `next_handle` getter hands
         // out the same value twice and the later object overwrites it.
         dl.handle = self.tabs[i].scene.document.allocate_handle();
+        // Viewports made later freeze it too.
+        dl.flags.frozen_in_new_viewport = frozen_in_viewports;
+        let layer_handle = dl.handle;
         let _ = self.tabs[i].scene.document.layers.add(dl);
+        if frozen_in_viewports {
+            for entity in self.tabs[i].scene.document.entities_mut() {
+                if let document::EntityType::Viewport(vp) = entity {
+                    if !vp.frozen_layers.contains(&layer_handle) {
+                        vp.frozen_layers.push(layer_handle);
+                    }
+                }
+            }
+            self.tabs[i]
+                .scene
+                .invalidate_layer_visibility(&[new_name.clone()]);
+        }
         self.tabs[i].dirty = true;
         let doc_layers = self.tabs[i].scene.document.layers.clone();
         let vp_info = self.tabs[i].scene.viewport_list();
@@ -1602,14 +1793,21 @@ impl OpenCADStudio {
         // rename prompt is visible (#271). Offset is layout-independent
         // (idx × fixed row height), so it holds even before the freshly
         // added row is measured.
+        // The name field takes the keyboard, so typing renames the layer
+        // instead of reaching the command line (#2610).
         match new_idx {
-            Some(idx) => iced::widget::operation::scroll_to(
-                iced::advanced::widget::Id::new(crate::ui::window::layers::LAYER_TABLE_SCROLL_ID),
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: 0.0,
-                    y: idx as f32 * crate::ui::ROW_H,
-                },
-            ),
+            Some(idx) => Task::batch([
+                iced::widget::operation::scroll_to(
+                    iced::advanced::widget::Id::new(
+                        crate::ui::window::layers::LAYER_TABLE_SCROLL_ID,
+                    ),
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: 0.0,
+                        y: idx as f32 * crate::ui::ROW_H,
+                    },
+                ),
+                super::focus_layer_name_field(),
+            ]),
             None => Task::none(),
         }
     }
@@ -1621,8 +1819,8 @@ impl OpenCADStudio {
         if names.is_empty() {
             return Task::none();
         }
-        // Layer "0" and the current layer can't be deleted — drop them
-        // from the batch and note it.
+        // Layer "0", Defpoints, the current layer and layers of an xref
+        // can't be deleted — drop them from the batch and note it.
         let current = self.tabs[i]
             .scene
             .document
@@ -1630,10 +1828,11 @@ impl OpenCADStudio {
             .current_layer_name
             .clone();
         let before = names.len();
-        names.retain(|n| n != "0" && *n != current);
+        names.retain(|n| !layer_is_protected(n, &current));
         if names.len() < before {
             self.command_line.push_info(
-                crate::t!("Layer \"0\" and the current layer can't be deleted — skipped.").as_ref(),
+                crate::t!("Layer \"0\", Defpoints, the current layer and xref layers can't be deleted — skipped.")
+                    .as_ref(),
             );
         }
         if names.is_empty() {
@@ -1673,7 +1872,7 @@ impl OpenCADStudio {
             return Task::none();
         };
         self.push_undo_snapshot(i, "LAYER DELETE");
-        let handles: Vec<codec::Handle> = self.tabs[i]
+        let handles: Vec<document::Handle> = self.tabs[i]
             .scene
             .document
             .entities()
@@ -1755,6 +1954,12 @@ impl OpenCADStudio {
                 if name == self.tabs[i].layers.current_layer {
                     return Task::none();
                 }
+                if layer.frozen {
+                    self.command_line.push_error(
+                        crate::t!("A frozen layer can't be made current.").as_ref(),
+                    );
+                    return Task::none();
+                }
                 // Mirror the change into the document header (CLAYER) too,
                 // not just the per-tab default. Otherwise the no-selection
                 // ribbon refresh (e.g. after Esc) re-reads the stale header
@@ -1765,7 +1970,7 @@ impl OpenCADStudio {
                     .layers
                     .get(&name)
                     .map(|l| l.handle)
-                    .unwrap_or(codec::types::Handle::NULL);
+                    .unwrap_or(document::types::Handle::NULL);
                 self.tabs[i].scene.document.header.current_layer_name = name.clone();
                 self.tabs[i].scene.document.header.current_layer_handle = handle;
                 self.tabs[i].active_layer = name.clone();
@@ -1778,28 +1983,893 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_layer_rename_commit(&mut self) -> Task<Message> {
+        self.commit_layer_rename(true)
+    }
+
+    /// Apply the typed layer name. A name that can't be used says why (#2610).
+    /// On Enter (`refocus`) the field stays open with what was typed and
+    /// takes the keyboard again; a click elsewhere keeps the old name.
+    pub(super) fn commit_layer_rename(&mut self, refocus: bool) -> Task<Message> {
         let i = self.active_tab;
-        let editing_name = self.tabs[i].layers.editing.take();
-        if let Some(old_name) = editing_name {
-            let new_name = self.tabs[i].layers.edit_buf.trim().to_string();
-            // The name was captured at RenameStart; look it up fresh so
-            // a sort/sync/filter in between cannot retarget the rename.
-            // Deleted meanwhile → clear and no-op.
-            let still_there = self.tabs[i]
-                .layers
-                .layers
-                .iter()
-                .any(|l| l.name == old_name);
-            if !new_name.is_empty() && new_name != old_name && still_there {
-                self.push_undo_snapshot(i, "LAYER RENAME");
-                if !self.tabs[i].rename_layer(&old_name, &new_name) {
-                    self.discard_last_undo_entry(i);
+        let Some(old_name) = self.tabs[i].layers.editing.take() else {
+            return Task::none();
+        };
+        let new_name = self.tabs[i].layers.edit_buf.trim().to_string();
+        // The name was captured at RenameStart; look it up fresh so a
+        // sort/sync/filter in between cannot retarget the rename. Deleted
+        // meanwhile → clear and no-op.
+        let still_there = self.tabs[i]
+            .layers
+            .layers
+            .iter()
+            .any(|l| l.name == old_name);
+        if !new_name.is_empty() && new_name != old_name && still_there {
+            if let Some(problem) =
+                layer_rename_problem(&self.tabs[i].scene.document, &old_name, &new_name)
+            {
+                self.command_line.push_error(&problem);
+                if refocus {
+                    self.tabs[i].layers.editing = Some(old_name);
+                    return super::focus_layer_name_field();
+                }
+                // A click elsewhere moves on; the old name stays.
+                self.tabs[i].layers.edit_buf.clear();
+                return Task::none();
+            }
+            self.push_undo_snapshot(i, "LAYER RENAME");
+            if !self.tabs[i].rename_layer(&old_name, &new_name) {
+                self.discard_last_undo_entry(i);
+            }
+        }
+        self.tabs[i].layers.edit_buf.clear();
+        self.refresh_layer_panel();
+        Task::none()
+    }
+
+    /// A layer row's right-click menu. A row outside the selection becomes
+    /// the selection first, as a click would.
+    pub(super) fn on_layer_menu(
+        &mut self,
+        name: String,
+        action: crate::ui::window::layers::LayerMenuAction,
+    ) -> Task<Message> {
+        use crate::ui::window::layers::LayerMenuAction as A;
+        let i = self.active_tab;
+        let Some(idx) = self.layer_panel_index(i, &name) else {
+            return Task::none();
+        };
+        // Merging into this row keeps the selection it merges.
+        let merge_sources = self.tabs[i].layers.selected_names();
+        let panel = &mut self.tabs[i].layers;
+        panel.keys_active = true;
+        if action == A::MergeHere {
+            // The selection stays as it is.
+        } else if !panel.selected_multi.contains(&idx) {
+            panel.selected_multi = vec![idx];
+        }
+        panel.selected = Some(idx);
+        match action {
+            A::SetCurrent => self.on_layer_set_current(),
+            A::New => self.on_layer_new(),
+            A::Rename => self.update(Message::LayerRenameStart(name)),
+            A::Delete => self.on_layer_delete(),
+            A::SelectObjects => {
+                let layers = self.tabs[i].layers.selected_names();
+                let count = self.tabs[i].scene.select_objects_on_layers(&layers);
+                self.command_line.push_output(
+                    crate::tf!("{} object(s) on the selected layers are selected.", count).as_ref(),
+                );
+                self.refresh_properties();
+                Task::none()
+            }
+            A::NewGroup => self.update(Message::LayerGroupNew),
+            // A ticked group: the selected layers are all in it, so the
+            // item takes them out.
+            A::AddToGroup(group) => {
+                let panel = &self.tabs[i].layers;
+                let selected = panel.selected_names();
+                let all_in = panel.groups.iter().any(|(g, members)| {
+                    g == &group
+                        && selected
+                            .iter()
+                            .all(|s| members.iter().any(|m| m.eq_ignore_ascii_case(s)))
+                });
+                self.set_layer_group(i, &group, &selected, !all_in);
+                Task::none()
+            }
+            A::RemoveFromGroup => self.update(Message::LayerGroupRemove),
+            A::FilterObjects => {
+                let layers = self.tabs[i].layers.selected_names().join(",");
+                self.filter_open_for_layers(layers);
+                self.layers_dialog_to_front()
+            }
+            A::MergeHere => {
+                let sources: Vec<String> = merge_sources
+                    .into_iter()
+                    .filter(|source| !source.eq_ignore_ascii_case(&name))
+                    .collect();
+                if sources.is_empty() {
+                    self.command_line.push_info(
+                        crate::t!(
+                            "Select the layers to merge, then right-click the one they go into."
+                        )
+                        .as_ref(),
+                    );
+                } else {
+                    self.merge_layers(i, sources, name);
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Keys for the Layer manager's table after a click in it: ↑/↓ move
+    /// (Shift extends), Ctrl+A selects all, Del deletes, F2 renames and Esc
+    /// clears the selection. `None` leaves the key to the rest of the app.
+    pub(super) fn layer_manager_key(&mut self, key: &str) -> Option<Task<Message>> {
+        use crate::ui::window::layers::{TreeAction, TreeNode};
+        let i = self.active_tab;
+        if key == "ESCAPE" && self.tabs[i].layers.tree_rename.is_some() {
+            self.tabs[i].layers.tree_rename = None;
+            return Some(Task::none());
+        }
+        let panel = &self.tabs[i].layers;
+        if panel.tree_rename.is_some() {
+            return None;
+        }
+        if !panel.keys_active
+            || panel.editing.is_some()
+            || panel.transparency_edit.is_some()
+            || panel.description_edit.is_some()
+            || !self.dock_panel_visible(crate::ui::dock::PanelId::Layers)
+        {
+            return None;
+        }
+        // A running command keeps Esc and Delete for itself.
+        if self.tabs[i].active_cmd.is_some() && matches!(key, "ESCAPE" | "DELETE") {
+            return None;
+        }
+        match key {
+            "CTRL+A" => {
+                let panel = &mut self.tabs[i].layers;
+                panel.selected_multi = panel.visible_indices();
+                Some(Task::none())
+            }
+            "DELETE"
+                if panel.tree_focus
+                    && matches!(panel.view, TreeNode::Group(_) | TreeNode::Filter(_)) =>
+            {
+                let node = panel.view.clone();
+                Some(self.update(Message::LayerTreeAction(node, TreeAction::Delete)))
+            }
+            "DELETE" => Some(self.on_layer_delete()),
+            "F2" if panel.tree_focus
+                && matches!(panel.view, TreeNode::Group(_) | TreeNode::Filter(_)) =>
+            {
+                let node = panel.view.clone();
+                Some(self.update(Message::LayerTreeAction(node, TreeAction::Rename)))
+            }
+            "F2" => {
+                let name = panel
+                    .selected
+                    .and_then(|row| panel.layers.get(row))?
+                    .name
+                    .clone();
+                Some(self.update(Message::LayerRenameStart(name)))
+            }
+            "ESCAPE" => {
+                let panel = &mut self.tabs[i].layers;
+                panel.selected = None;
+                panel.selected_multi.clear();
+                panel.keys_active = false;
+                Some(Task::none())
+            }
+            _ => None,
+        }
+    }
+
+    /// ↑/↓ in the Layer manager's table: the row above or below the anchor
+    /// among the rows shown; Shift extends the selection to it.
+    pub(super) fn layer_manager_arrow(&mut self, down: bool, extend: bool) -> bool {
+        let i = self.active_tab;
+        let panel = &self.tabs[i].layers;
+        if !panel.keys_active
+            || panel.editing.is_some()
+            || panel.transparency_edit.is_some()
+            || panel.description_edit.is_some()
+            || !self.dock_panel_visible(crate::ui::dock::PanelId::Layers)
+        {
+            return false;
+        }
+        let rows = panel.visible_indices();
+        if rows.is_empty() {
+            return true;
+        }
+        let at = panel
+            .selected
+            .and_then(|row| rows.iter().position(|r| *r == row));
+        let next = match at {
+            Some(at) if down => rows[(at + 1).min(rows.len() - 1)],
+            Some(at) => rows[at.saturating_sub(1)],
+            None if down => rows[0],
+            None => rows[rows.len() - 1],
+        };
+        let panel = &mut self.tabs[i].layers;
+        if extend {
+            if !panel.selected_multi.contains(&next) {
+                panel.selected_multi.push(next);
+            }
+        } else {
+            panel.selected_multi = vec![next];
+        }
+        panel.selected = Some(next);
+        true
+    }
+
+    /// Esc while the Layer manager is typing a name or a transparency drops
+    /// what was typed. Returns whether there was something to drop.
+    pub(super) fn cancel_layer_manager_edit(&mut self) -> bool {
+        let layers = &mut self.tabs[self.active_tab].layers;
+        if layers.editing.take().is_some() {
+            layers.edit_buf.clear();
+            return true;
+        }
+        layers.description_edit.take().is_some() || layers.transparency_edit.take().is_some()
+    }
+
+    /// Apply the typed description to the layer as one undo step (#2610).
+    pub(super) fn on_layer_description_commit(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let Some((name, typed)) = self.tabs[i].layers.description_edit.take() else {
+            return Task::none();
+        };
+        let typed = typed.trim().to_string();
+        let unchanged = self.tabs[i]
+            .scene
+            .document
+            .layers
+            .get(&name)
+            .is_none_or(|layer| layer.description == typed);
+        if unchanged {
+            return Task::none();
+        }
+        let undo = self.begin_layer_undo(i, "LAYER DESCRIPTION", std::slice::from_ref(&name));
+        if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(&name) {
+            layer.description = typed.clone();
+        }
+        if let Some(row) = self.tabs[i]
+            .layers
+            .layers
+            .iter_mut()
+            .find(|l| l.name == name)
+        {
+            row.description = typed;
+        }
+        self.tabs[i].dirty = true;
+        self.commit_layer_undo(i, undo);
+        Task::none()
+    }
+
+    /// Count the objects on each layer for the Layer manager's Objects column
+    /// and status, again only when the drawing or its layers changed and the
+    /// manager is open. Objects inside block definitions count too, apart.
+    pub(in crate::app) fn refresh_layer_counts(&mut self) {
+        use std::hash::{Hash, Hasher};
+        if self.tabs.get(self.active_tab).is_none() {
+            return;
+        }
+        if !self.dock_panel_visible(crate::ui::dock::PanelId::Layers) {
+            let i = self.active_tab;
+            if !self.tabs[i].layers.eye_layers.is_empty() {
+                self.tabs[i].layers.eye_layers.clear();
+                self.tabs[i].layers.highlighted = 0;
+                self.tabs[i].layers.highlight_key = None;
+                self.tabs[i].scene.set_filter_preview_highlights(&[]);
+            }
+            return;
+        }
+        let i = self.active_tab;
+        self.refresh_layer_tree(i);
+        self.refresh_layer_highlight(i);
+        let scene = &self.tabs[i].scene;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for layer in scene.document.layers.iter() {
+            layer.name.hash(&mut hasher);
+        }
+        let key = (scene.geometry_epoch, hasher.finish());
+        if self.tabs[i].layers.counts_key == Some(key) {
+            return;
+        }
+        let mut counts: std::collections::HashMap<String, (usize, usize)> = Default::default();
+        for record in scene.document.block_records.iter() {
+            let in_block = !record.is_layout();
+            for handle in &record.entity_handles {
+                if let Some(entity) = scene.document.get_entity(*handle) {
+                    let entry = counts
+                        .entry(entity.common().layer.to_lowercase())
+                        .or_default();
+                    entry.0 += 1;
+                    if in_block {
+                        entry.1 += 1;
+                    }
                 }
             }
-            self.tabs[i].layers.edit_buf.clear();
-            self.refresh_layer_panel();
+        }
+        self.tabs[i].layers.set_counts(counts, key);
+    }
+
+    /// FILTER over the layers: the LAYERFILTER filter `name`, or a new one
+    /// starting from what the search box holds (#2610).
+    pub(super) fn on_layer_filter_edit(&mut self, name: Option<String>) -> Task<Message> {
+        use crate::filter::{Condition, Filter, Item, Match, Op};
+        let i = self.active_tab;
+        self.load_layer_filters(i);
+        // `Some("")`: a new, empty filter (the toolbar's New Filter); `None`
+        // starts from the search text (Advanced…).
+        let blank = name.as_deref() == Some("");
+        let (name, filter) = match name.and_then(|name| {
+            self.layer_filters
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(&name))
+                .map(|f| (f.name.clone(), f.to_filter()))
+        }) {
+            Some(found) => found,
+            None => {
+                let search = if blank {
+                    String::new()
+                } else {
+                    self.tabs[i].layers.filter.trim().to_string()
+                };
+                let condition = if search.is_empty() {
+                    Condition::default()
+                } else {
+                    // The search box finds names containing the text.
+                    let value = if search.contains(['*', '?', ',']) {
+                        search
+                    } else {
+                        format!("*{search}*")
+                    };
+                    Condition {
+                        property: Some("name".into()),
+                        op: Op::Eq,
+                        value,
+                        ..Default::default()
+                    }
+                };
+                (
+                    String::new(),
+                    Filter {
+                        root: Match::All,
+                        items: vec![Item::Condition(condition)],
+                    },
+                )
+            }
+        };
+        self.filter_open_layers(name, filter);
+        self.layers_dialog_to_front()
+    }
+
+    /// Save as filter: the search text as a property filter on the name,
+    /// shown in the tree (#2610 LM-22a).
+    pub(super) fn on_layer_save_search(&mut self) -> Task<Message> {
+        use crate::filter::{Condition, Filter, Item, Match, Op};
+        use crate::ui::window::layers::TreeNode;
+        let i = self.active_tab;
+        let search = self.tabs[i].layers.filter.trim().to_string();
+        if search.is_empty() {
+            return Task::none();
+        }
+        self.load_layer_filters(i);
+        // The search finds names containing the text; a pattern stays one.
+        let value = if search.contains(['*', '?', ',']) {
+            search.clone()
+        } else {
+            format!("*{search}*")
+        };
+        let mut name = search.clone();
+        let mut n = 2;
+        while crate::app::layer_filters::find_filter_mut(&mut self.layer_filters, &name).is_some() {
+            name = format!("{search} ({n})");
+            n += 1;
+        }
+        self.layer_filters
+            .push(crate::app::layer_filters::LayerFilter {
+                name: name.clone(),
+                conditions: Some(Filter {
+                    root: Match::All,
+                    items: vec![Item::Condition(Condition {
+                        property: Some("name".into()),
+                        op: Op::Eq,
+                        value,
+                        ..Default::default()
+                    })],
+                }),
+                ..Default::default()
+            });
+        self.persist_layer_filters(i, "LAYERFILTER");
+        let panel = &mut self.tabs[i].layers;
+        panel.filter.clear();
+        panel.view = TreeNode::Filter(name);
+        self.refresh_layer_counts();
+        Task::none()
+    }
+
+    /// The tree's rename field: Enter. A group is renamed in the drawing, a
+    /// filter in the list; an empty or taken name leaves it as it was.
+    pub(super) fn on_layer_tree_rename_commit(&mut self) -> Task<Message> {
+        use crate::ui::window::layers::TreeNode;
+        let i = self.active_tab;
+        let Some((node, typed)) = self.tabs[i].layers.tree_rename.take() else {
+            return Task::none();
+        };
+        let new = typed.trim().to_string();
+        match node {
+            TreeNode::Group(old) if !new.is_empty() && new != old => {
+                let taken = self.tabs[i]
+                    .layers
+                    .groups
+                    .iter()
+                    .any(|(g, _)| g.eq_ignore_ascii_case(&new) && !g.eq_ignore_ascii_case(&old));
+                if taken {
+                    self.command_line
+                        .push_error(&crate::tr!("layer-groups", "exists", name = new));
+                } else {
+                    self.rename_layer_group_named(i, &old, &new);
+                    self.tabs[i].layers.view = TreeNode::Group(new);
+                }
+            }
+            TreeNode::Filter(old) if !new.is_empty() && new != old => {
+                self.load_layer_filters(i);
+                let taken = !new.eq_ignore_ascii_case(&old)
+                    && crate::app::layer_filters::find_filter_mut(&mut self.layer_filters, &new)
+                        .is_some();
+                if taken {
+                    self.command_line
+                        .push_error(&crate::tf!("A filter named \"{}\" already exists.", new));
+                } else if let Some(filter) =
+                    crate::app::layer_filters::find_filter_mut(&mut self.layer_filters, &old)
+                {
+                    filter.name = new.clone();
+                    self.persist_layer_filters(i, "LAYERFILTER RENAME");
+                    if self.tabs[i].layers.view == TreeNode::Filter(old) {
+                        self.tabs[i].layers.view = TreeNode::Filter(new);
+                    }
+                    self.refresh_layer_counts();
+                }
+            }
+            _ => {}
         }
         Task::none()
+    }
+
+    /// A filter tree node's right-click menu: edit or delete a LAYERFILTER
+    /// filter, or switch all of a node's layers at once (one undo step; the
+    /// current layer is never frozen).
+    pub(super) fn on_layer_tree_action(
+        &mut self,
+        node: crate::ui::window::layers::TreeNode,
+        action: crate::ui::window::layers::TreeAction,
+    ) -> Task<Message> {
+        use crate::ui::window::layers::{TreeAction as A, TreeNode};
+        let i = self.active_tab;
+        match (&node, action) {
+            (TreeNode::Filter(name), A::Edit) => {
+                return self.on_layer_filter_edit(Some(name.clone()));
+            }
+            (TreeNode::Filter(name), A::Delete) => {
+                self.load_layer_filters(i);
+                crate::app::layer_filters::remove_filter(&mut self.layer_filters, name);
+                self.persist_layer_filters(i, "LAYERFILTER DELETE");
+                if self.tabs[i].layers.view == node {
+                    self.tabs[i].layers.view = TreeNode::All;
+                }
+                self.refresh_layer_counts();
+                return Task::none();
+            }
+            // A group goes from the tree's menu; its layers stay. Called
+            // directly: a name with a space would not survive the command
+            // line.
+            (TreeNode::Group(name), A::Delete) => {
+                let name = name.clone();
+                if self.tabs[i].layers.view == node {
+                    self.tabs[i].layers.set_group(None);
+                }
+                self.delete_layer_group_named(i, &name);
+                return Task::none();
+            }
+            (TreeNode::Group(name) | TreeNode::Filter(name), A::Rename) => {
+                let panel = &mut self.tabs[i].layers;
+                panel.tree_rename = Some((node.clone(), name.clone()));
+                return iced::widget::operation::focus(crate::ui::window::layers::tree_rename_input_id())
+                    .chain(iced::widget::operation::select_all(
+                        crate::ui::window::layers::tree_rename_input_id(),
+                    ));
+            }
+            (TreeNode::Unused, A::Purge) => {
+                let unused = self.tabs[i].layers.node_layers(&TreeNode::Unused);
+                self.open_purge_dialog();
+                if let Some(state) = self.purge_dialog.as_mut() {
+                    for (name, ticked) in &mut state.items[0] {
+                        *ticked = unused.iter().any(|u| u.eq_ignore_ascii_case(name));
+                    }
+                }
+                return self.layers_dialog_to_front();
+            }
+            (_, A::Edit | A::Delete | A::Rename | A::Purge) => return Task::none(),
+            _ => {}
+        }
+        let mut names = self.tabs[i].layers.node_layers(&node);
+        let current = self.tabs[i]
+            .scene
+            .document
+            .header
+            .current_layer_name
+            .clone();
+        if action == A::Freeze {
+            names.retain(|name| !name.eq_ignore_ascii_case(&current));
+        }
+        let label = format!("LAYER {action:?}").to_uppercase();
+        match action {
+            A::On => self.edit_layers(i, &label, &names, |layer| layer.turn_on()),
+            A::Off => self.edit_layers(i, &label, &names, |layer| layer.turn_off()),
+            A::Freeze => self.edit_layers(i, &label, &names, |layer| layer.freeze()),
+            A::Thaw => self.edit_layers(i, &label, &names, |layer| layer.thaw()),
+            A::Lock => self.edit_layers(i, &label, &names, |layer| layer.lock()),
+            A::Unlock => self.edit_layers(i, &label, &names, |layer| layer.unlock()),
+            A::Edit | A::Delete | A::Rename | A::Purge => {}
+        }
+        self.refresh_layer_panel();
+        Task::none()
+    }
+
+    /// With Show on and no selection dialog open, light the selected layers'
+    /// objects in the drawing; again only when the layers or the drawing
+    /// changed.
+    fn refresh_layer_highlight(&mut self, i: usize) {
+        if self.tabs[i].layers.eye_layers.is_empty()
+            || self.filter_dialog.is_some()
+            || self.qselect.is_some()
+        {
+            // The dialog owns the highlight now; recompute once it closes.
+            self.tabs[i].layers.highlight_key = None;
+            return;
+        }
+        let names = self.tabs[i].layers.eye_layers.clone();
+        let key = (self.tabs[i].scene.geometry_epoch, names.clone());
+        if self.tabs[i].layers.highlight_key.as_ref() == Some(&key) {
+            return;
+        }
+        let handles = self.tabs[i].scene.objects_on_layers(&names);
+        self.tabs[i].scene.set_filter_preview_highlights(&handles);
+        self.tabs[i].layers.highlighted = handles.len();
+        self.tabs[i].layers.highlight_key = Some(key);
+    }
+
+    /// The filter tree's live parts: the layers of the selected objects and
+    /// what each LAYERFILTER filter matches. Set only when they changed.
+    fn refresh_layer_tree(&mut self, i: usize) {
+        self.load_layer_filters(i);
+        self.tabs[i].layers.ribbon_follows = self.ribbon_layers_follow_filter;
+        use std::hash::{Hash, Hasher};
+        let scene = &self.tabs[i].scene;
+        // This runs on every message while the panel shows: work the tree
+        // out again only when what it reads has changed.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        scene.selected.len().hash(&mut hasher);
+        scene
+            .selected
+            .iter()
+            .fold(0u64, |acc, h| acc ^ h.value().wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .hash(&mut hasher);
+        for layer in scene.document.layers.iter() {
+            format!("{layer:?}").hash(&mut hasher);
+        }
+        format!("{:?}", self.layer_filters).hash(&mut hasher);
+        let key = hasher.finish();
+        if self.tabs[i].layers.tree_key == Some(key) {
+            return;
+        }
+        self.tabs[i].layers.tree_key = Some(key);
+        let scene = &self.tabs[i].scene;
+        let mut selected: Vec<String> = scene
+            .selected
+            .iter()
+            .filter_map(|h| scene.document.get_entity(*h))
+            .map(|e| e.common().layer.to_lowercase())
+            .collect();
+        selected.sort();
+        selected.dedup();
+        // Every filter, a nested one right after its parent, its layers those
+        // its own conditions and all of its parents' take (#2610).
+        fn walk(
+            list: &[super::super::layer_filters::LayerFilter],
+            parents: &mut Vec<crate::filter::Filter>,
+            depth: u8,
+            document: &document::Document,
+            out: &mut Vec<(String, Vec<String>)>,
+            depths: &mut Vec<u8>,
+        ) {
+            let source = super::super::layer_filters::LayerProperties;
+            for filter in list {
+                let own = filter.to_filter();
+                let members = document
+                    .layers
+                    .iter()
+                    .filter(|layer| !layer.name.starts_with('*'))
+                    .filter(|layer| own.matches(&source, *layer))
+                    .filter(|layer| parents.iter().all(|p| p.matches(&source, *layer)))
+                    .map(|layer| layer.name.clone())
+                    .collect();
+                out.push((filter.name.clone(), members));
+                depths.push(depth);
+                parents.push(own);
+                walk(&filter.children, parents, depth + 1, document, out, depths);
+                parents.pop();
+            }
+        }
+        let mut filters: Vec<(String, Vec<String>)> = Vec::new();
+        let mut depths = Vec::new();
+        walk(
+            &self.layer_filters,
+            &mut Vec::new(),
+            0,
+            &scene.document,
+            &mut filters,
+            &mut depths,
+        );
+        let panel = &mut self.tabs[i].layers;
+        if panel.selected_object_layers != selected {
+            panel.selected_object_layers = selected;
+        }
+        if panel.filters != filters {
+            if let crate::ui::window::layers::TreeNode::Filter(name) = &panel.view {
+                if !filters.iter().any(|(f, _)| f.eq_ignore_ascii_case(name)) {
+                    panel.view = crate::ui::window::layers::TreeNode::All;
+                }
+            }
+            panel.filters = filters;
+        }
+        panel.filter_depths = depths;
+    }
+
+    /// Apply the typed transparency to the layer (and the selection it is
+    /// part of) as one undo step. A value that isn't a whole number from 0 to
+    /// 90 says so and the field shows the layer's value again (#2610).
+    pub(super) fn on_layer_transparency_commit(&mut self) -> Task<Message> {
+        let i = self.active_tab;
+        let Some((name, typed)) = self.tabs[i].layers.transparency_edit.take() else {
+            return Task::none();
+        };
+        let Some(idx) = self.layer_panel_index(i, &name) else {
+            return Task::none();
+        };
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return Task::none();
+        }
+        let Some(value) = typed.parse::<i32>().ok().filter(|v| (0..=90).contains(v)) else {
+            self.command_line
+                .push_error(crate::t!("Transparency is a whole number from 0 to 90.").as_ref());
+            return Task::none();
+        };
+        let targets: Vec<String> = self
+            .layer_row_action_targets(i, idx)
+            .into_iter()
+            .filter(|target| {
+                self.tabs[i]
+                    .layers
+                    .layers
+                    .iter()
+                    .any(|l| &l.name == target && l.transparency != value)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Task::none();
+        }
+        let undo = self.begin_layer_undo(i, "LAYER TRANSPARENCY", &targets);
+        for target in &targets {
+            if let Some(layer) = self.tabs[i].scene.document.layers.get_mut(target) {
+                layer.transparency =
+                    document::types::Transparency::from_percent(value as f64 / 100.0);
+            }
+            if let Some(pl) = self.tabs[i]
+                .layers
+                .layers
+                .iter_mut()
+                .find(|l| &l.name == target)
+            {
+                pl.transparency = value;
+            }
+        }
+        self.tabs[i].scene.invalidate_layer_dependencies(&targets);
+        self.tabs[i].dirty = true;
+        self.commit_layer_undo(i, undo);
+        Task::none()
+    }
+
+    /// The action of the Ctrl cycle waiting for the next click, if the cycle
+    /// still belongs to the hot grip.
+    pub(super) fn grip_ctrl_one_shot(
+        &self,
+        i: usize,
+    ) -> Option<crate::scene::model::object::GripMenuAction> {
+        let cycle = self.grip_ctrl_cycle.as_ref()?;
+        let active = self.tabs[i].active_grip.as_ref()?;
+        (active.handle == cycle.handle && active.grip_id == cycle.active_grip_id)
+            .then_some(cycle.one_shot)
+            .flatten()
+    }
+
+    /// Ctrl on a hot polyline grip moves to its next mode, as the grip menu
+    /// offers them. Each stage starts from the geometry the grip was picked up
+    /// with, so a stage left behind leaves nothing in the drawing or in undo.
+    pub(super) fn cycle_grip_ctrl_mode(&mut self) -> Task<Message> {
+        use crate::entities::traits::EntityTypeOps;
+        use crate::scene::model::object::GripMenuAction as Action;
+        let i = self.active_tab;
+        if self.tabs[i].grip_copy || self.grip_pending.is_some() {
+            return Task::none();
+        }
+        let Some(active) = self.tabs[i].active_grip.as_ref() else {
+            return Task::none();
+        };
+        let [target] = active.targets.as_slice() else {
+            return Task::none();
+        };
+        if active.gizmo {
+            return Task::none();
+        }
+        let (handle, active_grip_id) = (active.handle, active.grip_id);
+        let mut cycle = self
+            .grip_ctrl_cycle
+            .take()
+            .filter(|cycle| cycle.handle == handle && cycle.active_grip_id == active_grip_id)
+            .unwrap_or(crate::app::GripCtrlCycle {
+                handle,
+                grip_id: active_grip_id,
+                is_translate: target.is_translate,
+                world: active.origin_world,
+                stage: 0,
+                active_grip_id,
+                one_shot: None,
+            });
+        let original = self
+            .grip_originals
+            .iter()
+            .find(|(owner, _)| *owner == handle)
+            .map(|(_, entity)| entity.clone())
+            .or_else(|| self.tabs[i].scene.document.get_entity(handle).cloned());
+        let Some(original) = original else {
+            return Task::none();
+        };
+        // Other grips (and entities whose Add Vertex is not a placement) keep
+        // their single behaviour.
+        if polyline_add_vertex_target(&original, cycle.grip_id).is_none() {
+            return Task::none();
+        }
+        let items = original.grip_menu(cycle.grip_id);
+        let stages = grip_ctrl_stages(&items);
+        if stages.is_empty() || self.reject_locked_edit(i, handle) {
+            return Task::none();
+        }
+
+        self.cancel_active_grip_edit();
+        cycle.stage = (cycle.stage + 1) % (stages.len() + 1);
+        cycle.one_shot = None;
+        let mut task = Task::none();
+        let label = match cycle.stage.checked_sub(1).map(|stage| stages[stage]) {
+            None => {
+                let edit = self.grip_edit_for_hit(
+                    i,
+                    handle,
+                    cycle.grip_id,
+                    cycle.is_translate,
+                    cycle.world,
+                );
+                // A rectangle's grips start in their own Resize / Move Parallel.
+                let stretches =
+                    matches!(edit.mode, crate::scene::pick::grip::GripEditMode::Stretch);
+                self.tabs[i].active_grip = Some(edit);
+                self.sync_dyn_fields();
+                stretches.then_some("Stretch")
+            }
+            Some(Action::AddVertex) => {
+                // The menu's own placement: it prompts for the new vertex.
+                let index = items
+                    .iter()
+                    .position(|item| item.action == Action::AddVertex);
+                self.grip_popup = Some(crate::app::GripPopup {
+                    handle,
+                    grip_id: cycle.grip_id,
+                    anchor: self.tabs[i].last_cursor_screen,
+                    items: items.clone(),
+                    selected: 0,
+                    pinned: true,
+                });
+                task = self.on_grip_menu_pick(index.unwrap_or(0));
+                None
+            }
+            Some(Action::ConvertToArc) => {
+                let dirty_before = self.tabs[i].dirty;
+                if let Some(entity) = self.tabs[i].scene.document.get_entity_mut(handle) {
+                    entity.apply_grip_menu(cycle.grip_id, Action::ConvertToArc);
+                }
+                self.tabs[i]
+                    .scene
+                    .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+                self.tabs[i].dirty = true;
+                self.refresh_selected_grips();
+                self.refresh_properties();
+                let world = self.tabs[i]
+                    .selected_grip_handles
+                    .iter()
+                    .zip(self.tabs[i].selected_grips.iter())
+                    .find(|(owner, grip)| **owner == handle && grip.id == cycle.grip_id)
+                    .map_or(cycle.world, |(_, grip)| grip.world);
+                self.grip_originals = vec![(handle, original)];
+                self.grip_dirty_before = Some(dirty_before);
+                self.tabs[i].active_grip =
+                    Some(GripEdit::single(handle, cycle.grip_id, false, world));
+                Some("Convert to Arc")
+            }
+            Some(action) => {
+                self.tabs[i].active_grip = Some(GripEdit::single(
+                    handle,
+                    cycle.grip_id,
+                    cycle.is_translate,
+                    cycle.world,
+                ));
+                cycle.one_shot = Some(action);
+                items
+                    .iter()
+                    .find(|item| item.action == action)
+                    .map(|item| item.label)
+            }
+        };
+        if let Some(label) = label {
+            self.command_line
+                .push_info(&format!("{}:", crate::i18n::translate(label)));
+        }
+        let Some(active_grip_id) = self.tabs[i].active_grip.as_ref().map(|grip| grip.grip_id)
+        else {
+            return task;
+        };
+        cycle.active_grip_id = active_grip_id;
+        self.grip_ctrl_cycle = Some(cycle);
+        // Show the new mode at the cursor without waiting for the next move.
+        let at = self.tabs[i].last_cursor_screen;
+        Task::batch([task, Task::done(Message::ViewportMove(at))])
+    }
+
+    /// The click that confirms Remove Vertex or Convert to Line: the menu's
+    /// own action, recorded as one undo step.
+    pub(super) fn commit_grip_ctrl_one_shot(&mut self, i: usize) -> Task<Message> {
+        use crate::entities::traits::EntityTypeOps;
+        let Some(action) = self.grip_ctrl_one_shot(i) else {
+            return Task::none();
+        };
+        let Some(cycle) = self.grip_ctrl_cycle.take() else {
+            return Task::none();
+        };
+        self.cancel_active_grip_edit();
+        let items = self.tabs[i]
+            .scene
+            .document
+            .get_entity(cycle.handle)
+            .map(|entity| entity.grip_menu(cycle.grip_id))
+            .unwrap_or_default();
+        let Some(index) = items.iter().position(|item| item.action == action) else {
+            return Task::none();
+        };
+        self.grip_popup = Some(crate::app::GripPopup {
+            handle: cycle.handle,
+            grip_id: cycle.grip_id,
+            anchor: self.tabs[i].last_cursor_screen,
+            items,
+            selected: index,
+            pinned: true,
+        });
+        self.on_grip_menu_pick(index)
     }
 
     pub(super) fn on_grip_menu_pick(&mut self, idx: usize) -> Task<Message> {
@@ -1827,7 +2897,7 @@ impl OpenCADStudio {
         ) {
             let is_dimension = matches!(
                 self.tabs[i].scene.document.get_entity(popup.handle),
-                Some(codec::EntityType::Dimension(_))
+                Some(document::EntityType::Dimension(_))
             );
             if is_dimension {
                 let movement = match item.action {
@@ -1862,7 +2932,7 @@ impl OpenCADStudio {
                 // Only multileaders use the whole-object grip.
                 let is_multileader = matches!(
                     self.tabs[i].scene.document.get_entity(popup.handle),
-                    Some(codec::EntityType::MultiLeader(_))
+                    Some(document::EntityType::MultiLeader(_))
                 );
                 let (grip_id, is_translate) =
                     if matches!(item.action, GripMenuAction::MoveWithLeader) && is_multileader {
@@ -2016,7 +3086,7 @@ impl OpenCADStudio {
         // structural, so it can't ride the in-place apply below.
         if matches!(item.action, GripMenuAction::BreakVertex) {
             let pieces = match self.tabs[i].scene.document.get_entity(popup.handle) {
-                Some(codec::EntityType::LwPolyline(p)) => {
+                Some(document::EntityType::LwPolyline(p)) => {
                     crate::entities::lwpolyline::break_at_vertex(p, popup.grip_id)
                 }
                 _ => None,
@@ -2123,10 +3193,10 @@ impl OpenCADStudio {
                 .document
                 .get_entity(popup.handle)
                 .is_some_and(|entity| match (item.action, entity) {
-                    (GripMenuAction::ShowFit, codec::EntityType::Spline(spline)) => {
+                    (GripMenuAction::ShowFit, document::EntityType::Spline(spline)) => {
                         crate::entities::spline::shows_fit_points(spline)
                     }
-                    (GripMenuAction::ShowControlVertices, codec::EntityType::Spline(spline)) => {
+                    (GripMenuAction::ShowControlVertices, document::EntityType::Spline(spline)) => {
                         crate::entities::spline::shows_control_vertices(spline)
                     }
                     _ => false,
@@ -2143,7 +3213,7 @@ impl OpenCADStudio {
                 .document
                 .get_entity(popup.handle)
                 .and_then(|e| match e {
-                    codec::EntityType::MultiLeader(ml) => Some(
+                    document::EntityType::MultiLeader(ml) => Some(
                         ml.context
                             .leader_roots
                             .iter()
@@ -2360,16 +3430,16 @@ impl OpenCADStudio {
         };
         let height = width / aspect;
         let origin = self.tabs[i].last_cursor_world;
-        let mut image = codec::entities::RasterImage::with_size(
+        let mut image = document::entities::RasterImage::with_size(
             &name,
-            codec::types::Vector3::new(origin.x, origin.y, origin.z),
+            document::types::Vector3::new(origin.x, origin.y, origin.z),
             pixels_w as f64,
             pixels_h as f64,
             width,
             height,
         );
-        image.flags = codec::entities::ImageDisplayFlags::SHOW_IMAGE
-            | codec::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
+        image.flags = document::entities::ImageDisplayFlags::SHOW_IMAGE
+            | document::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
         let short = std::path::Path::new(&name)
             .file_name()
             .and_then(|n| n.to_str())
@@ -2386,25 +3456,25 @@ impl OpenCADStudio {
             .as_ref(),
         );
         self.apply_cmd_result(crate::command::CmdResult::CommitAndExit(
-            codec::EntityType::RasterImage(image),
+            document::EntityType::RasterImage(image),
         ))
     }
 
-    pub(super) fn on_qselect_open(&mut self) -> Task<Message> {
+    pub(in crate::app) fn on_qselect_open(&mut self) -> Task<Message> {
         let i = self.active_tab;
-        self.tabs[i].scene.selection.borrow_mut().menu.open_at = None;
+        self.tabs[i].scene.selection.borrow_mut().menu.close();
         let remembered = self.qselect_settings.clone();
         let scope = remembered
             .as_ref()
             .map_or(crate::app::QSelectScope::CurrentSpace, |settings| {
                 settings.scope
             });
-        let available_types = self.tabs[i].scene.qselect_entity_type_names(scope);
+        let available_types = self.tabs[i].scene.qselect_type_counts(scope);
         let type_filter = if let Some(settings) = remembered.as_ref() {
             settings
                 .type_filter
                 .as_ref()
-                .filter(|selected| available_types.iter().any(|item| item == *selected))
+                .filter(|selected| available_types.iter().any(|(item, _)| item == *selected))
                 .cloned()
         } else {
             self.tabs[i]
@@ -2432,12 +3502,11 @@ impl OpenCADStudio {
         let mut operator = remembered
             .as_ref()
             .map_or(crate::app::QSelectOp::Eq, |settings| settings.operator);
-        if matches!(
-            operator,
-            crate::app::QSelectOp::Gt | crate::app::QSelectOp::Lt
-        ) && !property.as_ref().is_some_and(|property| {
-            matches!(property.editor, crate::app::QSelectValueEditor::Number)
-        }) {
+        if operator.needs_number()
+            && !property.as_ref().is_some_and(|property| {
+                matches!(property.editor, crate::app::QSelectValueEditor::Number)
+            })
+        {
             operator = crate::app::QSelectOp::Eq;
         }
         let value = remembered.as_ref().map_or_else(String::new, |settings| {
@@ -2450,8 +3519,12 @@ impl OpenCADStudio {
         let mode = remembered
             .as_ref()
             .map_or(crate::app::QSelectMode::Include, |settings| settings.mode);
-        let append = matches!(scope, crate::app::QSelectScope::CurrentSpace)
-            && remembered.as_ref().is_some_and(|settings| settings.append);
+        let result = remembered
+            .as_ref()
+            .map_or_else(Default::default, |settings| settings.result);
+        // Highlighting the matches starts off until it is turned on, then
+        // stays as it was left (#2611).
+        let show = remembered.as_ref().is_some_and(|settings| settings.show);
         self.qselect = Some(crate::app::QSelectState {
             conditions: remembered
                 .as_ref()
@@ -2466,10 +3539,17 @@ impl OpenCADStudio {
             operator,
             value,
             mode,
-            append,
+            result,
             error: None,
+            live_count: 0,
+            live_by_type: Vec::new(),
+            show,
+            value_counts: Vec::new(),
+            sample: None,
         });
         self.reset_modal_geometry();
+        self.qselect_refresh_values();
+        self.qselect_refresh_live();
         Task::none()
     }
 
@@ -2490,7 +3570,7 @@ impl OpenCADStudio {
                 .layers
                 .get(&layer)
                 .map(|l| l.handle)
-                .unwrap_or(codec::types::Handle::NULL);
+                .unwrap_or(document::types::Handle::NULL);
             self.tabs[i].scene.document.header.current_layer_name = layer.clone();
             self.tabs[i].scene.document.header.current_layer_handle = handle;
             self.tabs[i].active_layer = layer.clone();
@@ -2542,7 +3622,7 @@ impl OpenCADStudio {
 
     pub(super) fn on_ribbon_lineweight_changed(
         &mut self,
-        lw: codec::types::LineWeight,
+        lw: document::types::LineWeight,
     ) -> Task<Message> {
         let i = self.active_tab;
         self.ribbon.close_dropdown();
@@ -2587,7 +3667,7 @@ impl OpenCADStudio {
                 .iter()
                 .find(|x| x.name.eq_ignore_ascii_case(&lt))
                 .map(|x| x.handle)
-                .unwrap_or(codec::types::Handle::NULL);
+                .unwrap_or(document::types::Handle::NULL);
             self.tabs[i].scene.document.header.current_linetype_name = lt.clone();
             self.tabs[i].scene.document.header.current_linetype_handle = handle;
             self.tabs[i].dirty = true;
@@ -2664,7 +3744,7 @@ impl OpenCADStudio {
                 self.ribbon.active_table_style = name.clone();
                 let i = self.active_tab;
                 let found = self.tabs[i].scene.document.objects.values().any(
-                    |o| matches!(o, codec::objects::ObjectType::TableStyle(ts) if ts.name == name),
+                    |o| matches!(o, document::objects::ObjectType::TableStyle(ts) if ts.name == name),
                 );
                 if found {
                     self.tabs[i].scene.document.header.current_table_style_name = name;
@@ -2684,7 +3764,7 @@ impl OpenCADStudio {
     pub(super) fn apply_hatch_pattern(
         &mut self,
         i: usize,
-        handles: &[codec::Handle],
+        handles: &[document::Handle],
         name: String,
     ) -> Task<Message> {
         if !handles.is_empty() {
@@ -2692,7 +3772,7 @@ impl OpenCADStudio {
             if let Some(entry) = hatch_patterns::find(&name) {
                 self.push_undo_snapshot(i, "HATCHEDIT");
                 for &handle in handles {
-                    if let Some(codec::EntityType::Hatch(dxf)) =
+                    if let Some(document::EntityType::Hatch(dxf)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
                         let (scale, angle) = (dxf.pattern_scale, dxf.pattern_angle);
@@ -2728,7 +3808,7 @@ impl OpenCADStudio {
             panel
                 .edit_buf
                 .remove(&crate::ui::properties::FieldKey::Geom(field));
-            panel.edit_choice_open = false;
+            panel.edit_choice_open = None;
             crate::scene::creation_style::current_transparency_label(transparency)
         } else {
             value
@@ -2743,13 +3823,13 @@ impl OpenCADStudio {
         let i = self.active_tab;
         if field == "ole_lock_aspect" {
             self.set_ole_lock_aspect(i, &value);
-            self.tabs[i].properties.edit_choice_open = false;
+            self.tabs[i].properties.edit_choice_open = None;
             return Task::none();
         }
         if field == "ext_pcx_locked" {
             let handles = self.point_cloud_lock_targets(i);
             self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
-                if let Some(codec::EntityType::Extended(extended)) =
+                if let Some(document::EntityType::Extended(extended)) =
                     app.tabs[i].scene.document.get_entity_mut(handle)
                 {
                     crate::entities::traits::PropertyEditable::apply_geom_prop(
@@ -2757,10 +3837,18 @@ impl OpenCADStudio {
                     );
                 }
             });
-            self.tabs[i].properties.edit_choice_open = false;
+            self.tabs[i].properties.edit_choice_open = None;
             return Task::none();
         }
         let handles = self.property_target_handles(i);
+        if crate::app::properties::field_moves_geometry(field)
+            && self.any_entity_is_fixed(i, &handles)
+        {
+            self.command_line
+                .push_error(crate::app::properties::HELD_BY_FIXED);
+            self.tabs[i].properties.edit_choice_open = None;
+            return Task::none();
+        }
         // The Annotative Yes/No list drives the per-object annotative toggle
         // (MTEXT's own flag, the annotation context for the rest).
         if field == "annotative" {
@@ -2770,7 +3858,7 @@ impl OpenCADStudio {
             };
             let document = &self.tabs[i].scene.document;
             let (toggle, current) = match document.get_entity(handle) {
-                Some(codec::EntityType::MText(text)) => ("is_annotative", text.is_annotative),
+                Some(document::EntityType::MText(text)) => ("is_annotative", text.is_annotative),
                 // The same per-object state the row shows and the toggle
                 // flips; a dimension's style only seeds it. (#1917)
                 Some(entity) => (
@@ -2798,7 +3886,7 @@ impl OpenCADStudio {
             ) {
                 let unchanged = handles.iter().all(|handle| {
                     match self.tabs[i].scene.document.get_entity(*handle) {
-                        Some(codec::EntityType::Spline(spline)) => match field {
+                        Some(document::EntityType::Spline(spline)) => match field {
                             "spline_method" => {
                                 value
                                     == if crate::entities::spline::shows_fit_points(spline) {
@@ -2826,7 +3914,7 @@ impl OpenCADStudio {
                             }
                             _ => false,
                         },
-                        Some(codec::EntityType::Hatch(hatch)) => match field {
+                        Some(document::EntityType::Hatch(hatch)) => match field {
                             "fill_type" => {
                                 value
                                     == if hatch.gradient_color.is_single_color {
@@ -2845,21 +3933,21 @@ impl OpenCADStudio {
                             "style" => {
                                 value
                                     == match hatch.style {
-                                        codec::entities::HatchStyleType::Normal => "Normal",
-                                        codec::entities::HatchStyleType::Outer => "Outer",
-                                        codec::entities::HatchStyleType::Ignore => "Ignore",
+                                        document::entities::HatchStyleType::Normal => "Normal",
+                                        document::entities::HatchStyleType::Outer => "Outer",
+                                        document::entities::HatchStyleType::Ignore => "Ignore",
                                     }
                             }
                             "pattern_type_label" => {
                                 value
                                     == match hatch.pattern_type {
-                                        codec::entities::HatchPatternType::Predefined => {
+                                        document::entities::HatchPatternType::Predefined => {
                                             "Predefined"
                                         }
-                                        codec::entities::HatchPatternType::UserDefined => {
+                                        document::entities::HatchPatternType::UserDefined => {
                                             "User Defined"
                                         }
-                                        codec::entities::HatchPatternType::Custom => "Custom",
+                                        document::entities::HatchPatternType::Custom => "Custom",
                                     }
                             }
                             _ => false,
@@ -2893,20 +3981,20 @@ impl OpenCADStudio {
                         );
                     }
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "material" {
                 // Material source: ByLayer / ByBlock clear the handle; a
                 // named material sets flag 3 + its handle (resolved here
                 // because the update loop holds the document).
-                let mat_handle: Option<codec::Handle> = self.tabs[i]
+                let mat_handle: Option<document::Handle> = self.tabs[i]
                     .scene
                     .document
                     .objects
                     .iter()
                     .find_map(|(h, o)| match o {
-                        codec::objects::ObjectType::Material(m) if m.name == value => Some(*h),
+                        document::objects::ObjectType::Material(m) if m.name == value => Some(*h),
                         _ => None,
                     });
                 self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
@@ -2937,12 +4025,12 @@ impl OpenCADStudio {
                         }
                     }
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "tol_text_style" {
                 use crate::entities::dim_override as dov;
-                use codec::xdata::XDataValue;
+                use document::xdata::XDataValue;
                 let style_handle = self.tabs[i]
                     .scene
                     .document
@@ -2955,7 +4043,7 @@ impl OpenCADStudio {
                         if app.tabs[i].scene.is_layer_locked(handle)
                             || !matches!(
                                 app.tabs[i].scene.document.get_entity(handle),
-                                Some(codec::EntityType::Tolerance(_))
+                                Some(document::EntityType::Tolerance(_))
                             )
                         {
                             return;
@@ -2971,7 +4059,7 @@ impl OpenCADStudio {
                     self.invalidate_property_targets(i, &handles);
                     self.refresh_properties();
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field.starts_with("dim_") {
@@ -2981,7 +4069,7 @@ impl OpenCADStudio {
                     }
                     if matches!(
                         app.tabs[i].scene.document.get_entity(handle),
-                        Some(codec::EntityType::Dimension(_))
+                        Some(document::EntityType::Dimension(_))
                     ) {
                         let applied = crate::entities::dim_override::set_property(
                             &mut app.tabs[i].scene.document,
@@ -2995,28 +4083,28 @@ impl OpenCADStudio {
                                 .document
                                 .get_entity_mut(handle)
                                 .and_then(crate::entities::dimension::as_dimension_mut);
-                            if let Some(codec::entities::Dimension::LargeRadial(dimension)) = radial
+                            if let Some(document::entities::Dimension::LargeRadial(dimension)) = radial
                             {
                                 dimension.base.text_user_positioned = false;
                             }
                         }
                     }
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "vscale_std" {
                 self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
                     if matches!(
                         app.tabs[i].scene.document.get_entity(handle),
-                        Some(codec::EntityType::Viewport(_))
+                        Some(document::EntityType::Viewport(_))
                     ) {
                         let _ = app.tabs[i]
                             .scene
                             .set_viewport_scale_named_for(handle, &value);
                     }
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "vp_ucs_name" {
@@ -3030,7 +4118,7 @@ impl OpenCADStudio {
                     .cloned();
                 if let Some(ucs) = ucs_data {
                     self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
-                        if let Some(codec::EntityType::Viewport(vp)) =
+                        if let Some(document::EntityType::Viewport(vp)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             vp.ucs_handle = ucs.handle;
@@ -3044,7 +4132,7 @@ impl OpenCADStudio {
                     self.invalidate_property_targets(i, &handles);
                     self.refresh_properties();
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "vp_named_view" {
@@ -3058,7 +4146,7 @@ impl OpenCADStudio {
                     .cloned();
                 if let Some(view) = view_data {
                     self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
-                        if let Some(codec::EntityType::Viewport(vp)) =
+                        if let Some(document::EntityType::Viewport(vp)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             vp.view_target = view.target.clone();
@@ -3073,7 +4161,7 @@ impl OpenCADStudio {
                     self.invalidate_property_targets(i, &handles);
                     self.refresh_properties();
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if crate::scene::model::solid_history::is_loft_geometry_choice(field) {
@@ -3087,7 +4175,7 @@ impl OpenCADStudio {
                         .scene
                         .apply_solid_history_property(handle, field, &value);
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == crate::scene::model::solid_history::PROP_OPERAND {
@@ -3099,7 +4187,7 @@ impl OpenCADStudio {
                         &value,
                     );
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 self.refresh_properties();
                 return Task::none();
             }
@@ -3112,7 +4200,7 @@ impl OpenCADStudio {
                         .scene
                         .apply_solid_history_choice(handle, field, &value);
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if crate::scene::model::solid_history::is_surface_property_choice(field) {
@@ -3126,7 +4214,7 @@ impl OpenCADStudio {
                     }
                     let Some(mut state) = app.tabs[i].scene.document.get_entity(handle).and_then(
                         |entity| match entity {
-                            codec::EntityType::Surface(surface) => {
+                            document::EntityType::Surface(surface) => {
                                 Some(crate::entities::solid3d::surface_property_state(surface))
                             }
                             _ => None,
@@ -3158,7 +4246,7 @@ impl OpenCADStudio {
                         app.tabs[i].scene.reseed_derived_caches(handle);
                     }
                 });
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "tol_dim_style" {
@@ -3175,7 +4263,7 @@ impl OpenCADStudio {
                         if app.tabs[i].scene.is_layer_locked(handle) {
                             return;
                         }
-                        if let Some(codec::EntityType::Tolerance(tolerance)) =
+                        if let Some(document::EntityType::Tolerance(tolerance)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             tolerance.dimension_style_handle = Some(style_handle);
@@ -3202,7 +4290,35 @@ impl OpenCADStudio {
                     self.invalidate_property_targets(i, &handles);
                     self.refresh_properties();
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
+                return Task::none();
+            }
+            if field == "tbl_cell_border_lt" {
+                let linetype = self.tabs[i]
+                    .scene
+                    .document
+                    .line_types
+                    .iter()
+                    .find(|lt| lt.name.eq_ignore_ascii_case(value.trim()))
+                    .map(|lt| lt.handle);
+                let cells = self.picked_cell_positions(i);
+                if linetype.is_some() {
+                    self.apply_property_op(i, "TABLE CELL BORDER", &handles, |app, handle| {
+                        use crate::entities::table::TableCellBordersExt;
+                        if let Some(document::EntityType::Table(table)) =
+                            app.tabs[i].scene.document.get_entity_mut(handle)
+                        {
+                            for &(row, column) in &cells {
+                                table.edit_cell_borders(row, column, |border| {
+                                    border.line_type_handle = linetype;
+                                    document::entities::table::BorderPropertyFlags::LINE_TYPE
+                                });
+                            }
+                            table.block_record_handle = None;
+                        }
+                    });
+                }
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             if field == "tbl_style_handle" {
@@ -3213,7 +4329,7 @@ impl OpenCADStudio {
                         .objects
                         .iter()
                         .find_map(|(handle, object)| match object {
-                            codec::objects::ObjectType::TableStyle(style)
+                            document::objects::ObjectType::TableStyle(style)
                                 if style.name.eq_ignore_ascii_case(value.trim()) =>
                             {
                                 Some(*handle)
@@ -3222,7 +4338,7 @@ impl OpenCADStudio {
                         });
                 if let Some(style_handle) = style_handle {
                     self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
-                        if let Some(codec::EntityType::Table(table)) =
+                        if let Some(document::EntityType::Table(table)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             table.table_style_handle = Some(style_handle);
@@ -3237,7 +4353,7 @@ impl OpenCADStudio {
                     // Unresolvable name: preserve the old tail's
                     // block_record clearing without pushing a snapshot.
                     for &handle in &handles {
-                        if let Some(codec::EntityType::Table(table)) =
+                        if let Some(document::EntityType::Table(table)) =
                             self.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             table.block_record_handle = None;
@@ -3246,7 +4362,7 @@ impl OpenCADStudio {
                     self.invalidate_property_targets(i, &handles);
                     self.refresh_properties();
                 }
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 return Task::none();
             }
             self.push_undo_snapshot(i, "CHPROP");
@@ -3278,7 +4394,7 @@ impl OpenCADStudio {
                 let resolved_mleader_style = (field == "mleader_style")
                     .then(|| {
                         doc.objects.values().find_map(|object| match object {
-                            codec::objects::ObjectType::MultiLeaderStyle(style)
+                            document::objects::ObjectType::MultiLeaderStyle(style)
                                 if style.name == value =>
                             {
                                 Some(style.clone())
@@ -3287,7 +4403,7 @@ impl OpenCADStudio {
                         })
                     })
                     .flatten();
-                let resolved: Option<codec::Handle> = match field {
+                let resolved: Option<document::Handle> = match field {
                     "mleader_style" => resolved_mleader_style.as_ref().map(|style| style.handle),
                     "text_style_handle" => doc
                         .text_styles
@@ -3326,7 +4442,7 @@ impl OpenCADStudio {
                             );
                             style_annotation = Some(style.is_annotative);
                         }
-                    } else if let Some(codec::EntityType::MultiLeader(ml)) =
+                    } else if let Some(document::EntityType::MultiLeader(ml)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
                         match field {
@@ -3335,7 +4451,7 @@ impl OpenCADStudio {
                                     ml.text_style_handle = Some(h);
                                     ml.context.text_style_handle = Some(h);
                                     ml.property_override_flags.insert(
-                                                codec::entities::MultiLeaderPropertyOverrideFlags::TEXT_STYLE,
+                                                document::entities::MultiLeaderPropertyOverrideFlags::TEXT_STYLE,
                                             );
                                 }
                             }
@@ -3345,12 +4461,12 @@ impl OpenCADStudio {
                                     for line in &mut root.lines {
                                         line.arrowhead_handle = resolved;
                                         line.override_flags.insert(
-                                                    codec::entities::LeaderLinePropertyOverrideFlags::ARROWHEAD,
+                                                    document::entities::LeaderLinePropertyOverrideFlags::ARROWHEAD,
                                                 );
                                     }
                                 }
                                 ml.property_override_flags.insert(
-                                    codec::entities::MultiLeaderPropertyOverrideFlags::ARROWHEAD,
+                                    document::entities::MultiLeaderPropertyOverrideFlags::ARROWHEAD,
                                 );
                             }
                             "line_type_handle" => {
@@ -3359,12 +4475,12 @@ impl OpenCADStudio {
                                     for line in &mut root.lines {
                                         line.line_type_handle = resolved;
                                         line.override_flags.insert(
-                                                    codec::entities::LeaderLinePropertyOverrideFlags::LINE_TYPE,
+                                                    document::entities::LeaderLinePropertyOverrideFlags::LINE_TYPE,
                                                 );
                                     }
                                 }
                                 ml.property_override_flags.insert(
-                                            codec::entities::MultiLeaderPropertyOverrideFlags::LEADER_LINE_TYPE,
+                                            document::entities::MultiLeaderPropertyOverrideFlags::LEADER_LINE_TYPE,
                                         );
                             }
                             "block_content_handle" => {
@@ -3375,7 +4491,7 @@ impl OpenCADStudio {
                                     ml.context.block_content_location =
                                         ml.context.content_base_point;
                                     ml.property_override_flags.insert(
-                                                codec::entities::MultiLeaderPropertyOverrideFlags::BLOCK_CONTENT,
+                                                document::entities::MultiLeaderPropertyOverrideFlags::BLOCK_CONTENT,
                                             );
                                 }
                             }
@@ -3408,8 +4524,8 @@ impl OpenCADStudio {
                 // reverts to the style); the other two map a label to
                 // the DIMLWD / DIMTAD enum value.
                 use crate::entities::dim_override as dov;
-                use codec::xdata::XDataValue;
-                let arrow_h: Option<codec::Handle> =
+                use document::xdata::XDataValue;
+                let arrow_h: Option<document::Handle> =
                     if field == "arrow_block" && value != "Closed filled" {
                         self.tabs[i]
                             .scene
@@ -3429,7 +4545,7 @@ impl OpenCADStudio {
                     // a multi-type selection can't get stray overrides.
                     if !matches!(
                         self.tabs[i].scene.document.get_entity(handle),
-                        Some(codec::EntityType::Leader(_))
+                        Some(document::EntityType::Leader(_))
                     ) {
                         continue;
                     }
@@ -3461,7 +4577,7 @@ impl OpenCADStudio {
                                     doc,
                                     handle,
                                     dov::DIMLDRBLK,
-                                    Some(XDataValue::Handle(codec::Handle::NULL)),
+                                    Some(XDataValue::Handle(document::Handle::NULL)),
                                 );
                             } else if let Some(h) = arrow_h {
                                 dov::set(doc, handle, dov::DIMLDRBLK, Some(XDataValue::Handle(h)));
@@ -3473,7 +4589,7 @@ impl OpenCADStudio {
             } else if field == "dyn_visibility" {
                 // A visibility state picked in Properties, applied like a
                 // pick from the reference's visibility grip.
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 for &handle in &handles {
                     let state = self.tabs[i]
                         .scene
@@ -3485,7 +4601,7 @@ impl OpenCADStudio {
                     }
                 }
             } else if field == "dyn_lookup" {
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 let mut changed = false;
                 for &handle in &handles {
                     if self.tabs[i].scene.is_layer_locked(handle) {
@@ -3517,7 +4633,7 @@ impl OpenCADStudio {
                     .properties
                     .edit_buf
                     .remove(&crate::ui::properties::FieldKey::Geom("block"));
-                self.tabs[i].properties.edit_choice_open = false;
+                self.tabs[i].properties.edit_choice_open = None;
                 let canon = self.tabs[i]
                     .scene
                     .document
@@ -3525,22 +4641,67 @@ impl OpenCADStudio {
                     .get(&value)
                     .map(|br| br.name.clone());
                 if let Some(canon) = canon {
-                    let mut changes = Vec::new();
-                    for &handle in &handles {
-                        if self.tabs[i].scene.is_layer_locked(handle) {
-                            continue;
-                        }
-                        if let Some(codec::EntityType::Insert(ins)) =
-                            self.tabs[i].scene.document.get_entity_mut(handle)
-                        {
-                            if ins.block_name != canon {
-                                ins.block_name = canon.clone();
-                                changes.push((handle, crate::scene::ChangeKind::Modified));
+                    let to = self.tabs[i]
+                        .scene
+                        .document
+                        .block_records
+                        .get(&canon)
+                        .map(|record| record.handle);
+                    if let Some(to) = to {
+                        let mut planned = Vec::new();
+                        for &handle in &handles {
+                            if self.tabs[i].scene.is_layer_locked(handle) {
+                                continue;
+                            }
+                            let Some((from, differs)) = self.tabs[i]
+                                .scene
+                                .document
+                                .get_entity(handle)
+                                .and_then(|entity| match entity {
+                                    document::EntityType::Insert(ins) => {
+                                        let record = self.tabs[i]
+                                            .scene
+                                            .document
+                                            .block_records
+                                            .get(&ins.block_name)?;
+                                        // Compare what the row shows: an
+                                        // evaluated copy already names this
+                                        // definition, so re-picking it asks
+                                        // for no change.
+                                        let effective =
+                                            crate::app::control::block_ops::resolve_effective_block(
+                                                &self.tabs[i].scene.document,
+                                                ins,
+                                            )
+                                            .1;
+                                        Some((record.handle, effective != Some(to)))
+                                    }
+                                    _ => None,
+                                })
+                            else {
+                                continue;
+                            };
+                            if differs {
+                                planned.push((handle, from));
                             }
                         }
-                    }
-                    if !changes.is_empty() {
-                        self.tabs[i].scene.bump_entities(&changes);
+                        if !planned.is_empty() {
+                            let mut changes = Vec::new();
+                            for (handle, from) in planned {
+                                // An evaluated copy must stop resolving
+                                // through its old definition before it takes
+                                // the new name.
+                                crate::app::control::block_ops::detach_representation(
+                                    &mut self.tabs[i].scene.document,
+                                    handle,
+                                );
+                                self.tabs[i]
+                                    .scene
+                                    .repoint_representation(handle, from, to, &canon);
+                                changes.push((handle, crate::scene::ChangeKind::Modified));
+                            }
+                            self.tabs[i].scene.bump_entities(&changes);
+                        }
                     }
                 }
             } else if field == "plot_style" {
@@ -3552,7 +4713,7 @@ impl OpenCADStudio {
                     .document
                     .header
                     .acad_plotstylename_dict_handle;
-                let ph: Option<codec::Handle> =
+                let ph: Option<document::Handle> =
                     crate::scene::annotative::as_dict(&self.tabs[i].scene.document, dict_h)
                         .and_then(|d| d.entries.iter().find(|(n, _)| *n == value).map(|(_, h)| *h));
                 for &handle in &handles {
@@ -3625,7 +4786,7 @@ impl OpenCADStudio {
                             .document
                             .get_entity(handle)
                             .and_then(|entity| match entity {
-                                codec::EntityType::MLine(mline) => {
+                                document::EntityType::MLine(mline) => {
                                     crate::entities::mline::resolved_mline_style(
                                         mline,
                                         &self.tabs[i].scene.document,
@@ -3645,21 +4806,21 @@ impl OpenCADStudio {
                         crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
                             entity, field, &value, plane,
                         );
-                        match (entity as &mut codec::EntityType, text_style.as_ref()) {
-                            (codec::EntityType::Text(text), Some(style)) => {
+                        match (entity as &mut document::EntityType, text_style.as_ref()) {
+                            (document::EntityType::Text(text), Some(style)) => {
                                 if style.height > 0.0 {
                                     text.height = style.height;
                                 }
                                 text.width_factor = style.width_factor;
                                 text.oblique_angle = style.oblique_angle;
                             }
-                            (codec::EntityType::MText(text), Some(style)) if style.height > 0.0 => {
+                            (document::EntityType::MText(text), Some(style)) if style.height > 0.0 => {
                                 text.height = style.height;
                             }
                             _ => {}
                         }
                         if matches!(field, "ml_justification" | "ml_scale") {
-                            if let (codec::EntityType::MLine(mline), Some(style)) =
+                            if let (document::EntityType::MLine(mline), Some(style)) =
                                 (entity, mline_style.as_ref())
                             {
                                 crate::modules::draw::draw::mline::sync_mline_element_parameters(
@@ -3671,8 +4832,8 @@ impl OpenCADStudio {
                     if let Some(annotative) = dim_style_annotative {
                         let document = &mut self.tabs[i].scene.document;
                         let current = match document.get_entity(handle) {
-                            Some(codec::EntityType::Dimension(dimension))
-                                if !matches!(**dimension, codec::entities::Dimension::Arc(_)) =>
+                            Some(document::EntityType::Dimension(dimension))
+                                if !matches!(**dimension, document::entities::Dimension::Arc(_)) =>
                             {
                                 crate::scene::annotative::object_is_annotative(
                                     document,
@@ -3696,7 +4857,7 @@ impl OpenCADStudio {
             }
             if field.starts_with("tbl_") {
                 for &handle in &handles {
-                    if let Some(codec::EntityType::Table(table)) =
+                    if let Some(document::EntityType::Table(table)) =
                         self.tabs[i].scene.document.get_entity_mut(handle)
                     {
                         table.block_record_handle = None;
@@ -3705,7 +4866,7 @@ impl OpenCADStudio {
             }
             self.invalidate_property_targets(i, &handles);
             self.tabs[i].dirty = true;
-            self.tabs[i].properties.edit_choice_open = false;
+            self.tabs[i].properties.edit_choice_open = None;
             if field == "spline_method" {
                 self.tabs[i].properties.prop_vertex = 0;
                 self.tabs[i].properties.prop_vertex_indicator_active = false;
@@ -3741,19 +4902,19 @@ impl OpenCADStudio {
                     self.refresh_properties();
                 }
                 "material" => {
-                    let mat_handle: Option<codec::Handle> = self.tabs[i]
+                    let mat_handle: Option<document::Handle> = self.tabs[i]
                         .scene
                         .document
                         .objects
                         .iter()
                         .find_map(|(h, o)| match o {
-                            codec::objects::ObjectType::Material(m) if m.name == value => Some(*h),
+                            document::objects::ObjectType::Material(m) if m.name == value => Some(*h),
                             _ => None,
                         });
                     match value.as_str() {
                         "ByLayer" | "ByBlock" | "Global" => {
                             self.tabs[i].scene.document.header.current_material_handle =
-                                codec::Handle::NULL;
+                                document::Handle::NULL;
                         }
                         _ => {
                             if let Some(h) = mat_handle {
@@ -3790,7 +4951,7 @@ impl OpenCADStudio {
                         .objects
                         .values()
                         .find_map(|object| {
-                            let codec::objects::ObjectType::Layout(layout) = object else {
+                            let document::objects::ObjectType::Layout(layout) = object else {
                                 return None;
                             };
                             layout
@@ -3802,7 +4963,7 @@ impl OpenCADStudio {
                     if current != next {
                         self.push_undo_snapshot(i, "PLOTSTYLE");
                         for object in self.tabs[i].scene.document.objects.values_mut() {
-                            if let codec::objects::ObjectType::Layout(layout) = object {
+                            if let document::objects::ObjectType::Layout(layout) = object {
                                 if layout.name.eq_ignore_ascii_case(&layout_name) {
                                     layout.plot_style_sheet = next.clone();
                                     layout.plot_flags.plot_plot_styles = !next.is_empty();
@@ -3842,7 +5003,7 @@ impl OpenCADStudio {
                     let current = active_viewport
                         .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
                         .and_then(|entity| match entity {
-                            codec::EntityType::Viewport(viewport) => {
+                            document::EntityType::Viewport(viewport) => {
                                 Some(viewport.ucs_icon_visible)
                             }
                             _ => None,
@@ -3865,7 +5026,7 @@ impl OpenCADStudio {
                     if current != next {
                         self.push_undo_snapshot(i, "UCSICON");
                         if let Some(handle) = active_viewport {
-                            if let Some(codec::EntityType::Viewport(viewport)) =
+                            if let Some(document::EntityType::Viewport(viewport)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 viewport.ucs_icon_visible = next;
@@ -3896,7 +5057,7 @@ impl OpenCADStudio {
                     let current = active_viewport
                         .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
                         .and_then(|entity| match entity {
-                            codec::EntityType::Viewport(viewport) => {
+                            document::EntityType::Viewport(viewport) => {
                                 Some(viewport.status.ucs_icon_at_origin)
                             }
                             _ => None,
@@ -3919,7 +5080,7 @@ impl OpenCADStudio {
                     if current != next {
                         self.push_undo_snapshot(i, "UCSICON");
                         if let Some(handle) = active_viewport {
-                            if let Some(codec::EntityType::Viewport(viewport)) =
+                            if let Some(document::EntityType::Viewport(viewport)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 viewport.status.ucs_icon_at_origin = next;
@@ -3950,7 +5111,7 @@ impl OpenCADStudio {
                     let current = active_viewport
                         .and_then(|handle| self.tabs[i].scene.document.get_entity(handle))
                         .and_then(|entity| match entity {
-                            codec::EntityType::Viewport(viewport) => {
+                            document::EntityType::Viewport(viewport) => {
                                 Some(viewport.ucs_per_viewport)
                             }
                             _ => None,
@@ -3973,7 +5134,7 @@ impl OpenCADStudio {
                     if current != next {
                         self.push_undo_snapshot(i, "UCSVP");
                         if let Some(handle) = active_viewport {
-                            if let Some(codec::EntityType::Viewport(viewport)) =
+                            if let Some(document::EntityType::Viewport(viewport)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 viewport.ucs_per_viewport = next;
@@ -3997,7 +5158,7 @@ impl OpenCADStudio {
                     self.refresh_properties();
                 }
                 "view_visual_style" => {
-                    use codec::entities::ViewportRenderMode as Mode;
+                    use document::entities::ViewportRenderMode as Mode;
                     let mode = match value.as_str() {
                         "2D Wireframe" | "Wireframe 2D" => Some(Mode::Wireframe2D),
                         "3D Wireframe" | "Wireframe 3D" => Some(Mode::Wireframe3D),
@@ -4102,6 +5263,17 @@ impl OpenCADStudio {
         let i = self.active_tab;
         self.tabs[i].properties.active_field = None;
         let handles = self.property_target_handles(i);
+        if crate::app::properties::field_moves_geometry(field)
+            && self.any_entity_is_fixed(i, &handles)
+        {
+            self.tabs[i]
+                .properties
+                .edit_buf
+                .remove(&crate::ui::properties::FieldKey::Geom(field));
+            self.command_line
+                .push_error(crate::app::properties::HELD_BY_FIXED);
+            return Task::none();
+        }
         if field.starts_with("assoc_array_") {
             self.on_assoc_array_field_commit(i, field, &handles);
             return Task::none();
@@ -4193,7 +5365,7 @@ impl OpenCADStudio {
                     "ul_width" | "ul_height" => {
                         let scale = handles.iter().find_map(|handle| {
                             match self.tabs[i].scene.document.get_entity(*handle) {
-                                Some(codec::EntityType::Underlay(underlay)) => {
+                                Some(document::EntityType::Underlay(underlay)) => {
                                     crate::entities::underlay::size_to_scale(
                                         underlay,
                                         &self.tabs[i].scene.document,
@@ -4220,13 +5392,13 @@ impl OpenCADStudio {
                         .filter_map(|handle| {
                             let entity = self.tabs[i].scene.document.get_entity(*handle)?;
                             match (field, entity) {
-                                ("current_fit_point", codec::EntityType::Spline(spline)) => {
+                                ("current_fit_point", document::EntityType::Spline(spline)) => {
                                     Some(spline.fit_points.len())
                                 }
-                                ("current_control_point", codec::EntityType::Spline(spline)) => {
+                                ("current_control_point", document::EntityType::Spline(spline)) => {
                                     Some(crate::entities::spline::control_vertex_count(spline))
                                 }
-                                ("pm_current_vertex", codec::EntityType::PolygonMesh(mesh)) => {
+                                ("pm_current_vertex", document::EntityType::PolygonMesh(mesh)) => {
                                     Some(mesh.vertices.len())
                                 }
                                 _ => None,
@@ -4253,7 +5425,7 @@ impl OpenCADStudio {
                             .objects
                             .iter()
                             .find_map(|(handle, object)| match object {
-                                codec::objects::ObjectType::TableStyle(style)
+                                document::objects::ObjectType::TableStyle(style)
                                     if style.name.eq_ignore_ascii_case(val.trim()) =>
                                 {
                                     Some(*handle)
@@ -4262,7 +5434,7 @@ impl OpenCADStudio {
                             });
                     if let Some(style_handle) = style_handle {
                         for &handle in &handles {
-                            if let Some(codec::EntityType::Table(table)) =
+                            if let Some(document::EntityType::Table(table)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 table.table_style_handle = Some(style_handle);
@@ -4287,7 +5459,7 @@ impl OpenCADStudio {
                         let host = self.tabs[i].scene.document.header.insertion_units;
                         for &handle in &handles {
                             let factor = match self.tabs[i].scene.document.get_entity(handle) {
-                                Some(codec::EntityType::Insert(ins)) => self.tabs[i]
+                                Some(document::EntityType::Insert(ins)) => self.tabs[i]
                                     .scene
                                     .document
                                     .block_records
@@ -4298,7 +5470,7 @@ impl OpenCADStudio {
                                     .unwrap_or(1.0),
                                 _ => continue,
                             };
-                            if let Some(codec::EntityType::Insert(ins)) =
+                            if let Some(document::EntityType::Insert(ins)) =
                                 self.tabs[i].scene.document.get_entity_mut(handle)
                             {
                                 match axis {
@@ -4313,11 +5485,11 @@ impl OpenCADStudio {
                     // Name row on a block reference: an existing name
                     // re-points the selected inserts; a new one renames
                     // the definition they share. Commit closes the list.
-                    self.tabs[i].properties.edit_choice_open = false;
+                    self.tabs[i].properties.edit_choice_open = None;
                     self.apply_block_name_commit(i, &handles, val.trim());
                 } else if field == "frozen_layers" {
                     // Resolve layer names → handles, then apply to viewports.
-                    let layer_handles: Vec<codec::Handle> = val
+                    let layer_handles: Vec<document::Handle> = val
                         .split(',')
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
@@ -4332,7 +5504,7 @@ impl OpenCADStudio {
                         })
                         .collect();
                     for &handle in &handles {
-                        if let Some(codec::EntityType::Viewport(vp)) =
+                        if let Some(document::EntityType::Viewport(vp)) =
                             self.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             vp.frozen_layers = layer_handles.clone();
@@ -4371,7 +5543,7 @@ impl OpenCADStudio {
                                             &mut self.tabs[i].scene.document,
                                             handle,
                                             dov::DIMTXT,
-                                            Some(codec::xdata::XDataValue::Real(height)),
+                                            Some(document::xdata::XDataValue::Real(height)),
                                         );
                                     }
                                 }
@@ -4379,7 +5551,7 @@ impl OpenCADStudio {
                             _ if field.starts_with("dim_") => {
                                 if matches!(
                                     self.tabs[i].scene.document.get_entity(handle),
-                                    Some(codec::EntityType::Dimension(_))
+                                    Some(document::EntityType::Dimension(_))
                                 ) {
                                     let applied = crate::entities::dim_override::set_property(
                                         &mut self.tabs[i].scene.document,
@@ -4388,7 +5560,7 @@ impl OpenCADStudio {
                                         &val,
                                     );
                                     if applied && field == "dim_text_inside" {
-                                        if let Some(codec::entities::Dimension::LargeRadial(
+                                        if let Some(document::entities::Dimension::LargeRadial(
                                             dimension,
                                         )) = self.tabs[i]
                                             .scene
@@ -4453,7 +5625,7 @@ impl OpenCADStudio {
                                         &mut self.tabs[i].scene.document,
                                         handle,
                                         code,
-                                        Some(codec::xdata::XDataValue::Real(n)),
+                                        Some(document::xdata::XDataValue::Real(n)),
                                     );
                                 }
                             }
@@ -4503,7 +5675,7 @@ impl OpenCADStudio {
                                     let mline_style =
                                         self.tabs[i].scene.document.get_entity(handle).and_then(
                                             |entity| match entity {
-                                                codec::EntityType::MLine(mline) => {
+                                                document::EntityType::MLine(mline) => {
                                                     crate::entities::mline::resolved_mline_style(
                                                         mline,
                                                         &self.tabs[i].scene.document,
@@ -4530,7 +5702,7 @@ impl OpenCADStudio {
                                                     plane,
                                                 );
                                         if field == "ml_scale" {
-                                            if let (codec::EntityType::MLine(mline), Some(style)) =
+                                            if let (document::EntityType::MLine(mline), Some(style)) =
                                                 (entity, mline_style.as_ref())
                                             {
                                                 crate::modules::draw::draw::mline::sync_mline_element_parameters(
@@ -4547,9 +5719,21 @@ impl OpenCADStudio {
                         }
                     }
                 }
+                // A cloud's Arc Length is REVCLOUD's arc length from now on.
+                if field == "revcloud_arc_length" {
+                    if let Ok(length) = val.trim().parse::<f64>() {
+                        if length.is_finite() && length > 0.0 {
+                            crate::io::set_drawing_variable(
+                                &mut self.tabs[i].scene.document,
+                                crate::entities::revcloud::ARC_LENGTH_VARIABLE,
+                                &format!("{length:.6}"),
+                            );
+                        }
+                    }
+                }
                 if field.starts_with("tbl_") {
                     for &handle in &handles {
-                        if let Some(codec::EntityType::Table(table)) =
+                        if let Some(document::EntityType::Table(table)) =
                             self.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             table.block_record_handle = None;
@@ -4593,10 +5777,10 @@ impl OpenCADStudio {
 
     /// Properties-panel Name commit for block references. A `new` matching an
     /// existing regular block re-points the selected inserts to it; otherwise
-    /// the definition the (single-block) selection references is renamed and
-    /// every insert of it follows. Anonymous/xref definitions never get here —
-    /// their Name row stays read-only.
-    fn apply_block_name_commit(&mut self, i: usize, handles: &[codec::Handle], new: &str) {
+    /// the definition the selection references is renamed and every insert of
+    /// it follows, including a reference showing an evaluated copy of it.
+    /// Anonymous/xref definitions are refused.
+    fn apply_block_name_commit(&mut self, i: usize, handles: &[document::Handle], new: &str) {
         if new.is_empty() {
             return;
         }
@@ -4610,48 +5794,109 @@ impl OpenCADStudio {
             .map(|br| {
                 (
                     br.name.clone(),
+                    br.handle,
                     br.is_anonymous() || br.flags.is_xref || br.name.contains('|'),
                 )
             });
-        if let Some((canon, protected)) = target {
+        if let Some((canon, to, protected)) = target {
             if protected {
                 return;
             }
-            let mut changes = Vec::new();
+            let mut planned = Vec::new();
             for &handle in handles {
                 if self.tabs[i].scene.is_layer_locked(handle) {
                     continue;
                 }
-                if let Some(codec::EntityType::Insert(ins)) =
-                    self.tabs[i].scene.document.get_entity_mut(handle)
-                {
-                    if ins.block_name != canon {
-                        ins.block_name = canon.clone();
-                        changes.push((handle, crate::scene::ChangeKind::Modified));
-                    }
+                let Some((from, differs)) =
+                    self.tabs[i].scene.document.get_entity(handle).and_then(
+                        |entity| match entity {
+                            document::EntityType::Insert(ins) => {
+                                let record = self.tabs[i]
+                                    .scene
+                                    .document
+                                    .block_records
+                                    .get(&ins.block_name)?;
+                                // An evaluated copy already carries the
+                                // definition's name in this row.
+                                let effective =
+                                    crate::app::control::block_ops::resolve_effective_block(
+                                        &self.tabs[i].scene.document,
+                                        ins,
+                                    )
+                                    .1;
+                                Some((record.handle, effective != Some(to)))
+                            }
+                            _ => None,
+                        },
+                    )
+                else {
+                    continue;
+                };
+                if differs {
+                    planned.push((handle, from));
                 }
             }
-            if !changes.is_empty() {
+            if !planned.is_empty() {
+                let mut changes = Vec::new();
+                for (handle, from) in planned {
+                    // An evaluated copy must stop resolving through its old
+                    // definition before it takes the new name.
+                    crate::app::control::block_ops::detach_representation(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                    );
+                    self.tabs[i]
+                        .scene
+                        .repoint_representation(handle, from, to, &canon);
+                    changes.push((handle, crate::scene::ChangeKind::Modified));
+                }
                 self.tabs[i].scene.bump_entities(&changes);
             }
             return;
         }
         // New name → rename. Only when every selected insert references the
         // same definition; a mixed selection makes the rename target ambiguous.
-        let mut old: Option<String> = None;
+        let mut old: Option<Option<document::Handle>> = None;
         for &handle in handles {
-            if let Some(codec::EntityType::Insert(ins)) =
+            if let Some(document::EntityType::Insert(ins)) =
                 self.tabs[i].scene.document.get_entity(handle)
             {
-                match &old {
-                    None => old = Some(ins.block_name.clone()),
-                    Some(o) if o.eq_ignore_ascii_case(&ins.block_name) => {}
+                let (name, definition, _) = crate::app::control::block_ops::resolve_effective_block(
+                    &self.tabs[i].scene.document,
+                    ins,
+                );
+                let definition = definition.or_else(|| {
+                    self.tabs[i]
+                        .scene
+                        .document
+                        .block_records
+                        .get(&name)
+                        .map(|record| record.handle)
+                });
+                match old {
+                    None => old = Some(definition),
+                    Some(current) if current == definition => {}
                     _ => return,
                 }
             }
         }
-        if let Some(old) = old {
-            self.tabs[i].scene.rename_block(&old, new);
+        let Some(Some(old)) = old else {
+            return;
+        };
+        let Some(old) = self.tabs[i]
+            .scene
+            .document
+            .block_records
+            .iter()
+            .find(|record| record.handle == old)
+            .map(|record| record.name.clone())
+        else {
+            return;
+        };
+        self.push_undo_snapshot(i, "BLOCK RENAME");
+        if !self.tabs[i].scene.rename_block(&old, new) {
+            self.command_line
+                .push_error(crate::tf!("Could not rename block \"{old}\" to \"{new}\".").as_ref());
         }
     }
 
@@ -4673,7 +5918,7 @@ impl OpenCADStudio {
         };
         self.push_undo_snapshot(i, "ATTEDIT");
         for &handle in &handles {
-            if let Some(codec::EntityType::Insert(ins)) =
+            if let Some(document::EntityType::Insert(ins)) =
                 self.tabs[i].scene.document.get_entity_mut(handle)
             {
                 if let Some(attr) = ins.attributes.iter_mut().find(|a| a.tag == tag) {
@@ -4726,7 +5971,7 @@ impl OpenCADStudio {
     /// Open the attribute editor dialog for the given INSERT, loading a working
     /// copy of its attribute values. No-op (with a hint) when the block has no
     /// attributes. Entry points: double-clicking such a block, or ATTEDIT.
-    pub(crate) fn open_attribute_editor(&mut self, handle: codec::Handle) {
+    pub(crate) fn open_attribute_editor(&mut self, handle: document::Handle) {
         let i = self.active_tab;
         if self.reject_locked_edit(i, handle) {
             return;
@@ -4735,7 +5980,7 @@ impl OpenCADStudio {
         // Ok((block, rows)) to open; Err(msg) to report and stay closed. The
         // borrow of `doc` ends with this match, before any `self` mutation.
         let result = match doc.get_entity(handle) {
-            Some(codec::EntityType::Insert(ins)) if !ins.attributes.is_empty() => {
+            Some(document::EntityType::Insert(ins)) if !ins.attributes.is_empty() => {
                 // The prompt text lives on the block's ATTDEFs, not on the
                 // attribute instances — map tag → prompt from the definition.
                 let meta = block_attr_meta(doc, &ins.block_name);
@@ -4746,7 +5991,7 @@ impl OpenCADStudio {
                     .collect::<Vec<_>>();
                 Ok((ins.block_name.clone(), rows))
             }
-            Some(codec::EntityType::Insert(_)) => Err("ATTEDIT  This block has no attributes."),
+            Some(document::EntityType::Insert(_)) => Err("ATTEDIT  This block has no attributes."),
             _ => Err("ATTEDIT  Select a block with attributes."),
         };
         match result {
@@ -4775,7 +6020,7 @@ impl OpenCADStudio {
     /// the tab it belongs to closes or the active tab switches — its handle is
     /// document-local and must not outlive its tab.
     pub(in crate::app) fn cancel_attr_editor(&mut self) {
-        if self.active_modal == Some(crate::app::ModalKind::AttributeEditor) {
+        if self.focus_dialog(crate::app::ModalKind::AttributeEditor) {
             self.active_modal = None;
             self.reset_modal_geometry();
         }
@@ -4815,7 +6060,7 @@ impl OpenCADStudio {
 
         self.push_undo_snapshot(i, "ATTEDIT");
         let mut changed = false;
-        if let Some(codec::EntityType::Insert(ins)) =
+        if let Some(document::EntityType::Insert(ins)) =
             self.tabs[i].scene.document.get_entity_mut(handle)
         {
             if ins.block_name == block && rows.len() == ins.attributes.len() {
@@ -4844,13 +6089,13 @@ pub(crate) struct BlockAttrMeta {
 /// Map each attribute tag to the metadata (prompt text, constant flag) declared on
 /// the block's matching ATTDEF. Tags with no definition are absent.
 pub(crate) fn block_attr_meta(
-    doc: &codec::Document,
+    doc: &document::Document,
     block_name: &str,
 ) -> rustc_hash::FxHashMap<String, BlockAttrMeta> {
     let mut map = rustc_hash::FxHashMap::default();
     if let Some(br) = doc.block_records.get(block_name) {
         for &eh in &br.entity_handles {
-            if let Some(codec::EntityType::AttributeDefinition(ad)) = doc.get_entity(eh) {
+            if let Some(document::EntityType::AttributeDefinition(ad)) = doc.get_entity(eh) {
                 map.insert(
                     ad.tag.clone(),
                     BlockAttrMeta {
@@ -4867,7 +6112,7 @@ pub(crate) fn block_attr_meta(
 /// Build the editor's working copy of one attribute. Angles are shown in
 /// degrees; numeric fields become strings so the user can type freely.
 pub(crate) fn attr_row_from_entity(
-    a: &codec::entities::AttributeEntity,
+    a: &document::entities::AttributeEntity,
     meta: &rustc_hash::FxHashMap<String, BlockAttrMeta>,
 ) -> AttrRow {
     let fmt = |v: f64| format!("{v}");
@@ -4898,7 +6143,7 @@ pub(crate) fn attr_row_from_entity(
 /// Write one edited row back onto its attribute; returns whether anything
 /// changed. Numeric fields are parsed (angles from degrees); an unparseable
 /// field is left as-is. Constant attributes ignore edits to their value.
-pub(crate) fn apply_attr_row(a: &mut codec::entities::AttributeEntity, row: &AttrRow) -> bool {
+pub(crate) fn apply_attr_row(a: &mut document::entities::AttributeEntity, row: &AttrRow) -> bool {
     let mut ch = false;
     if !row.is_constant && a.get_value() != row.value {
         a.set_value(row.value.clone());
@@ -4990,8 +6235,8 @@ mod transparency_property_tests {
         let mut app = OpenCADStudio::new_for_test();
         let i = app.active_tab;
         let handle = app
-            .commit_entity_handle(codec::EntityType::Hatch(Box::new(
-                codec::entities::Hatch::new(),
+            .commit_entity_handle(document::EntityType::Hatch(Box::new(
+                document::entities::Hatch::new(),
             )))
             .expect("solid hatch");
         app.tabs[i].scene.select_entity(handle, true);
@@ -5016,12 +6261,12 @@ mod transparency_property_tests {
             field: "transparency",
             value: "37".into(),
         });
-        app.tabs[i].properties.edit_choice_open = true;
+        app.tabs[i].properties.edit_choice_open = Some("transparency");
         let _ = app.update(Message::PropGeomChoiceChanged {
             field: "transparency",
             value: "50".into(),
         });
-        assert!(!app.tabs[i].properties.edit_choice_open);
+        assert!(app.tabs[i].properties.edit_choice_open.is_none());
         assert!(!app.tabs[i]
             .properties
             .edit_buf
@@ -5089,8 +6334,8 @@ mod transparency_property_tests {
 #[cfg(test)]
 mod layer_rename_tests {
     use crate::app::OpenCADStudio;
-    use codec::entities::Line;
-    use codec::{EntityType, Handle};
+    use document::entities::Line;
+    use document::{EntityType, Handle};
 
     fn app_with_editing_layer() -> OpenCADStudio {
         let mut app = OpenCADStudio::new_for_test();
@@ -5302,6 +6547,118 @@ mod layer_name_target_tests {
     use crate::app::{Message, OpenCADStudio};
     use crate::ui::window::layers::LayerSortCol;
 
+    #[test]
+    fn ribbon_layer_color_changes_only_named_layer_and_supports_undo() {
+        use document::types::Color;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let _ = app.update(Message::LayerSelect("ALPHA".into()));
+        let selected = app.tabs[i].layers.selected_multi.clone();
+        let alpha = app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ALPHA")
+            .unwrap()
+            .color;
+        let old = app.tabs[i].scene.document.layers.get("ZULU").unwrap().color;
+        let creation = app.tabs[i].scene.document.header.current_entity_color;
+        let mut line = document::entities::Line::new();
+        line.common.color = Color::Index(2);
+        line.common.layer = "ZULU".into();
+        let handle = app.tabs[i].scene.add_entity(document::EntityType::Line(line));
+        app.tabs[i].scene.select_entity(handle, true);
+        let epoch = app.tabs[i].scene.geometry_epoch;
+        let _ = app.update(Message::RibbonLayerColorChanged {
+            layer: "ZULU".into(),
+            color: Color::Index(1),
+        });
+        assert_eq!(
+            app.tabs[i].scene.document.layers.get("ZULU").unwrap().color,
+            Color::Index(1)
+        );
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("ALPHA")
+                .unwrap()
+                .color,
+            alpha
+        );
+        assert_eq!(app.tabs[i].layers.selected_multi, selected);
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .get_entity(handle)
+                .unwrap()
+                .common()
+                .color,
+            Color::Index(2)
+        );
+        assert_eq!(
+            app.tabs[i].scene.document.header.current_entity_color,
+            creation
+        );
+        assert!(app.tabs[i].scene.geometry_epoch > epoch);
+        assert_eq!(app.tabs[i].recent_colors.first(), Some(&Color::Index(1)));
+        app.undo_active_tab();
+        assert_eq!(
+            app.tabs[i].scene.document.layers.get("ZULU").unwrap().color,
+            old
+        );
+        app.redo_active_tab();
+        assert_eq!(
+            app.tabs[i].scene.document.layers.get("ZULU").unwrap().color,
+            Color::Index(1)
+        );
+        let history = app.tabs[i].history.undo_stack.len();
+        let _ = app.update(Message::RibbonLayerColorChanged {
+            layer: "missing".into(),
+            color: Color::Index(3),
+        });
+        let _ = app.update(Message::RibbonLayerColorChanged {
+            layer: "ZULU".into(),
+            color: Color::ByLayer,
+        });
+        assert_eq!(app.tabs[i].history.undo_stack.len(), history);
+        let _ = app.update(Message::OpenColorWindow(
+            crate::app::ColorPickTarget::RibbonLayer("ZULU".into()),
+            Color::Index(1),
+        ));
+        let _ = app.update(Message::ColorWindowPick(
+            Color::Rgb {
+                r: 12,
+                g: 34,
+                b: 56,
+            },
+            Some("TEST$Color".into()),
+        ));
+        let layer = app.tabs[i].scene.document.layers.get("ZULU").unwrap();
+        assert_eq!(
+            layer.color,
+            Color::Rgb {
+                r: 12,
+                g: 34,
+                b: 56
+            }
+        );
+        assert_eq!(layer.book_name.as_deref(), Some("TEST"));
+        assert_eq!(layer.color_name.as_deref(), Some("Color"));
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("ALPHA")
+                .unwrap()
+                .color,
+            alpha
+        );
+    }
+
     fn rename_layer(app: &mut OpenCADStudio, old_name: &str, new_name: &str) {
         let i = app.active_tab;
         assert!(
@@ -5392,6 +6749,39 @@ mod layer_name_target_tests {
             app.tabs[i].scene.document.layers.contains("ZULU_NEW"),
             "document must follow the rename"
         );
+    }
+
+    /// #2610: the current layer can't be frozen, a frozen layer can't be
+    /// made current, and Defpoints and xref layers can't be deleted.
+    #[test]
+    fn layer_manager_guards_current_frozen_and_protected_layers() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let current = app.tabs[i].scene.document.header.current_layer_name.clone();
+        let _ = app.update(Message::LayerToggleFreeze(current.clone()));
+        assert!(
+            !app.tabs[i].scene.document.layers.get(&current).unwrap().is_frozen(),
+            "the current layer stays thawed"
+        );
+
+        let _ = app.update(Message::LayerToggleFreeze("ZULU".to_string()));
+        assert!(app.tabs[i].scene.document.layers.get("ZULU").unwrap().is_frozen());
+        let zulu = app.layer_panel_index(i, "ZULU").unwrap();
+        app.tabs[i].layers.selected = Some(zulu);
+        let _ = app.on_layer_set_current();
+        assert_eq!(app.tabs[i].scene.document.header.current_layer_name, current);
+
+        for name in ["Defpoints", "XREF|WALLS"] {
+            let mut layer = document::tables::layer::Layer::new(name);
+            layer.handle = app.tabs[i].scene.document.allocate_handle();
+            let _ = app.tabs[i].scene.document.layers.add(layer);
+            app.sync_layer_panel(i);
+            let idx = app.layer_panel_index(i, name).unwrap();
+            app.tabs[i].layers.selected = Some(idx);
+            app.tabs[i].layers.selected_multi = vec![idx];
+            let _ = app.on_layer_delete();
+            assert!(app.tabs[i].scene.document.layers.contains(name), "{name} kept");
+        }
     }
 
     #[test]
@@ -5513,38 +6903,926 @@ mod layer_name_target_tests {
         assert_eq!(before, after, "unknown name must change nothing");
     }
 
+    fn panel_transparency(app: &OpenCADStudio, name: &str) -> i32 {
+        app.tabs[app.active_tab]
+            .layers
+            .layers
+            .iter()
+            .find(|l| l.name == name)
+            .expect("layer in panel")
+            .transparency
+    }
+
     #[test]
-    fn layer_transparency_edit_pushes_undo() {
-        // #43: every sibling layer arm pushes an undo entry; transparency must too.
+    fn layer_transparency_edit_is_one_undo_step_on_enter() {
+        // #43 / #2610: typing fills the field only; Enter applies it as one
+        // undo step, however many keys were typed.
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
         app.finish_pending_history(i);
         let before = app.tabs[i].history.undo_stack.len();
-        let _ = app.update(Message::LayerTransparencyEdit(
-            "0".to_string(),
-            "50".to_string(),
-        ));
+        for typed in ["5", "50"] {
+            let _ = app.update(Message::LayerTransparencyEdit(
+                "0".to_string(),
+                typed.into(),
+            ));
+        }
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            before,
+            "typing alone changes nothing"
+        );
+        assert_eq!(panel_transparency(&app, "0"), 0);
+        let _ = app.update(Message::LayerTransparencyCommit);
         assert_eq!(
             app.tabs[i].history.undo_stack.len(),
             before + 1,
-            "transparency edit must push an undo entry like its siblings"
+            "one undo step"
         );
-        let panel = app.tabs[i]
-            .layers
-            .layers
-            .iter()
-            .find(|l| l.name == "0")
-            .expect("layer 0 in panel");
-        assert_eq!(panel.transparency, 50);
+        assert_eq!(panel_transparency(&app, "0"), 50);
+        assert!(app.tabs[i].layers.transparency_edit.is_none());
         app.undo_active_tab();
-        let panel = app.tabs[i]
+        assert_eq!(
+            panel_transparency(&app, "0"),
+            0,
+            "undo must restore transparency"
+        );
+    }
+
+    #[test]
+    fn layer_transparency_out_of_range_says_so_and_keeps_the_value() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.finish_pending_history(i);
+        let before = app.tabs[i].history.undo_stack.len();
+        for typed in ["95", "x"] {
+            app.command_line.last_error = None;
+            let _ = app.update(Message::LayerTransparencyEdit(
+                "0".to_string(),
+                typed.into(),
+            ));
+            let _ = app.update(Message::LayerTransparencyCommit);
+            assert!(
+                app.command_line.last_error.is_some(),
+                "{typed} is refused with a message"
+            );
+        }
+        assert_eq!(panel_transparency(&app, "0"), 0);
+        assert_eq!(app.tabs[i].history.undo_stack.len(), before);
+        // Leaving the field applies like Enter; Esc drops what was typed.
+        let _ = app.update(Message::LayerTransparencyEdit("0".to_string(), "30".into()));
+        let _ = app.update(Message::LayerTransparencyFocus(None));
+        assert_eq!(panel_transparency(&app, "0"), 30);
+        let _ = app.update(Message::LayerTransparencyEdit("0".to_string(), "60".into()));
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert!(app.tabs[i].layers.transparency_edit.is_none());
+        assert_eq!(panel_transparency(&app, "0"), 30);
+    }
+
+    #[test]
+    fn layer_rename_to_a_taken_name_says_why_and_stays_open() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.finish_pending_history(i);
+        let before = app.tabs[i].history.undo_stack.len();
+        let _ = app.update(Message::LayerRenameStart("ZULU".to_string()));
+        let _ = app.update(Message::LayerRenameEdit("alpha".to_string()));
+        app.command_line.last_error = None;
+        let _ = app.update(Message::LayerRenameCommit);
+        assert!(app.command_line.last_error.is_some(), "the reason is shown");
+        assert_eq!(
+            app.tabs[i].layers.editing.as_deref(),
+            Some("ZULU"),
+            "field stays open"
+        );
+        assert_eq!(app.tabs[i].layers.edit_buf, "alpha", "with what was typed");
+        assert!(app.tabs[i].scene.document.layers.contains("ZULU"));
+        assert_eq!(app.tabs[i].history.undo_stack.len(), before, "no undo step");
+        // Esc gives up: the old name stays and the field closes.
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert!(app.tabs[i].layers.editing.is_none());
+        assert!(app.tabs[i].layers.edit_buf.is_empty());
+        // Invalid characters and protected layers are refused the same way.
+        for (layer, typed) in [("ZULU", "A*B"), ("0", "ZERO")] {
+            let _ = app.update(Message::LayerRenameStart(layer.to_string()));
+            let _ = app.update(Message::LayerRenameEdit(typed.to_string()));
+            app.command_line.last_error = None;
+            let _ = app.update(Message::LayerRenameCommit);
+            assert!(
+                app.command_line.last_error.is_some(),
+                "{layer} → {typed} refused"
+            );
+            assert!(app.tabs[i].scene.document.layers.contains(layer));
+            let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        }
+        // A click elsewhere after a refused name keeps the old one and moves on.
+        let _ = app.update(Message::LayerRenameStart("ZULU".to_string()));
+        let _ = app.update(Message::LayerRenameEdit("ALPHA".to_string()));
+        let _ = app.update(Message::LayerRenameFocus(None));
+        assert!(app.tabs[i].layers.editing.is_none());
+        assert!(app.tabs[i].scene.document.layers.contains("ZULU"));
+    }
+
+    #[test]
+    fn ctrl_click_on_a_layer_name_extends_the_selection() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let _ = app.update(Message::LayerSelect("ALPHA".to_string()));
+        app.ctrl_down = true;
+        let _ = app.update(Message::LayerRenameStart("ZULU".to_string()));
+        app.ctrl_down = false;
+        assert!(app.tabs[i].layers.editing.is_none(), "no rename starts");
+        let selected: Vec<String> = app.tabs[i]
+            .layers
+            .selected_multi
+            .iter()
+            .map(|&idx| app.tabs[i].layers.layers[idx].name.clone())
+            .collect();
+        assert!(selected.contains(&"ALPHA".to_string()) && selected.contains(&"ZULU".to_string()));
+    }
+
+    fn selected(app: &OpenCADStudio) -> Vec<String> {
+        let mut names = app.tabs[app.active_tab].layers.selected_names();
+        names.sort();
+        names
+    }
+
+    /// #2610: a click on a name selects; the keys then work the table until a
+    /// click in the drawing.
+    #[test]
+    fn layer_table_keys_after_a_click() {
+        use crate::app::ArrowKey;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        // Name order, ascending (the default): 0, ALPHA, ZULU.
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let _ = app.update(Message::LayerSelect("0".into()));
+        assert!(app.tabs[i].layers.keys_active);
+        assert!(
+            app.tabs[i].layers.editing.is_none(),
+            "a click doesn't rename"
+        );
+        let arrow = |direction, extend_selection| Message::ArrowKeyPressed {
+            direction,
+            shortcut: String::new(),
+            extend_selection,
+        };
+        let _ = app.update(arrow(ArrowKey::Down, false));
+        assert_eq!(selected(&app), ["ALPHA"]);
+        let _ = app.update(arrow(ArrowKey::Down, true));
+        assert_eq!(selected(&app), ["ALPHA", "ZULU"]);
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert!(selected(&app).is_empty());
+        let _ = app.update(Message::LayerSelect("ZULU".into()));
+        let _ = app.update(Message::ShortcutPressed("CTRL+A".into()));
+        assert_eq!(selected(&app).len(), 3);
+        let _ = app.update(Message::LayerSelect("ZULU".into()));
+        let _ = app.update(Message::ShortcutPressed("F2".into()));
+        assert_eq!(app.tabs[i].layers.editing.as_deref(), Some("ZULU"));
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        // A click in the drawing hands the keys back.
+        let _ = app.update(Message::ViewportLeftPress);
+        assert!(!app.tabs[i].layers.keys_active);
+        let _ = app.update(arrow(ArrowKey::Up, false));
+        assert_eq!(
+            selected(&app),
+            ["ZULU"],
+            "the arrow no longer moves the rows"
+        );
+    }
+
+    #[test]
+    fn layer_row_menu_acts_on_the_row_or_the_selection_it_is_in() {
+        use crate::ui::window::layers::LayerMenuAction;
+        use document::entities::Line;
+        use document::types::Vector3;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.layer = "ZULU".into();
+        let on_zulu = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(line));
+        let _ = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(2.0, 0.0, 0.0),
+            )));
+        let _ = app.update(Message::LayerSelect("ALPHA".into()));
+        // A row outside the selection becomes the selection first.
+        let _ = app.update(Message::LayerMenu(
+            "ZULU".into(),
+            LayerMenuAction::SelectObjects,
+        ));
+        assert_eq!(selected(&app), ["ZULU"]);
+        assert_eq!(app.tabs[i].scene.selected.len(), 1);
+        assert!(app.tabs[i].scene.selected.contains(&on_zulu));
+        // Select All / Deselect All left the menu (Ctrl+A and Esc do them).
+        let _ = app.update(Message::LayerMenu(
+            "ALPHA".into(),
+            LayerMenuAction::SetCurrent,
+        ));
+        assert_eq!(
+            app.tabs[i].scene.document.header.current_layer_name,
+            "ALPHA"
+        );
+    }
+
+    #[test]
+    fn a_new_layer_takes_the_selected_layers_look() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        {
+            let zulu = app.tabs[i].scene.document.layers.get_mut("ZULU").unwrap();
+            zulu.color = document::types::Color::Index(3);
+            zulu.line_type = "HIDDEN".into();
+            zulu.is_plottable = false;
+        }
+        app.sync_layer_panel(i);
+        let _ = app.update(Message::LayerSelect("ZULU".into()));
+        let _ = app.on_layer_new();
+        let name = app.tabs[i].layers.edit_buf.clone();
+        let layer = app.tabs[i].scene.document.layers.get(&name).unwrap();
+        assert_eq!(layer.color, document::types::Color::Index(3));
+        assert_eq!(layer.line_type, "HIDDEN");
+        assert!(!layer.is_plottable);
+    }
+
+    #[test]
+    fn a_new_layer_can_start_frozen_in_every_viewport() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let viewport = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Viewport(Box::new(
+                document::entities::Viewport::new(),
+            )));
+        app.tabs[i].layers.selected = None;
+        app.tabs[i].layers.selected_multi.clear();
+        let _ = app.update(Message::LayerNewVpFrozen);
+        let name = app.tabs[i].layers.edit_buf.clone();
+        let handle = app.tabs[i].scene.document.layers.get(&name).unwrap().handle;
+        let Some(document::EntityType::Viewport(vp)) =
+            app.tabs[i].scene.document.get_entity(viewport)
+        else {
+            panic!("the viewport stays");
+        };
+        assert!(vp.frozen_layers.contains(&handle));
+        app.undo_active_tab();
+        assert!(
+            !app.tabs[i].scene.document.layers.contains(&name),
+            "one undo step"
+        );
+    }
+
+    fn row(app: &OpenCADStudio, name: &str) -> crate::ui::window::layers::Layer {
+        app.tabs[app.active_tab]
             .layers
             .layers
             .iter()
-            .find(|l| l.name == "0")
-            .expect("layer 0 in panel");
-        assert_eq!(panel.transparency, 0, "undo must restore transparency");
+            .find(|l| l.name == name)
+            .expect("layer in panel")
+            .clone()
+    }
+
+    /// #2610: the Objects column counts the layer's objects, block contents
+    /// apart, and follows the drawing.
+    #[test]
+    fn layer_object_counts_follow_the_drawing() {
+        use document::entities::Line;
+        use document::types::Vector3;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let line_on = |layer: &str| {
+            let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+            line.common.layer = layer.into();
+            document::EntityType::Line(line)
+        };
+        let first = app.tabs[i].scene.add_entity(line_on("ZULU"));
+        let _ = app.tabs[i].scene.add_entity(line_on("zulu"));
+        // One more inside a block definition.
+        let mut block = document::tables::BlockRecord::new("DOOR");
+        block.handle = app.tabs[i].scene.document.allocate_handle();
+        let owner = block.handle;
+        let _ = app.tabs[i].scene.document.block_records.add(block);
+        let mut inside = line_on("ZULU");
+        inside.common_mut().owner_handle = owner;
+        let _ = app.tabs[i].scene.document.add_entity(inside);
+        app.tabs[i].scene.bump_geometry();
+        let _ = app.update(Message::LayerSort(LayerSortCol::Name));
+        assert_eq!(
+            (row(&app, "ZULU").objects, row(&app, "ZULU").in_blocks),
+            (3, 1)
+        );
+        assert_eq!(row(&app, "ALPHA").objects, 0);
+        let _ = app.tabs[i].scene.document.remove_entity(first);
+        app.tabs[i].scene.bump_geometry();
+        let _ = app.update(Message::LayerSort(LayerSortCol::Name));
+        assert_eq!(
+            row(&app, "ZULU").objects,
+            2,
+            "counted again after the change"
+        );
+    }
+
+    fn shown(app: &OpenCADStudio) -> Vec<String> {
+        let panel = &app.tabs[app.active_tab].layers;
+        let mut names: Vec<String> = panel
+            .visible_indices()
+            .into_iter()
+            .map(|row| panel.layers[row].name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// #2610: the filter tree's nodes pick the layers the table shows.
+    #[test]
+    fn filter_tree_nodes_choose_the_rows() {
+        use crate::ui::window::layers::TreeNode;
+        use document::entities::Line;
+        use document::types::Vector3;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.layer = "ZULU".into();
+        let on_zulu = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(line));
+        app.tabs[i].scene.bump_geometry();
+        let mut xref = document::tables::Layer::new("SITE|ROAD");
+        xref.handle = app.tabs[i].scene.document.allocate_handle();
+        let _ = app.tabs[i].scene.document.layers.add(xref);
+        app.sync_layer_panel(i);
+        let _ = app.update(Message::LayerShow(TreeNode::Used));
+        assert_eq!(shown(&app), ["ZULU"]);
+        let _ = app.update(Message::LayerInvert(true));
+        assert_eq!(shown(&app), ["0", "ALPHA", "SITE|ROAD"]);
+        let _ = app.update(Message::LayerInvert(false));
+        let _ = app.update(Message::LayerShow(TreeNode::Unused));
+        assert_eq!(shown(&app), ["0", "ALPHA", "SITE|ROAD"]);
+        assert!(app.tabs[i]
+            .layers
+            .tree_nodes()
+            .iter()
+            .any(|(n, _)| *n == TreeNode::Xref("SITE".into())));
+        let _ = app.update(Message::LayerShow(TreeNode::Xref("site".into())));
+        assert_eq!(shown(&app), ["SITE|ROAD"]);
+        // Layers of the selected objects follow the selection.
+        app.tabs[i].scene.select_entity(on_zulu, false);
+        let _ = app.update(Message::LayerShow(TreeNode::Selected));
+        assert_eq!(shown(&app), ["ZULU"]);
+        // A LAYERFILTER filter is a node too.
+        let _ = app.run_command_line("LAYERFILTER NEW LETTERS A*,Z*");
+        let _ = app.update(Message::LayerShow(TreeNode::Filter("LETTERS".into())));
+        assert_eq!(shown(&app), ["ALPHA", "ZULU"]);
+        let _ = app.update(Message::LayerShow(TreeNode::All));
+        assert_eq!(shown(&app).len(), 4);
+    }
+
+    /// #2610 (J6): layer filters live in the drawing — one undo step to make,
+    /// undone like anything else; a filter under another sits deeper in the
+    /// tree and takes only what its parent does; the search text becomes a
+    /// filter; the ribbon's list can follow the tree.
+    #[test]
+    fn layer_filters_in_the_drawing_nested_saved_from_search() {
+        use crate::app::filter_dialog::FilterMsg;
+        use crate::filter::{Condition, Filter, Item, Match};
+        use crate::ui::window::layers::TreeNode;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        app.finish_pending_history(i);
+        let _ = app.run_command_line("LAYERFILTER NEW LETTERS A*,Z*");
+        let stored = |app: &OpenCADStudio| {
+            crate::app::layer_filter_store::stored_layer_filters(
+                &app.tabs[app.active_tab].scene.document,
+            )
+        };
+        assert_eq!(stored(&app).len(), 1, "kept in the drawing");
+        app.undo_active_tab();
+        assert!(stored(&app).is_empty());
+        app.refresh_layer_counts();
+        assert!(
+            app.tabs[i].layers.filters.is_empty(),
+            "undone in the tree too"
+        );
+        let _ = app.run_command_line("LAYERFILTER NEW LETTERS A*,Z*");
+        // ZULUS under LETTERS: Z* within A*,Z*.
+        app.filter_open_layers(
+            "ZULUS".into(),
+            Filter {
+                root: Match::All,
+                items: vec![Item::Condition(Condition {
+                    property: Some("name".into()),
+                    value: "Z*".into(),
+                    ..Default::default()
+                })],
+            },
+        );
+        let _ = app.update(Message::FilterDialog(FilterMsg::LayerParent(
+            "LETTERS".into(),
+        )));
+        let _ = app.update(Message::FilterDialog(FilterMsg::SaveLayerFilter));
+        let saved = stored(&app);
+        let zulus = saved.iter().find(|f| f.name == "ZULUS").unwrap();
+        assert_eq!(zulus.parent.as_deref(), Some("LETTERS"));
+        app.refresh_layer_counts();
+        let panel = &app.tabs[i].layers;
+        let at = panel
+            .filters
+            .iter()
+            .position(|(f, _)| f == "ZULUS")
+            .unwrap();
+        assert_eq!(panel.filter_depths[at], 1);
+        assert_eq!(panel.filters[at].1, ["ZULU"]);
+        // The search text as a filter.
+        app.tabs[i].layers.filter = "AL".into();
+        let _ = app.update(Message::LayerSaveSearch);
+        assert!(stored(&app).iter().any(|f| f.name == "AL"));
+        assert_eq!(app.tabs[i].layers.view, TreeNode::Filter("AL".into()));
+        assert!(app.tabs[i].layers.filter.is_empty());
+        // The ribbon follows the tree: ALPHA (and the current layer).
+        let _ = app.update(Message::LayerRibbonFollows(true));
+        let _ = app.update(Message::LayerShow(TreeNode::Filter("AL".into())));
+        let names: Vec<String> = app
+            .ribbon
+            .layer_infos
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert!(names.contains(&"ALPHA".to_string()));
+        assert!(!names.contains(&"ZULU".to_string()) || app.tabs[i].active_layer == "ZULU");
+        let _ = app.update(Message::LayerRibbonFollows(false));
+    }
+
+    /// #2610 (F1): a group with a space in its name is renamed in place and
+    /// deleted from the tree's menu; a filter is renamed too, and a taken
+    /// name is refused.
+    #[test]
+    fn tree_rename_and_delete_with_spaces() {
+        use crate::ui::window::layers::{TreeAction, TreeNode};
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let _ = app.update(Message::LayerSelect("ZULU".into()));
+        let _ = app.update(Message::LayerGroupNew);
+        let group = app.tabs[i].layers.groups[0].0.clone();
+        assert!(
+            group.contains(' '),
+            "a default name like `Group 1` has a space"
+        );
+        let node = TreeNode::Group(group.clone());
+        let _ = app.update(Message::LayerTreeAction(node.clone(), TreeAction::Rename));
+        assert_eq!(app.tabs[i].layers.tree_rename, Some((node, group.clone())));
+        let _ = app.update(Message::LayerTreeRenameEdit("1. csoport".into()));
+        let _ = app.update(Message::LayerTreeRenameCommit);
+        assert_eq!(app.tabs[i].layers.groups[0].0, "1. csoport");
+        assert_eq!(app.tabs[i].layers.groups[0].1, ["ZULU"]);
+        let _ = app.update(Message::LayerTreeAction(
+            TreeNode::Group("1. csoport".into()),
+            TreeAction::Delete,
+        ));
+        assert!(
+            app.tabs[i].layers.groups.is_empty(),
+            "deleted despite the space"
+        );
+        // A filter: renamed; a second one may not take its name.
+        let _ = app.run_command_line("LAYERFILTER NEW LETTERS A*,Z*");
+        let _ = app.run_command_line("LAYERFILTER NEW OTHERS O*");
+        let _ = app.update(Message::LayerTreeAction(
+            TreeNode::Filter("LETTERS".into()),
+            TreeAction::Rename,
+        ));
+        let _ = app.update(Message::LayerTreeRenameEdit("Letters A-Z".into()));
+        let _ = app.update(Message::LayerTreeRenameCommit);
+        assert!(app.layer_filters.iter().any(|f| f.name == "Letters A-Z"));
+        let _ = app.update(Message::LayerTreeAction(
+            TreeNode::Filter("OTHERS".into()),
+            TreeAction::Rename,
+        ));
+        let _ = app.update(Message::LayerTreeRenameEdit("letters a-z".into()));
+        let _ = app.update(Message::LayerTreeRenameCommit);
+        assert!(app.layer_filters.iter().any(|f| f.name == "OTHERS"));
+    }
+
+    /// #2610 (F1): the row menu's group ticks add and take out; rows dropped
+    /// on a group join it; a node's eye lights all its layers; "Unused
+    /// layers" opens Purge with them ticked.
+    #[test]
+    fn groups_from_menu_and_drop_node_eye_and_purge() {
+        use crate::ui::window::layers::{LayerMenuAction, TreeAction, TreeNode};
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let _ = app.run_command_line("LAYERGROUP NEW WALLS ZULU");
+        let members = |app: &OpenCADStudio| app.tabs[app.active_tab].layers.groups[0].1.clone();
+        // ALPHA in by the menu, out again by its tick.
+        let _ = app.update(Message::LayerMenu(
+            "ALPHA".into(),
+            LayerMenuAction::AddToGroup("WALLS".into()),
+        ));
+        assert_eq!(members(&app).len(), 2);
+        let _ = app.update(Message::LayerMenu(
+            "ALPHA".into(),
+            LayerMenuAction::AddToGroup("WALLS".into()),
+        ));
+        assert_eq!(members(&app), ["ZULU"]);
+        // A press on ALPHA, released on the group: it joins.
+        let _ = app.update(Message::LayerSelect("ALPHA".into()));
+        let _ = app.update(Message::LayerDragOver(Some("WALLS".into())));
+        assert_eq!(app.tabs[i].layers.drag_over.as_deref(), Some("WALLS"));
+        let _ = app.update(Message::LayerDrop("WALLS".into()));
+        assert_eq!(members(&app).len(), 2);
+        // Released on the row instead: no drop afterwards.
+        let _ = app.run_command_line("LAYERGROUP REMOVE WALLS ALPHA");
+        let _ = app.update(Message::LayerSelect("ALPHA".into()));
+        let _ = app.update(Message::LayerDragEnd);
+        let _ = app.update(Message::LayerDrop("WALLS".into()));
+        assert_eq!(members(&app), ["ZULU"]);
+        // The group's eye lights ZULU only; again, off.
+        let node = TreeNode::Group("WALLS".into());
+        let _ = app.update(Message::LayerNodeEye(node.clone()));
+        assert_eq!(app.tabs[i].layers.eye_layers, ["ZULU"]);
+        let _ = app.update(Message::LayerNodeEye(node));
+        assert!(app.tabs[i].layers.eye_layers.is_empty());
+        // Purge with the unused layers ticked (no objects anywhere).
+        let _ = app.update(Message::LayerTreeAction(
+            TreeNode::Unused,
+            TreeAction::Purge,
+        ));
+        let state = app.purge_dialog.as_ref().expect("Purge opens");
+        let ticked: Vec<&str> = state.items[0]
+            .iter()
+            .filter(|(_, t)| *t)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(ticked.contains(&"ZULU") && ticked.contains(&"ALPHA"));
+    }
+
+    /// #2610 (F1): FILTER's "Open in Layer manager" opens the pallet the way
+    /// LAYERS does, and after closing it LAYERS opens it again (it stayed
+    /// "open" with no window and could not be opened).
+    #[test]
+    fn open_in_layer_manager_then_layers_again() {
+        use crate::app::filter_dialog::FilterMsg;
+        let mut app = app_with_zulu_alpha();
+        app.show_layers = false;
+        let _ = app.update(Message::FilterDialog(FilterMsg::Open(None)));
+        let _ = app.update(Message::FilterDialog(FilterMsg::ShowLayers));
+        assert!(app.show_layers);
+        assert!(app.dock_panel_visible(crate::ui::dock::PanelId::Layers));
+        let _ = app.update(Message::ToggleLayers);
+        assert!(!app.show_layers);
+        let _ = app.update(Message::ToggleLayers);
+        assert!(app.show_layers);
+        assert!(app.dock_panel_visible(crate::ui::dock::PanelId::Layers));
+    }
+
+    /// #2610: the tree as in the mockup: "All" with its count, Groups and
+    /// Property filters as sections that close, a group deleted from its
+    /// node's menu, and New Filter starting empty whatever the search says.
+    #[test]
+    fn layer_tree_sections_counts_and_group_delete() {
+        use crate::ui::window::layers::{TreeAction, TreeNode, TreeRow, TreeSection};
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let _ = app.run_command_line("LAYERGROUP NEW WALLS ZULU");
+        let _ = app.run_command_line("LAYERFILTER NEW LETTERS A*,Z*");
+        app.sync_layer_panel(i);
+        app.refresh_layer_counts();
+        let rows = app.tabs[i].layers.tree_rows();
+        let group = TreeRow::Node(TreeNode::Group("WALLS".into()), 2);
+        let filter = TreeRow::Node(TreeNode::Filter("LETTERS".into()), 2);
+        assert_eq!(rows[0], TreeRow::Section(TreeSection::All, 0));
+        assert!(rows.contains(&TreeRow::Section(TreeSection::Groups, 1)));
+        assert!(rows.contains(&group));
+        assert!(rows.contains(&filter));
+        let panel = &app.tabs[i].layers;
+        assert_eq!(panel.node_count(&TreeNode::Group("WALLS".into())), 1);
+        assert_eq!(panel.node_count(&TreeNode::Filter("LETTERS".into())), 2);
+        // A closed section hides its nodes, "All" closed hides the rest.
+        let _ = app.update(Message::LayerTreeSection(TreeSection::Groups));
+        let rows = app.tabs[i].layers.tree_rows();
+        assert!(!rows.contains(&group) && rows.contains(&filter));
+        let _ = app.update(Message::LayerTreeSection(TreeSection::All));
+        assert_eq!(app.tabs[i].layers.tree_rows().len(), 1);
+        let _ = app.update(Message::LayerTreeSection(TreeSection::All));
+        let _ = app.update(Message::LayerTreeSection(TreeSection::Groups));
+        assert!(app.tabs[i].layers.tree_rows().contains(&group));
+        // The group goes from its node's menu; the node shown falls back.
+        let _ = app.update(Message::LayerShow(TreeNode::Group("WALLS".into())));
+        let _ = app.update(Message::LayerTreeAction(
+            TreeNode::Group("WALLS".into()),
+            TreeAction::Delete,
+        ));
+        app.sync_layer_panel(i);
+        assert_eq!(app.tabs[i].layers.view, TreeNode::All);
+        assert!(app.tabs[i].layers.groups.is_empty());
+        assert!(app.tabs[i].layers.layers.iter().any(|l| l.name == "ZULU"));
+        // New Filter: no first row from the search text.
+        app.tabs[i].layers.filter = "LU".into();
+        let _ = app.update(Message::LayerFilterEdit(Some(String::new())));
+        let state = app.filter_dialog.as_ref().expect("FILTER over the layers");
+        assert_eq!(state.live_count, 3, "an empty row finds every layer");
+    }
+
+    /// #2610: a layer filter made with FILTER's rows over layer properties,
+    /// then switched as a whole from its tree node.
+    #[test]
+    fn layer_filter_from_the_editor_and_the_node_menu() {
+        use crate::app::filter_dialog::{FilterMsg, FilterRow, FilterRowEdit};
+        use crate::ui::window::layers::{TreeAction, TreeNode};
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        // The search text becomes the first row.
+        app.tabs[i].layers.filter = "LU".into();
+        let _ = app.update(Message::LayerFilterEdit(None));
+        let state = app.filter_dialog.as_ref().expect("FILTER over the layers");
+        assert_eq!(state.layer_filter.as_deref(), Some(""));
+        assert_eq!(state.live_count, 1, "*LU* finds ZULU");
+        assert!(state
+            .properties_for(None)
+            .iter()
+            .any(|p| p.field == "frozen"));
+        // Or: not frozen and named A* or Z*.
+        let edit = |app: &mut OpenCADStudio, row, e| {
+            let _ = app.update(Message::FilterDialog(FilterMsg::Edit(row, e)));
+        };
+        edit(
+            &mut app,
+            FilterRow::Root(0),
+            FilterRowEdit::Value("A*,Z*".into()),
+        );
+        assert_eq!(app.filter_dialog.as_ref().unwrap().live_count, 2);
+        let _ = app.update(Message::FilterDialog(FilterMsg::LayerName(
+            "Letters".into(),
+        )));
+        let _ = app.update(Message::FilterDialog(FilterMsg::SaveLayerFilter));
+        assert!(app.filter_dialog.is_none());
+        let node = TreeNode::Filter("Letters".into());
+        assert_eq!(app.tabs[i].layers.view, node);
+        assert_eq!(app.tabs[i].layers.node_layers(&node).len(), 2);
+        // The node's menu freezes both at once, one undo step.
+        app.finish_pending_history(i);
+        let before = app.tabs[i].history.undo_stack.len();
+        let _ = app.update(Message::LayerTreeAction(node.clone(), TreeAction::Freeze));
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .is_frozen());
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ALPHA")
+            .unwrap()
+            .is_frozen());
+        assert_eq!(app.tabs[i].history.undo_stack.len(), before + 1);
+        // Edit opens it again; Delete removes it, the layers stay.
+        let _ = app.update(Message::LayerTreeAction(node.clone(), TreeAction::Edit));
+        assert_eq!(
+            app.filter_dialog.as_ref().unwrap().layer_filter.as_deref(),
+            Some("Letters")
+        );
+        let _ = app.update(Message::FilterDialog(FilterMsg::Close));
+        let _ = app.update(Message::LayerTreeAction(node, TreeAction::Delete));
+        assert!(app.layer_filters.is_empty());
+        assert_eq!(app.tabs[i].layers.view, TreeNode::All);
+    }
+
+    /// #2610: LAYERP undoes layer-property changes only, newest first, and
+    /// says so when there is nothing left.
+    #[test]
+    fn layerp_steps_back_through_layer_changes() {
+        use document::entities::Line;
+        use document::types::Vector3;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let _ = app.update(Message::LayerToggleFreeze("ZULU".into()));
+        let _ = app.update(Message::LayerToggleLock("ALPHA".into()));
+        // A drawing change in between is not LAYERP's.
+        let line = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+            )));
+        let _ = app.run_command_line("LAYERP");
+        assert!(!app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ALPHA")
+            .unwrap()
+            .is_locked());
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .is_frozen());
+        let _ = app.run_command_line("LAYERP");
+        assert!(!app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .is_frozen());
+        assert!(app.tabs[i].scene.document.get_entity(line).is_some());
+        app.command_line.last_error = None;
+        let before = app.command_line.history.len();
+        let _ = app.run_command_line("LAYERP");
+        assert!(
+            app.command_line.history.len() > before,
+            "it says there is nothing left"
+        );
+        // LAYERP itself is one ordinary undo step.
+        app.undo_active_tab();
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .is_frozen());
+    }
+
+    /// #2610: Show lights the selected layers' objects; FILTER's result can
+    /// open in the manager; a row can start FILTER and take merges.
+    #[test]
+    fn layer_manager_and_drawing_work_together() {
+        use crate::app::filter_dialog::{FilterMsg, FilterRow, FilterRowEdit};
+        use crate::ui::window::layers::{LayerMenuAction, TreeNode};
+        use document::entities::{Circle, Line};
+        use document::types::Vector3;
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.show_layers = true;
+        app.dock_open_at_default(crate::ui::dock::PanelId::Layers);
+        let mut line = Line::from_points(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0));
+        line.common.layer = "ZULU".into();
+        let on_zulu = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(line));
+        let mut circle = Circle::new();
+        circle.common.layer = "ALPHA".into();
+        let on_alpha = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Circle(circle));
+        app.tabs[i].scene.bump_geometry();
+
+        let _ = app.update(Message::LayerEye("ZULU".into()));
+        let lit = app.tabs[i].scene.hover_highlight_handles();
+        assert!(lit.contains(&on_zulu) && !lit.contains(&on_alpha));
+        assert_eq!(app.tabs[i].layers.highlighted, 1);
+        assert!(
+            app.tabs[i].scene.selected.is_empty(),
+            "showing doesn't select"
+        );
+        // Two eyes light both layers; the eye of ZULU off leaves ALPHA.
+        let _ = app.update(Message::LayerEye("alpha".into()));
+        assert_eq!(app.tabs[i].layers.highlighted, 2);
+        let _ = app.update(Message::LayerEye("zulu".into()));
+        let lit = app.tabs[i].scene.hover_highlight_handles();
+        assert!(!lit.contains(&on_zulu) && lit.contains(&on_alpha));
+        let _ = app.update(Message::LayerEye("ALPHA".into()));
+        assert!(app.tabs[i].scene.hover_highlight_handles().is_empty());
+
+        // A row's "Filter objects..." starts FILTER on its layer.
+        let _ = app.update(Message::LayerMenu(
+            "ALPHA".into(),
+            LayerMenuAction::FilterObjects,
+        ));
+        assert_eq!(app.filter_dialog.as_ref().unwrap().live_count, 1);
+        // FILTER's result opens in the manager as its own node.
+        let _ = app.update(Message::FilterDialog(FilterMsg::Edit(
+            FilterRow::Root(0),
+            FilterRowEdit::Value("*".into()),
+        )));
+        let _ = app.update(Message::FilterDialog(FilterMsg::ShowLayers));
+        assert!(app.filter_dialog.is_none());
+        assert_eq!(app.tabs[i].layers.view, TreeNode::Found);
+        assert_eq!(
+            app.tabs[i].layers.node_layers(&TreeNode::Found),
+            ["ALPHA", "ZULU"]
+        );
+
+        // Merge: ZULU selected, right-click ALPHA.
+        let _ = app.update(Message::LayerShow(TreeNode::All));
+        let _ = app.update(Message::LayerSelect("ZULU".into()));
+        let _ = app.update(Message::LayerMenu(
+            "ALPHA".into(),
+            LayerMenuAction::MergeHere,
+        ));
+        assert!(!app.tabs[i].scene.document.layers.contains("ZULU"));
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .get_entity(on_zulu)
+                .unwrap()
+                .common()
+                .layer,
+            "ALPHA"
+        );
+    }
+
+    #[test]
+    fn layer_description_is_typed_and_applied_in_one_step() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        app.finish_pending_history(i);
+        let before = app.tabs[i].history.undo_stack.len();
+        for typed in ["W", "Walls"] {
+            let _ = app.update(Message::LayerDescriptionEdit("ZULU".into(), typed.into()));
+        }
+        assert_eq!(
+            app.tabs[i].history.undo_stack.len(),
+            before,
+            "typing alone changes nothing"
+        );
+        let _ = app.update(Message::LayerDescriptionFocus(None));
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("ZULU")
+                .unwrap()
+                .description,
+            "Walls"
+        );
+        assert_eq!(row(&app, "ZULU").description, "Walls");
+        assert_eq!(app.tabs[i].history.undo_stack.len(), before + 1);
+        let _ = app.update(Message::LayerDescriptionEdit("ZULU".into(), "Doors".into()));
+        let _ = app.update(Message::ShortcutPressed("ESCAPE".into()));
+        assert_eq!(
+            app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("ZULU")
+                .unwrap()
+                .description,
+            "Walls"
+        );
+        app.undo_active_tab();
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .description
+            .is_empty());
+    }
+
+    #[test]
+    fn plot_toggle_keeps_the_row_order_like_the_other_toggles() {
+        let mut app = app_with_zulu_alpha();
+        let i = app.active_tab;
+        let _ = app.update(Message::LayerSort(LayerSortCol::Plot));
+        let order = |app: &OpenCADStudio| -> Vec<String> {
+            app.tabs[i]
+                .layers
+                .layers
+                .iter()
+                .map(|l| l.name.clone())
+                .collect()
+        };
+        let before = order(&app);
+        let _ = app.update(Message::LayerTogglePlot("ZULU".to_string()));
+        assert_eq!(order(&app), before);
+        assert!(
+            !app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get("ZULU")
+                .unwrap()
+                .is_plottable
+        );
     }
 }
 
@@ -5560,14 +7838,14 @@ mod tablestyle_ribbon_tests {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
-        let mut extra = codec::objects::TableStyle::standard();
+        let mut extra = document::objects::TableStyle::standard();
         extra.name = "EXTRA".to_string();
         extra.handle = app.tabs[i].scene.document.allocate_handle();
         app.tabs[i]
             .scene
             .document
             .objects
-            .insert(extra.handle, codec::objects::ObjectType::TableStyle(extra));
+            .insert(extra.handle, document::objects::ObjectType::TableStyle(extra));
         app.tabs[i].dirty = false;
         let _ = app.on_ribbon_style_changed(StyleKey::TableStyle, "EXTRA".to_string());
         assert_eq!(
@@ -5586,14 +7864,14 @@ mod tablestyle_ribbon_tests {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
-        let mut extra = codec::objects::TableStyle::standard();
+        let mut extra = document::objects::TableStyle::standard();
         extra.name = "EXTRA".to_string();
         extra.handle = app.tabs[i].scene.document.allocate_handle();
         app.tabs[i]
             .scene
             .document
             .objects
-            .insert(extra.handle, codec::objects::ObjectType::TableStyle(extra));
+            .insert(extra.handle, document::objects::ObjectType::TableStyle(extra));
         let _ = app.on_ribbon_style_changed(StyleKey::TableStyle, "EXTRA".to_string());
         app.open_table_insert();
         assert_eq!(
@@ -5613,53 +7891,11 @@ mod tablestyle_buffer_tests {
     fn table_new_reloads_cell_buffers() {
         let mut app = OpenCADStudio::new_for_test();
         app.automation_op(r#"{"op":"new"}"#);
-        app.ts_cell_textstyle[0] = "STALE_SENTINEL".to_string();
+        app.ts_cell_height = "STALE_SENTINEL".to_string();
         let _ = app.style_new(StyleKind::Table);
         assert_ne!(
-            app.ts_cell_textstyle[0], "STALE_SENTINEL",
+            app.ts_cell_height, "STALE_SENTINEL",
             "buffers must reload from the fresh style"
-        );
-    }
-
-    #[test]
-    fn table_cell_unknown_text_style_is_rejected() {
-        let mut app = OpenCADStudio::new_for_test();
-        app.automation_op(r#"{"op":"new"}"#);
-        let i = app.active_tab;
-        let style_name = app.tabs[i]
-            .scene
-            .document
-            .objects
-            .values()
-            .find_map(|o| match o {
-                codec::objects::ObjectType::TableStyle(s) => Some(s.name.clone()),
-                _ => None,
-            })
-            .expect("fresh doc ships a table style");
-        app.tablestyle_selected = style_name.clone();
-        app.ts_cell_textstyle[0] = "NOPE".to_string();
-        let before = app.command_line.history.len();
-        let _ = app.on_table_style_cell_apply(0);
-        let cell_name = app.tabs[i]
-            .scene
-            .document
-            .objects
-            .values()
-            .find_map(|o| match o {
-                codec::objects::ObjectType::TableStyle(s) if s.name == style_name => {
-                    Some(s.data_row_style.text_style_name.clone())
-                }
-                _ => None,
-            })
-            .unwrap();
-        assert_ne!(cell_name, "NOPE", "dangling name must not persist");
-        assert_eq!(
-            app.ts_cell_textstyle[0], "NOPE",
-            "rejected text stays in the buffer for correction"
-        );
-        assert!(
-            app.command_line.history.len() > before,
-            "rejection must say something"
         );
     }
 }
@@ -5667,14 +7903,14 @@ mod tablestyle_buffer_tests {
 #[cfg(test)]
 mod plot_style_ctb_guard_tests {
     use crate::app::OpenCADStudio;
-    use codec::entities::Line;
-    use codec::types::Vector3;
+    use document::entities::Line;
+    use document::types::Vector3;
 
-    fn line_handle(app: &mut OpenCADStudio) -> codec::Handle {
+    fn line_handle(app: &mut OpenCADStudio) -> document::Handle {
         let mut line = Line::new();
         line.start = Vector3::ZERO;
         line.end = Vector3::new(1.0, 0.0, 0.0);
-        app.commit_entity_handle(codec::EntityType::Line(line))
+        app.commit_entity_handle(document::EntityType::Line(line))
             .expect("line should commit")
     }
 
@@ -5751,6 +7987,148 @@ mod tab_close_tests {
         );
     }
 
+    /// A closing drawing takes its remembered ATTDEF placement with it: the
+    /// coordinates belong to the drawing that placed them.
+    #[test]
+    fn closing_a_tab_drops_the_place_it_remembered() {
+        let mut app = three_tabs();
+        let i = app
+            .tabs
+            .iter()
+            .position(|tab| !tab.is_start)
+            .expect("a drawing tab, not the fixed start page");
+        let id = app.tabs[i].id;
+        crate::modules::draw::draw::attdef::session().set_place(id, &Default::default());
+        assert!(
+            crate::modules::draw::draw::attdef::session().last_in(id).is_some(),
+            "the drawing remembered a place"
+        );
+
+        let _ = app.update(Message::TabClose(id));
+
+        assert!(
+            crate::modules::draw::draw::attdef::session()
+                .last_in(id)
+                .is_none(),
+            "the place belonged to the drawing that just closed"
+        );
+    }
+
+    /// Discarding through the unsaved prompt is a close as much as clicking
+    /// the × is: the discarded drawing's remembered place goes with it, and a
+    /// drawing that stayed open keeps its own.
+    #[test]
+    fn discarding_a_dirty_tab_drops_the_place_it_remembered() {
+        let mut app = three_tabs();
+        let kept_id = app.tabs[1].id;
+        let closed_id = app.tabs[2].id;
+        crate::modules::draw::draw::attdef::session().set_place(kept_id, &Default::default());
+        crate::modules::draw::draw::attdef::session().set_place(closed_id, &Default::default());
+        assert!(
+            crate::modules::draw::draw::attdef::session()
+                .last_in(closed_id)
+                .is_some(),
+            "the drawing remembered a place"
+        );
+        app.tabs[2].dirty = true;
+
+        let _ = app.update(Message::TabClose(closed_id));
+        assert!(
+            app.pending_close.is_some(),
+            "closing a dirty drawing opens the unsaved prompt"
+        );
+        let _ = app.update(Message::UnsavedDialogDiscard);
+
+        assert!(
+            app.tabs.iter().all(|t| t.id != closed_id),
+            "the discarded drawing is gone"
+        );
+        assert!(
+            crate::modules::draw::draw::attdef::session()
+                .last_in(closed_id)
+                .is_none(),
+            "and the place it remembered went with it"
+        );
+        assert!(
+            crate::modules::draw::draw::attdef::session()
+                .last_in(kept_id)
+                .is_some(),
+            "the drawing still open keeps its own place"
+        );
+    }
+
+    /// A text line is remembered the same way an attribute placement is: the
+    /// next TEXT in the drawing continues below it, so closing the drawing has
+    /// to take the line with it.
+    #[test]
+    fn closing_a_tab_drops_the_line_it_remembered() {
+        let mut app = three_tabs();
+        let i = app
+            .tabs
+            .iter()
+            .position(|tab| !tab.is_start)
+            .expect("a drawing tab, not the fixed start page");
+        let id = app.tabs[i].id;
+        crate::modules::annotate::text::session().set_place(id, &Default::default());
+        assert!(
+            crate::modules::annotate::text::session()
+                .last_in(id)
+                .is_some(),
+            "the drawing remembered a line"
+        );
+
+        let _ = app.update(Message::TabClose(id));
+
+        assert!(
+            crate::modules::annotate::text::session()
+                .last_in(id)
+                .is_none(),
+            "the line belonged to the drawing that just closed"
+        );
+    }
+
+    /// Discarding a dirty drawing ends it just as closing does, so its line
+    /// goes too — while the drawings still open keep theirs.
+    #[test]
+    fn discarding_a_dirty_tab_drops_the_line_it_remembered() {
+        let mut app = three_tabs();
+        let kept_id = app.tabs[1].id;
+        let closed_id = app.tabs[2].id;
+        crate::modules::annotate::text::session().set_place(kept_id, &Default::default());
+        crate::modules::annotate::text::session().set_place(closed_id, &Default::default());
+        assert!(
+            crate::modules::annotate::text::session()
+                .last_in(closed_id)
+                .is_some(),
+            "the drawing remembered a line"
+        );
+        app.tabs[2].dirty = true;
+
+        let _ = app.update(Message::TabClose(closed_id));
+        assert!(
+            app.pending_close.is_some(),
+            "closing a dirty drawing opens the unsaved prompt"
+        );
+        let _ = app.update(Message::UnsavedDialogDiscard);
+
+        assert!(
+            app.tabs.iter().all(|t| t.id != closed_id),
+            "the discarded drawing is gone"
+        );
+        assert!(
+            crate::modules::annotate::text::session()
+                .last_in(closed_id)
+                .is_none(),
+            "the discarded drawing's line went with it"
+        );
+        assert!(
+            crate::modules::annotate::text::session()
+                .last_in(kept_id)
+                .is_some(),
+            "the drawing still open keeps its own line"
+        );
+    }
+
     /// Double-clicking one tab's × in a single batch must close that tab
     /// exactly once; the second message must not slide onto the tab that
     /// shifted into its place.
@@ -5814,4 +8192,206 @@ mod tab_close_tests {
         assert!(app.pending_close.is_none(), "pending target consumed");
         assert!(app.active_tab < app.tabs.len(), "active tab stays valid");
     }
+}
+
+#[cfg(test)]
+mod grip_ctrl_cycle_tests {
+    use crate::app::{Message, OpenCADStudio};
+    use crate::scene::model::object::GripMenuAction;
+    use document::entities::LwPolyline;
+    use document::types::Vector2;
+    use document::{EntityType, Handle};
+    use glam::DVec3;
+
+    fn app_with_polyline() -> (OpenCADStudio, usize, Handle) {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let polyline = LwPolyline::from_points(vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(10.0, 0.0),
+            Vector2::new(10.0, 10.0),
+        ]);
+        let handle = app.tabs[i]
+            .scene
+            .add_entity(EntityType::LwPolyline(polyline));
+        app.tabs[i].scene.selected.insert(handle);
+        app.refresh_selected_grips();
+        (app, i, handle)
+    }
+
+    fn pick_up(app: &mut OpenCADStudio, i: usize, handle: Handle, grip_id: usize, at: DVec3) {
+        let edit = app.grip_edit_for_hit(i, handle, grip_id, false, at);
+        app.tabs[i].active_grip = Some(edit);
+    }
+
+    fn press_ctrl(app: &mut OpenCADStudio) {
+        let _ = app.update(Message::SetModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        });
+        let _ = app.update(Message::SetModifiers {
+            shift: false,
+            ctrl: false,
+            alt: false,
+        });
+    }
+
+    fn polyline(app: &OpenCADStudio, i: usize, handle: Handle) -> LwPolyline {
+        match app.tabs[i].scene.document.get_entity(handle) {
+            Some(EntityType::LwPolyline(polyline)) => polyline.clone(),
+            other => panic!("expected a polyline, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_cycles_a_vertex_grip_and_a_full_turn_changes_nothing() {
+        let (mut app, i, handle) = app_with_polyline();
+        let dirty = app.tabs[i].dirty;
+        pick_up(&mut app, i, handle, 1, DVec3::new(10.0, 0.0, 0.0));
+
+        press_ctrl(&mut app);
+        assert_eq!(
+            polyline(&app, i, handle).vertices.len(),
+            4,
+            "Add Vertex is provisional"
+        );
+        assert_eq!(app.grip_ctrl_one_shot(i), None);
+        assert_eq!(
+            app.tabs[i].active_grip.as_ref().map(|grip| grip.grip_id),
+            Some(2)
+        );
+
+        press_ctrl(&mut app);
+        assert_eq!(
+            polyline(&app, i, handle).vertices.len(),
+            3,
+            "Add Vertex left behind"
+        );
+        assert_eq!(
+            app.grip_ctrl_one_shot(i),
+            Some(GripMenuAction::RemoveVertex)
+        );
+
+        press_ctrl(&mut app);
+        assert_eq!(polyline(&app, i, handle).vertices.len(), 3);
+        assert_eq!(app.grip_ctrl_one_shot(i), None);
+        assert_eq!(
+            app.tabs[i].active_grip.as_ref().map(|grip| grip.grip_id),
+            Some(1)
+        );
+        assert_eq!(
+            app.tabs[i].dirty, dirty,
+            "a full turn leaves the drawing clean"
+        );
+    }
+
+    #[test]
+    fn the_click_after_ctrl_removes_the_vertex_as_one_undo_step() {
+        let (mut app, i, handle) = app_with_polyline();
+        pick_up(&mut app, i, handle, 1, DVec3::new(10.0, 0.0, 0.0));
+        press_ctrl(&mut app);
+        press_ctrl(&mut app);
+
+        // The cursor has nothing to place while the removal waits for a click.
+        let _ = app.update(Message::ViewportMove(iced::Point::new(50.0, 50.0)));
+        assert_eq!(
+            polyline(&app, i, handle).vertices[1].location,
+            Vector2::new(10.0, 0.0)
+        );
+
+        let _ = app.on_viewport_left_release();
+        assert_eq!(polyline(&app, i, handle).vertices.len(), 2);
+        assert!(app.tabs[i].active_grip.is_none());
+        assert!(app.grip_ctrl_cycle.is_none());
+
+        let _ = app.update(Message::Undo);
+        assert_eq!(polyline(&app, i, handle).vertices.len(), 3);
+    }
+
+    #[test]
+    fn ctrl_cycles_a_midpoint_grip_through_add_vertex_and_arc() {
+        let (mut app, i, handle) = app_with_polyline();
+        // Grips 0..3 are the vertices; grip 3 is the first segment's midpoint.
+        pick_up(&mut app, i, handle, 3, DVec3::new(5.0, 0.0, 0.0));
+
+        press_ctrl(&mut app);
+        assert_eq!(polyline(&app, i, handle).vertices.len(), 4);
+
+        press_ctrl(&mut app);
+        let arc = polyline(&app, i, handle);
+        assert_eq!(arc.vertices.len(), 3);
+        assert!(
+            arc.vertices[0].bulge.abs() > 1e-9,
+            "the segment is an arc while placing"
+        );
+
+        press_ctrl(&mut app);
+        let back = polyline(&app, i, handle);
+        assert_eq!(back.vertices.len(), 3);
+        assert_eq!(
+            back.vertices[0].bulge, 0.0,
+            "leaving the stage restores the line"
+        );
+    }
+
+    #[test]
+    fn escape_during_the_cycle_restores_the_polyline() {
+        let (mut app, i, handle) = app_with_polyline();
+        pick_up(&mut app, i, handle, 1, DVec3::new(10.0, 0.0, 0.0));
+        press_ctrl(&mut app);
+        assert!(app.cancel_active_grip_edit());
+        assert_eq!(polyline(&app, i, handle).vertices.len(), 3);
+        assert!(app.tabs[i].active_grip.is_none());
+        assert!(app.grip_ctrl_cycle.is_none());
+    }
+
+    #[test]
+    fn ctrl_leaves_other_grips_alone() {
+        use document::entities::Line;
+        use document::types::Vector3;
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let line = Line::from_points(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
+        let handle = app.tabs[i].scene.add_entity(EntityType::Line(line));
+        app.tabs[i].scene.selected.insert(handle);
+        app.refresh_selected_grips();
+        pick_up(&mut app, i, handle, 0, DVec3::ZERO);
+        press_ctrl(&mut app);
+        assert!(app.grip_ctrl_cycle.is_none());
+        assert_eq!(
+            app.tabs[i].active_grip.as_ref().map(|grip| grip.grip_id),
+            Some(0)
+        );
+    }
+}
+
+/// Why `new` can't be the name of layer `old`, or `None` when the rename can
+/// go ahead. The same rules the document applies, said in the user's words.
+pub(super) fn layer_rename_problem(
+    document: &document::Document,
+    old: &str,
+    new: &str,
+) -> Option<String> {
+    if old == "0" || old.eq_ignore_ascii_case("Defpoints") || old.contains('|') {
+        return Some(crate::tf!("Layer \"{old}\" can't be renamed.").into_owned());
+    }
+    if !crate::scene::valid_block_name(new) {
+        return Some(
+            crate::tf!("\"{new}\" isn't a valid layer name (no < > / \\ \" : ; ? * | , = `).")
+                .into_owned(),
+        );
+    }
+    // A case-only change finds the layer itself, which is fine.
+    if document.layers.get(new).is_some_and(|taken| taken.name != old) {
+        return Some(crate::tf!("A layer named \"{new}\" already exists.").into_owned());
+    }
+    None
+}
+
+/// Layers the Layer manager never deletes; the rule lives with the table.
+pub(super) fn layer_is_protected(name: &str, current: &str) -> bool {
+    crate::ui::window::layers::layer_is_protected(name, current)
 }

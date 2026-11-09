@@ -249,11 +249,11 @@ pub struct HatchModel {
     /// Per-ring DXF role, aligned with the NaN-separated boundary paths.
     pub boundary_exterior: Option<Arc<Vec<bool>>>,
     /// Source entity handles for each boundary ring.
-    pub boundary_sources: Option<Arc<Vec<Vec<codec::Handle>>>>,
+    pub boundary_sources: Option<Arc<Vec<Vec<document::Handle>>>>,
     /// Exact boundary paths retained for persistence and editing.
-    pub boundary_paths: Option<Arc<Vec<codec::entities::BoundaryPath>>>,
+    pub boundary_paths: Option<Arc<Vec<document::entities::BoundaryPath>>>,
     /// Island handling used by the persisted hatch entity.
-    pub style: codec::entities::HatchStyleType,
+    pub style: document::entities::HatchStyleType,
     /// Fill pattern.
     pub pattern: HatchPattern,
     /// Catalog name for this pattern (e.g. "ANSI31", "SOLID", "LINEAR").
@@ -282,8 +282,8 @@ pub struct HatchModel {
 /// One rule for every consumer: the model rebuilt from a stored hatch
 /// (`scene/entity.rs`) and the previews the HATCH dialog draws. Keeping two
 /// copies would let the preview show rings the committed hatch later drops.
-pub fn island_ring_kept(style: codec::entities::HatchStyleType, depth: usize) -> bool {
-    use codec::entities::HatchStyleType as Style;
+pub fn island_ring_kept(style: document::entities::HatchStyleType, depth: usize) -> bool {
+    use document::entities::HatchStyleType as Style;
     match style {
         Style::Normal => true,
         Style::Outer => depth <= 1,
@@ -1155,7 +1155,7 @@ mod tests {
 #[cfg(test)]
 mod island_rule_tests {
     use super::island_ring_kept;
-    use codec::entities::HatchStyleType as Style;
+    use document::entities::HatchStyleType as Style;
 
     #[test]
     fn normal_keeps_every_ring() {

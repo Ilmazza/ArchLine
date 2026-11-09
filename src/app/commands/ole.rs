@@ -4,7 +4,7 @@
 
 use crate::app::{Message, OpenCADStudio};
 use crate::entities::ole2frame::{self, FrameState};
-use codec::{EntityType, Handle};
+use document::{EntityType, Handle};
 use iced::Task;
 
 /// OLEQUALITY: the plot quality new OLE objects take (0 monochrome, 1 low
@@ -59,7 +59,7 @@ impl OpenCADStudio {
                     .entities()
                     .filter_map(|entity| match entity {
                         EntityType::Ole2Frame(ole)
-                            if ole.ole_object_type == codec::entities::OleObjectType::Link =>
+                            if ole.ole_object_type == document::entities::OleObjectType::Link =>
                         {
                             Some(ole.source_application.clone())
                         }
@@ -96,7 +96,7 @@ impl OpenCADStudio {
         let ask = |app: &mut Self| {
             let current = app.ole_variable(i, name);
             app.command_line
-                .push_output(&format!("Enter new value for {name} <{current}>:"));
+                .push_output(&crate::ui::command_line::value_prompt(&name, &current));
             app.pending_setvar = Some(name.to_string());
         };
         let Some(value) = value else {
@@ -114,12 +114,12 @@ impl OpenCADStudio {
                 }
                 Ok(_) => {
                     self.command_line
-                        .push_error("Cannot set MSOLESCALE to that value.");
+                        .push_rejection("Cannot set MSOLESCALE to that value.");
                     self.command_line.push_output("*Invalid*");
                 }
                 Err(_) => {
                     self.command_line
-                        .push_error("Requires numeric distance or two points.");
+                        .push_rejection("Requires numeric distance or two points.");
                     ask(self);
                 }
             }
@@ -129,7 +129,7 @@ impl OpenCADStudio {
             return Task::none();
         };
         let Some(v) = value.parse::<i16>().ok().filter(|v| (min..=max).contains(v)) else {
-            self.command_line.push_error(message);
+            self.command_line.push_rejection(message);
             ask(self);
             return Task::none();
         };
@@ -251,7 +251,7 @@ impl OpenCADStudio {
         &self,
         i: usize,
         handle: Handle,
-        ole: &codec::entities::Ole2Frame,
+        ole: &document::entities::Ole2Frame,
         sections: &mut [crate::scene::model::object::PropSection],
     ) {
         use crate::scene::model::object::PropValue;
@@ -282,7 +282,7 @@ impl OpenCADStudio {
 }
 
 /// MSOLESCALE of the drawing (1 when not set).
-fn ms_ole_scale(document: &codec::Document) -> f64 {
+fn ms_ole_scale(document: &document::Document) -> f64 {
     crate::io::drawing_variable(document, "MSOLESCALE")
         .and_then(|value| value.trim().parse::<f64>().ok())
         .unwrap_or(1.0)

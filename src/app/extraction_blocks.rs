@@ -3,7 +3,7 @@
 //! DATAEXTRACTION's block and attribute columns are upstream's since v2026.43;
 //! what stays here is how two block references are told apart.
 
-use codec::{Document, EntityType};
+use document::{Document, EntityType};
 
 /// The block a reference stands for: its dynamic definition rather than the
 /// anonymous `*U` copy, so references of one block group together.
@@ -23,11 +23,11 @@ pub(crate) fn block_identity(doc: &Document, entity: &EntityType) -> String {
 #[cfg(test)]
 mod tests {
     use crate::scene::Scene;
-    use codec::entities::Insert;
-    use codec::types::Vector3;
-    use codec::EntityType;
+    use document::entities::Insert;
+    use document::types::Vector3;
+    use document::EntityType;
 
-    fn add_insert(scene: &mut Scene, block: &str, x: f64) -> codec::Handle {
+    fn add_insert(scene: &mut Scene, block: &str, x: f64) -> document::Handle {
         scene.add_entity(EntityType::Insert(Insert::new(block, Vector3::new(x, 0.0, 0.0))))
     }
 

@@ -3,17 +3,17 @@
 use crate::host::HostApi;
 use crate::ipc::protocol::{PluginRequest, PluginResponse};
 
-fn addressable_document_snapshot(host: &dyn HostApi) -> codec::Document {
+fn addressable_document_snapshot(host: &dyn HostApi) -> document::Document {
     let mut snapshot = host.document().clone();
     let attributes = host
         .document()
         .entities()
         .filter_map(|entity| match entity {
-            codec::EntityType::Insert(insert) => Some(insert.attributes.clone()),
+            document::EntityType::Insert(insert) => Some(insert.attributes.clone()),
             _ => None,
         })
         .flatten()
-        .map(codec::EntityType::AttributeEntity)
+        .map(document::EntityType::AttributeEntity)
         .collect::<Vec<_>>();
     for attribute in attributes {
         // Attribute entities remain canonical children of INSERT in the host
@@ -243,6 +243,11 @@ pub fn handle_plugin_request(
         SampleParametric { chain, s } => {
             PluginResponse::SampleParametricResult(host.sample_parametric(&chain, s))
         }
+        ValidateParametricChain { chain, tolerance } => {
+            PluginResponse::ValidateParametricChainResult(
+                host.validate_parametric_chain(&chain, tolerance),
+            )
+        }
         RegisterPluginClass { class } => {
             PluginResponse::RegisterPluginClassResult(host.register_plugin_class(
                 &plugin_id,
@@ -267,6 +272,45 @@ pub fn handle_plugin_request(
         }
         TogglePanel { panel_id, show } => {
             PluginResponse::PanelToggled(host.toggle_panel(&panel_id, show))
+        }
+        RegisterQuadPanels { panels } => {
+            // API v15: the owning plugin's id is transport identity (see
+            // handle_plugin_request's doc), so one plugin's registration can
+            // never rewrite another plugin's panel. The outcome shape is one
+            // entry per panel; refused entries get a short reason string (a
+            // capable host reports its own specific reason on the command
+            // line; the wire reason stays honest and short).
+            let ok = host.register_quad_panels(plugin_id, &panels);
+            let errors: Vec<String> = ok
+                .iter()
+                .map(|accepted| {
+                    if *accepted {
+                        String::new()
+                    } else {
+                        "quad panel refused".to_owned()
+                    }
+                })
+                .collect();
+            PluginResponse::QuadPanelsRegistered { ok, errors }
+        }
+        UnregisterQuadPanels { panel_ids } => {
+            // API v15: the ownership law runs both ways — the transport's
+            // plugin id scopes the removal exactly like RegisterQuadPanels
+            // scopes the registration, so one plugin can never remove
+            // another plugin's panel.
+            let refs: Vec<&str> = panel_ids.iter().map(String::as_str).collect();
+            let ok = host.unregister_quad_panels(plugin_id, &refs);
+            let errors: Vec<String> = ok
+                .iter()
+                .map(|accepted| {
+                    if *accepted {
+                        String::new()
+                    } else {
+                        "quad panel not owned".to_owned()
+                    }
+                })
+                .collect();
+            PluginResponse::QuadPanelsRegistered { ok, errors }
         }
     }
 }

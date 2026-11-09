@@ -1,5 +1,5 @@
 use crate::t;
-use codec::entities::{RasterImage, Wipeout};
+use document::entities::{RasterImage, Wipeout};
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
@@ -18,7 +18,7 @@ use crate::scene::text::lff;
 /// The four world-space corners of an image/wipeout (the codec's
 /// `corners()`) as plain arrays, counter-clockwise from the origin:
 /// origin, +U·W, +U·W+V·H, +V·H.
-fn world_corners(corners: [codec::types::Vector3; 4]) -> [[f64; 3]; 4] {
+fn world_corners(corners: [document::types::Vector3; 4]) -> [[f64; 3]; 4] {
     corners.map(|c| [c.x, c.y, c.z])
 }
 
@@ -45,7 +45,7 @@ fn image_wire(corners: [[f64; 3]; 4], with_x: bool) -> Vec<[f64; 3]> {
 /// shows only while both the clip state and the display flag are on (the
 /// OFF option clears the flag and keeps the state).
 pub(crate) fn image_clip_polygon(img: &RasterImage) -> Option<Vec<[f64; 2]>> {
-    use codec::entities::{ClipType, ImageDisplayFlags};
+    use document::entities::{ClipType, ImageDisplayFlags};
     if !img.clipping_enabled || !img.flags.contains(ImageDisplayFlags::USE_CLIPPING_BOUNDARY) {
         return None;
     }
@@ -71,7 +71,7 @@ pub(crate) fn image_clip_polygon(img: &RasterImage) -> Option<Vec<[f64; 2]>> {
 
 /// World point → raster clip space (the inverse of `image_clip_polygon`'s
 /// mapping), for the clip commands.
-pub(crate) fn image_world_to_clip(img: &RasterImage, p: [f64; 3]) -> codec::types::Vector2 {
+pub(crate) fn image_world_to_clip(img: &RasterImage, p: [f64; 3]) -> document::types::Vector2 {
     let (u, v) = (&img.u_vector, &img.v_vector);
     let d = [p[0] - img.insertion_point.x, p[1] - img.insertion_point.y];
     // Solve d = a·u + b·v in the image plane (x/y components).
@@ -84,7 +84,7 @@ pub(crate) fn image_world_to_clip(img: &RasterImage, p: [f64; 3]) -> codec::type
     } else {
         (0.0, 0.0)
     };
-    codec::types::Vector2::new(a - 0.5, img.size.y - b - 0.5)
+    document::types::Vector2::new(a - 0.5, img.size.y - b - 0.5)
 }
 
 fn reflect_vec3(vx: &mut f64, vy: &mut f64, ax: f64, ay: f64, len2: f64) {
@@ -96,7 +96,7 @@ fn reflect_vec3(vx: &mut f64, vy: &mut f64, ax: f64, ay: f64, len2: f64) {
 // ── RasterImage ───────────────────────────────────────────────────────────────
 
 impl RenderConvertible for RasterImage {
-    fn to_render(&self, document: &codec::Document) -> Option<RenderEntity> {
+    fn to_render(&self, document: &document::Document) -> Option<RenderEntity> {
         let corners = world_corners(self.corners());
 
         // Helper: pixel-space → world-space point.
@@ -126,7 +126,7 @@ impl RenderConvertible for RasterImage {
                 let mut ring: Vec<[f64; 3]> =
                     poly.iter().map(|p| px_to_world(p[0], p[1])).collect();
                 ring.push(ring[0]);
-                if self.clip_boundary.clip_mode == codec::entities::ClipMode::Inside {
+                if self.clip_boundary.clip_mode == document::entities::ClipMode::Inside {
                     let mut frame = image_wire(corners, false);
                     frame.push([f64::NAN; 3]);
                     frame.extend(ring);
@@ -290,11 +290,11 @@ impl PropertyEditable for RasterImage {
         let scale = self.u_vector.length();
         let show_image = self
             .flags
-            .contains(codec::entities::ImageDisplayFlags::SHOW_IMAGE);
+            .contains(document::entities::ImageDisplayFlags::SHOW_IMAGE);
         let show_clipped = self
             .flags
-            .contains(codec::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY);
-        let clip_inverted = self.clip_boundary.clip_mode == codec::entities::ClipMode::Inside;
+            .contains(document::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY);
+        let clip_inverted = self.clip_boundary.clip_mode == document::entities::ClipMode::Inside;
         let transparency = self.common.transparency.to_string();
         let whole = |label: &str, field: &'static str, value: u8| Property {
             label: t!(label).into_owned(),
@@ -374,7 +374,7 @@ impl PropertyEditable for RasterImage {
                 let on = if value == "toggle" {
                     !self
                         .flags
-                        .contains(codec::entities::ImageDisplayFlags::SHOW_IMAGE)
+                        .contains(document::entities::ImageDisplayFlags::SHOW_IMAGE)
                 } else {
                     value == "true"
                 };
@@ -385,27 +385,27 @@ impl PropertyEditable for RasterImage {
                 let on = if value == "toggle" {
                     !self
                         .flags
-                        .contains(codec::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY)
+                        .contains(document::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY)
                 } else {
                     value == "true"
                 };
                 if on {
-                    self.flags |= codec::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
+                    self.flags |= document::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
                 } else {
-                    self.flags &= !codec::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
+                    self.flags &= !document::entities::ImageDisplayFlags::USE_CLIPPING_BOUNDARY;
                 }
                 return;
             }
             "ri_clip_inverted" => {
                 let on = if value == "toggle" {
-                    self.clip_boundary.clip_mode != codec::entities::ClipMode::Inside
+                    self.clip_boundary.clip_mode != document::entities::ClipMode::Inside
                 } else {
                     value == "true"
                 };
                 self.clip_boundary.clip_mode = if on {
-                    codec::entities::ClipMode::Inside
+                    document::entities::ClipMode::Inside
                 } else {
-                    codec::entities::ClipMode::Outside
+                    document::entities::ClipMode::Outside
                 };
                 return;
             }
@@ -453,12 +453,22 @@ impl Transformable for RasterImage {
 
 // ── Wipeout ───────────────────────────────────────────────────────────────────
 
+/// Whether the wipeout hides what lies behind it: Show image and Show
+/// clipped on, Background transparency off.
+pub(crate) fn wipeout_masks(wipeout: &Wipeout) -> bool {
+    use document::entities::WipeoutDisplayFlags as Flags;
+    wipeout.flags.contains(Flags::SHOW_IMAGE)
+        && wipeout.flags.contains(Flags::USE_CLIPPING_BOUNDARY)
+        && wipeout.clipping_enabled
+        && !wipeout.flags.contains(Flags::TRANSPARENCY_ON)
+}
+
 fn wipeout_is_polygonal(wipeout: &Wipeout) -> bool {
     wipeout.clipping_enabled
         && wipeout.clip_boundary_vertices.len() >= 3
         && matches!(
             wipeout.clip_type,
-            codec::entities::WipeoutClipType::Polygonal
+            document::entities::WipeoutClipType::Polygonal
         )
 }
 
@@ -486,16 +496,16 @@ fn wipeout_boundary(wipeout: &Wipeout) -> Vec<[f64; 3]> {
     }
 }
 
-fn wipeout_world_to_clip(wipeout: &Wipeout, world: [f64; 3]) -> Option<codec::types::Vector2> {
+fn wipeout_world_to_clip(wipeout: &Wipeout, world: [f64; 3]) -> Option<document::types::Vector2> {
     let [x, y] = wipeout_plane(wipeout).project(world)?;
-    Some(codec::types::Vector2::new(
+    Some(document::types::Vector2::new(
         x - wipeout.size.x * 0.5,
         wipeout.size.y * 0.5 - y,
     ))
 }
 
 impl RenderConvertible for Wipeout {
-    fn to_render(&self, _document: &codec::Document) -> Option<RenderEntity> {
+    fn to_render(&self, _document: &document::Document) -> Option<RenderEntity> {
         let boundary = wipeout_boundary(self);
         let mut pts = boundary.clone();
         if let Some(&first) = pts.first() {
@@ -520,16 +530,15 @@ impl RenderConvertible for Wipeout {
 impl Grippable for Wipeout {
     fn grips(&self) -> Vec<GripDef> {
         if wipeout_is_polygonal(self) {
-            wipeout_boundary(self)
+            // One grip per corner: the repeated closing point has none.
+            let mut boundary = wipeout_boundary(self);
+            if boundary.len() > 3 && boundary.first() == boundary.last() {
+                boundary.pop();
+            }
+            boundary
                 .into_iter()
                 .enumerate()
-                .map(|(i, point)| {
-                    if i == 0 {
-                        square_grip(i, glam::DVec3::from(point))
-                    } else {
-                        center_grip(i, glam::DVec3::from(point))
-                    }
-                })
+                .map(|(i, point)| square_grip(i, glam::DVec3::from(point)))
                 .collect()
         } else {
             let corners = world_corners(self.corners());
@@ -555,7 +564,15 @@ impl Grippable for Wipeout {
                     GripApply::Absolute(p) => [p.x as f64, p.y as f64, p.z as f64],
                 };
                 if let Some(clip) = wipeout_world_to_clip(self, new_w) {
+                    let closes = self.clip_boundary_vertices.len() > 3
+                        && self.clip_boundary_vertices.first() == self.clip_boundary_vertices.last();
                     self.clip_boundary_vertices[grip_id] = clip;
+                    // The first corner is repeated to close the boundary.
+                    if grip_id == 0 && closes {
+                        if let Some(last) = self.clip_boundary_vertices.last_mut() {
+                            *last = clip;
+                        }
+                    }
                 }
             }
             return;
@@ -621,15 +638,15 @@ impl Grippable for Wipeout {
         };
         if width.abs() > 1e-9 && height.abs() > 1e-9 {
             self.insertion_point =
-                codec::types::Vector3::new(insertion.x, insertion.y, insertion.z);
+                document::types::Vector3::new(insertion.x, insertion.y, insertion.z);
             let sx = self.size.x.abs().max(1e-9);
             let sy = self.size.y.abs().max(1e-9);
-            self.u_vector = codec::types::Vector3::new(
+            self.u_vector = document::types::Vector3::new(
                 u_hat.x * width / sx,
                 u_hat.y * width / sx,
                 u_hat.z * width / sx,
             );
-            self.v_vector = codec::types::Vector3::new(
+            self.v_vector = document::types::Vector3::new(
                 v_hat.x * height / sy,
                 v_hat.y * height / sy,
                 v_hat.z * height / sy,
@@ -642,31 +659,35 @@ impl PropertyEditable for Wipeout {
     fn geometry_properties(&self, _text_style_names: &[String]) -> Vec<PropSection> {
         let show_image = self
             .flags
-            .contains(codec::entities::WipeoutDisplayFlags::SHOW_IMAGE);
+            .contains(document::entities::WipeoutDisplayFlags::SHOW_IMAGE);
         let show_clipped = self
             .flags
-            .contains(codec::entities::WipeoutDisplayFlags::USE_CLIPPING_BOUNDARY);
+            .contains(document::entities::WipeoutDisplayFlags::USE_CLIPPING_BOUNDARY);
         let bg_transparency = self
             .flags
-            .contains(codec::entities::WipeoutDisplayFlags::TRANSPARENCY_ON);
+            .contains(document::entities::WipeoutDisplayFlags::TRANSPARENCY_ON);
         let width = self.width();
         let height = self.height();
         let rotation = self.u_vector.y.atan2(self.u_vector.x).to_degrees();
+        // The reference shows a wipeout's image adjustment but does not
+        // let it be edited (the palette's fields are read-only).
+        let whole = |label: &str, field: &'static str, value: u8| Property {
+            label: t!(label).into_owned(),
+            field,
+            value: PropValue::ReadOnly(value.to_string()),
+        };
+        let toggle = |label: &str, field: &'static str, value: bool| Property {
+            label: t!(label).into_owned(),
+            field,
+            value: PropValue::BoolToggle { field, value },
+        };
         vec![
             PropSection {
                 title: t!("Image Adjust").into_owned(),
                 props: vec![
-                    ro(
-                        t!("Brightness").as_ref(),
-                        "wo_brightness",
-                        self.brightness.to_string(),
-                    ),
-                    ro(
-                        t!("Contrast").as_ref(),
-                        "wo_contrast",
-                        self.contrast.to_string(),
-                    ),
-                    ro(t!("Fade").as_ref(), "wo_fade", self.fade.to_string()),
+                    whole("Brightness", "wo_brightness", self.brightness),
+                    whole("Contrast", "wo_contrast", self.contrast),
+                    whole("Fade", "wo_fade", self.fade),
                 ],
             },
             PropSection {
@@ -678,33 +699,52 @@ impl PropertyEditable for Wipeout {
                     edit_angle(t!("Rotation").as_ref(), "wo_rotation", rotation),
                     edit(t!("Width").as_ref(), "wo_width", width),
                     edit(t!("Height").as_ref(), "wo_height", height),
-                    ro(t!("Scale").as_ref(), "wo_scale", "1"),
+                    edit(t!("Scale").as_ref(), "wo_scale", 1.0),
                 ],
             },
             PropSection {
                 title: t!("Misc").into_owned(),
                 props: vec![
-                    ro(
-                        t!("Show image").as_ref(),
-                        "wo_show_image",
-                        if show_image { t!("Yes") } else { t!("No") },
-                    ),
-                    ro(
-                        t!("Show clipped").as_ref(),
-                        "wo_show_clipped",
-                        if show_clipped { t!("Yes") } else { t!("No") },
-                    ),
-                    ro(
-                        t!("Background transparency").as_ref(),
-                        "wo_bg_transparency",
-                        if bg_transparency { t!("Yes") } else { t!("No") },
-                    ),
+                    toggle("Show image", "wo_show_image", show_image),
+                    toggle("Show clipped", "wo_show_clipped", show_clipped),
+                    toggle("Background transparency", "wo_bg_transparency", bg_transparency),
                 ],
+            },
+            // The transparent colour of a bitonal image; a wipeout has none.
+            PropSection {
+                title: t!("Misc").into_owned(),
+                props: vec![ro(t!("Transparency Color").as_ref(), "wo_transparency_color", "")],
             },
         ]
     }
 
     fn apply_geom_prop(&mut self, field: &str, value: &str) {
+        use document::entities::WipeoutDisplayFlags as Flags;
+        let flag = match field {
+            "wo_show_image" => Some(Flags::SHOW_IMAGE),
+            "wo_show_clipped" => Some(Flags::USE_CLIPPING_BOUNDARY),
+            "wo_bg_transparency" => Some(Flags::TRANSPARENCY_ON),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            let on = if value == "toggle" { !self.flags.contains(flag) } else { value == "true" };
+            self.flags.set(flag, on);
+            if flag == Flags::USE_CLIPPING_BOUNDARY {
+                self.clipping_enabled = on;
+            }
+            return;
+        }
+        if field == "wo_scale" {
+            // Scale about the insertion point; the row reads 1 again after.
+            if let Some(factor) = parse_f64(value).filter(|factor| factor.is_finite() && *factor > 0.0) {
+                for vector in [&mut self.u_vector, &mut self.v_vector] {
+                    vector.x *= factor;
+                    vector.y *= factor;
+                    vector.z *= factor;
+                }
+            }
+            return;
+        }
         if field == "wo_rotation" {
             let Some(target_degrees) = parse_angle_deg(value).filter(|value| value.is_finite())
             else {
@@ -731,8 +771,8 @@ impl PropertyEditable for Wipeout {
             let rotation = glam::DQuat::from_axis_angle(normal, angle);
             let u = rotation * u;
             let v = rotation * v;
-            self.u_vector = codec::types::Vector3::new(u.x, u.y, u.z);
-            self.v_vector = codec::types::Vector3::new(v.x, v.y, v.z);
+            self.u_vector = document::types::Vector3::new(u.x, u.y, u.z);
+            self.v_vector = document::types::Vector3::new(v.x, v.y, v.z);
             return;
         }
 
@@ -801,8 +841,8 @@ mod wipeout_property_tests {
             ([1.0, 0.0, 1.0], [0.0, 1.0, 0.0], 45.0),
         ] {
             let mut wipeout = Wipeout::new();
-            wipeout.u_vector = codec::types::Vector3::new(u[0], u[1], u[2]);
-            wipeout.v_vector = codec::types::Vector3::new(v[0], v[1], v[2]);
+            wipeout.u_vector = document::types::Vector3::new(u[0], u[1], u[2]);
+            wipeout.v_vector = document::types::Vector3::new(v[0], v[1], v[2]);
             let lengths = (wipeout.u_vector.length(), wipeout.v_vector.length());
 
             wipeout.apply_geom_prop("wo_rotation", &target.to_string());

@@ -155,7 +155,7 @@ impl OpenCADStudio {
                     .paper_space_linetype_scaling,
             ) | (i16::from(self.tabs[i].scene.document.header.paper_space_limit_check) << 1);
         for obj in self.tabs[i].scene.document.objects.values_mut() {
-            if let codec::objects::ObjectType::Layout(layout) = obj {
+            if let document::objects::ObjectType::Layout(layout) = obj {
                 if layout.name == name {
                     layout.flags = layout_flags;
                     crate::scene::apply_default_page_setup(layout, &plot_style);
@@ -191,7 +191,7 @@ impl OpenCADStudio {
         let mut ps = self.tabs[i]
             .scene
             .plot_settings_for(&layout)
-            .unwrap_or_else(|| codec::objects::PlotSettings::new(String::new()));
+            .unwrap_or_else(|| document::objects::PlotSettings::new(String::new()));
         if let Some(paper) = req["paper"].as_str().filter(|p| !p.is_empty()) {
             let resolved = crate::io::paper_catalog::resolve(paper)
                 .ok_or_else(|| failure("invalid_paper", format!("Unknown paper '{paper}'")))?;
@@ -203,9 +203,9 @@ impl OpenCADStudio {
                 .as_str()
                 .is_some_and(|o| o.eq_ignore_ascii_case("portrait"))
             {
-                codec::objects::PlotRotation::None
+                document::objects::PlotRotation::None
             } else {
-                codec::objects::PlotRotation::Degrees90
+                document::objects::PlotRotation::Degrees90
             };
         }
         if let Some(fit) = req["fit"].as_bool() {
@@ -243,7 +243,7 @@ impl OpenCADStudio {
         if let Some(window) = req["window"].as_array().filter(|v| v.len() == 4) {
             let coord = |k: usize| window[k].as_f64().unwrap_or(0.0);
             ps.set_plot_window(coord(0), coord(1), coord(2), coord(3));
-            ps.plot_type = codec::objects::PlotType::Window;
+            ps.plot_type = document::objects::PlotType::Window;
         }
         self.push_undo_snapshot(i, "PAGESETUP");
         if !self.tabs[i].scene.set_layout_plot_settings(&layout, &ps) {
@@ -267,8 +267,13 @@ impl OpenCADStudio {
     }
 
     /// `entities_copy_to` — copy entities into another open document
-    /// Referenced layer definitions travel along;
-    /// the new handles are returned.
+    /// The dependency snapshot the interactive copy takes travels with them:
+    /// referenced layers, linetypes and styles, and every block definition the
+    /// source holds for the copied references — transitively, with its object
+    /// graph — so a moved reference keeps pointing at a record the target has.
+    /// A reference whose definition the source itself does not hold stays a
+    /// dangling reference here, as it does when the drawing is loaded, and the
+    /// audit reports it. The new handles are returned.
     pub(super) fn control_entities_copy_to(&mut self, req: &Value) -> Result<Task<Message>, Value> {
         let handles = crate::app::control::entities::hex_handles(req, "handles")?;
         let target = req["target_document_id"]
@@ -286,62 +291,51 @@ impl OpenCADStudio {
             &handles,
         )?;
 
-        // Clone out of the source first so the two tabs never borrow together.
-        let cloned: Vec<codec::EntityType> = handles
-            .iter()
-            .filter_map(|handle| self.tabs[source_index].scene.document.get_entity(*handle))
-            .map(|entity| entity.clone())
-            .collect();
-
-        // Copy the referenced layer definitions out of the source before the
-        // target borrow starts (the two tabs never borrow together).
-        let mut missing_layers: Vec<codec::tables::Layer> = Vec::new();
-        // The APPIDs their XDATA names, so it is re-pointed at the target's.
-        let deps = crate::app::ClipboardDeps {
-            app_ids: crate::app::ClipboardDeps::capture(
-                &self.tabs[source_index].scene.document,
-                &cloned,
-            )
-            .app_ids,
-            ..Default::default()
+        // Snapshot out of the source first so the two tabs never borrow together.
+        use crate::app::command_driver::clipboard::{
+            copy_to_clipboard_kernel, finish_paste_in_scene, paste_entities_kernel, PasteSpace,
         };
-        {
-            let source_document = &self.tabs[source_index].scene.document;
-            for entity in &cloned {
-                let layer = entity.common().layer.clone();
-                if layer.is_empty()
-                    || layer == "0"
-                    || missing_layers.iter().any(|l| l.name == layer)
-                {
-                    continue;
-                }
-                if let Some(source_layer) = source_document.layers.get(&layer) {
-                    missing_layers.push(source_layer.clone());
-                }
-            }
-        }
+        let (cloned, deps) =
+            copy_to_clipboard_kernel(&self.tabs[source_index].scene.document, &handles);
 
         self.push_undo_snapshot(target_index, "COPYTO");
-        let mut created = Vec::new();
-        {
+        let created: Vec<String> = {
             let scene = &mut self.tabs[target_index].scene;
-            for layer_record in &missing_layers {
-                if !scene.document.layers.contains(&layer_record.name) {
-                    let mut layer_record = layer_record.clone();
-                    layer_record.handle = scene.document.allocate_handle();
-                    let _ = scene.document.layers.add(layer_record);
+            // New geometry lands in the space the target is editing: its block
+            // editor session, a paper layout with no active viewport, or model.
+            let layout = scene.current_layout.clone();
+            let space = match scene.block_edit_block {
+                Some(block) => PasteSpace::Block(block),
+                None if layout != "Model" && scene.active_viewport.is_none() => {
+                    PasteSpace::Layout(&layout)
                 }
-            }
-            use crate::app::command_driver::clipboard::{eed_app_map, merge_app_ids, remap_eed_apps};
-            merge_app_ids(&mut scene.document, &deps);
-            let apps = eed_app_map(&scene.document, &deps);
-            for mut entity in cloned {
-                remap_eed_apps(&mut entity, &apps);
-                let linetype = entity.common().linetype.clone();
+                None => PasteSpace::Model,
+            };
+            let first_new_handle = scene.document.next_handle();
+            let records_before = scene.document.block_records.len();
+            let (by_index, handle_map) =
+                paste_entities_kernel(&mut scene.document, &cloned, &deps, None, space);
+            for linetype in cloned.iter().map(|e| e.common().linetype.clone()) {
+                // The kernel copies the records the source declares; a linetype
+                // it only names still needs this drawing's catalogue entry.
                 crate::io::linetypes::ensure_catalog_linetype(&mut scene.document, &linetype);
-                created.push(format!("{:X}", scene.add_entity_clone(entity).value()));
             }
-        }
+            // Same Scene half an interactive paste runs, so a copied image,
+            // hatch, group or constraint arrives wired the way a pasted one does.
+            finish_paste_in_scene(
+                scene,
+                &deps,
+                &by_index,
+                &handle_map,
+                records_before,
+                first_new_handle,
+            );
+            by_index
+                .iter()
+                .filter(|handle| !handle.is_null())
+                .map(|handle| format!("{:X}", handle.value()))
+                .collect()
+        };
         self.tabs[target_index].dirty = true;
         self.post_ref_op(target_index);
         let created_count = created.len();
@@ -518,22 +512,22 @@ impl OpenCADStudio {
                     &mut self.tabs[i].scene.document,
                     handle,
                     FILE_IDENTITY_APP,
-                    Some(vec![codec::xdata::XDataValue::String(identity.clone())]),
+                    Some(vec![document::xdata::XDataValue::String(identity.clone())]),
                 );
             }
             None => {
-                let mut text = codec::entities::Text::with_value(
+                let mut text = document::entities::Text::with_value(
                     FILE_IDENTITY_APP,
-                    codec::types::Vector3::ZERO,
+                    document::types::Vector3::ZERO,
                 )
                 .with_height(0.0001);
                 text.common.invisible = true;
-                let handle = self.tabs[i].scene.add_entity(codec::EntityType::Text(text));
+                let handle = self.tabs[i].scene.add_entity(document::EntityType::Text(text));
                 crate::scene::view::dispatch::set_entity_xdata(
                     &mut self.tabs[i].scene.document,
                     handle,
                     FILE_IDENTITY_APP,
-                    Some(vec![codec::xdata::XDataValue::String(identity.clone())]),
+                    Some(vec![document::xdata::XDataValue::String(identity.clone())]),
                 );
             }
         }
@@ -548,7 +542,7 @@ impl OpenCADStudio {
 const FILE_IDENTITY_APP: &str = "SPMDOCUNIQUE";
 
 /// The handle of the entity carrying the file identity, if present.
-fn find_file_identity_marker(document: &codec::Document) -> Option<codec::Handle> {
+fn find_file_identity_marker(document: &document::Document) -> Option<document::Handle> {
     document
         .entities()
         .find(|entity| {
@@ -562,14 +556,14 @@ fn find_file_identity_marker(document: &codec::Document) -> Option<codec::Handle
 }
 
 /// The identity GUID from the marker entity's XData.
-fn marker_identity(document: &codec::Document, handle: codec::Handle) -> Option<String> {
+fn marker_identity(document: &document::Document, handle: document::Handle) -> Option<String> {
     let record = document
         .get_entity(handle)?
         .common()
         .extended_data
         .get_record(FILE_IDENTITY_APP)?;
     match record.values.first() {
-        Some(codec::xdata::XDataValue::String(text)) => Some(text.clone()),
+        Some(document::xdata::XDataValue::String(text)) => Some(text.clone()),
         _ => None,
     }
 }
@@ -664,7 +658,7 @@ fn read_sysvar(scene: &crate::scene::Scene, name: &str) -> Option<Value> {
     Some(value)
 }
 
-fn validate_sysvar(document: &codec::Document, name: &str, value: &Value) -> Result<(), Value> {
+fn validate_sysvar(document: &document::Document, name: &str, value: &Value) -> Result<(), Value> {
     let failure = |message: &str| crate::app::control::failure("invalid_sysvar_value", message);
     match name.to_ascii_lowercase().as_str() {
         "ltscale" => {
@@ -735,12 +729,12 @@ fn validate_sysvar(document: &codec::Document, name: &str, value: &Value) -> Res
     Ok(())
 }
 
-fn set_sysvar(document: &mut codec::Document, name: &str, value: &Value) -> Result<(), Value> {
+fn set_sysvar(document: &mut document::Document, name: &str, value: &Value) -> Result<(), Value> {
     validate_sysvar(document, name, value)?;
     let failure = |message: &str| crate::app::control::failure("invalid_sysvar_value", message);
     // The header and the tables are separate fields of the acadrust document;
     // borrow them through it, not through the whole Document.
-    let document: &mut codec::CadDocument = document;
+    let document: &mut document::CadDocument = document;
     let header = &mut document.header;
     match name.to_ascii_lowercase().as_str() {
         "ltscale" => {

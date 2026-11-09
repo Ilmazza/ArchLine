@@ -92,7 +92,7 @@ mod tests {
             .scene
             .document
             .entities()
-            .filter(|e| matches!(e, codec::EntityType::Hatch(_)))
+            .filter(|e| matches!(e, document::EntityType::Hatch(_)))
             .count()
     }
 

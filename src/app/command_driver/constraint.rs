@@ -1,5 +1,5 @@
 use super::*;
-use codec::EntityType;
+use document::EntityType;
 
 impl OpenCADStudio {
     pub(super) fn handle_open_auto_constrain_settings(&mut self) {
@@ -138,6 +138,33 @@ impl OpenCADStudio {
         None
     }
 
+    /// A constraint's solve covers its whole space, so it can move geometry
+    /// the command never named. Say so: the drawing has changed somewhere
+    /// the operator was not working, and nothing else would tell them.
+    pub(crate) fn report_pending_network_moves(&mut self, i: usize) {
+        let moved = std::mem::take(&mut self.tabs[i].scene.constraint_network_moves);
+        self.report_network_moves(moved);
+    }
+
+    fn report_network_moves(&mut self, mut moved: Vec<Handle>) {
+        moved.sort_unstable();
+        moved.dedup();
+        if moved.is_empty() {
+            return;
+        }
+        let noun = if moved.len() == 1 {
+            "entity"
+        } else {
+            "entities"
+        };
+        let handles: Vec<String> = moved.iter().map(|handle| handle.to_string()).collect();
+        self.command_line.push_output(&format!(
+            "The constraint network moved {} {noun} the command did not name: {}.",
+            moved.len(),
+            handles.join(", ")
+        ));
+    }
+
     /// The prompt names the first object as the reference, and a line pair
     /// that starts exactly perpendicular gives the cross-product relation no
     /// angular gradient — the first solve would stretch the second line
@@ -155,14 +182,14 @@ impl OpenCADStudio {
             .document
             .get_entity(datum.entity)
             .and_then(|entity| match entity {
-                codec::EntityType::Line(line) if datum.marker.is_none() => Some(line.clone()),
+                document::EntityType::Line(line) if datum.marker.is_none() => Some(line.clone()),
                 _ => None,
             })?;
         if moving.marker.is_some() {
             return None;
         }
         let before = self.tabs[i].scene.document.get_entity_arc(moving.entity)?;
-        let codec::EntityType::Line(moving_line) = before.as_ref() else {
+        let document::EntityType::Line(moving_line) = before.as_ref() else {
             return None;
         };
         let (ax, ay) = (
@@ -186,7 +213,7 @@ impl OpenCADStudio {
             tx = -tx;
             ty = -ty;
         }
-        let end = codec::types::Vector3::new(
+        let end = document::types::Vector3::new(
             moving_line.start.x + tx * moving_len,
             moving_line.start.y + ty * moving_len,
             moving_line.end.z,
@@ -197,7 +224,7 @@ impl OpenCADStudio {
         self.tabs[i]
             .scene
             .record_undo_before(moving.entity, Some(before.clone()));
-        if let Some(codec::EntityType::Line(line)) = self.tabs[i]
+        if let Some(document::EntityType::Line(line)) = self.tabs[i]
             .scene
             .document
             .get_entity_mut(moving.entity)
@@ -371,7 +398,7 @@ impl OpenCADStudio {
         let scope = self.tabs[i].current_parametric_scope();
         let resolved = {
             let document = &self.tabs[i].scene.document;
-            let world = codec::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z);
+            let world = document::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z);
             let reference = match pick.handle {
                 Some(handle) => nearest_parametric_point_on_entity(document, scope, handle, world),
                 None => nearest_parametric_point(document, scope, world, None),
@@ -398,6 +425,27 @@ impl OpenCADStudio {
             Some(result) => self.apply_cmd_result(result),
             None => Task::none(),
         }
+    }
+
+    /// The record the label keeps from creation: a model-space dimension names
+    /// the anonymous block that draws it, and that block holds the geometry the
+    /// solve left. Save reuses the same cache.
+    fn complete_created_dimension(
+        &mut self,
+        tab: usize,
+        dimension: document::Handle,
+        scope: crate::scene::parametric_constraints::ParametricScope,
+    ) {
+        if scope == crate::scene::parametric_constraints::ParametricScope::ModelSpace {
+            if let Some(document::EntityType::Dimension(d)) =
+                self.tabs[tab].scene.document.get_entity_mut(dimension)
+            {
+                d.base_mut().common.entity_mode = Some(2);
+            }
+        }
+        crate::modules::draw::modify::explode::bake_dimension_blocks(
+            &mut self.tabs[tab].scene.document,
+        );
     }
 
     pub(super) fn handle_add_dimensional_constraint(
@@ -540,7 +588,7 @@ impl OpenCADStudio {
             entity.as_entity_mut().set_layer(
                 crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
             );
-            entity.common_mut().color = codec::types::Color::Rgb {
+            entity.common_mut().color = document::types::Color::Rgb {
                 r: 103,
                 g: 109,
                 b: 118,
@@ -596,6 +644,7 @@ impl OpenCADStudio {
         // DYNCONSTRAINTDISPLAY 0 also keeps a new dynamic dimension off screen.
         self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
         self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+        self.complete_created_dimension(i, dimension, scope);
         self.tabs[i].dirty = true;
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
@@ -726,7 +775,7 @@ impl OpenCADStudio {
             entity.as_entity_mut().set_layer(
                 crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
             );
-            entity.common_mut().color = codec::types::Color::Rgb {
+            entity.common_mut().color = document::types::Color::Rgb {
                 r: 103,
                 g: 109,
                 b: 118,
@@ -774,6 +823,7 @@ impl OpenCADStudio {
             .bump_entities_after_constraint_added(&changes, &anchors, false, &[]);
         self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
         self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+        self.complete_created_dimension(i, dimension, scope);
         self.tabs[i].dirty = true;
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
@@ -919,7 +969,7 @@ impl OpenCADStudio {
             entity.as_entity_mut().set_layer(
                 crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
             );
-            entity.common_mut().color = codec::types::Color::Rgb {
+            entity.common_mut().color = document::types::Color::Rgb {
                 r: 103,
                 g: 109,
                 b: 118,
@@ -984,11 +1034,19 @@ impl OpenCADStudio {
             .into_iter()
             .map(|handle| (handle, crate::scene::ChangeKind::Modified))
             .collect();
-        self.tabs[i]
-            .scene
-            .bump_entities_after_constraint_added(&changes, &anchors, false, &[]);
+        // A corner between two sides is an angle, not a size: the sides keep
+        // the lengths they were drawn with. The 3-point form reaches its
+        // corner through the picked points' own entities, so it keeps the
+        // solver's freedom to resize them.
+        self.tabs[i].scene.bump_entities_after_constraint_added(
+            &changes,
+            &anchors,
+            self.constraint_solve_mode && kind == ConstraintKind::Angle,
+            &[],
+        );
         self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
         self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+        self.complete_created_dimension(i, dimension, scope);
         self.tabs[i].dirty = true;
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
@@ -1122,7 +1180,7 @@ impl OpenCADStudio {
 
         let scope = self.tabs[i].current_parametric_scope();
         let document = &self.tabs[i].scene.document;
-        let world = codec::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z);
+        let world = document::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z);
         let resolved = match (pick.whole_curve, pick.handle) {
             (true, Some(handle)) => parametric_curve_ref_for_pick(document, scope, handle, world)
                 .ok_or(FixConstraintCommand::INVALID_OBJECT),
@@ -1173,7 +1231,7 @@ impl OpenCADStudio {
         let found = nearest_parametric_point(
             &self.tabs[i].scene.document,
             scope,
-            codec::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z),
+            document::types::Vector3::new(pick.point.x, pick.point.y, pick.point.z),
             None,
         )
         .is_some();
@@ -1213,7 +1271,7 @@ impl OpenCADStudio {
         let vertical = kind == ConstraintKind::Vertical;
         let axis = if vertical { "Vertical" } else { "Horizontal" };
         let scope = self.tabs[i].current_parametric_scope();
-        let to_world = |point: glam::DVec3| codec::types::Vector3::new(point.x, point.y, point.z);
+        let to_world = |point: glam::DVec3| document::types::Vector3::new(point.x, point.y, point.z);
         let (refs, initial_fixed) = match selection {
             HorizontalConstraintSelection::Reference(reference) => {
                 // The reference turns the object about its first
@@ -1291,7 +1349,7 @@ impl OpenCADStudio {
             return Some(Task::none());
         }
         let direction =
-            codec::types::Vector3::new(direction.x / axis_length, direction.y / axis_length, 0.0);
+            document::types::Vector3::new(direction.x / axis_length, direction.y / axis_length, 0.0);
         if let Err(message) = self.tabs[i]
             .scene
             .validate_parametric_constraint(kind, &refs, None)
@@ -1461,7 +1519,7 @@ impl OpenCADStudio {
         use crate::scene::parametric_constraints::ConstraintKind;
 
         let scope = self.tabs[i].current_parametric_scope();
-        let to_world = |point: glam::DVec3| codec::types::Vector3::new(point.x, point.y, point.z);
+        let to_world = |point: glam::DVec3| document::types::Vector3::new(point.x, point.y, point.z);
         let resolve_point = |pick: crate::command::CoincidentPick| {
             if let Some(handle) = pick.handle {
                 crate::scene::parametric_constraints::nearest_parametric_point_on_entity(
@@ -1737,15 +1795,15 @@ impl OpenCADStudio {
         let (cx, cy, radius) = {
             let document = &self.tabs[i].scene.document;
             match document.get_entity(datum.entity)? {
-                codec::EntityType::Circle(circle) => {
+                document::EntityType::Circle(circle) => {
                     (circle.center.x, circle.center.y, circle.radius)
                 }
-                codec::EntityType::Arc(arc) => (arc.center.x, arc.center.y, arc.radius),
+                document::EntityType::Arc(arc) => (arc.center.x, arc.center.y, arc.radius),
                 _ => return None,
             }
         };
         let before = self.tabs[i].scene.document.get_entity_arc(moving.entity)?;
-        let codec::EntityType::Line(line) = before.as_ref() else {
+        let document::EntityType::Line(line) = before.as_ref() else {
             return None;
         };
         let (dx, dy) = (line.end.x - line.start.x, line.end.y - line.start.y);
@@ -1765,18 +1823,18 @@ impl OpenCADStudio {
         if shift.abs() <= 1.0e-12 {
             return None;
         }
-        let start = codec::types::Vector3::new(
+        let start = document::types::Vector3::new(
             line.start.x + nx * shift,
             line.start.y + ny * shift,
             line.start.z,
         );
-        let end = codec::types::Vector3::new(
+        let end = document::types::Vector3::new(
             line.end.x + nx * shift,
             line.end.y + ny * shift,
             line.end.z,
         );
         self.tabs[i].scene.record_undo_before(moving.entity, Some(before.clone()));
-        if let Some(codec::EntityType::Line(line)) = self.tabs[i]
+        if let Some(document::EntityType::Line(line)) = self.tabs[i]
             .scene
             .document
             .get_entity_mut(moving.entity)
@@ -1887,7 +1945,7 @@ impl OpenCADStudio {
             unreachable!("router only routes the matching variant");
         };
         let scope = self.tabs[i].current_parametric_scope();
-        let to_world = |p: glam::DVec3| codec::types::Vector3::new(p.x, p.y, p.z);
+        let to_world = |p: glam::DVec3| document::types::Vector3::new(p.x, p.y, p.z);
         let resolve = |pick: crate::command::CoincidentPick, exclude: Option<Handle>| {
             if pick.whole_curve {
                 pick.handle.and_then(|handle| {
@@ -1975,12 +2033,17 @@ impl OpenCADStudio {
             .copied()
             .map(|handle| (handle, crate::scene::ChangeKind::Modified))
             .collect();
-        self.tabs[i].scene.bump_entities_after_constraint_added(
-            &changes,
-            &[first_ref],
-            self.constraint_solve_mode,
-            &[],
-        );
+        // Constraint creation is not an active drag. Preserve the
+        // first-picked reference and let an already satisfied chain take
+        // the fixpoint/no-op path instead of reprojecting fresh geometry.
+        self.tabs[i]
+            .scene
+            .bump_entities_with_initial_parametric_policy(
+                &changes,
+                &[first_ref],
+                self.constraint_solve_mode,
+                &[],
+            );
         self.tabs[i].dirty = true;
         self.tabs[i].snap_result = None;
         if !multiple {
@@ -2044,7 +2107,9 @@ impl OpenCADStudio {
                 .copied()
                 .map(|handle| (handle, crate::scene::ChangeKind::Modified))
                 .collect();
-            self.tabs[i].scene.bump_entities(&changes);
+            self.tabs[i]
+                .scene
+                .bump_entities_after_constraint_added(&changes, &[], false, &[]);
             self.tabs[i].dirty = true;
             self.refresh_properties();
             if let Some(pd) = pending {
@@ -2072,7 +2137,7 @@ impl OpenCADStudio {
             unreachable!("router only routes the matching variant");
         };
         let scope = self.tabs[i].current_parametric_scope();
-        let to_world = |p: glam::DVec3| codec::types::Vector3::new(p.x, p.y, p.z);
+        let to_world = |p: glam::DVec3| document::types::Vector3::new(p.x, p.y, p.z);
         let resolved = crate::scene::parametric_constraints::nearest_parametric_point(
             &self.tabs[i].scene.document,
             scope,
@@ -2117,7 +2182,7 @@ impl OpenCADStudio {
     ) -> Option<Task<Message>> {
         let i = self.active_tab;
         let scope = self.tabs[i].current_parametric_scope();
-        let to_world = |p: glam::DVec3| codec::types::Vector3::new(p.x, p.y, p.z);
+        let to_world = |p: glam::DVec3| document::types::Vector3::new(p.x, p.y, p.z);
         let mut refs = Vec::with_capacity(4);
         for p in points {
             let Some(r) = crate::scene::parametric_constraints::nearest_parametric_point(

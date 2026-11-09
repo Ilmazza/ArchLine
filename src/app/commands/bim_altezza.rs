@@ -21,8 +21,8 @@ use crate::bim::{APP_LOCALE, APP_ZONA};
 use crate::command::{CadCommand, KeywordCommand};
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::scene::Scene;
-use codec::xdata::XDataValue;
-use codec::Handle;
+use document::xdata::XDataValue;
+use document::Handle;
 use iced::Task;
 use std::collections::HashMap;
 

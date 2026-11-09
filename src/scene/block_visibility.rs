@@ -9,14 +9,14 @@
 //! The definition itself shows the first state, so a reference to it needs
 //! no copy until another state is picked for it.
 
-use codec::objects::{
+use document::objects::{
     BlockElement, BlockEvalExpression, BlockEvalValue, BlockGrip, BlockGripExpression,
     BlockParameterPropertyInfo, BlockRepresentationData, BlockVisibilityParameter,
     BlockVisibilityState, DynamicBlockData, ObjectType,
 };
-use codec::types::Vector3;
-use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::{Document, EntityType, Handle};
+use document::types::Vector3;
+use document::xdata::{ExtendedDataRecord, XDataValue};
+use document::{Document, EntityType, Handle};
 
 use super::Scene;
 
@@ -58,7 +58,7 @@ impl Scene {
         handles
     }
 
-    pub(crate) fn display_entity_invisible(&self, common: &codec::entities::EntityCommon) -> bool {
+    pub(crate) fn display_entity_invisible(&self, common: &document::entities::EntityCommon) -> bool {
         if super::block_construction::is_construction(common) { return !self.construction_revealed(common.handle); }
         common.invisible && !self.visibility_revealed(common.handle)
     }
@@ -150,6 +150,20 @@ pub fn create(document: &mut Document, definition: Handle, location: Vector3) ->
     let (graph, slots) = super::block_authoring::prepare(document, definition).ok()?;
     register_classes(document, CLASSES);
     let [parameter, grip, x, y] = [(); 4].map(|_| document.allocate_handle());
+    // The copy matches governed objects by their representation tag and drops
+    // the untagged ones, and preparing only tags when the graph is new, so a
+    // definition that already carries a graph is tagged here.
+    super::block_authoring::tag_members(document, definition);
+    // The state set governs the objects the definition itself leaves on screen.
+    // A member hidden at the definition level stays outside the set: a state
+    // hides what the set governs and does not name, so admitting it would put
+    // an object the definition owns under the state's rule, and the reveal
+    // display would offer it as a state-hidden object.
+    let members: Vec<Handle> = definition_members(document, definition)
+        .into_iter()
+        .filter(|(_, shown)| *shown)
+        .map(|(handle, _)| handle)
+        .collect();
 
     store(
         document,
@@ -178,9 +192,10 @@ pub fn create(document: &mut Document, definition: Handle, location: Vector3) ->
             property_info_count: slots.eval + 1,
             is_initialized: true,
             unknown_bool: false,
-            all_blocks: Vec::new(),
+            all_blocks: members.clone(),
             states: vec![BlockVisibilityState {
                 name: "VisibilityState0".to_string(),
+                visible_blocks: members,
                 ..Default::default()
             }],
         },
@@ -237,7 +252,7 @@ pub fn create(document: &mut Document, definition: Handle, location: Vector3) ->
 pub fn reframe(
     document: &mut Document,
     definition: Handle,
-    transform: &codec::types::Transform,
+    transform: &document::types::Transform,
 ) -> usize {
     let Some(mut parameter) = parameter(document, definition).cloned() else {
         return 0;
@@ -534,10 +549,10 @@ pub fn apply_state(document: &mut Document, parameter: Handle, index: usize) {
     }
 }
 
-/// Per-member visibility of state `index`, in definition member order. A
-/// member the parameter does not control stays visible in every state: a
-/// state only hides objects the parameter governs and it does not name.
-pub fn state_visibility(document: &Document, parameter: Handle, index: usize) -> Vec<bool> {
+/// Per-member rule of state `index`, in definition member order. A member the
+/// parameter does not govern is `None`: a state decides only what its set
+/// controls, so everything else stays as the definition shows it.
+pub fn state_visibility(document: &Document, parameter: Handle, index: usize) -> Vec<Option<bool>> {
     let Some(ObjectType::BlockVisibilityParameter(parameter)) = document.objects.get(&parameter)
     else {
         return Vec::new();
@@ -551,8 +566,10 @@ pub fn state_visibility(document: &Document, parameter: Handle, index: usize) ->
     members(document, definition)
         .into_iter()
         .map(|handle| {
-            !parameter.all_blocks.contains(&handle)
-                || state.visible_blocks.contains(&handle)
+            parameter
+                .all_blocks
+                .contains(&handle)
+                .then(|| state.visible_blocks.contains(&handle))
         })
         .collect()
 }
@@ -661,6 +678,7 @@ impl Scene {
         if !direct {
             // Already linked to its definition; only its block changes.
             self.repoint_representation(insert, source, copy, &name);
+            self.bump_geometry();
             return Some(name);
         }
 
@@ -678,7 +696,7 @@ impl Scene {
         let representation = existing.unwrap_or_else(|| self.document.allocate_handle());
         let data = self.document.allocate_handle();
         if existing.is_none() {
-            let mut dictionary = codec::objects::Dictionary::new();
+            let mut dictionary = document::objects::Dictionary::new();
             dictionary.handle = representation;
             dictionary.owner = holder;
             dictionary.reactors.push(holder);
@@ -713,28 +731,37 @@ impl Scene {
             .insert(data, ObjectType::DynamicBlock(link));
         self.document.block_representations.insert(data, definition);
         self.repoint_representation(insert, source, copy, &name);
+        self.bump_geometry();
         Some(name)
     }
 
-    fn repoint_representation(&mut self, insert: Handle, from: Handle, to: Handle, name: &str) {
+    pub(crate) fn repoint_representation(
+        &mut self,
+        insert: Handle,
+        from: Handle,
+        to: Handle,
+        name: &str,
+    ) {
         if let Some(EntityType::Insert(reference)) = self.document.get_entity_mut(insert) {
             reference.block_name = name.to_string();
+        }
+        if from == to {
+            return;
         }
         for record in self.document.block_records.iter_mut() {
             if record.handle == from {
                 record.insert_handles.retain(|handle| *handle != insert);
-            } else if record.handle == to {
+            } else if record.handle == to && !record.insert_handles.contains(&insert) {
                 record.insert_handles.push(insert);
             }
         }
-        self.bump_geometry();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::{Circle, Insert, Line};
+    use document::entities::{Circle, Insert, Line};
 
     #[test]
     fn visibility_ribbon_reveal_respects_layers_uncontrolled_flags_and_nested_states() {
@@ -809,8 +836,62 @@ mod tests {
         assert!(!scene.visibility_revealed(controlled));
     }
 
-    /// A member the parameter does not control stays visible in every state;
-    /// only the objects a state names are hidden when it does not list them.
+    /// The first state describes the definition as it stands: every object the
+    /// definition leaves on screen is governed and shown, and an object the
+    /// definition itself hides is governed by no state.
+    #[test]
+    fn create_seeds_the_state_with_the_members_the_definition_shows() {
+        let mut scene = Scene::new();
+        scene.define_block_raw(
+            "cabinet",
+            Vector3::ZERO,
+            vec![
+                EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 4.0, 0.0, 0.0)),
+                EntityType::Line(Line::from_coords(0.0, 1.0, 0.0, 4.0, 1.0, 0.0)),
+                EntityType::Circle(Circle::from_center_radius(
+                    Vector3::new(1.0, 2.0, 0.0),
+                    0.5,
+                )),
+            ],
+        );
+        let definition = scene.document.block_records.get("cabinet").unwrap().handle;
+        let hidden = members(&scene.document, definition)[2];
+        scene
+            .document
+            .get_entity_mut(hidden)
+            .unwrap()
+            .common_mut()
+            .invisible = true;
+        create(&mut scene.document, definition, Vector3::ZERO).unwrap();
+        let parameter = parameter(&scene.document, definition).unwrap();
+        let shown: Vec<Handle> = members(&scene.document, definition)
+            .into_iter()
+            .filter(|handle| *handle != hidden)
+            .collect();
+        assert_eq!(shown.len(), 2, "two members stay on screen");
+        for handle in &shown {
+            assert!(
+                parameter.all_blocks.contains(handle),
+                "a member the definition shows has to be governed"
+            );
+            assert!(
+                parameter.states[0].visible_blocks.contains(handle),
+                "and shown by the first state"
+            );
+        }
+        assert!(
+            !parameter.all_blocks.contains(&hidden),
+            "a member the definition hides stays outside the state set"
+        );
+        assert_eq!(
+            parameter.states[0].visible_blocks,
+            parameter.all_blocks,
+            "the first state shows the governed set and nothing else"
+        );
+    }
+
+    /// A state hides only what its set governs and does not list, so the other
+    /// members of the definition keep showing.
     #[test]
     fn a_state_hides_only_the_members_the_parameter_controls() {
         let mut scene = Scene::new();
@@ -833,10 +914,14 @@ mod tests {
         let shown = state_visibility(&scene.document, parameter, hidden);
         assert_eq!(
             shown,
-            vec![true, false, true],
-            "the door and cat are not controlled, so the state leaves them visible"
+            vec![Some(true), Some(false), Some(true)],
+            "the frame is the only object the state does not list"
         );
-        assert_eq!(state_visibility(&scene.document, parameter, 0), vec![true; 3]);
+        assert_eq!(
+            state_visibility(&scene.document, parameter, 0),
+            vec![Some(true); 3],
+            "the first state shows everything the set governs"
+        );
 
         apply_state(&mut scene.document, parameter, hidden);
         let visible = |handle: Handle| {
@@ -904,7 +989,23 @@ mod tests {
             assert_eq!(record.name, "door", "{ext}");
             let names: Vec<&str> = parameter.states.iter().map(|s| s.name.as_str()).collect();
             assert_eq!(names, ["VisibilityState0", "Open"], "{ext}");
-            assert_eq!(parameter.states[1].visible_blocks.len(), 0, "{ext}");
+            assert_eq!(
+                parameter.states[0].visible_blocks.len(),
+                2,
+                "{ext}: the first state keeps every member the definition shows"
+            );
+            assert_eq!(
+                parameter.states[1].visible_blocks.len(),
+                1,
+                "{ext}: Open keeps one member and hides the other"
+            );
+            assert!(
+                matches!(
+                    read.get_entity(parameter.states[1].visible_blocks[0]),
+                    Some(EntityType::Line(_))
+                ),
+                "{ext}: the member Open keeps is the line, not the circle"
+            );
         }
     }
 }
@@ -912,93 +1013,50 @@ mod tests {
 #[cfg(test)]
 mod placement_fixtures {
     use super::*;
-    use sha2::{Digest, Sha256};
+    use document::entities::Line;
 
     #[test]
-    #[ignore = "requires OCS_DYNAMIC_BLOCK_FIXTURES with local DWG fixtures"]
-    fn visibility_parameter_placement_fixture_roundtrips() {
-        let directory = std::env::var_os("OCS_DYNAMIC_BLOCK_FIXTURES").expect("fixture directory");
-        let mut paths = std::fs::read_dir(directory)
+    fn visibility_parameter_in_multiblock_document_roundtrips() {
+        let mut scene = Scene::new();
+        scene.define_block_raw("BLOCK_A", Vector3::ZERO, vec![EntityType::Line(Line::from_points(Vector3::ZERO, Vector3::UNIT_X))]);
+        let a = scene.document.block_records.get("BLOCK_A").unwrap().handle;
+        crate::scene::block_point_parameter::create(
+            &mut scene.document,
+            a,
+            Vector3::ZERO,
+            Vector3::UNIT_X,
+        )
+        .unwrap();
+        let a_graph = super::super::block_authoring::graph(&scene.document, a)
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dwg"))
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        assert!(!paths.is_empty(), "no DWG fixtures found");
-        for path in paths {
-            let original = std::fs::read(&path).unwrap();
-            let digest = Sha256::digest(&original);
-            let filename = path.file_name().unwrap().to_string_lossy();
-            let document = crate::io::load_bytes(&filename, original).expect(&filename);
-            let before = document.clone();
-            let mut scene = Scene::new();
-            scene.document = document;
-            let protected = scene
-                .document
-                .block_records
-                .iter()
-                .map(|record| record.handle)
-                .filter(|definition| {
-                    parameter(&scene.document, *definition).is_none()
-                        && placement_error(&scene.document, *definition).is_some()
-                })
-                .collect::<Vec<_>>();
-            for definition in &protected {
-                assert!(create(&mut scene.document, *definition, Vector3::ZERO).is_none());
+            .unwrap();
+        if let Some(ObjectType::DynamicBlock(object)) = scene.document.objects.get_mut(&a_graph) {
+            if let DynamicBlockData::EvaluationGraph(graph) = &mut object.data {
+                graph.first_node_id = i32::MAX;
             }
+        }
+        assert!(parameter(&scene.document, a).is_none());
+        assert!(placement_error(&scene.document, a).is_some());
+        let before = scene.document.clone();
+        assert!(create(&mut scene.document, a, Vector3::ZERO).is_none());
+        assert_eq!(scene.document, before, "existing graphs remain untouched");
+
+        scene.define_block_raw("BLOCK_B", Vector3::ZERO, vec![EntityType::Line(Line::from_points(Vector3::ZERO, Vector3::UNIT_Y))]);
+        let b = scene.document.block_records.get("BLOCK_B").unwrap().handle;
+        let loc = Vector3::new(3.25, -4.5, 0.0);
+        create(&mut scene.document, b, loc).unwrap();
+        for (handle, object) in &before.objects {
             assert_eq!(
-                scene.document, before,
-                "{filename}: existing graphs remain untouched"
+                scene.document.objects.get(handle),
+                Some(object),
+                "preserved object {handle}"
             );
-            scene.define_block_raw(
-                "PALETTE_VISIBILITY_TEST",
-                Vector3::ZERO,
-                vec![EntityType::Line(codec::entities::Line::from_points(
-                    Vector3::ZERO,
-                    Vector3::UNIT_X,
-                ))],
-            );
-            let definition = scene
-                .document
-                .block_records
-                .get("PALETTE_VISIBILITY_TEST")
-                .unwrap()
-                .handle;
-            let location = Vector3::new(3.25, -4.5, 0.0);
-            create(&mut scene.document, definition, location).expect(&filename);
-            for (handle, object) in &before.objects {
-                assert_eq!(
-                    scene.document.objects.get(handle),
-                    Some(object),
-                    "{filename}: preserved object {handle}"
-                );
-            }
-            for extension in ["dwg", "dxf"] {
-                let bytes =
-                    crate::io::save_to_bytes(&scene.document, extension, scene.document.version)
-                        .expect(&filename);
-                let read =
-                    crate::io::load_bytes(&format!("placed.{extension}"), bytes).expect(&filename);
-                let owner = read
-                    .block_records
-                    .get("PALETTE_VISIBILITY_TEST")
-                    .unwrap()
-                    .handle;
-                assert_eq!(
-                    parameter(&read, owner).expect(&filename).def_point,
-                    location,
-                    "{filename}: {extension}"
-                );
-            }
-            assert_eq!(
-                Sha256::digest(std::fs::read(&path).unwrap()),
-                digest,
-                "{filename}: source checksum"
-            );
-            eprintln!("{filename}: DWG/DXF placement roundtrips; {} existing graphs protected; source unchanged", protected.len());
+        }
+        for ext in ["dwg", "dxf"] {
+            let bytes = crate::io::save_to_bytes(&scene.document, ext, scene.document.version).unwrap();
+            let read = crate::io::load_bytes(&format!("multi.{ext}"), bytes).unwrap();
+            let owner = read.block_records.get("BLOCK_B").unwrap().handle;
+            assert_eq!(parameter(&read, owner).unwrap().def_point, loc);
         }
     }
 }
@@ -1006,8 +1064,8 @@ mod placement_fixtures {
 #[cfg(test)]
 mod representation_xdict_tests {
     use super::*;
-    use codec::entities::{Insert, Line};
-    use codec::objects::{XRecord, XRecordValue};
+    use document::entities::{Insert, Line};
+    use document::objects::{XRecord, XRecordValue};
 
     #[test]
     fn visibility_representation_deep_clones_member_xdict() {

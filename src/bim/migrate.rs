@@ -20,7 +20,7 @@
 //! per altra via (incolla da un altro disegno, inserimento di un file) non
 //! passa da qui.
 
-use codec::Document;
+use document::Document;
 
 use super::{rooms, zone, APP_LOCALE, APP_ZONA};
 use crate::scene::view::dispatch::set_entity_xdata;
@@ -59,9 +59,9 @@ pub fn migrate_document(doc: &mut Document) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::Line;
-    use codec::xdata::{ExtendedDataRecord, XDataValue};
-    use codec::{EntityType, Vector3};
+    use document::entities::Line;
+    use document::xdata::{ExtendedDataRecord, XDataValue};
+    use document::{EntityType, Vector3};
 
     use crate::bim::rooms::{decode, RoomPart};
     use crate::bim::zone::{self as zone_mod, ZoneOrigin, ZoneState};

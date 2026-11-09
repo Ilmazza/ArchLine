@@ -10,8 +10,8 @@
 //! piano si ignorano e si contano, mai in silenzio. `boundary_sources_on_plane`
 //! di upstream (tutti i fili visibili) non si tocca.
 
-use codec::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType};
-use codec::{Document, EntityType, Handle};
+use document::entities::{BoundaryEdge, BoundaryPath, Hatch, HatchStyleType};
+use document::{Document, EntityType, Handle};
 use kernel::geom2d::{
     contains, distance_to, segment_crossing, signed_area, Curve, Line, SegmentCrossing, Tolerance,
     Transform,
@@ -924,11 +924,11 @@ mod tests {
         case_a, disturbi, pilastro, scene_with, Form, LAYER_MURI, LAYER_PILASTRI,
     };
     use crate::bim::units::{area_m2, DrawingUnit};
-    use codec::entities::{
+    use document::entities::{
         Arc, Circle, Insert, Line, LwPolyline, LwVertex, MText, Polyline2D, Text, Vertex2D,
     };
-    use codec::tables::Layer;
-    use codec::{Vector2, Vector3};
+    use document::tables::Layer;
+    use document::{Vector2, Vector3};
 
     const M: DrawingUnit = DrawingUnit::Metri;
 

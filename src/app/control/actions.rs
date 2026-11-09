@@ -3,9 +3,9 @@ use crate::io::plot_style::PlotStyleTableExt as _;
 use super::*;
 use crate::scene::model::object::PropValue;
 
-fn control_color(value: &Value) -> Result<codec::types::Color, Value> {
+fn control_color(value: &Value) -> Result<document::types::Color, Value> {
     if let Some(index) = value.as_i64().and_then(|v| i16::try_from(v).ok()) {
-        return Ok(codec::types::Color::from_index(index));
+        return Ok(document::types::Color::from_index(index));
     }
     if let Some(rgb) = value
         .get("rgb")
@@ -14,7 +14,7 @@ fn control_color(value: &Value) -> Result<codec::types::Color, Value> {
     {
         let component = |i: usize| rgb[i].as_u64().and_then(|v| u8::try_from(v).ok());
         return match (component(0), component(1), component(2)) {
-            (Some(r), Some(g), Some(b)) => Ok(codec::types::Color::from_rgb(r, g, b)),
+            (Some(r), Some(g), Some(b)) => Ok(document::types::Color::from_rgb(r, g, b)),
             _ => Err(failure(
                 "invalid_color",
                 "RGB components must be 0 through 255",
@@ -27,12 +27,12 @@ fn control_color(value: &Value) -> Result<codec::types::Color, Value> {
     ))
 }
 
-fn control_lineweight(value: &Value) -> Result<codec::types::LineWeight, Value> {
+fn control_lineweight(value: &Value) -> Result<document::types::LineWeight, Value> {
     let raw = value
         .as_i64()
         .and_then(|v| i16::try_from(v).ok())
         .ok_or_else(|| failure("invalid_lineweight", "Use the raw lineweight value"))?;
-    let candidate = codec::types::LineWeight::from_value(raw);
+    let candidate = document::types::LineWeight::from_value(raw);
     crate::ui::properties::lw_options()
         .iter()
         .any(|v| v.0 == candidate)
@@ -40,7 +40,7 @@ fn control_lineweight(value: &Value) -> Result<codec::types::LineWeight, Value> 
         .ok_or_else(|| failure("invalid_lineweight", "Value is not a standard lineweight"))
 }
 
-fn color_value(color: codec::types::Color) -> Value {
+fn color_value(color: document::types::Color) -> Value {
     if let Some((r, g, b)) = color.true_color_rgb() {
         json!({"rgb":[r,g,b]})
     } else {
@@ -142,6 +142,7 @@ pub(super) const NAMES: &[&str] = &[
     "external_change_cancel",
     "pdf_dialog_ok",
     "txt2mtxt_settings",
+    "matchprop_settings",
     "view_background",
     "image_adjust",
     "import_file_dialog",
@@ -151,6 +152,8 @@ pub(super) const NAMES: &[&str] = &[
     "tds_import_dialog",
     "tds_material_dialog",
     "tds_map_dialog",
+    "hatch_panel",
+    "hatch_boundary_warning",
     "extraction_outdated",
     "print_all",
     "data_link_manager",
@@ -158,8 +161,13 @@ pub(super) const NAMES: &[&str] = &[
     "refedit_dialog",
     "pdf_password_dialog",
     "dim_inspect_dialog",
+    "table_cell_dialog",
+    "table_cell_warning",
+    "table_cell_entry",
     "hyperlink_dialog",
     "spell_dialog",
+    "table_cell_tab",
+    "command_submit",
     "pdf_shx_settings",
     "pdf_layer_toggle",
     "pc_manager_toggle",
@@ -173,10 +181,12 @@ pub(super) const NAMES: &[&str] = &[
     "ribbon_dropdown",
     "keytips",
     "dialog_ok",
+    "dialog_answer",
     "dialog_discard",
     "dialog_cancel",
     "block_def_dialog",
     "table_insert_dialog",
+    "table_style_dialog",
     "attdef_dialog",
     "field_dialog",
     "attman_dialog",
@@ -193,6 +203,7 @@ pub(super) const NAMES: &[&str] = &[
     "mtext_cancel",
     "text_input",
     "text_commit",
+    "command_escape",
     "layer_visible",
     "layer_locked",
     "layer_frozen",
@@ -204,7 +215,7 @@ pub(super) const NAMES: &[&str] = &[
 ];
 
 /// Parse the `at` placement point for `embed_image`: `[x,y]` or `[x,y,z]`.
-fn embed_point(req: &Value) -> Result<codec::types::Vector3, Value> {
+fn embed_point(req: &Value) -> Result<document::types::Vector3, Value> {
     let values = req["at"]
         .as_array()
         .filter(|v| (2..=3).contains(&v.len()))
@@ -216,7 +227,7 @@ fn embed_point(req: &Value) -> Result<codec::types::Vector3, Value> {
             .filter(|v| v.is_finite())
             .ok_or_else(|| failure("invalid_point", "Expected finite coordinates"))?;
     }
-    Ok(codec::types::Vector3::new(p[0], p[1], p[2]))
+    Ok(document::types::Vector3::new(p[0], p[1], p[2]))
 }
 fn parse_point_2d(val: &Value) -> Result<[f64; 2], Value> {
     let arr = val
@@ -238,7 +249,7 @@ fn parse_calibrate(
     cal: &Value,
     pixel_width: u32,
     pixel_height: u32,
-) -> Result<(codec::types::Vector3, f64, f64), Value> {
+) -> Result<(document::types::Vector3, f64, f64), Value> {
     let pt_a = cal
         .get("point_a")
         .or_else(|| cal.get("pixel_a"))
@@ -284,7 +295,7 @@ fn parse_calibrate(
 
         let x_ll = align_to[0] - p1[0] * scale;
         let y_ll = align_to[1] - (pixel_height as f64 - p1[1]) * scale;
-        return Ok((codec::types::Vector3::new(x_ll, y_ll, 0.0), width, scale));
+        return Ok((document::types::Vector3::new(x_ll, y_ll, 0.0), width, scale));
     }
 
     if let (Some(src_pts), Some(tgt_pts)) = (
@@ -308,7 +319,7 @@ fn parse_calibrate(
             let width = pixel_width as f64 * scale;
             let x_ll = p_t1[0] - p_s1[0] * scale;
             let y_ll = p_t1[1] - (pixel_height as f64 - p_s1[1]) * scale;
-            return Ok((codec::types::Vector3::new(x_ll, y_ll, 0.0), width, scale));
+            return Ok((document::types::Vector3::new(x_ll, y_ll, 0.0), width, scale));
         }
     }
 
@@ -363,7 +374,7 @@ impl OpenCADStudio {
             self.push_undo_snapshot(i, "IMAGEATTACH");
             let handle = {
                 let document = &mut self.tabs[i].scene.document;
-                let mut entity = codec::entities::RasterImage::with_size(
+                let mut entity = document::entities::RasterImage::with_size(
                     path,
                     final_at,
                     image.pixel_width as f64,
@@ -374,7 +385,7 @@ impl OpenCADStudio {
                 if let Some(l_name) = layer_name {
                     entity.common.layer = l_name.to_string();
                     if !document.layers.contains(l_name) {
-                        let mut layer_record = codec::tables::Layer::new(l_name.to_string());
+                        let mut layer_record = document::tables::Layer::new(l_name.to_string());
                         layer_record.handle = document.allocate_handle();
                         if lock_layer {
                             layer_record.flags.locked = true;
@@ -388,7 +399,7 @@ impl OpenCADStudio {
                 }
                 let handle = self.tabs[i]
                     .scene
-                    .add_entity(codec::EntityType::RasterImage(entity));
+                    .add_entity(document::EntityType::RasterImage(entity));
                 if handle.is_null() {
                     return Err(failure("embed_failed", "Could not add image"));
                 }
@@ -425,7 +436,7 @@ impl OpenCADStudio {
         if let Some(l_name) = layer_name {
             let document = &mut self.tabs[i].scene.document;
             if !document.layers.contains(l_name) {
-                let mut layer_record = codec::tables::Layer::new(l_name.to_string());
+                let mut layer_record = document::tables::Layer::new(l_name.to_string());
                 layer_record.handle = document.allocate_handle();
                 if lock_layer {
                     layer_record.flags.locked = true;
@@ -493,7 +504,7 @@ impl OpenCADStudio {
                 None => crate::modules::insert::wblock::extract_block_to_doc(&document, block),
             }
         } else if let Some(listed) = req["handles"].as_array() {
-            let handles: Result<Vec<codec::Handle>, Value> = listed
+            let handles: Result<Vec<document::Handle>, Value> = listed
                 .iter()
                 .map(|v| {
                     u64::from_str_radix(
@@ -503,7 +514,7 @@ impl OpenCADStudio {
                             .trim_start_matches("0X"),
                         16,
                     )
-                    .map(codec::Handle::new)
+                    .map(document::Handle::new)
                     .map_err(|_| {
                         failure(
                             "invalid_handle",
@@ -1042,7 +1053,7 @@ impl OpenCADStudio {
     pub(in crate::app) fn perform_grip_drag(
         &mut self,
         i: usize,
-        target: codec::Handle,
+        target: document::Handle,
         grip_id: usize,
         to: [f64; 3],
     ) -> Result<Task<Message>, (&'static str, &'static str)> {
@@ -1052,8 +1063,14 @@ impl OpenCADStudio {
         if self.tabs[i].scene.document.get_entity(target).is_none() {
             return Err(("entity_absent", "No entity with that handle"));
         }
+        // Picked cells of the target table stay picked: their grips are the
+        // cell grips.
+        let cells = self.tabs[i].scene.table_cells.filter(|cells| cells.table == target);
         self.tabs[i].scene.deselect_all();
         self.tabs[i].scene.select_entity(target, false);
+        if let Some(cells) = cells {
+            self.tabs[i].scene.select_table_cells(cells);
+        }
         self.refresh_properties();
         let (world, moves_entity) = self.tabs[i]
             .selected_grip_handles
@@ -1271,6 +1288,15 @@ impl OpenCADStudio {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| raw.to_string());
+        let i = self.active_tab;
+        if crate::app::properties::property_edits_geometry(&p)
+            && self.any_entity_is_fixed(i, &self.property_target_handles(i))
+        {
+            return Err(failure(
+                "fixed_constraint",
+                crate::app::properties::HELD_BY_FIXED,
+            ));
+        }
         Ok(match p.value {
             PropValue::EditText(_)
             | PropValue::PlainText(_)
@@ -1387,12 +1413,56 @@ impl OpenCADStudio {
         let name = string(req, "name")?;
         // Without a prompt there is no failed open to retry.
         if name == "recovery_accept"
-            && self.active_modal != Some(crate::app::ModalKind::RecoveryPrompt)
+            && !self.focus_dialog(crate::app::ModalKind::RecoveryPrompt)
         {
             return Ok(Task::none());
         }
+        // The buttons of "the open dialog" press the front-most one when no
+        // dialog is swapped in.
+        if matches!(
+            name,
+            "dialog_ok"
+                | "dialog_answer"
+                | "dialog_discard"
+                | "dialog_cancel"
+                | "pdf_dialog_ok"
+                | "pdf_layer_toggle"
+                | "table_cell_dialog"
+        ) && self.active_modal.is_none()
+        {
+            if let Some(kind) = self.tool_windows.last().map(|tool| tool.kind) {
+                self.enter_tool(kind);
+            }
+        }
+        match name {
+            "conversion_loss_save_anyway" | "conversion_loss_back" => {
+                self.focus_dialog(crate::app::ModalKind::ConversionLoss);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "external_change_reload"
+            | "external_change_overwrite"
+            | "external_change_save_as"
+            | "external_change_cancel" => {
+                self.focus_dialog(crate::app::ModalKind::ExternalChange);
+            }
+            _ => {}
+        }
         let msg = match name {
-            "close_modal" => Message::CloseModal,
+            // With no modal dialog up, the front-most open tool dialog.
+            "close_modal" => match (self.active_modal, self.tool_windows.last()) {
+                (None, Some(tool)) => Message::ToolWindow(tool.kind, Box::new(Message::CloseModal)),
+                _ => Message::CloseModal,
+            },
+            // Type `value` into the command line and press Enter.
+            "command_submit" => {
+                self.command_line.input = req["value"].as_str().unwrap_or("").to_string();
+                Message::CommandSubmit
+            }
+            // Tab / Shift+Tab in a table cell editor: value "next" or "prev".
+            "table_cell_tab" => match req["value"].as_str() {
+                Some("prev") => Message::DynTabPrev,
+                _ => Message::DynTabNext,
+            },
             // The recovery prompt's Recover button; `close_modal` declines.
             "recovery_accept" => Message::RecoveryAttempt,
             // The conversion-loss warning's choices: save with the losses it
@@ -1401,6 +1471,22 @@ impl OpenCADStudio {
             "conversion_loss_back" => Message::ConversionLossBack,
             // Show a layout (or "Model"), as clicking its tab does.
             "layout_switch" => Message::LayoutSwitch(string(req, "value")?.into()),
+            // Pick the Plot dialog's output device: a printer name, "pdf" or "svg".
+            "plot_printer" => {
+                use crate::ui::window::plot::{PlotDlgMsg, OUT_PDF, OUT_SVG};
+                let device = match string(req, "value")? {
+                    "pdf" => OUT_PDF.to_string(),
+                    "svg" => OUT_SVG.to_string(),
+                    other => other.to_string(),
+                };
+                Message::PlotDlg(PlotDlgMsg::Printer(device))
+            }
+            // The open right-click menu turns into its editor.
+            "context_menu_customize" => {
+                Message::ContextMenuPick(crate::ui::popup::context_menu::MenuAction::Customize)
+            }
+            // The Plot dialog's Plot / Export button.
+            "plot_commit" => Message::PlotDlg(crate::ui::window::plot::PlotDlgMsg::Commit),
             // The "changed outside" modal's suggested actions (D6): reload
             // the disk copy, keep the in-memory one and overwrite, save as,
             // or dismiss. Native only — the web build has no such dialog.
@@ -1476,7 +1562,7 @@ impl OpenCADStudio {
                 let value = string(req, "value")?;
                 let parsed = value.split_once(':').and_then(|(handle, row)| {
                     Some((
-                        codec::Handle::new(u64::from_str_radix(handle, 16).ok()?),
+                        document::Handle::new(u64::from_str_radix(handle, 16).ok()?),
                         Row::parse(row)?,
                     ))
                 });
@@ -1500,18 +1586,18 @@ impl OpenCADStudio {
                 Message::Count(match key {
                     "search" => M::Search(arg.into()),
                     "sort" => M::Sort(arg == "count"),
-                    "open" => M::Open(arg.into(), codec::count::CountKey::default()),
+                    "open" => M::Open(arg.into(), document::count::CountKey::default()),
                     "child" => {
                         let (name, n) = arg.rsplit_once(':').ok_or_else(bad)?;
                         let n: usize = n.parse().map_err(|_| bad())?;
                         let [l, s, m] = self.count_palette.expansion(name).ok_or_else(bad)?;
                         let i = self.active_tab;
                         let area = self.tabs[i].count.as_ref().and_then(|c| c.area.clone());
-                        let instances = codec::count::block_instances(
+                        let instances = document::count::block_instances(
                             &self.tabs[i].scene.document,
                             area.as_deref(),
                         );
-                        let (k, _) = codec::count::expanded_counts(&instances, name, l, s, m)
+                        let (k, _) = document::count::expanded_counts(&instances, name, l, s, m)
                             .into_iter()
                             .nth(n)
                             .ok_or_else(bad)?;
@@ -1527,7 +1613,7 @@ impl OpenCADStudio {
                             "mirror" => RowAction::Expand(2),
                             _ => return Err(bad()),
                         };
-                        M::Menu(name.into(), codec::count::CountKey::default(), action)
+                        M::Menu(name.into(), document::count::CountKey::default(), action)
                     }
                     "create_table" => M::CreateTable,
                     "check" => {
@@ -1733,9 +1819,79 @@ impl OpenCADStudio {
             // `width=…`, `lines=…`, `window=0|1`, `columns_fixed=0|1`,
             // `rows_fixed=0|1`, `preview=0|1`, `styles` (the Table Style
             // button), `ok`.
+            "table_style_dialog" => {
+                // value: "open", "select=<style>", "tab=<0-3>", "cell=<name>",
+                // "new[=<name>]", "rename=<name>", "delete", "<field>=<value>"
+                // (cell fields), "edge<0-5>.<field>=<value>", "flow=<Down|Up>",
+                // "description=<text>", "template_pick", "template_remove",
+                // "apply", "close".
+                let value = string(req, "value")?;
+                let (key, v) = value.split_once('=').unwrap_or((value, ""));
+                if key != "open" && !self.focus_dialog(crate::app::ModalKind::TableStyle) {
+                    return Err(failure("no_dialog", "The Table Style dialog is not open"));
+                }
+                let cell = |field: &'static str| Message::TableStyleCellEdit {
+                    field,
+                    value: v.to_string(),
+                };
+                match key {
+                    "open" => Message::TableStyleDialogOpen,
+                    "select" => Message::TableStyleDialogSelect(v.to_string()),
+                    "tab" => Message::TableStyleDialogTab(v.parse().unwrap_or(0)),
+                    "cell" => Message::TableStyleCellSelect(v.to_string()),
+                    "new" => {
+                        let _ = self.update(cell("name"));
+                        Message::TableStyleCellNew
+                    }
+                    "rename" => {
+                        let _ = self.update(cell("name"));
+                        Message::TableStyleCellRename
+                    }
+                    "delete" => Message::TableStyleCellDelete,
+                    "flow" => Message::TableStyleSetFlow(v.to_string()),
+                    "description" => Message::TableStyleEdit {
+                        field: "description",
+                        value: v.to_string(),
+                    },
+                    "template_pick" => Message::TableStyleTemplatePick,
+                    "template_remove" => Message::TableStyleTemplateRemove,
+                    "apply" => Message::TableStyleApply,
+                    "close" => Message::TableStyleDialogClose,
+                    "height" => cell("height"),
+                    "angle" => cell("angle"),
+                    "hmargin" => cell("hmargin"),
+                    "vmargin" => cell("vmargin"),
+                    "format" => cell("format"),
+                    "align" => cell("align"),
+                    "class" => cell("class"),
+                    "datatype" => cell("datatype"),
+                    "textstyle" => cell("textstyle"),
+                    "textcolor" => cell("textcolor"),
+                    "fillcolor" => cell("fillcolor"),
+                    "merge" => cell("merge"),
+                    edge if edge.starts_with("edge") => {
+                        let (slot, field) = edge[4..].split_once('.').unwrap_or(("", ""));
+                        let field: &'static str = match field {
+                            "visible" => "visible",
+                            "lw" => "lw",
+                            "linetype" => "linetype",
+                            "color" => "color",
+                            "double" => "double",
+                            "spacing" => "spacing",
+                            _ => return Err(failure("invalid_value", "Unknown edge field")),
+                        };
+                        Message::TableStyleEdgeEdit {
+                            edge: slot.parse().unwrap_or(0),
+                            field,
+                            value: v.to_string(),
+                        }
+                    }
+                    _ => return Err(failure("invalid_value", "Unknown Table Style field")),
+                }
+            }
             "table_insert_dialog" => {
                 use crate::ui::window::annotation_data::{TableInsertField as F, TableInsertion};
-                if self.active_modal != Some(crate::app::ModalKind::InsertTable) {
+                if !self.focus_dialog(crate::app::ModalKind::InsertTable) {
                     return Err(failure("no_dialog", "The Insert Table dialog is not open"));
                 }
                 let value = string(req, "value")?;
@@ -1755,6 +1911,19 @@ impl OpenCADStudio {
                     "columns_fixed" => Message::TableInsertField(F::ColumnsFixed(on)),
                     "rows_fixed" => Message::TableInsertField(F::RowsFixed(on)),
                     "preview" => Message::TableInsertField(F::Preview(on)),
+                    "first_row" => Message::TableInsertField(F::FirstRowStyle(v.to_string())),
+                    "second_row" => Message::TableInsertField(F::SecondRowStyle(v.to_string())),
+                    "other_rows" => Message::TableInsertField(F::OtherRowStyle(v.to_string())),
+                    "extra_rows" => Message::TableInsertField(F::ExtraRows(v.to_string())),
+                    "extra_columns" => Message::TableInsertField(F::ExtraColumns(v.to_string())),
+                    // "keep=<option index>:<0|1>", the -TABLE Options order.
+                    "keep" => {
+                        let (index, state) = v.split_once(':').unwrap_or((v, "1"));
+                        Message::TableInsertField(F::TemplateOption(
+                            index.parse().unwrap_or(0),
+                            state == "1",
+                        ))
+                    }
                     "styles" => Message::TableInsertManageStyles,
                     "ok" => Message::TableInsertApply,
                     _ => return Err(failure("invalid_value", "Unknown Insert Table field")),
@@ -1789,7 +1958,7 @@ impl OpenCADStudio {
                 let value = string(req, "value")?;
                 let (key, v) = value.split_once('=').unwrap_or((value, ""));
                 let on = v == "1";
-                let editing = self.active_modal == Some(crate::app::ModalKind::AttDefEdit);
+                let editing = self.focus_dialog(crate::app::ModalKind::AttDefEdit);
                 Message::AttdefDialog(match key {
                     "tag" if editing => M::EditTag(v.into()),
                     "prompt" if editing => M::EditPrompt(v.into()),
@@ -1970,12 +2139,12 @@ impl OpenCADStudio {
                     "select_object" => F::SelectObject,
                     "formula" => F::Formula(v.into()),
                     "formula_format" => {
-                        F::FormulaFormat(index(codec::fields::FORMULA_FORMATS.len())?)
+                        F::FormulaFormat(index(document::fields::FORMULA_FORMATS.len())?)
                     }
                     "precision" => F::FormulaPrecision(index(fd::FORMULA_PRECISIONS.len())?),
                     "link_text" => F::HyperlinkText(v.into()),
                     "link_url" => F::HyperlinkUrl(v.into()),
-                    "plot_scale" => F::PlotScale(index(codec::fields::PLOT_SCALE_FORMATS.len())?),
+                    "plot_scale" => F::PlotScale(index(document::fields::PLOT_SCALE_FORMATS.len())?),
                     "count" => F::CountExpression(v.into()),
                     "show_instances" => F::ShowCountInstances,
                     "ss_custom" => F::SsCustom(v.into()),
@@ -2001,9 +2170,9 @@ impl OpenCADStudio {
                     "ss_prop" => F::SsProp(v.into()),
                     "ss_href" => F::SsHref(v == "1"),
                     "ss_placeholder" => F::SsPlaceholder(index(fd::PLACEHOLDER_TYPES.len())?),
-                    "ss_scale" => F::SsScaleFormat(index(codec::fields::PLOT_SCALE_FORMATS.len())?),
+                    "ss_scale" => F::SsScaleFormat(index(document::fields::PLOT_SCALE_FORMATS.len())?),
                     "placeholder" => F::PlaceholderProperty(index(
-                        codec::fields::BLOCK_PLACEHOLDER_PROPERTIES.len(),
+                        document::fields::BLOCK_PLACEHOLDER_PROPERTIES.len(),
                     )?),
                     "table_function" => F::TableFunction(
                         ["Average", "Sum", "Count", "Cell"]
@@ -2180,8 +2349,8 @@ impl OpenCADStudio {
                             .locations
                             .iter()
                             .find(|(_, folder, _)| {
-                                codec::sheet_set::path_key(folder)
-                                    == codec::sheet_set::path_key(arg)
+                                document::sheet_set::path_key(folder)
+                                    == document::sheet_set::path_key(arg)
                             })
                             .map(|(id, _, _)| id.clone())
                             .ok_or_else(|| failure("invalid_value", "No such location"))?;
@@ -2212,7 +2381,7 @@ impl OpenCADStudio {
                             .into_iter()
                             .flat_map(|s| db.sheet_views(s))
                             .find(|v| {
-                                codec::sheet_set::number_and_title(v) == spec
+                                document::sheet_set::number_and_title(v) == spec
                                     || v.prop("Title") == Some(spec)
                             })
                             .map(|v| v.id().to_string())
@@ -2274,7 +2443,7 @@ impl OpenCADStudio {
             // "help".
             "pdf_password_dialog" => {
                 use crate::ui::window::pdf_password_dialog::PdfPasswordMsg as P;
-                if self.active_modal != Some(crate::app::ModalKind::PdfPassword) {
+                if !self.focus_dialog(crate::app::ModalKind::PdfPassword) {
                     return Err(failure(
                         "no_dialog",
                         "The Password Protected PDF window is not open",
@@ -2312,7 +2481,7 @@ impl OpenCADStudio {
             // text … 7 punctuation) or "close".
             "spell_dialog" => {
                 use crate::ui::window::spell_dialog::{SpellMsg as S, SpellScope, SpellSetting};
-                if self.active_modal != Some(crate::app::ModalKind::Spell) {
+                if !self.focus_dialog(crate::app::ModalKind::Spell) {
                     return Err(failure("no_dialog", "The Check Spelling window is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2360,10 +2529,120 @@ impl OpenCADStudio {
             // "shape=round|angular|none", "label_on=0|1", "label=<text>",
             // "rate_on=0|1", "rate=<text>", "select", "remove", "ok" or
             // "cancel".
+            // The Cell Borders / Cell Contents window, one field per call:
+            // "lineweight=<name>", "linetype=<name>", "color=<name>",
+            // "double=0|1", "spacing=<n>", "edges=all|outside|inside|none|
+            // top|bottom|left|right|inside_h|inside_v", "pick=<n>", "up",
+            // "down", "delete", "layout=1|2|4", "content_spacing=<n>"; the
+            // Cell Block window: "block=<name>", "align=1..9",
+            // "scale=<n>", "autofit=0|1", "rotation=<deg>"; the Cell Data
+            // Format window: "kind=0..8", "unit=<n>", "precision=<text>",
+            // "symbol=<s>", "append=0|1", "negative=0|1", "separator=0..2",
+            // "axis=0..2", "date=<picture>", "conversion=<n>", "prefix=<s>",
+            // "suffix=<s>", "decimal=0..2", "thousands=0..3",
+            // "zero=4|8|1|2" (toggles); "ok" or "cancel".
+            "table_cell_dialog" => {
+                use crate::ui::window::table_cell_dialog::{BorderSet as B, TableCellDialogMsg as T};
+                if !matches!(
+                    self.active_modal,
+                    Some(crate::app::ModalKind::TableCellBorders)
+                        | Some(crate::app::ModalKind::TableCellContents)
+                        | Some(crate::app::ModalKind::TableCellBlock)
+                        | Some(crate::app::ModalKind::TableCellFormat)
+                ) {
+                    return Err(failure("no_dialog", "No table cell window is open"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let bad = || failure("invalid_value", spec);
+                if key == "cancel" {
+                    Message::CloseModal
+                } else {
+                    Message::TableCellDialog(match key {
+                        "lineweight" => T::Lineweight(value.to_string()),
+                        "linetype" => T::Linetype(value.to_string()),
+                        "color" => T::Color(value.to_string()),
+                        "double" => T::Double(value == "1"),
+                        "spacing" => T::Spacing(value.to_string()),
+                        "edges" => T::Edges(match value {
+                            "all" => B::All,
+                            "outside" => B::Outside,
+                            "inside" => B::Inside,
+                            "none" => B::None,
+                            "top" => B::Top,
+                            "bottom" => B::Bottom,
+                            "left" => B::Left,
+                            "right" => B::Right,
+                            "inside_h" => B::InsideHorizontal,
+                            "inside_v" => B::InsideVertical,
+                            _ => return Err(bad()),
+                        }),
+                        "pick" => T::Pick(value.parse().map_err(|_| bad())?),
+                        "up" => T::Up,
+                        "down" => T::Down,
+                        "delete" => T::Delete,
+                        "layout" => T::Layout(value.parse().map_err(|_| bad())?),
+                        "content_spacing" => T::ContentSpacing(value.to_string()),
+                        "block" => T::BlockName(value.to_string()),
+                        "align" => T::Align(value.parse().map_err(|_| bad())?),
+                        "scale" => T::BlockScale(value.to_string()),
+                        "autofit" => T::AutoFit(value == "1"),
+                        "rotation" => T::BlockRotation(value.to_string()),
+                        "kind" => T::FormatKind(value.parse().map_err(|_| bad())?),
+                        "unit" => T::FormatUnit(value.parse().map_err(|_| bad())?),
+                        "precision" => T::Precision(value.to_string()),
+                        "symbol" => T::Symbol(value.to_string()),
+                        "append" => T::Append(value == "1"),
+                        "negative" => T::Negative(value == "1"),
+                        "separator" => T::Separator(value.parse().map_err(|_| bad())?),
+                        "axis" => T::Axis(value.parse().map_err(|_| bad())?),
+                        "date" => T::DateFormat(value.to_string()),
+                        "conversion" => T::Conversion(value.to_string()),
+                        "prefix" => T::Prefix(value.to_string()),
+                        "suffix" => T::Suffix(value.to_string()),
+                        "decimal" => T::DecimalSeparator(value.parse().map_err(|_| bad())?),
+                        "thousands" => T::ThousandsSeparator(value.parse().map_err(|_| bad())?),
+                        "zero" => T::Zero(value.parse().map_err(|_| bad())?),
+                        "ok" => T::Ok,
+                        _ => return Err(bad()),
+                    })
+                }
+            }
+            // The invalid table cell data type warning: "ok" converts,
+            // "cancel" leaves the cells as they were.
+            "table_cell_warning" => {
+                if !self.focus_dialog(crate::app::ModalKind::TableCellWarning) {
+                    return Err(failure("no_dialog", "The invalid data type warning is not open"));
+                }
+                let spec = string(req, "value")?;
+                match spec {
+                    "ok" => Message::TableCellDialog(
+                        crate::ui::window::table_cell_dialog::TableCellDialogMsg::WarnOk,
+                    ),
+                    "cancel" | "close" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", spec)),
+                }
+            }
+            // A typed value that is not of the cell's data type: "type"
+            // changes the cell's type, "value" edits the value again,
+            // "cancel" drops it.
+            "table_cell_entry" => {
+                if !self.focus_dialog(crate::app::ModalKind::TableCellEntry) {
+                    return Err(failure("no_dialog", "The cell value question is not open"));
+                }
+                use crate::ui::window::table_cell_dialog::TableCellDialogMsg as T;
+                let spec = string(req, "value")?;
+                match spec {
+                    "type" => Message::TableCellDialog(T::EntryType),
+                    "value" => Message::TableCellDialog(T::EntryValue),
+                    "cancel" | "close" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", spec)),
+                }
+            }
             "dim_inspect_dialog" => {
                 use crate::entities::dim_inspect::Shape;
                 use crate::ui::window::dim_inspect_dialog::DimInspectMsg as D;
-                if self.active_modal != Some(crate::app::ModalKind::DimInspect) {
+                if !self.focus_dialog(crate::app::ModalKind::DimInspect) {
                     return Err(failure(
                         "no_dialog",
                         "The Inspection Dimension window is not open",
@@ -2408,7 +2687,7 @@ impl OpenCADStudio {
             // "browse", "ok", "remove" or "cancel".
             "hyperlink_dialog" => {
                 use crate::ui::window::hyperlink_dialog::HyperlinkMsg as H;
-                if self.active_modal != Some(crate::app::ModalKind::Hyperlink) {
+                if !self.focus_dialog(crate::app::ModalKind::Hyperlink) {
                     return Err(failure("no_dialog", "The Hyperlink window is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2440,7 +2719,7 @@ impl OpenCADStudio {
             // "cancel".
             "refedit_dialog" => {
                 use crate::ui::window::refedit_dialog::RefEditDialogMsg as R;
-                if self.active_modal != Some(crate::app::ModalKind::RefEdit) {
+                if !self.focus_dialog(crate::app::ModalKind::RefEdit) {
                     return Err(failure(
                         "no_dialog",
                         "The Reference Edit dialog is not open",
@@ -2506,7 +2785,7 @@ impl OpenCADStudio {
             // "apply" or "cancel".
             "view_background" => {
                 use crate::ui::window::pdf_dialogs::{BgKind, BgPosition, PdfDialogMsg as P};
-                if self.active_modal != Some(crate::app::ModalKind::ViewBackground) {
+                if !self.focus_dialog(crate::app::ModalKind::ViewBackground) {
                     return Err(failure("no_dialog", "The Background dialog is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2590,14 +2869,14 @@ impl OpenCADStudio {
             // "rotation=0|90|180|270", "ok" or "cancel".
             "pdf_import_dialog" => {
                 use crate::ui::window::pdf_dialogs::{PdfDialogMsg as P, RotationChoice};
-                if self.active_modal != Some(crate::app::ModalKind::PdfImportFile) {
+                if !self.focus_dialog(crate::app::ModalKind::PdfImportFile) {
                     return Err(failure("no_dialog", "The Import PDF window is not open"));
                 }
                 let spec = string(req, "value")?;
                 let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
                 let bad = || failure("invalid_value", spec);
                 if key == "cancel" {
-                    return Ok(Task::done(Message::CloseModal));
+                    return Ok(self.update(Message::CloseModal));
                 }
                 Message::PdfDialog(match key {
                     "ok" => P::ImportOk,
@@ -2618,14 +2897,14 @@ impl OpenCADStudio {
             // "recent=<n>", "ok" or "cancel".
             "import_file_dialog" => {
                 use crate::ui::window::import_dialogs::{ImportDialogMsg as I, FORMATS};
-                if self.active_modal != Some(crate::app::ModalKind::ImportFile) {
+                if !self.focus_dialog(crate::app::ModalKind::ImportFile) {
                     return Err(failure("no_dialog", "The Import File window is not open"));
                 }
                 let spec = string(req, "value")?;
                 let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
                 let bad = || failure("invalid_value", spec);
                 if key == "cancel" {
-                    return Ok(Task::done(Message::CloseModal));
+                    return Ok(self.update(Message::CloseModal));
                 }
                 Message::ImportDialog(match key {
                     "ok" => I::ImportOk,
@@ -2655,14 +2934,14 @@ impl OpenCADStudio {
             // it), "ok" or "cancel".
             "tds_import_dialog" => {
                 use crate::ui::window::import_dialogs::ImportDialogMsg as I;
-                if self.active_modal != Some(crate::app::ModalKind::TdsImport) {
+                if !self.focus_dialog(crate::app::ModalKind::TdsImport) {
                     return Err(failure("no_dialog", "The 3D Studio Import window is not open"));
                 }
                 let spec = string(req, "value")?;
                 let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
                 let bad = || failure("invalid_value", spec);
                 if key == "cancel" {
-                    return Ok(Task::done(Message::CloseModal));
+                    return Ok(self.update(Message::CloseModal));
                 }
                 let pick = |options: &[&str]| options.iter().position(|o| *o == value).ok_or_else(bad);
                 Message::ImportDialog(match key {
@@ -2692,7 +2971,7 @@ impl OpenCADStudio {
             // choice too), "remember=on|off", "apply" or "cancel".
             "tds_material_dialog" => {
                 use crate::ui::window::import_dialogs::ImportDialogMsg as I;
-                if self.active_modal != Some(crate::app::ModalKind::TdsMaterial) {
+                if !self.focus_dialog(crate::app::ModalKind::TdsMaterial) {
                     return Err(failure("no_dialog", "The multiple-material window is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2722,7 +3001,7 @@ impl OpenCADStudio {
                         _ => return Err(bad()),
                     }),
                     "apply" | "ok" => I::TdsMatApply,
-                    "cancel" => return Ok(Task::done(Message::CloseModal)),
+                    "cancel" => return Ok(self.update(Message::CloseModal)),
                     _ => return Err(bad()),
                 })
             }
@@ -2737,7 +3016,7 @@ impl OpenCADStudio {
                 use crate::ui::window::annotation_data::{
                     DataExtractionField as F, ExtractionBegin, ExtractionSource,
                 };
-                if self.active_modal != Some(crate::app::ModalKind::DataExtraction) {
+                if !self.focus_dialog(crate::app::ModalKind::DataExtraction) {
                     return Err(failure("no_dialog", "The Data Extraction wizard is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2808,7 +3087,7 @@ impl OpenCADStudio {
             // "select=<link name>", "edit", "delete", "insert" or "close".
             "data_link_manager" => {
                 use crate::ui::window::annotation_data::{DataLinkField as F, LinkRange};
-                if self.active_modal != Some(crate::app::ModalKind::DataLinkManager) {
+                if !self.focus_dialog(crate::app::ModalKind::DataLinkManager) {
                     return Err(failure("no_dialog", "The Data Link Manager is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2859,7 +3138,7 @@ impl OpenCADStudio {
             // "skip", "skip_all" or "close".
             "extraction_outdated" => {
                 use crate::ui::window::extraction_outdated::OutdatedChoice as C;
-                if self.active_modal != Some(crate::app::ModalKind::ExtractionOutdated) {
+                if !self.focus_dialog(crate::app::ModalKind::ExtractionOutdated) {
                     return Err(failure(
                         "no_dialog",
                         "The outdated extraction table window is not open",
@@ -2880,7 +3159,7 @@ impl OpenCADStudio {
             // outputs run the DXEVAL publish check first.
             "print_all" => {
                 let spec = string(req, "value")?;
-                let open = self.active_modal == Some(crate::app::ModalKind::PrintAll);
+                let open = self.focus_dialog(crate::app::ModalKind::PrintAll);
                 match spec.split_once('=') {
                     _ if spec == "open" => Message::PrintAllOpen,
                     _ if !open => {
@@ -2894,8 +3173,85 @@ impl OpenCADStudio {
                     _ => return Err(failure("invalid_value", spec)),
                 }
             }
+            // The Hatch panel of a running HATCH / GRADIENT, one edit per
+            // call: "kind=solid|gradient|pattern|user", "pattern=<name>",
+            // "gradient=<label>", "color=<label>", "background=<label>",
+            // "angle=<deg>", "scale=<n>", "spacing=<n>", "double=on|off",
+            // "origin_x=<n>", "origin_y=<n>", "method=pick|select|draw",
+            // "associative=on|off", "separate=on|off", "keep=on|off",
+            // "island=normal|outer|ignore", "gap=<n>", "layer=<name>",
+            // "transparency=<0-90 or empty>", "color1=<label>",
+            // "color2=<label>", "draw_order=<0-4>", "annotative=on|off",
+            // "ok" or "cancel".
+            "hatch_panel" => {
+                use crate::ui::window::hatch_panel::HatchPanelMsg as H;
+                let i = self.active_tab;
+                if self.tabs[i]
+                    .active_cmd
+                    .as_ref()
+                    .and_then(|command| command.hatch_settings())
+                    .is_none()
+                {
+                    return Err(failure("no_dialog", "No HATCH or GRADIENT is running"));
+                }
+                let spec = string(req, "value")?;
+                let (key, value) = spec.split_once('=').unwrap_or((spec, ""));
+                let on = matches!(value, "on" | "1" | "true");
+                let text = value.to_string();
+                let code = |names: &[&str]| {
+                    names
+                        .iter()
+                        .position(|name| *name == value)
+                        .map(|code| code as u8)
+                        .ok_or_else(|| failure("invalid_value", spec))
+                };
+                let message = match key {
+                    "kind" => H::Kind(code(&["solid", "gradient", "pattern", "user"])?),
+                    "pattern" => H::Pattern(text),
+                    "gradient" => H::Gradient(text),
+                    "color" => H::Color(text),
+                    "background" => H::Background(text),
+                    "angle" => H::Angle(text),
+                    "scale" => H::Scale(text),
+                    "spacing" => H::Spacing(text),
+                    "double" => H::Double(on),
+                    "origin_x" => H::OriginX(text),
+                    "origin_y" => H::OriginY(text),
+                    "method" => H::Method(code(&["pick", "select", "draw"])?),
+                    "associative" => H::Associative(on),
+                    "separate" => H::Separate(on),
+                    "keep" => H::KeepBoundaries(on),
+                    "island" => H::Islands(code(&["normal", "outer", "ignore"])?),
+                    "gap" => H::Gap(text),
+                    "layer" => H::Layer(text),
+                    "transparency" => H::Transparency(text),
+                    "color1" => H::GradientColor1(text),
+                    "color2" => H::GradientColor2(text),
+                    "draw_order" => H::DrawOrder(code(&["0", "1", "2", "3", "4"])?),
+                    "annotative" => H::Annotative(on),
+                    "ok" => H::Accept,
+                    "cancel" => H::Cancel,
+                    _ => return Err(failure("invalid_value", spec)),
+                };
+                Message::HatchPanel(message)
+            }
+            // The boundary warning of an empty-area HATCH pick: "details",
+            // "dont_show" (ticks "Do not show this message again"), "close".
+            "hatch_boundary_warning" => {
+                use crate::ui::window::hatch_dialogs::HatchDialogMsg as H;
+                if !self.focus_dialog(crate::app::ModalKind::HatchBoundaryWarning) {
+                    return Err(failure("no_dialog", "The hatch boundary warning is not open"));
+                }
+                let state = self.hatch_boundary_warning.clone().unwrap_or_default();
+                match string(req, "value")? {
+                    "details" => Message::HatchDialog(H::WarningDetails(!state.details)),
+                    "dont_show" => Message::HatchDialog(H::WarningDontShow(true)),
+                    "close" => Message::HatchDialog(H::WarningClose),
+                    other => return Err(failure("invalid_value", other)),
+                }
+            }
             "tds_map_dialog" => {
-                if self.active_modal != Some(crate::app::ModalKind::TdsMissingMap) {
+                if !self.focus_dialog(crate::app::ModalKind::TdsMissingMap) {
                     return Err(failure("no_dialog", "The missing texture map window is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2911,7 +3267,7 @@ impl OpenCADStudio {
             // "mapping=layer|linetype|lineweight|color", "ok" or "cancel".
             "dgn_import_dialog" => {
                 use crate::ui::window::import_dialogs::ImportDialogMsg as I;
-                if self.active_modal != Some(crate::app::ModalKind::DgnImport) {
+                if !self.focus_dialog(crate::app::ModalKind::DgnImport) {
                     return Err(failure("no_dialog", "The DGN Import window is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -2923,7 +3279,7 @@ impl OpenCADStudio {
                     _ => Err(bad()),
                 };
                 if key == "cancel" {
-                    return Ok(Task::done(Message::CloseModal));
+                    return Ok(self.update(Message::CloseModal));
                 }
                 Message::ImportDialog(match key {
                     "ok" => I::DgnOk,
@@ -2972,7 +3328,7 @@ impl OpenCADStudio {
             // the box), "step=brightness,+1|-1", "reset", "apply" or "cancel".
             "image_adjust" => {
                 use crate::ui::window::pdf_dialogs::PdfDialogMsg as P;
-                if self.active_modal != Some(crate::app::ModalKind::ImageAdjust) {
+                if !self.focus_dialog(crate::app::ModalKind::ImageAdjust) {
                     return Err(failure("no_dialog", "The Image Adjust dialog is not open"));
                 }
                 let spec = string(req, "value")?;
@@ -3014,7 +3370,7 @@ impl OpenCADStudio {
             // "cancel".
             "txt2mtxt_settings" => {
                 use crate::ui::window::pdf_dialogs::PdfDialogMsg as M;
-                if self.active_modal != Some(crate::app::ModalKind::Txt2MtxtSettings) {
+                if !self.focus_dialog(crate::app::ModalKind::Txt2MtxtSettings) {
                     return Err(failure("no_dialog", "Text to MText Settings is not open"));
                 }
                 let value = string(req, "value")?;
@@ -3030,6 +3386,27 @@ impl OpenCADStudio {
                     _ => return Err(failure("invalid_value", "Unknown setting")),
                 }
             }
+            // MATCHPROP's Property Settings: "toggle=<MATCHMODE bit>",
+            // "all", "none", "ok", "cancel".
+            "matchprop_settings" => {
+                use crate::ui::window::pdf_dialogs::PdfDialogMsg as M;
+                if !self.focus_dialog(crate::app::ModalKind::MatchPropSettings) {
+                    return Err(failure("no_dialog", "Property Settings is not open"));
+                }
+                let value = string(req, "value")?;
+                let (key, arg) = value.split_once('=').unwrap_or((value, ""));
+                match key {
+                    "toggle" => match arg.trim().parse::<u32>() {
+                        Ok(bit) if bit.is_power_of_two() => Message::PdfDialog(M::MpToggle(bit)),
+                        _ => return Err(failure("invalid_value", value)),
+                    },
+                    "all" => Message::PdfDialog(M::MpAll),
+                    "none" => Message::PdfDialog(M::MpNone),
+                    "ok" => Message::PdfDialog(M::MpOk),
+                    "cancel" => Message::CloseModal,
+                    _ => return Err(failure("invalid_value", "Unknown setting")),
+                }
+            }
             // The PDF Text Recognition Settings dialog, one edit per call:
             // "select=<n>", "toggle=<n>,0|1", "up", "down", "remove",
             // "add=<path to .shx>", "move=<from>,<to>" (dragging a row),
@@ -3038,7 +3415,7 @@ impl OpenCADStudio {
             // "defaults", "apply" or "cancel" (rows count from 0).
             "pdf_shx_settings" => {
                 use crate::ui::window::pdf_shx_dialog::ShxDialogMsg as S;
-                if self.active_modal != Some(crate::app::ModalKind::PdfShxSettings) {
+                if !self.focus_dialog(crate::app::ModalKind::PdfShxSettings) {
                     return Err(failure(
                         "no_dialog",
                         "The PDF Text Recognition Settings dialog is not open",
@@ -3122,6 +3499,9 @@ impl OpenCADStudio {
                 Some(crate::app::ModalKind::AttDefEdit) => {
                     Message::AttdefDialog(crate::ui::window::attdef_dialog::AttdefDialogMsg::EditOk)
                 }
+                Some(crate::app::ModalKind::InsertAttributes) => Message::InsertAttrDialog(
+                    crate::ui::window::insert_attr_dialog::InsertAttrMsg::Ok,
+                ),
                 Some(crate::app::ModalKind::SheetSet) => {
                     Message::SheetSet(crate::ui::window::sheet_set::SheetSetMsg::Ok)
                 }
@@ -3133,6 +3513,46 @@ impl OpenCADStudio {
                 }
                 _ => return Err(failure("no_dialog", "No dialog with an OK button is open")),
             },
+            // One row of the form an attributed insertion answers in a page:
+            // a script has no command line to type the answer into.
+            "dialog_answer" => {
+                let tag = string(req, "tag")?;
+                let value = string(req, "value")?;
+                let rows = match self.active_modal {
+                    Some(crate::app::ModalKind::InsertAttributes) => match self
+                        .insert_attr_dialog
+                        .as_ref()
+                    {
+                        Some(form) => &form.rows,
+                        None => {
+                            return Err(failure("no_dialog", "The attribute form is not open"))
+                        }
+                    },
+                    _ => return Err(failure("no_dialog", "The attribute form is not open")),
+                };
+                // A tag names a row outright; only when none does is a tag
+                // allowed to stand for the caption a row shows.
+                let Some(index) = rows
+                    .iter()
+                    .position(|row| row.tag == tag)
+                    .or_else(|| {
+                        rows.iter().position(|row| {
+                            row.label == tag
+                                || crate::ui::window::insert_attr_dialog::caption(&row.label) == tag
+                        })
+                    })
+                else {
+                    return Err(failure("unknown_tag", "tag is not a row of the open form"));
+                };
+                Message::InsertAttrDialog(
+                    crate::ui::window::insert_attr_dialog::InsertAttrMsg::Value(index, value.to_string()),
+                )
+            }
+            // The attribute form's Cancel is the plain decline of the parked
+            // placement, so it is the modal closing itself.
+            "dialog_cancel" if self.focus_dialog(crate::app::ModalKind::InsertAttributes) => {
+                Message::CloseModal
+            }
             "dialog_discard" | "dialog_cancel" => match self.active_modal {
                 Some(crate::app::ModalKind::Unsaved) => {
                     if name == "dialog_discard" {
@@ -3176,6 +3596,9 @@ impl OpenCADStudio {
             "mtext_cancel" => Message::MTextCancel,
             "text_input" => Message::TextInlineInput(string(req, "value")?.into()),
             "text_commit" => Message::TextInlineOk,
+            // One Esc key press, as the keyboard gives it: a command that
+            // steps back on Esc (a sub-prompt) stays active.
+            "command_escape" => Message::CommandEscape,
             "pointer_move"
             | "pointer_press"
             | "pointer_release"

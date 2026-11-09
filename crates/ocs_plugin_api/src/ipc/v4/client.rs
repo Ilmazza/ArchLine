@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use codec::xdata::ExtendedDataRecord;
-use codec::{Document, EntityType, Handle};
+use document::xdata::ExtendedDataRecord;
+use document::{Document, EntityType, Handle};
 use interprocess::local_socket::traits::Stream as StreamTrait;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 use interprocess::TryClone;
@@ -1073,8 +1073,8 @@ impl HostApi for V4PluginHostApi {
 
     fn entities_batch(
         &self,
-        handles: &[codec::Handle],
-    ) -> Result<Vec<Option<codec::EntityType>>, String> {
+        handles: &[document::Handle],
+    ) -> Result<Vec<Option<document::EntityType>>, String> {
         // API v12: per-entity reads — refresh passes never need to re-clone
         // the invalidated document snapshot after writes.
         match self.request(PluginRequest::GetEntitiesBatch {
@@ -1118,7 +1118,7 @@ impl HostApi for V4PluginHostApi {
     fn update_xrecords(
         &mut self,
         updates: &[crate::host::XRecordUpdate],
-    ) -> Result<Vec<Result<codec::Handle, String>>, String> {
+    ) -> Result<Vec<Result<document::Handle, String>>, String> {
         // API v13: one frame (one undo composition) replaces the whole
         // per-record write loop.
         match self.request(PluginRequest::UpdateXRecords {
@@ -1310,6 +1310,79 @@ impl HostApi for V4PluginHostApi {
             }
         }
     }
+
+    fn register_quad_panels(
+        &mut self,
+        _plugin_id: &str,
+        panels: &[crate::dialog::QuadPanelDef],
+    ) -> Vec<bool> {
+        // API v15: the host stores the panels under the caller's transport
+        // identity (the plugin_id param is nominal, the RegisterPluginClass
+        // precedent), so quad panels are always registered in the plugin's
+        // own name.
+        match self.request(PluginRequest::RegisterQuadPanels {
+            panels: panels.to_vec(),
+        }) {
+            Ok(PluginResponse::QuadPanelsRegistered { ok, errors }) => {
+                // Surface the short per-reject reasons like push errors do.
+                for error in errors.iter().filter(|reason| !reason.is_empty()) {
+                    eprintln!("[plugin] quad panel registration refused: {error}");
+                }
+                ok
+            }
+            Ok(other) => {
+                eprintln!("[plugin] unexpected RegisterQuadPanels response: {other:?}");
+                vec![false; panels.len()]
+            }
+            Err(e) => {
+                eprintln!("[plugin] RegisterQuadPanels request failed: {e}");
+                vec![false; panels.len()]
+            }
+        }
+    }
+
+    fn unregister_quad_panels(&mut self, _plugin_id: &str, panel_ids: &[&str]) -> Vec<bool> {
+        // API v15: the host scopes the removal by the caller's transport
+        // identity (the plugin_id param is nominal, the register_quad_panels
+        // precedent), so a plugin only ever removes its own panels.
+        match self.request(PluginRequest::UnregisterQuadPanels {
+            panel_ids: panel_ids.iter().map(|id| id.to_string()).collect(),
+        }) {
+            Ok(PluginResponse::QuadPanelsRegistered { ok, errors }) => {
+                for error in errors.iter().filter(|reason| !reason.is_empty()) {
+                    eprintln!("[plugin] quad panel removal refused: {error}");
+                }
+                ok
+            }
+            Ok(other) => {
+                eprintln!("[plugin] unexpected UnregisterQuadPanels response: {other:?}");
+                vec![false; panel_ids.len()]
+            }
+            Err(e) => {
+                eprintln!("[plugin] UnregisterQuadPanels request failed: {e}");
+                vec![false; panel_ids.len()]
+            }
+        }
+    }
+
+    fn validate_parametric_chain(
+        &self,
+        chain: &crate::host::ParametricChain,
+        tolerance: f64,
+    ) -> Result<(), String> {
+        // Pure validation: no document snapshot invalidation.
+        match self.request(PluginRequest::ValidateParametricChain {
+            chain: chain.clone(),
+            tolerance,
+        }) {
+            Ok(PluginResponse::ValidateParametricChainResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!(
+                "unexpected parametric validation response: {other:?}"
+            )),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1365,7 +1438,7 @@ mod tests {
     use crate::ipc::transport::recv;
     use crate::ipc::v4::protocol::{HostToPluginV4, PluginToHostV4};
     use crate::test_lock::ENV_LOCK;
-    use codec::entities::Point;
+    use document::entities::Point;
 
     fn unique_socket_name() -> String {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1422,6 +1495,53 @@ mod tests {
 
         let mut api = client.plugin_host_api(0, Rc::new(RefCell::new(HashMap::new())));
         api.push_info("hello host");
+        runner.join().unwrap();
+    }
+
+    #[test]
+    fn v4_client_validate_parametric_chain_roundtrip() {
+        let (host_stream, mut runner_stream) = connect_pair();
+        let client = V4Client::from_stream_for_test(host_stream);
+        let chain = crate::host::ParametricChain {
+            plane: crate::host::ParametricPlane::Plan,
+            segments: Vec::new(),
+            layer: String::new(),
+        };
+
+        let runner = thread::spawn(move || {
+            for result in [Ok(()), Err("hard-corner seam".to_owned())] {
+                match recv::<PluginToHostV4>(&mut runner_stream).unwrap() {
+                    PluginToHostV4::Request {
+                        id,
+                        payload:
+                            PluginRequest::ValidateParametricChain {
+                                chain: decoded,
+                                tolerance,
+                            },
+                        ..
+                    } => {
+                        assert!(decoded.segments.is_empty());
+                        assert_eq!(tolerance, 1e-3);
+                        send(
+                            &mut runner_stream,
+                            &HostToPluginV4::Response {
+                                id,
+                                payload: PluginResponse::ValidateParametricChainResult(result),
+                            },
+                        )
+                        .unwrap();
+                    }
+                    other => panic!("unexpected: {other:?}"),
+                }
+            }
+        });
+
+        let api = client.plugin_host_api(0, Rc::new(RefCell::new(HashMap::new())));
+        assert_eq!(api.validate_parametric_chain(&chain, 1e-3), Ok(()));
+        assert_eq!(
+            api.validate_parametric_chain(&chain, 1e-3),
+            Err("hard-corner seam".to_owned())
+        );
         runner.join().unwrap();
     }
 

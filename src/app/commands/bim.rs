@@ -32,7 +32,7 @@ use crate::command::{
 use crate::scene::view::dispatch::set_entity_xdata;
 use crate::scene::Scene;
 use crate::ui::window::bim_extract::{BimMsg, ExtractDialog};
-use codec::{Document, Handle};
+use document::{Document, Handle};
 use iced::Task;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1138,8 +1138,8 @@ mod tests {
     use crate::bim::units::DrawingUnit;
     use crate::bim::zone::{Zone, ZoneOrigin, ZoneState};
     use crate::scene::Scene;
-    use codec::tables::Layer;
-    use codec::{Document, Handle};
+    use document::tables::Layer;
+    use document::{Document, Handle};
     use std::path::{Path, PathBuf};
 
     #[test]

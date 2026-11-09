@@ -5,8 +5,8 @@
 //! window reads like the original. The dialog never writes into the drawing
 //! itself: OK builds a `HatchCommand` from this state and lets that commit.
 
-use codec::entities::HatchStyleType;
-use codec::Handle;
+use document::entities::HatchStyleType;
+use document::Handle;
 use iced::widget::{button, canvas, checkbox, column, container, pick_list, row, text, text_input, Space};
 use iced::{Border, Element, Fill, Length, Theme};
 
@@ -18,7 +18,7 @@ use crate::modules::draw::draw::hatch_settings::{
 };
 use crate::scene::model::hatch_model::{GradientKind, HatchPattern};
 use crate::t;
-use codec::types::Color as AcadColor;
+use document::types::Color as AcadColor;
 use crate::ui::style::form::{dialog_button_styled_opt, form_radio};
 
 /// Which hidden step the dialog is waiting on. `None` while it is visible.
@@ -49,7 +49,7 @@ pub enum HatchColorSlot {
 
 impl HatchColorSlot {
     /// The field that sets this slot to `color`.
-    pub fn field(self, color: codec::types::Color) -> Field {
+    pub fn field(self, color: document::types::Color) -> Field {
         match self {
             Self::Fill => Field::Color(HatchColor::Color(color)),
             Self::Gradient1 => Field::GradientColor1(color),
@@ -60,8 +60,8 @@ impl HatchColorSlot {
 
 /// The message that sets `slot` to the colour "Select Color" returned. A
 /// gradient's colours are true colours: ByLayer, ByBlock and None are refused.
-pub fn color_pick_message(slot: HatchColorSlot, color: codec::types::Color) -> Option<Message> {
-    use codec::types::Color;
+pub fn color_pick_message(slot: HatchColorSlot, color: document::types::Color) -> Option<Message> {
+    use document::types::Color;
     let logical = matches!(color, Color::ByLayer | Color::ByBlock | Color::None);
     if slot != HatchColorSlot::Fill && logical {
         return None;
@@ -76,8 +76,8 @@ pub enum Field {
     Color(HatchColor),
     GradientShape(usize),
     GradientOneColor(bool),
-    GradientColor1(codec::types::Color),
-    GradientColor2(codec::types::Color),
+    GradientColor1(document::types::Color),
+    GradientColor2(document::types::Color),
     GradientTint(f32),
     GradientCentered(bool),
     GradientAngle(String),
@@ -1042,8 +1042,8 @@ mod tests {
     // ── Hatch Edit ─────────────────────────────────────────────────────────
 
     fn edit_state(associative: bool, pattern: &str) -> State {
-        let mut hatch = codec::entities::Hatch::with_pattern(
-            codec::entities::hatch::HatchPattern::new(pattern),
+        let mut hatch = document::entities::Hatch::with_pattern(
+            document::entities::hatch::HatchPattern::new(pattern),
         );
         hatch.is_associative = associative;
         hatch.pattern_scale = 1.0;
@@ -1133,7 +1133,7 @@ mod tests {
             )),
             "Add and Preview are grey"
         );
-        let mut ui = iced_test::simulator(view_window(&state, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
+        let mut ui = iced_test::simulator(view_window(&state, document::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
         assert!(ui.find("0 region(s) selected").is_err());
         assert!(ui.find("Create separate hatches").is_ok(), "shown, greyed");
         assert!(ui.find("Retain boundaries").is_ok(), "shown, greyed");
@@ -1152,13 +1152,13 @@ mod tests {
         let messages = click_all(&create, &["Preview", "OK"]);
         assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogPreview)));
         assert!(has_message(&messages, |m| matches!(m, Message::HatchDialogOk)));
-        let mut ui = iced_test::simulator(view_window(&create, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
+        let mut ui = iced_test::simulator(view_window(&create, document::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL));
         assert!(ui.find("1 region(s) selected").is_ok());
     }
 
     #[test]
     fn the_new_fields_change_the_settings() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = state();
         state.apply(Field::Tab(FillTab::Gradient));
         state.apply(Field::Color(HatchColor::Color(Color::Index(1))));
@@ -1201,7 +1201,7 @@ mod tests {
 
     #[test]
     fn the_colour_list_opens_and_closes_and_choosing_a_colour_closes_it() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = state();
         state.apply(Field::ColorList(Some(HatchColorSlot::Gradient1)));
         assert_eq!(state.color_list, Some(HatchColorSlot::Gradient1));
@@ -1236,7 +1236,7 @@ mod tests {
 
     #[test]
     fn the_slot_makes_the_matching_field() {
-        use codec::types::Color;
+        use document::types::Color;
         assert!(matches!(
             HatchColorSlot::Fill.field(Color::Index(3)),
             Field::Color(HatchColor::Color(c)) if c == Color::Index(3)
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn choosing_a_fill_colour_closes_the_list() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = state();
         state.apply(Field::ColorList(Some(HatchColorSlot::Fill)));
         state.apply(Field::Color(HatchColor::Color(Color::Index(5))));
@@ -1263,7 +1263,7 @@ mod tests {
 
     #[test]
     fn the_pick_message_refuses_the_logical_colours_for_a_gradient_only() {
-        use codec::types::Color;
+        use document::types::Color;
         let field = |message: Option<Message>| match message {
             Some(Message::HatchDialogField(field)) => Some(field),
             Some(other) => panic!("a field message, got {other:?}"),
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn editing_can_still_change_tab_and_colour() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = edit_state(true, "ANSI31");
         state.apply(Field::Color(HatchColor::Color(Color::Index(5))));
         assert_eq!(state.settings.color, HatchColor::Color(Color::Index(5)));
@@ -1353,8 +1353,8 @@ mod tests {
         state.apply(Field::Tab(FillTab::Gradient));
         state.apply(Field::GradientOneColor(true));
         state.apply(Field::GradientTint(0.5));
-        state.apply(Field::GradientColor1(codec::types::Color::Index(1)));
-        state.apply(Field::GradientColor2(codec::types::Color::Index(3))); // hidden
+        state.apply(Field::GradientColor1(document::types::Color::Index(1)));
+        state.apply(Field::GradientColor2(document::types::Color::Index(3))); // hidden
         let (pattern, first) = state.gradient_swatch();
         assert_eq!(first, [1.0, 0.0, 0.0, 1.0]);
         let HatchPattern::Gradient { color2, one_color, .. } = pattern else {
@@ -1374,7 +1374,7 @@ mod tests {
 
     #[test]
     fn the_colour_control_shows_its_slot_and_use_current_the_current_colour() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = state();
         let current = Color::Index(6);
         assert_eq!(
@@ -1398,7 +1398,7 @@ mod tests {
 
     #[test]
     fn the_pattern_swatch_takes_the_fill_colour() {
-        use codec::types::Color;
+        use document::types::Color;
         let red = Some(iced::Color::from_rgb8(255, 0, 0));
         let green = Some(iced::Color::from_rgb8(0, 255, 0));
         assert_eq!(pattern_swatch_color(HatchColor::Color(Color::Index(1)), Color::Index(3)), red);
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn the_swatches_are_built_with_their_colours() {
         use crate::scene::model::hatch_model::HatchPattern;
-        use codec::types::Color;
+        use document::types::Color;
         let red = Some(iced::Color::from_rgb8(255, 0, 0));
         let green = Some(iced::Color::from_rgb8(0, 255, 0));
         let mut state = state();
@@ -1447,7 +1447,7 @@ mod tests {
 
     /// Every text the window shows, in layout order, the open colour list
     /// included.
-    fn texts_shown(state: &State, current: codec::types::Color) -> Vec<String> {
+    fn texts_shown(state: &State, current: document::types::Color) -> Vec<String> {
         let mut ui = iced_test::simulator(view_window(state, current, ModalSizing::FILL));
         let mut seen = Vec::new();
         let _ = ui.find(|candidate: iced_test::selector::Candidate<'_>| -> Option<()> {
@@ -1460,7 +1460,7 @@ mod tests {
     }
 
     fn texts(state: &State) -> Vec<String> {
-        texts_shown(state, codec::types::Color::ByLayer)
+        texts_shown(state, document::types::Color::ByLayer)
     }
 
     fn count(texts: &[String], wanted: &str) -> usize {
@@ -1482,7 +1482,7 @@ mod tests {
     fn click_nth(state: &State, label: &str, nth: usize, dx: f32) -> Vec<Field> {
         let mut ui = iced_test::simulator(view_window(
             state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             ModalSizing::FILL,
         ));
         let mut found = Vec::new();
@@ -1579,7 +1579,7 @@ mod tests {
         let bounds = {
             let mut ui = iced_test::simulator(view_window(
                 &state,
-                codec::types::Color::ByLayer,
+                document::types::Color::ByLayer,
                 ModalSizing::FILL,
             ));
             let mut found = Vec::new();
@@ -1600,7 +1600,7 @@ mod tests {
         while y <= bounds.y - 4.0 {
             let mut ui = iced_test::simulator(view_window(
                 &state,
-                codec::types::Color::ByLayer,
+                document::types::Color::ByLayer,
                 ModalSizing::FILL,
             ));
             ui.point_at(iced::Point::new(bounds.x + 8.0, y));
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[test]
     fn one_colour_shows_the_tint_and_two_colours_the_second_colour() {
-        use codec::types::Color;
+        use document::types::Color;
         let mut state = gradient_state();
         state.apply(Field::GradientColor1(Color::Index(1)));
         state.apply(Field::GradientColor2(Color::Index(3)));
@@ -1690,7 +1690,7 @@ mod tests {
 
     #[test]
     fn the_colour_lists_open_and_publish_into_their_slot() {
-        use codec::types::Color;
+        use document::types::Color;
         // Closed: the head opens its own list.
         let picked = click_nth(&state(), "Use Current", 0, 0.0);
         assert!(
@@ -1746,7 +1746,7 @@ mod tests {
 
     #[test]
     fn use_current_is_a_button_while_creating_only() {
-        use codec::types::Color;
+        use document::types::Color;
         let layer_and_transparency = 2; // the greyed "Use Current" of Options
         // On "Use Current": the head says so, the button is off.
         let state = state();
@@ -1784,7 +1784,7 @@ mod tests {
         state.apply(Field::GradientAngle("30".into()));
         let mut ui = iced_test::simulator(view_window(
             &state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             ModalSizing::FILL,
         ));
         assert!(ui.find("30").is_ok(), "the gradient's angle");
@@ -1803,8 +1803,8 @@ mod tests {
     /// window (`sized_flow` with the window's caps), on the headless renderer.
     fn laid_out(state: &State) -> (f32, f32) {
         let element = crate::ui::modal::intrinsic(
-            view_window(state, codec::types::Color::ByLayer, ModalSizing::INTRINSIC),
-            view_window(state, codec::types::Color::ByLayer, ModalSizing::FILL),
+            view_window(state, document::types::Color::ByLayer, ModalSizing::INTRINSIC),
+            view_window(state, document::types::Color::ByLayer, ModalSizing::FILL),
             iced::Size::new(f32::from(MAX_WIDTH), f32::from(MAX_HEIGHT)),
             iced::Vector::ZERO,
         );
@@ -1816,7 +1816,7 @@ mod tests {
 
     #[test]
     fn the_window_fits_and_keeps_its_size_on_both_tabs() {
-        use codec::types::Color;
+        use document::types::Color;
         // The tallest Hatch tab: every message shown.
         let mut hatch = state();
         hatch.apply(Field::Pattern("NO_SUCH_PATTERN".into()));
@@ -1850,7 +1850,7 @@ mod tests {
 
     /// Messages the real window publishes for the given interactions.
     fn click_all(state: &State, labels: &[&str]) -> Vec<Message> {
-        let element = view_window(state, codec::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL);
+        let element = view_window(state, document::types::Color::ByLayer, crate::ui::modal::ModalSizing::FILL);
         let mut ui = iced_test::simulator(element);
         for label in labels {
             ui.click(*label).unwrap_or_else(|_| panic!("{label} is on screen"));
@@ -1916,7 +1916,7 @@ mod tests {
         );
         let mut ui = iced_test::simulator(view_window(
             &state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         for hidden in ["Preview", "Add: Pick points", "Click to set new origin", "Islands"] {
@@ -1941,14 +1941,14 @@ mod tests {
         let state = with_palette("zzzz-no-such-pattern", None);
         let mut ui = iced_test::simulator(view_window(
             &state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         assert!(ui.find("No patterns found").is_ok());
         let state = with_palette("brick", None);
         let mut ui = iced_test::simulator(view_window(
             &state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         assert!(ui.find("No patterns found").is_err());
@@ -1965,7 +1965,7 @@ mod tests {
         assert!(entries.len() > 40, "more cards than one screen of the grid shows");
         let mut ui = iced_test::simulator(view_window(
             &state,
-            codec::types::Color::ByLayer,
+            document::types::Color::ByLayer,
             crate::ui::modal::ModalSizing::FILL,
         ));
         for entry in &entries {

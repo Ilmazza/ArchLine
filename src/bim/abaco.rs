@@ -39,7 +39,7 @@
 //!   senza altezza la riga è incompleta e non entra: un'altezza che manca non
 //!   diventa mai un campo vuoto.
 
-use codec::Document;
+use document::Document;
 
 use super::abaco_render::{height_state, room_notes, zone_notes, ND};
 use super::extract::push_unique;
@@ -680,7 +680,7 @@ mod tests {
     use super::test_support::*;
     use super::*;
 
-    use codec::EntityType;
+    use document::EntityType;
 
     use crate::bim::extract::{extract, Elaborato, ExtractOptions};
     use crate::bim::fixtures::{shift_tramezzo, Form, LAYER_MURI};
@@ -1294,7 +1294,7 @@ mod tests {
         let mut scene = scene_of(Form::ChiusaPerMuro);
         set_default_height(&mut scene, 2.7);
         demolish(&mut scene, [4.05, 0.0], [4.05, 3.0]);
-        let mut text = codec::entities::MText::with_value("x", codec::Vector3::new(4.05, 1.5, 0.0));
+        let mut text = document::entities::MText::with_value("x", document::Vector3::new(4.05, 1.5, 0.0));
         text.common.layer = "TESTI".into();
         scene.add_entity(EntityType::MText(Box::new(text)));
         let (_, geometry) = project_room_rows(&scene.document, M, TOL, TOL, Some(2.7), &[]);

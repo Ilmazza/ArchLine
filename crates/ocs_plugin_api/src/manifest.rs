@@ -136,7 +136,16 @@
 /// (emitted by `export_plugin!`), so no Rust type crosses the library
 /// boundary. The host no longer matches the plugin's compiler or codec commit;
 /// it matches the codec types' wire shapes (`version_info::wire_schema`).
-pub const API_VERSION: u32 = 14;
+/// v15: quad panels + custom icons — the declarative quad-cursor-menu surface
+/// (`QuadPanelDef` / `PluginRequest::RegisterQuadPanels` /
+/// `HostNotification::QuadAction`), appending to the protocol enums only.
+/// v16: `PluginRequest::ValidateParametricChain` checks a parametric chain
+/// without staging it, appended to the protocol enums. A v15 host cannot
+/// decode the request and drops the connection, so a plugin that calls it
+/// declares v16 and the older host refuses to load it. Custom grips now
+/// snap (object snap, tracking, ortho, polar) and settle click-move-click
+/// like native grips.
+pub const API_VERSION: u32 = 16;
 
 /// Oldest plugin API major the current host still loads. This keeps previously
 /// compiled cdylibs usable as long as their vtable layout is a prefix of the

@@ -2,7 +2,7 @@
 //! the colour picks, the keys with an overlay open. (Tests below also cover
 //! the Properties panel's gradient colours.)
 
-use codec::types::{Color, Transparency};
+use document::types::{Color, Transparency};
 use iced::Task;
 
 use crate::app::{ColorPickTarget, Message, ModalKind, OpenCADStudio};
@@ -160,7 +160,7 @@ impl OpenCADStudio {
 #[cfg(test)]
 mod tests {
     use crate::app::{Message, OpenCADStudio};
-    use codec::types::Color;
+    use document::types::Color;
 
     fn new_app() -> OpenCADStudio {
         let mut app = OpenCADStudio::new_for_test();
@@ -169,12 +169,12 @@ mod tests {
     }
 
     /// A drawing holding one gradient hatch built straight in the document.
-    fn app_with_gradient(stops: usize) -> (OpenCADStudio, codec::Handle) {
+    fn app_with_gradient(stops: usize) -> (OpenCADStudio, document::Handle) {
         use crate::entities::hatch_fill::{apply_gradient, GradientSpec};
         use crate::scene::model::hatch_model::GradientKind;
         let mut app = new_app();
         let i = app.active_tab;
-        let mut hatch = codec::entities::Hatch::solid();
+        let mut hatch = document::entities::Hatch::solid();
         apply_gradient(
             &mut hatch,
             &GradientSpec {
@@ -189,15 +189,15 @@ mod tests {
             },
         );
         hatch.gradient_color.colors.truncate(stops);
-        let handle = app.tabs[i].scene.add_entity(codec::EntityType::Hatch(Box::new(hatch)));
+        let handle = app.tabs[i].scene.add_entity(document::EntityType::Hatch(Box::new(hatch)));
         app.tabs[i].scene.select_entity(handle, true);
         app.refresh_properties();
         (app, handle)
     }
 
-    fn stops(app: &OpenCADStudio, handle: codec::Handle) -> Vec<(f64, Color)> {
+    fn stops(app: &OpenCADStudio, handle: document::Handle) -> Vec<(f64, Color)> {
         match app.tabs[app.active_tab].scene.document.get_entity(handle) {
-            Some(codec::EntityType::Hatch(h)) => {
+            Some(document::EntityType::Hatch(h)) => {
                 h.gradient_color.colors.iter().map(|e| (e.value, e.color)).collect()
             }
             other => panic!("not a hatch: {other:?}"),
@@ -243,9 +243,9 @@ mod tests {
         let i = app.active_tab;
         app.tabs[i]
             .scene
-            .add_entity(codec::EntityType::Line(codec::entities::Line::from_points(
-                codec::types::Vector3::new(x1, y1, 0.0),
-                codec::types::Vector3::new(x2, y2, 0.0),
+            .add_entity(document::EntityType::Line(document::entities::Line::from_points(
+                document::types::Vector3::new(x1, y1, 0.0),
+                document::types::Vector3::new(x2, y2, 0.0),
             )));
     }
 
@@ -276,19 +276,19 @@ mod tests {
         }
     }
 
-    fn all_hatches(app: &OpenCADStudio) -> Vec<codec::entities::Hatch> {
+    fn all_hatches(app: &OpenCADStudio) -> Vec<document::entities::Hatch> {
         app.tabs[app.active_tab]
             .scene
             .document
             .entities()
             .filter_map(|entity| match entity {
-                codec::EntityType::Hatch(hatch) => Some((**hatch).clone()),
+                document::EntityType::Hatch(hatch) => Some((**hatch).clone()),
                 _ => None,
             })
             .collect()
     }
 
-    fn the_hatch(app: &OpenCADStudio) -> codec::entities::Hatch {
+    fn the_hatch(app: &OpenCADStudio) -> document::entities::Hatch {
         let mut hatches = all_hatches(app);
         assert_eq!(hatches.len(), 1, "exactly one hatch was made");
         hatches.remove(0)
@@ -306,8 +306,8 @@ mod tests {
     }
 
     /// Every vertex of the hatch's boundary paths, in world coordinates.
-    fn world_boundary(hatch: &codec::entities::Hatch) -> Vec<glam::DVec3> {
-        use codec::entities::BoundaryEdge;
+    fn world_boundary(hatch: &document::entities::Hatch) -> Vec<glam::DVec3> {
+        use document::entities::BoundaryEdge;
         let plane = crate::entities::curve::ocs_plane(hatch.normal, hatch.elevation);
         let (origin, x, y) = (
             glam::DVec3::from_array(plane.origin),
@@ -553,12 +553,12 @@ mod tests {
             (20.0, 10.0, 0.0, 10.0),
             (0.0, 10.0, 0.0, 0.0),
         ] {
-            let mut line = codec::entities::Line::from_points(
-                codec::types::Vector3::new(a, b, 0.0),
-                codec::types::Vector3::new(c, d, 0.0),
+            let mut line = document::entities::Line::from_points(
+                document::types::Vector3::new(a, b, 0.0),
+                document::types::Vector3::new(c, d, 0.0),
             );
             line.common.color = color;
-            let handle = app.tabs[i].scene.add_entity(codec::EntityType::Line(line));
+            let handle = app.tabs[i].scene.add_entity(document::EntityType::Line(line));
             app.tabs[i].scene.select_entity(handle, false);
         }
         app.refresh_properties();
@@ -602,7 +602,7 @@ mod tests {
     fn the_hatch_takes_the_current_transparency_of_its_drawing() {
         let mut app = app_with_rectangle();
         let i = app.active_tab;
-        let half = codec::types::Transparency::Explicit(128);
+        let half = document::types::Transparency::Explicit(128);
         assert!(app.tabs[i].scene.document.set_current_entity_transparency(half));
         open_with(&mut app, "HATCH", &[]);
         ok(&mut app);
@@ -690,7 +690,7 @@ mod tests {
             ]
         );
         assert_eq!(hatch.common.color, Color::ByLayer, "the command line keeps ByLayer");
-        assert_eq!(hatch.normal, codec::types::Vector3::new(0.0, 0.0, 1.0));
+        assert_eq!(hatch.normal, document::types::Vector3::new(0.0, 0.0, 1.0));
     }
 
     #[test]
@@ -824,12 +824,12 @@ mod tests {
             RegionOrigin::Points,
         ));
         let _ = app.update(Message::HatchDialogField(Field::IslandStyle(
-            codec::entities::HatchStyleType::Outer,
+            document::entities::HatchStyleType::Outer,
         )));
         ok(&mut app);
         let hatch = the_hatch(&app);
         assert_eq!(FillKind::of(&hatch), FillKind::Gradient);
-        assert_eq!(hatch.style, codec::entities::HatchStyleType::Outer);
+        assert_eq!(hatch.style, document::entities::HatchStyleType::Outer);
         assert_eq!(hatch.paths.len(), 2, "outer boundary and island");
     }
 
@@ -851,7 +851,7 @@ mod tests {
         open_with(&mut app, "GRADIENT", &[]);
         ok(&mut app);
         let hatch = the_hatch(&app);
-        assert_eq!(hatch.normal, codec::types::Vector3::new(0.0, 0.0, 1.0));
+        assert_eq!(hatch.normal, document::types::Vector3::new(0.0, 0.0, 1.0));
         assert_eq!(hatch.elevation, 0.0);
         assert_eq!(FillKind::of(&hatch), FillKind::Gradient);
         for point in world_boundary(&hatch) {
@@ -871,10 +871,10 @@ mod tests {
         let mut app = new_app();
         let i = app.active_tab;
         // The XZ plane at y = 5: local x along world X, local y along world Z.
-        let mut ucs = codec::tables::Ucs::new("*ACTIVE*");
-        ucs.origin = codec::types::Vector3::new(0.0, 5.0, 0.0);
-        ucs.x_axis = codec::types::Vector3::new(1.0, 0.0, 0.0);
-        ucs.y_axis = codec::types::Vector3::new(0.0, 0.0, 1.0);
+        let mut ucs = document::tables::Ucs::new("*ACTIVE*");
+        ucs.origin = document::types::Vector3::new(0.0, 5.0, 0.0);
+        ucs.x_axis = document::types::Vector3::new(1.0, 0.0, 0.0);
+        ucs.y_axis = document::types::Vector3::new(0.0, 0.0, 1.0);
         app.tabs[i].active_ucs = Some(ucs);
         open_with(&mut app, "GRADIENT", &[]);
         ok(&mut app);
@@ -922,7 +922,7 @@ mod tests {
         // yellow. The ribbon shows yet another colour.
         app.tabs[second].scene.document.header.current_entity_color = Color::ByLayer;
         app.tabs[second].scene.document.layers.get_mut("0").unwrap().color = Color::Index(1);
-        let quarter = codec::types::Transparency::Explicit(64);
+        let quarter = document::types::Transparency::Explicit(64);
         assert!(app.tabs[second].scene.document.set_current_entity_transparency(quarter));
         app.tabs[first].scene.document.header.current_entity_color = Color::Index(2);
         app.ribbon.active_color = Color::Index(6);
@@ -937,11 +937,11 @@ mod tests {
         );
         assert_eq!(
             app.hatch_creation_style(first, HatchColor::UseCurrent),
-            (Color::Index(2), codec::types::Transparency::ByLayer)
+            (Color::Index(2), document::types::Transparency::ByLayer)
         );
         assert_eq!(
             app.hatch_creation_style(first, HatchColor::Color(Color::Index(4))),
-            (Color::Index(4), codec::types::Transparency::ByLayer)
+            (Color::Index(4), document::types::Transparency::ByLayer)
         );
         // "Use Current" follows that drawing's current colour; a chosen one
         // wins over it.

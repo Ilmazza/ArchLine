@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::Document;
+use document::Document;
 
 /// The community folder's GitHub contents API (lists name + download URL).
 #[cfg(not(target_arch = "wasm32"))]
@@ -123,19 +123,7 @@ pub fn missing_shx_fonts(doc: &Document) -> Vec<String> {
         // The primary font and the big font (Asian double-byte glyphs) are
         // both plain .shx files the style depends on.
         for file in [style.font_file.trim(), style.big_font_file.trim()] {
-            // A font with a built-in stroke equivalent (romans, simplex, txt...)
-            // already draws as it should; only one that would fall back to an
-            // unrelated face is worth a download.
-            if file.is_empty()
-                || !file.to_ascii_lowercase().ends_with(".shx")
-                || crate::io::linetypes::is_bundled_shape_file(file)
-                || crate::scene::text::lff::is_builtin(file)
-            {
-                continue;
-            }
-            let resolved = crate::io::resolve_image_file(file, base).is_some()
-                || local_font_file(file).is_some();
-            if resolved {
+            if !shx_file_missing(file, base) {
                 continue;
             }
             let name = file.rsplit(['/', '\\']).next().unwrap_or(file).to_string();
@@ -146,6 +134,37 @@ pub fn missing_shx_fonts(doc: &Document) -> Vec<String> {
     }
     missing.sort_by_key(|name| name.to_ascii_lowercase());
     missing
+}
+
+/// Whether `file` is an `.shx` font that draws with an unrelated stand-in:
+/// not bundled, not beside the drawing (`base`), not in the font folders. A
+/// font with a built-in stroke equivalent (romans, simplex, txt...) already
+/// draws as it should.
+pub fn shx_file_missing(file: &str, base: Option<&Path>) -> bool {
+    let file = file.trim();
+    !(file.is_empty()
+        || !file.to_ascii_lowercase().ends_with(".shx")
+        || crate::io::linetypes::is_bundled_shape_file(file)
+        || crate::scene::text::lff::is_builtin(file)
+        || crate::io::resolve_image_file(file, base).is_some()
+        || local_font_file(file).is_some())
+}
+
+/// The `.shx` files in the downloaded-fonts folder and the support folder,
+/// by file name, sorted and de-duplicated case-insensitively.
+pub fn folder_shx_fonts() -> Vec<String> {
+    let mut files: Vec<String> = fonts_dir()
+        .into_iter()
+        .chain(support_folder())
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.to_ascii_lowercase().ends_with(".shx"))
+        .collect();
+    files.sort_by_key(|name| name.to_ascii_lowercase());
+    files.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    files
 }
 
 /// A font file previously downloaded into the local fonts directory, matched
@@ -348,7 +367,7 @@ mod tests {
         std::fs::write(dir.join("exists.shx"), b"stub").unwrap();
         let mut doc = Document::new();
         let mk = |name: &str, file: &str| {
-            let mut style = codec::TextStyle::new(name);
+            let mut style = document::TextStyle::new(name);
             style.font_file = file.into();
             style
         };

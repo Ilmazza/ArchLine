@@ -6,7 +6,7 @@
 
 use crate::app::{Message, OpenCADStudio};
 use crate::command::{CadCommand, CmdResult};
-use codec::{Document, EntityType, Handle};
+use document::{Document, EntityType, Handle};
 use glam::DVec3;
 use iced::Task;
 use std::path::{Path, PathBuf};
@@ -112,8 +112,8 @@ impl OpenCADStudio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::{Line, TableBuilder};
-    use codec::types::Vector3;
+    use document::entities::{Line, TableBuilder};
+    use document::types::Vector3;
 
     fn fresh_app() -> OpenCADStudio {
         let mut app = OpenCADStudio::new_for_test();

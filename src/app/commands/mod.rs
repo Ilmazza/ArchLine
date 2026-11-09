@@ -12,6 +12,7 @@ mod block_cmdline;
 mod blocks;
 mod blockvars;
 mod center_vars;
+mod revcloud_vars;
 mod purge;
 pub(crate) use purge::purge_pass;
 mod block_editor_vars;
@@ -29,10 +30,19 @@ mod mleader_layer;
 pub(crate) mod display;
 mod draw;
 mod field;
+mod group_display;
+mod hatch_dialogs;
+mod hatch_vars;
 mod fileops;
 mod hatch_dialog;
 mod hatch_gradient;
+mod log_file;
+pub(crate) use log_file::write_line as write_log_line;
+pub(crate) use log_file::{
+    log_file_folder_setting, log_file_mode, set_log_file_folder, set_log_file_mode,
+};
 mod hyperlink;
+pub(crate) use group_display::{group_display_mode, set_group_display_mode};
 pub(crate) use hyperlink::{hyperlink_options, set_hyperlink_options};
 mod inquiry;
 mod layerprops;
@@ -55,6 +65,7 @@ mod point_cloud;
 mod refedit;
 pub(crate) mod sheet_set;
 mod spell;
+pub(in crate::app) mod table_cells;
 mod styleprops;
 mod text_edit;
 mod table_style_var;
@@ -101,6 +112,8 @@ impl OpenCADStudio {
         // A command parked behind a transparent zoom / MTP goes with it.
         self.tabs[i].suspended_cmd = None;
         self.tabs[i].transparent_resume = false;
+        // So does a 'FILTER / 'QSELECT waiting to hand objects back to it.
+        self.transparent_select = None;
         // Starting any command leaves interactive navigation modes (their own
         // command arms below re-enable the selected one).
         self.tabs[i].pan_mode = false;
@@ -108,7 +121,9 @@ impl OpenCADStudio {
         self.tabs[i].zoom_dynamic_mode = false;
         // Reset the last committed point so the first click of the new command
         // is not constrained by ortho/polar relative to a previous command's endpoint.
-        self.last_point = None;
+        if let Some(point) = self.last_point.take() {
+            self.last_entered_point = Some(point);
+        }
         // A new command collects its own points, so the previous command's
         // accepted snaps must not leak into it.
         self.clear_accepted_snaps();
@@ -134,26 +149,36 @@ impl OpenCADStudio {
     }
 
     pub(super) fn dispatch_command(&mut self, cmd: &str) -> Task<Message> {
+        self.remember_selection_before_command(cmd);
         let task = self.dispatch_command_inner(cmd, false);
         self.clear_idle_tool_highlight();
         task
+    }
+
+    /// SELECTPREVIOUS hands back the set a command started with, so capture the
+    /// live selection whenever a user command begins. Answers fed to a running
+    /// command, internal `_` dispatches and SELECTPREVIOUS itself leave it
+    /// alone; otherwise the set being gathered would overwrite the one to
+    /// restore.
+    fn remember_selection_before_command(&mut self, cmd: &str) {
+        let i = self.active_tab;
+        if self.tabs[i].active_cmd.is_some() || self.active_modal.is_some() {
+            return;
+        }
+        let verb = cmd.split([' ', ':']).next().unwrap_or(cmd);
+        if verb.starts_with('_') || verb.starts_with('\'') {
+            return;
+        }
+        if verb.eq_ignore_ascii_case("SELECTPREVIOUS") {
+            return;
+        }
+        self.tabs[i].scene.remember_selection_set();
     }
 
     /// Run a ribbon command. A `;` stands for Enter, as in a menu macro: each
     /// part answers the running command's prompt, or starts a command when
     /// none runs (`PDFIMPORT;FILE`).
     pub(super) fn dispatch_ribbon_command(&mut self, cmd: &str) -> Task<Message> {
-        if cmd.eq_ignore_ascii_case("BLOOKUPTABLE")
-            && self.block_editor_preferences.action_bars
-            && self.tabs[self.active_tab]
-                .active_block_edit_session()
-                .is_some()
-        {
-            // The palette's Lookup tool is the action bar's own affordance, so
-            // the refusal meant for the typed verb would silence it: open the
-            // table editor instead.
-            return self.open_lookup_table("");
-        }
         if !cmd.contains(';') {
             return self.dispatch_command(cmd);
         }
@@ -209,6 +234,88 @@ impl OpenCADStudio {
             })
     }
 
+    /// API v15: run a picked quad item's `quadplugin:` action host-side. The
+    /// pick router (`on_quad_pick`) routes the scheme here INSTEAD of the
+    /// generic dispatcher: plugin quad actions are impossible by typed /
+    /// automation / script input — `try_dispatch_command` answers
+    /// `quadplugin:` with the ordinary unknown-command path — so this method
+    /// is the only door to the pick surface. The triple resolves against the
+    /// quad store (`QuadStore::resolve`, no visibility filtering; the
+    /// liveness guard below is the pick path's own):
+    ///
+    /// - `Command(verb)` dispatches the verb exactly like a plain quad item
+    ///   (the `Message::Command` path) — the review's dead-tile fix.
+    /// - `Callback` publishes the owner-targeted `QuadAction` notification.
+    /// - A stale/invisible triple answers like any unknown command.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn quad_plugin_action(&mut self, cmd: &str) -> Task<Message> {
+        use ocs_plugin_api::dialog::QuadActionDef;
+
+        let unknown = |app: &mut Self| {
+            app.command_line
+                .push_error(crate::tf!("Unknown command: {cmd}").as_ref());
+            Task::none()
+        };
+        let Some((plugin_id, panel_id, control_id)) = crate::plugin::quad::split_action(cmd) else {
+            return unknown(self);
+        };
+        let resolved = crate::plugin::quad::with_store(|store| {
+            store
+                .resolve(&plugin_id, &panel_id, &control_id)
+                .cloned()
+        });
+        match resolved {
+            Some(QuadActionDef::Command(verb)) => self.update(Message::Command(verb)),
+            Some(QuadActionDef::Callback) => {
+                // Visibility is the enabled+alive predicate the quad build
+                // applies (`panels_for_visible`): a pick that raced a plugin
+                // teardown delivers nothing but the honest error.
+                let visible =
+                    crate::plugin::grip_points::visibility(&self.disabled_plugins)(&plugin_id);
+                if !visible {
+                    return unknown(self);
+                }
+                let i = self.active_tab;
+                let handles = self.tabs[i].scene.selected_handles_in_order();
+                let type_keys: Vec<String> = handles
+                    .iter()
+                    .filter_map(|handle| {
+                        self.tabs[i]
+                            .scene
+                            .document
+                            .get_entity(*handle)
+                            .map(|entity| {
+                                crate::entities::traits::entity_type_name(entity).to_string()
+                            })
+                    })
+                    .collect();
+                // `pick_point` is context-only: the quad's hover anchor is a
+                // screen position, not a world point, and no world
+                // reconstruction is trivially available on this path — the
+                // host-supplied zero is the honest placeholder (§4).
+                crate::plugin::v4_support::publish_quad_action(
+                    &plugin_id,
+                    &panel_id,
+                    &control_id,
+                    handles,
+                    type_keys,
+                    [0.0; 3],
+                );
+                Task::none()
+            }
+            None => unknown(self),
+        }
+    }
+
+    /// The wasm twin: no plugin surface exists, so no `quadplugin:` item can
+    /// be built — a stray one answers like any unknown command.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn quad_plugin_action(&mut self, cmd: &str) -> Task<Message> {
+        self.command_line
+            .push_error(crate::tf!("Unknown command: {cmd}").as_ref());
+        Task::none()
+    }
+
     /// Dispatch `cmd`, or `None` when no command answers to it (nothing is
     /// reported then). A script line uses it to tell a command that took
     /// the words after it from one that did not.
@@ -217,6 +324,12 @@ impl OpenCADStudio {
         cmd: &str,
         allow_suggest: bool,
     ) -> Option<Task<Message>> {
+        if self.table_cell_editor.is_some()
+            && self.field_dialog.is_none()
+            && !self.commit_table_cell_editor()
+        {
+            return Some(Task::none());
+        }
         let i = self.active_tab;
         // Expand a command alias ("L" → "LINE") on the leading token before any
         // routing, so every path below (Start-tab gate, plugins, all dispatch
@@ -405,11 +518,26 @@ impl OpenCADStudio {
         // (#677) A quoted navigation command does the same; an interactive
         // one (ZOOM Window) parks the running command and resumes it when the
         // zoom ends, as does a ZOOM the zoom prompt itself hands off to.
+        // 'FILTER and 'QSELECT work for the command asking for objects; they
+        // park it and hand it what they find (#2611).
+        if quoted && matches!(cmd, "FILTER" | "QSELECT") {
+            return Some(self.start_transparent_select(i, cmd));
+        }
         let transparent = is_transparent(cmd)
+            || (cmd == "PARAMETERS" && self.tabs[i].active_block_edit_session().is_some())
             || (quoted && is_transparent_capable(cmd))
             || (self.tabs[i].transparent_resume && cmd.starts_with("ZOOM"));
         if transparent {
             if zoom_prompts(cmd) && self.tabs[i].active_cmd.is_some() {
+                // One command waits at a time: parking this one too would
+                // drop the one already waiting.
+                if self.tabs[i].suspended_cmd.is_some() {
+                    self.command_line.push_error(
+                        crate::tf!("'{} cannot run while another command is waiting.", cmd)
+                            .as_ref(),
+                    );
+                    return Some(Task::none());
+                }
                 self.tabs[i].suspended_cmd = self.tabs[i].active_cmd.take();
                 self.tabs[i].transparent_resume = true;
                 self.tabs[i].scene.clear_preview_wire();
@@ -438,6 +566,7 @@ impl OpenCADStudio {
         // Remove or a fixed Window sense must not quietly still be in force
         // when the next command asks for objects. (#596)
         self.select_remove_mode = false;
+        crate::modules::draw::select::set_remove_mode(false);
         {
             let mut selection = self.tabs[i].scene.selection.borrow_mut();
             // Cancel the active selection gesture before the new command starts.
@@ -601,6 +730,9 @@ impl OpenCADStudio {
         if let Some(t) = self.dispatch_table_style_var(cmd, i) {
             return Some(t);
         }
+        if let Some(t) = self.dispatch_hatch_var(cmd) {
+            return Some(t);
+        }
         if let Some(t) = self.dispatch_layer_variable(cmd, i) {
             return Some(t);
         }
@@ -641,6 +773,9 @@ impl OpenCADStudio {
             return Some(t);
         }
         if let Some(t) = self.dispatch_blocks(cmd, i) {
+            return Some(t);
+        }
+        if let Some(t) = self.dispatch_table_cells(cmd, i) {
             return Some(t);
         }
         if let Some(t) = self.dispatch_pdf_underlay(cmd, i) {
@@ -778,7 +913,12 @@ pub fn is_transparent(cmd: &str) -> bool {
                 | "DSETTINGS"
                 | "BAUTHORPALETTE"
                 | "BAUTHORPALETTECLOSE"
+                | "BPARAMETERS"
+                | "BPARAMETERSCLOSE"
                 | "PARAMETERSCLOSE"
+                | "TOOLPALETTES"
+                | "TOOLPALETTESCLOSE"
+                | "TP"
         )
 }
 
@@ -844,12 +984,19 @@ inventory::submit!(crate::command::CommandRegistration {
         // Drafting-aid / display toggles + customization entry points wired in the
         // dispatch families (no interactive command module of their own).
         "ALIASEDIT",
+        // Dispatched commands that the alias file names (#2452).
+        "CTABLESTYLE",
+        "HPNAME",
+        "SELHANDLES",
+        "SELH",
         // Implemented command-line block forms must also validate in ALIASEDIT.
         "-BLOCK",
         "-BMAKE",
         "-WBLOCK",
         "-WB",
         "-ATTEDIT",
+        // Redefine a block's attribute definitions from an existing reference.
+        "ATTREDEF",
         // Script forms of the table commands.
         "-LAYER",
         "-PURGE",
@@ -865,6 +1012,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "DSETTINGS",
         "PARAMETERS",
         "PARAMETERSCLOSE",
+        "TOOLPALETTES",
+        "TOOLPALETTESCLOSE",
         "BTABLE",
         "GRID",
         "GRAPHICATTRIBUTES",
@@ -1006,6 +1155,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "VISUALSTYLES",
         "QUICKCALC",
         "QC",
+        "COMMANDHISTORY",
         "HYPERLINK",
         "XOPEN",
         "REGION",
@@ -1051,6 +1201,11 @@ inventory::submit!(crate::command::CommandRegistration {
         "ZOOMFACTOR",
         "SHORTCUTMENU",
         "SHORTCUTMENUDURATION",
+        // Quad cursor menu (F12 / status-bar QUAD field, docs/quad-menu.md
+        // §3.7): the sysvars reflect the three persisted quad settings.
+        "QUAD",
+        "QUADWIDTH",
+        "QUADCOMMANDLAUNCH",
         "CURSORSIZE",
         "PICKBOX",
         "APERTURE",
@@ -1070,6 +1225,12 @@ inventory::submit!(crate::command::CommandRegistration {
         "PSLTSCALE",
         // Hatch variables (commands/hatchvars.rs).
         "HPGAPTOL",
+        "MSLTSCALE",
+        "LOGFILEMODE",
+        "LOGFILEON",
+        "LOGFILEOFF",
+        "LOGFILEPATH",
+        "SAVEFILEPATH",
         // Plot preferences and the current-layout variables (commands/plotvars.rs).
         "PLOTOFFSET",
         "PAPERUPDATE",
@@ -1125,6 +1286,13 @@ inventory::submit!(crate::command::CommandRegistration {
         "FILEDIA",
         "SDI",
         "TRIMEXTENDMODE",
+        "REVCLOUDCREATEMODE",
+        "REVCLOUDARCVARIANCE",
+        "REVCLOUDGRIPS",
+        "GROUPDISPLAYMODE",
+        "OFFSETGAPTYPE",
+        "MATCHMODE",
+        "REVCLOUDAPPROXARCLEN",
         "PELLIPSE",
         "SELECTIONCYCLING",
         "OSNAPZ",
@@ -1185,12 +1353,26 @@ inventory::submit!(crate::command::CommandRegistration {
         "MENUBAR",
         "RIBBON",
         "RIBBONCLOSE",
+        "TOOLBAR",
+        "-TOOLBAR",
+        "WSCURRENT",
+        "COMMANDLINE",
+        "COMMANDLINEHIDE",
+        "COMMANDLINETOGGLE",
         "COLORTHEME",
         "SELECTIONAREA",
         "SELECTIONAREAOPACITY",
+        "VPHIGHLIGHT",
+        "VPHIGHLIGHTOPACITY",
         "SELECTIONEFFECT",
         "SELECTIONEFFECTCOLOR",
         "VSEDGECOLOR",
+        "VSEDGESMOOTH",
+        "COMPARECOLORADDED",
+        "COMPARECOLORREMOVED",
+        "COMPARECOLORMODIFIED",
+        "COMPARETOLERANCE",
+        "HPDLGMODE",
         "WINDOWSAREACOLOR",
         "WINDOWAREACOLOR",
         "CROSSINGAREACOLOR",
@@ -1237,6 +1419,9 @@ inventory::submit!(crate::command::CommandRegistration {
         "DE",
         "DESELALL",
         "DESELECT",
+        "SELECT",
+        "SELECTPREVIOUS",
+        "PSELECT",
         "DIMSTYLE",
         "DONATE",
         "DRAWORDER",
@@ -1300,6 +1485,7 @@ inventory::submit!(crate::command::CommandRegistration {
         "IMPORT",
         "ACISIN",
         "WMFIN",
+        "SVGIN",
         "DGNIMPORT",
         "-DGNIMPORT",
         "OPEN",
@@ -1338,6 +1524,8 @@ inventory::submit!(crate::command::CommandRegistration {
         "SELSIM",
         // Draw a new object of the same type as the selected one. (#239)
         "ADDSELECTED",
+        // Explode a block reference and keep its attribute values as text.
+        "BURST",
         // Outline of origin planes, open sketch and solid bodies.
         "BROWSER",
         // Open and close a sketch: a drawing plane, a square-on view and
@@ -1365,7 +1553,10 @@ inventory::submit!(crate::command::CommandRegistration {
         "TABLESTYLE",
         "BAUTHORPALETTE",
         "BAUTHORPALETTECLOSE",
+        "BPARAMETERS",
+        "BPARAMETERSCLOSE",
         "TOOLPALETTES",
+        "TOOLPALETTESCLOSE",
         "TP",
         "TS",
         "U",
@@ -1402,7 +1593,7 @@ mod marquee_cancel_tests {
     use crate::app::{GripPendingValue, Message, OpenCADStudio};
     use crate::scene::model::object::GripMenuAction;
     use crate::scene::pick::grip::GripEdit;
-    use codec::Handle;
+    use document::Handle;
     use iced::time::Instant;
 
     fn fresh() -> OpenCADStudio {
@@ -1631,6 +1822,149 @@ mod marquee_cancel_tests {
             "Test Modal"
         );
     }
+
+    #[test]
+    fn plugin_quad_pick_delivers_to_owner_and_unknown_panel_errors() {
+        use ocs_plugin_api::dialog::{QuadActionDef, QuadItemDef, QuadPanelDef};
+        use ocs_plugin_api::host::{CustomGripResponse, HostApi};
+        use ocs_plugin_api::ribbon::owned::OwnedIconKind;
+
+        let mut app = fresh();
+        let i = app.active_tab;
+        // Test liveness: the in-process sink marks the plugin loaded+alive in
+        // the grips' visibility predicate (thread-local, so no cross-test
+        // bleed), and the global quad store keys the registration by plugin.
+        crate::plugin::grip_points::install_in_process_sink("quadtest.plugin", |_, _| {
+            CustomGripResponse::default()
+        });
+        let plugin_id = "quadtest.plugin";
+        let callback_panel = QuadPanelDef::new("align", "Align").with_item(QuadItemDef {
+            control_id: "flip".to_string(),
+            label: "Flip".to_string(),
+            icon: OwnedIconKind::Glyph("F".to_string()),
+            action: QuadActionDef::Callback,
+        });
+        let command_panel = QuadPanelDef::new("cmds", "Commands").with_item(QuadItemDef {
+            control_id: "line".to_string(),
+            label: "Line".to_string(),
+            icon: OwnedIconKind::Glyph("L".to_string()),
+            action: QuadActionDef::Command("LINE".to_string()),
+        });
+
+        // Register through the host session (the wire path's storage).
+        {
+            let mut host = crate::app::plugin_host::HostSession::new(&mut app, i);
+            assert_eq!(
+                host.register_quad_panels(plugin_id, &[callback_panel, command_panel]),
+                vec![true, true]
+            );
+        }
+
+        // The model feed: namespaced id, the title as tab label, and the
+        // `quadplugin:` command on the item.
+        let feed = crate::app::plugin_host::plugin_quad_panels(&app.disabled_plugins);
+        let registered = feed
+            .iter()
+            .find(|panel| panel.id == "plugin:quadtest.plugin:align")
+            .expect("registered quad panel joins the model feed");
+        assert_eq!(registered.label, "Align");
+        assert_eq!(
+            registered.items[0].command,
+            "quadplugin:quadtest.plugin:align:flip"
+        );
+
+        // The pick dispatch: a Callback item is delivered to the owner as a
+        // quad action notification and never started as a command.
+        let _ = app.quad_plugin_action("quadplugin:quadtest.plugin:align:flip");
+        let log = crate::plugin::v4_support::take_test_dispatch_log();
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("QuadAction"))
+                .count(),
+            1,
+            "exactly one owner-targeted quad action: {log:?}"
+        );
+        assert!(log
+            .iter()
+            .any(|entry| entry == "QuadAction(align.flip, 0 handles)"));
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // The dead-tile fix: a Command item's verb dispatches host-side,
+        // exactly like a plain quad item.
+        let _ = app.quad_plugin_action("quadplugin:quadtest.plugin:cmds:line");
+        assert_eq!(
+            app.tabs[i].active_cmd.as_deref().map(|cmd| cmd.name()),
+            Some("LINE")
+        );
+        let _ = app.update(crate::app::Message::CommandEscape);
+        assert!(app.tabs[i].active_cmd.is_none());
+
+        // The scheme is the pick path's own: the generic dispatcher treats
+        // even a REGISTERED triple as an unknown command (no notification),
+        // so command line / automation / script can never reach the surface.
+        let _ = app.dispatch_command("quadplugin:quadtest.plugin:align:flip");
+        let log = crate::plugin::v4_support::take_test_dispatch_log();
+        assert!(
+            log.iter().all(|entry| !entry.starts_with("QuadAction")),
+            "the dispatcher must not deliver quad actions: {log:?}"
+        );
+        assert!(
+            app.command_line
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Unknown command")),
+            "a dispatcher quadplugin: line must answer the unknown-command error"
+        );
+
+        // An unknown panel answers the same way on both doors.
+        let _ = app.dispatch_command("quadplugin:quadtest.plugin:nope:flip");
+        let log = crate::plugin::v4_support::take_test_dispatch_log();
+        assert!(
+            log.iter().all(|entry| !entry.starts_with("QuadAction")),
+            "an unknown panel must deliver nothing: {log:?}"
+        );
+        assert!(
+            app.command_line
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Unknown command")),
+            "unknown panel must answer the unknown-command error"
+        );
+
+        // The raw dispatch probe: None, no notification, no error.
+        assert!(app.try_dispatch_command("quadplugin:a:b:c", false).is_none());
+        assert!(crate::plugin::v4_support::take_test_dispatch_log().is_empty());
+
+        // A pick whose owner turned invisible (died/disabled since the quad
+        // was built) delivers nothing but the honest error.
+        crate::plugin::grip_points::remove_in_process_sink(plugin_id);
+        let _ = app.quad_plugin_action("quadplugin:quadtest.plugin:align:flip");
+        let log = crate::plugin::v4_support::take_test_dispatch_log();
+        assert!(
+            log.iter().all(|entry| !entry.starts_with("QuadAction")),
+            "an invisible owner must deliver nothing: {log:?}"
+        );
+        assert!(
+            app.command_line
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("Unknown command")),
+            "an invisible owner's pick must answer the unknown-command error"
+        );
+
+        // Teardown parity: unregister removes only the owner's ids.
+        {
+            let mut host = crate::app::plugin_host::HostSession::new(&mut app, i);
+            assert_eq!(
+                host.unregister_quad_panels(plugin_id, &["align", "nope"]),
+                vec![true, false]
+            );
+        }
+        let feed = crate::app::plugin_host::plugin_quad_panels(&app.disabled_plugins);
+        assert!(feed
+            .iter()
+            .all(|panel| panel.id != "plugin:quadtest.plugin:align"));
+    }
 }
 
 /// `cmd` without its leading `_` / `.` name prefixes (`_LINE`, `.LINE`,
@@ -1678,5 +2012,96 @@ mod ribbon_highlight_tests {
         let _ = app.dispatch_command_or_suggest("REGEN");
         assert!(app.tabs[app.active_tab].active_cmd.is_none());
         assert_eq!(app.ribbon.active_tool(), None);
+    }
+}
+
+#[cfg(test)]
+mod stretch_preselection_tests {
+    use super::*;
+    use document::entities::Line;
+    use document::types::Vector3;
+    use glam::DVec3;
+
+    fn fresh() -> OpenCADStudio {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app
+    }
+
+    #[test]
+    fn preselected_crossing_window_stretches_only_contained_endpoints() {
+        let mut app = fresh();
+        let i = app.active_tab;
+        let line = document::EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        ));
+        let handle = app.tabs[i].scene.document.add_entity(line).unwrap();
+        app.tabs[i].scene.select_entities(&[handle]);
+        app.tabs[i].last_crossing_window = Some(([5.0, -2.0], [15.0, 2.0]));
+
+        let _ = app.dispatch_command("STRETCH");
+
+        assert!(app.tabs[i].active_cmd.is_some());
+        let cmd_prompt = app.tabs[i].active_cmd.as_ref().unwrap().prompt();
+        assert_eq!(cmd_prompt, "STRETCH  Specify base point:");
+
+        // Pick base point
+        let res = app.tabs[i].active_cmd.as_mut().unwrap().on_point(DVec3::new(10.0, 0.0, 0.0));
+        let _ = app.apply_cmd_result(res);
+
+        // Pick destination point
+        let res = app.tabs[i].active_cmd.as_mut().unwrap().on_point(DVec3::new(15.0, 0.0, 0.0));
+        let _ = app.apply_cmd_result(res);
+
+        // Check line: start (0,0,0) didn't move; end (10,0,0) moved to (15,0,0)
+        let ent = app.tabs[i].scene.document.get_entity(handle).unwrap();
+        let document::EntityType::Line(l) = ent else { panic!("expected line"); };
+        assert_eq!(l.start, Vector3::new(0.0, 0.0, 0.0));
+        assert_eq!(l.end, Vector3::new(15.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn preselected_without_crossing_window_moves_rigidly() {
+        let mut app = fresh();
+        let i = app.active_tab;
+        let line = document::EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        ));
+        let handle = app.tabs[i].scene.document.add_entity(line).unwrap();
+        app.tabs[i].scene.select_entities(&[handle]);
+        app.tabs[i].last_crossing_window = None;
+
+        let _ = app.dispatch_command("S");
+
+        assert!(app.tabs[i].active_cmd.is_some());
+        let cmd_prompt = app.tabs[i].active_cmd.as_ref().unwrap().prompt();
+        assert_eq!(cmd_prompt, "STRETCH  Specify base point:");
+
+        // Pick base point
+        let res = app.tabs[i].active_cmd.as_mut().unwrap().on_point(DVec3::new(0.0, 0.0, 0.0));
+        let _ = app.apply_cmd_result(res);
+
+        // Pick destination point
+        let res = app.tabs[i].active_cmd.as_mut().unwrap().on_point(DVec3::new(5.0, 3.0, 0.0));
+        let _ = app.apply_cmd_result(res);
+
+        // Check line: start moved to (5,3,0); end moved to (15,3,0)
+        let ent = app.tabs[i].scene.document.get_entity(handle).unwrap();
+        let document::EntityType::Line(l) = ent else { panic!("expected line"); };
+        assert_eq!(l.start, Vector3::new(5.0, 3.0, 0.0));
+        assert_eq!(l.end, Vector3::new(15.0, 3.0, 0.0));
+    }
+
+    #[test]
+    fn stretch_without_preselection_starts_in_crossing_window_step() {
+        let mut app = fresh();
+        let i = app.active_tab;
+        app.tabs[i].scene.deselect_all();
+        let _ = app.dispatch_command("STRETCH");
+        assert!(app.tabs[i].active_cmd.is_some());
+        let cmd_prompt = app.tabs[i].active_cmd.as_ref().unwrap().prompt();
+        assert_eq!(cmd_prompt, "STRETCH  Specify first corner of crossing window:");
     }
 }

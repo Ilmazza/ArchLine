@@ -4,8 +4,8 @@
 //!
 //! Pure data, like `hatch_settings`: no app, scene or GPU.
 
-use codec::entities::{Hatch, HatchStyleType};
-use codec::Handle;
+use document::entities::{Hatch, HatchStyleType};
+use document::Handle;
 
 use super::hatch_settings::{
     parse_angle_deg, parse_scale, FillTab, GradientSettings, HatchColor, HatchSettings, OriginMode,
@@ -267,7 +267,7 @@ impl EditTarget {
 /// The colour picked on the Hatch tab, when it is not the one it opened with.
 /// Compared as stored values: the same ACI or true colour picked again is
 /// no change.
-fn changed_colour(initial: &HatchSettings, now: &HatchSettings) -> Option<codec::types::Color> {
+fn changed_colour(initial: &HatchSettings, now: &HatchSettings) -> Option<document::types::Color> {
     match (initial.color, now.color) {
         (HatchColor::Color(before), HatchColor::Color(after)) if before != after => Some(after),
         _ => None,
@@ -307,8 +307,8 @@ mod tests {
     };
     use crate::modules::draw::draw::hatch_settings::{FillTab, GradientSettings, HatchColor};
     use crate::scene::model::hatch_model::GradientKind;
-    use codec::entities::hatch::HatchPattern;
-    use codec::types::Color;
+    use document::entities::hatch::HatchPattern;
+    use document::types::Color;
 
     /// The edit of a pattern or solid hatch's own fields on the Hatch tab.
     fn pattern_edit(pattern: Option<&str>, scale: Option<f32>, angle_deg: Option<f32>) -> HatchEditChanges {
@@ -708,7 +708,7 @@ mod tests {
         let mut hatch = Hatch::solid();
         hatch.gradient_color.enabled = true;
         hatch.gradient_color.name = "SPHERICAL".into();
-        hatch.gradient_color.colors.push(codec::entities::hatch::GradientColorEntry {
+        hatch.gradient_color.colors.push(document::entities::hatch::GradientColorEntry {
             value: 0.0,
             color: Color::Index(3),
             ..Default::default()

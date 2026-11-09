@@ -87,9 +87,9 @@
 //! * Le entità muro senza geometria sul piano XY (fuori piano, contate in
 //!   `WallSet.off_plane`) non si tagliano: restano in `kept_originals`.
 
-use codec::entities::Line as LineEntity;
-use codec::xdata::ExtendedData;
-use codec::{Document, Color, EntityType, Handle, Vector3};
+use document::entities::Line as LineEntity;
+use document::xdata::ExtendedData;
+use document::{Document, Color, EntityType, Handle, Vector3};
 use kernel::geom2d::{
     contains, distance_to, inside_spans, intersect, normalize_angle, segment_crossing,
     Arc as KernelArc, Curve, Extent, Line, SegmentCrossing, Tolerance,
@@ -1490,11 +1490,11 @@ fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::hatch::BoundaryPathFlags;
-    use codec::entities::{
+    use document::entities::hatch::BoundaryPathFlags;
+    use document::entities::{
         BoundaryEdge, BoundaryPath, Circle, Hatch, LwPolyline, PolylineEdge, Spline, Text,
     };
-    use codec::{Color, Vector2, Vector3};
+    use document::{Color, Vector2, Vector3};
     use kernel::geom2d::{contains, distance_to, Curve, Line, Tolerance};
     use kernel::tessellation::DEFAULT_ANGLE;
 
@@ -1914,7 +1914,7 @@ mod tests {
         let mut walls = wall_set(&scene.document, TOL);
         let high = Handle::new(FIRST_SYNTHETIC_HANDLE + 1);
         // Lontano dalla zona: resta. L'altro la attraversa: due pezzi.
-        let mut line = codec::entities::Line::from_points(
+        let mut line = document::entities::Line::from_points(
             Vector3::new(0.0, 5.0, 0.0),
             Vector3::new(8.0, 5.0, 0.0),
         );
@@ -2395,7 +2395,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn wall_line(a: [f64; 2], b: [f64; 2]) -> EntityType {
-        let mut line = codec::entities::Line::from_points(
+        let mut line = document::entities::Line::from_points(
             Vector3::new(a[0], a[1], 0.0),
             Vector3::new(b[0], b[1], 0.0),
         );

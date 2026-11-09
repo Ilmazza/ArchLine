@@ -3,8 +3,8 @@ use super::block_actions::{self as actions, instance, Parameter, Value};
 use super::model::object::{
     BlockParameterComponent as Component, BlockParameterKey as Key, PropValue, Property,
 };
-use codec::objects::{DynamicBlockData as Data, ObjectType};
-use codec::{Document, EntityType, Handle};
+use document::objects::{DynamicBlockData as Data, ObjectType};
+use document::{Document, EntityType, Handle};
 use glam::DVec3;
 
 mod table;
@@ -15,64 +15,95 @@ pub(crate) fn current_table_row(doc: &Document, baseline: Option<&Document>, ins
     table::current_row(doc, baseline, insert, definition, &view).ok().flatten()
 }
 
-struct Descriptor<'a> {
-    component: Component,
-    label: String,
-    description: &'a str,
+pub(crate) struct Descriptor<'a> {
+    pub(crate) component: Component,
+    pub(crate) label: String,
+    pub(crate) description: &'a str,
+    pub(crate) show: bool,
 }
-fn descriptors<'a>(
+pub(crate) fn descriptors<'a>(
     doc: &'a Document,
     definition: Handle,
     p: &Parameter,
 ) -> Result<Vec<Descriptor<'a>>, &'static str> {
     super::block_authoring::metadata::read(doc, definition, p.handle)?;
+    rows(doc, p)
+}
+
+/// The same component rows for a reader that only lists them: the parameter's
+/// belonging is proved through the links, so a graph that will not take an edit
+/// still says which rows its own parameters print.
+pub(crate) fn listed_descriptors<'a>(
+    doc: &'a Document,
+    definition: Handle,
+    p: &Parameter,
+) -> Result<Vec<Descriptor<'a>>, &'static str> {
+    super::block_authoring::metadata::listed_read(doc, definition, p.handle)?;
+    rows(doc, p)
+}
+
+fn rows<'a>(doc: &'a Document, p: &Parameter) -> Result<Vec<Descriptor<'a>>, &'static str> {
     let Some(ObjectType::DynamicBlock(object)) = doc.objects.get(&p.handle) else {
         return Err("The reference parameter is unavailable.");
     };
     let mut result = Vec::new();
-    let mut add = |component, label: &str, description| {
+    let mut add = |component, label: &str, description, show| {
         result.push(Descriptor {
             component,
             label: label.to_owned(),
             description,
+            show,
         })
     };
     match &object.data {
-        Data::PointParameter(p) if p.parameter.parameter.show_properties => {
+        Data::PointParameter(p) => {
+            let show = p.parameter.parameter.show_properties;
             add(
                 Component::X,
                 &format!("{} X", p.position_name),
                 &p.position_description,
+                show,
             );
             add(
                 Component::Y,
                 &format!("{} Y", p.position_name),
                 &p.position_description,
+                show,
             );
         }
-        Data::LinearParameter(p) if p.parameter.parameter.show_properties => add(
+        Data::LinearParameter(p) => add(
             Component::Distance,
             &p.distance_name,
             &p.distance_description,
+            p.parameter.parameter.show_properties,
         ),
-        Data::PolarParameter(p) if p.parameter.parameter.show_properties => {
+        Data::PolarParameter(p) => {
+            let show = p.parameter.parameter.show_properties;
             add(
                 Component::Distance,
                 &p.distance_name,
                 &p.distance_description,
+                show,
             );
-            add(Component::Angle, &p.angle_name, &p.angle_description);
+            add(Component::Angle, &p.angle_name, &p.angle_description, show);
         }
-        Data::XYParameter(p) if p.parameter.parameter.show_properties => {
-            add(Component::X, &p.x_label, &p.x_label_description);
-            add(Component::Y, &p.y_label, &p.y_label_description);
+        Data::XYParameter(p) => {
+            let show = p.parameter.parameter.show_properties;
+            add(Component::X, &p.x_label, &p.x_label_description, show);
+            add(Component::Y, &p.y_label, &p.y_label_description, show);
         }
-        Data::RotationParameter(p) if p.parameter.parameter.show_properties => {
-            add(Component::Angle, &p.angle_name, &p.angle_description)
-        }
-        Data::FlipParameter(p) if p.parameter.parameter.show_properties => {
-            add(Component::Flip, &p.flip_label, &p.flip_label_description)
-        }
+        Data::RotationParameter(p) => add(
+            Component::Angle,
+            &p.angle_name,
+            &p.angle_description,
+            p.parameter.parameter.show_properties,
+        ),
+        Data::FlipParameter(p) => add(
+            Component::Flip,
+            &p.flip_label,
+            &p.flip_label_description,
+            p.parameter.parameter.show_properties,
+        ),
         _ => {}
     }
     Ok(result)
@@ -124,7 +155,7 @@ fn frame(
         instance::frame(doc, insert, p)
     }
 }
-fn number(
+pub(crate) fn number(
     p: &Parameter,
     frame: instance::ParameterFrame,
     component: Component,
@@ -156,6 +187,7 @@ pub(crate) fn component_id(component: &Component) -> String {
         Component::Distance => "Distance".to_owned(),
         Component::Angle => "Angle".to_owned(),
         Component::Flip => "Flip".to_owned(),
+        Component::Visibility(_) => "Visibility".to_owned(),
         Component::TableRow(_) => "TableRow".to_owned(),
         Component::LookupOutput { column, .. } => format!("Lookup{column}"),
     }
@@ -178,12 +210,29 @@ fn display(value: f64, component: Component) -> String {
             .auprec
             .max(0)
             .min(15) as usize;
+        let scale = 10f64.powi(precision as i32);
+        // An angle the drawing's precision rounds up to a full turn reads back
+        // as zero, so the wrap follows the rounding; rounding afterwards would
+        // print the angle it started from. Angles print as plain degrees here,
+        // whatever AUNITS is set to.
+        let rounded = (value * scale).round() / scale;
         return crate::entities::common::without_negative_zero(format!(
             "{:.*}",
-            precision, value
+            precision,
+            rounded.rem_euclid(360.0)
         ));
     }
     crate::entities::common::format_length(value)
+}
+
+/// The row's `Value` cell: the number at the drawing's precision.
+pub(crate) fn rendered(value: f64, component: Component) -> String {
+    display(value, component)
+}
+
+/// The row's `Expression` cell: the number as stored, unrounded.
+pub(crate) fn stored(value: f64) -> String {
+    crate::entities::common::without_negative_zero(format!("{value}"))
 }
 
 /// Values are in definition-plane drawing units, with angles in degrees.
@@ -207,11 +256,13 @@ pub(crate) fn properties(
         let Ok(fields) = descriptors(source, definition, &p) else {
             continue;
         };
-        for field in fields {
+        for field in fields.into_iter().filter(|field| field.show) {
             let key = Key {
                 document,
                 definition,
                 insert,
+                batch_generation: None,
+                editor_session: None,
                 parameter: p.handle,
                 component: field.component,
             };
@@ -282,7 +333,7 @@ pub(crate) fn evaluate(
         .ok_or("The reference parameter is unavailable.")?;
     if !descriptors(source, key.definition, &p)?
         .iter()
-        .any(|field| field.component == key.component)
+        .any(|field| field.component == key.component && field.show)
     {
         return Err("The reference parameter property is hidden or unavailable.");
     }
@@ -302,13 +353,16 @@ pub(crate) fn evaluate(
                     if input <= 1e-9 {
                         return Err("Specify a positive parameter length.");
                     }
-                    let axis = if p.linear {
-                        (p.end - p.base).normalize()
-                    } else {
-                        delta
-                            .try_normalize()
-                            .ok_or("The parameter direction is unavailable.")?
-                    };
+                    let axis = delta
+                        .try_normalize()
+                        .or_else(|| {
+                            if p.linear {
+                                (p.end - p.base).try_normalize()
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or("The parameter direction is unavailable.")?;
                     frame.end = frame.base + axis * input;
                 }
                 Component::Angle => {
@@ -316,7 +370,7 @@ pub(crate) fn evaluate(
                     frame.end =
                         frame.base + DVec3::new(angle.cos(), angle.sin(), 0.) * delta.length();
                 }
-                Component::Flip | Component::TableRow(_) | Component::LookupOutput { .. } => unreachable!(),
+                Component::Flip | Component::Visibility(_) | Component::TableRow(_) | Component::LookupOutput { .. } => unreachable!(),
             }
             if !frame.end.is_finite() {
                 return Err("Specify a finite parameter value.");

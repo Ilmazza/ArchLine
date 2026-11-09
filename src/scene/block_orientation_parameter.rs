@@ -1,14 +1,14 @@
 //! Native Rotation, Alignment and Flip parameter placement.
 use super::block_authoring::{self as authoring, *};
 use super::block_distance_parameter::Graphic;
-use codec::objects::{
+use document::objects::{
     BlockAlignmentParameter, BlockConnection, BlockElement, BlockEvalValue, BlockFlipGrip,
     BlockFlipParameter, BlockGrip, BlockGripExpression, BlockOrientedGrip, BlockParameter,
     BlockParameterProperty, BlockParameterValueSet, BlockRotationParameter, BlockTwoPointParameter,
     DynamicBlockData, ObjectType,
 };
-use codec::types::{Transform, Vector3};
-use codec::{Document, Handle};
+use document::types::{Transform, Vector3};
+use document::{Document, Handle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -194,7 +194,15 @@ pub(crate) fn create(
     end: Vector3,
     reference: Vector3,
 ) -> Result<Handle, &'static str> {
-    create_with_label(document, definition, kind, base, end, reference, None)
+    create_with_label(document, definition, kind, base, end, reference, None, None)
+}
+
+/// The next free `Flip state<n>` label the placement prompt offers.
+pub(crate) fn next_flip_state_label(document: &Document, definition: Handle) -> String {
+    super::block_distance_parameter::unique_label(
+        &super::block_distance_parameter::label_names(document, definition),
+        "Flip state",
+    )
 }
 
 pub(crate) fn create_with_label(
@@ -205,21 +213,14 @@ pub(crate) fn create_with_label(
     end: Vector3,
     reference: Vector3,
     label_offset: Option<f64>,
+    value_set: Option<&super::block_distance_parameter::ValueSet>,
 ) -> Result<Handle, &'static str> {
     if let Some(error) = points_error(kind, base, end, reference)
         .or_else(|| placement_error(document, definition, kind))
     {
         return Err(error);
     }
-    let mut names = super::block_distance_parameter::parameters(document, definition)
-        .into_iter()
-        .flat_map(|p| p.labels)
-        .collect::<Vec<_>>();
-    names.extend(
-        parameters(document, definition)
-            .into_iter()
-            .map(|p| p.label),
-    );
+    let names = super::block_distance_parameter::label_names(document, definition);
     let prefix = match kind {
         Kind::Rotation => "Angle",
         Kind::Alignment => "Alignment",
@@ -229,6 +230,13 @@ pub(crate) fn create_with_label(
         .map(|n| format!("{prefix}{n}"))
         .find(|name| names.iter().all(|old| !old.eq_ignore_ascii_case(name)))
         .unwrap();
+    let element_name = if kind == Kind::Rotation {
+        super::block_authoring::metadata::next_parameter_name(document, definition, kind.name())?
+    } else if kind == Kind::Alignment {
+        label.clone()
+    } else {
+        kind.name().to_owned()
+    };
     let (graph, slots) = authoring::prepare(document, definition)?;
     let (class, cpp, grip_class, grip_cpp) = kind.classes();
     register_classes(
@@ -252,14 +260,7 @@ pub(crate) fn create_with_label(
     };
     let native = BlockTwoPointParameter {
         parameter: BlockParameter {
-            element: element(
-                0,
-                if kind == Kind::Alignment {
-                    &label
-                } else {
-                    kind.name()
-                },
-            ),
+            element: element(0, &element_name),
             show_properties: true,
             chain_actions: false,
         },
@@ -293,11 +294,13 @@ pub(crate) fn create_with_label(
             definition_base_angle_point: reference,
             angle_name: label,
             angle: label_offset.unwrap_or((end - base).length() * 0.15),
-            value_set: BlockParameterValueSet {
-                flags: 3,
-                maximum: std::f64::consts::TAU,
-                ..Default::default()
-            },
+            value_set: value_set
+                .map(|set| set.record())
+                .unwrap_or(BlockParameterValueSet {
+                    flags: 3,
+                    maximum: std::f64::consts::TAU,
+                    ..Default::default()
+                }),
             ..Default::default()
         }),
         Kind::Alignment => DynamicBlockData::AlignmentParameter(BlockAlignmentParameter {

@@ -21,6 +21,12 @@ pub(super) fn geometry(
         if !doc.objects.contains_key(handle) {
             return Err("An action target is unavailable.");
         }
+        if kind == Kind::Stretch
+            && super::super::block_basepoint::parameter(doc, definition)
+                .is_some_and(|(basepoint, _)| basepoint == *handle)
+        {
+            continue;
+        }
         if grips.is_none() {
             let parameter = parameters(doc, definition, kind)
                 .into_iter()
@@ -33,9 +39,33 @@ pub(super) fn geometry(
                     .collect::<std::collections::BTreeSet<_>>(),
             );
         }
-        if !grips.as_ref().unwrap().contains(handle) {
+        if kind == Kind::Move && chains::frame_target(doc, definition, parameter_id, *handle).is_some() {
+            continue;
+        }
+        if grips.as_ref().unwrap().contains(handle) {
+            continue;
+        }
+        // Flip-linked parameters need frame transport; silently treating them
+        // as bookkeeping would leave later grips and edits in the old frame.
+        if kind == Kind::Flip {
             return Err("This action targets another parameter or an unsupported native object.");
         }
+        let all_params = all_parameters(doc, definition);
+        let is_block_param_or_grip = all_params.iter().any(|p| {
+            // Linear grip aliases are not yet transport targets. The driving
+            // parameter's own grips and supported whole-parameter links were
+            // handled above; accepting another Linear grip would drop its move.
+            !(kind == Kind::Move && p.linear)
+                && (p.handle == *handle
+                    || p.grip == *handle
+                    || super::super::block_grips::config::locations(doc, definition, p.handle)
+                        .map(|locs| locs.iter().any(|g| g.handle == *handle))
+                        .unwrap_or(false))
+        });
+        if is_block_param_or_grip {
+            continue;
+        }
+        return Err("This action targets another parameter or an unsupported native object.");
         // The current per-reference parameter frame already determines its own
         // grips. Keep the native link without transforming definition objects.
     }

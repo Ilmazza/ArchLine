@@ -96,6 +96,26 @@ pub struct AppPrefs {
     pub right_click_mode: RightClickMode,
     /// SHORTCUTMENUDURATION: time-sensitive hold threshold, ms.
     pub right_click_hold_ms: i32,
+    // ── Quad cursor menu ───────────────────────────────────────────────────
+    // The quad's own display options (docs/quad-menu.md §3.7), wired to
+    // `Message::QuadOption` like every other row of this page.
+    /// QUAD: the quad cursor menu exists at all.
+    pub quad_on: bool,
+    /// QUADDISPLAY: hovering an entity offers the quad.
+    pub quad_on_hover: bool,
+    /// QUADDISPLAY: a selection set offers the quad.
+    pub quad_on_select: bool,
+    /// QUADDISPLAY: a targetless right-click opens the No Selection quad.
+    pub quad_on_right_click: bool,
+    /// QUADDISPLAY: hovering is suppressed while something is selected.
+    pub quad_suppress_hover_when_selection: bool,
+    /// QUADWIDTH: columns of the expanded quad.
+    pub quad_width: u8,
+    /// QUADCOMMANDLAUNCH: right-click over an entity launches its default
+    /// command directly.
+    pub quad_command_launch: bool,
+    /// Hover dwell before the quad appears, ms.
+    pub quad_hover_delay_ms: u64,
     /// Open the Plot / Page Setup dialog for every new layout.
     pub page_setup_on_new_layout: bool,
 }
@@ -208,7 +228,7 @@ fn color_swatch<'a>(target: crate::app::UiColor, [r, g, b]: [u8; 3]) -> Element<
     button(swatch)
         .on_press(Message::OpenColorWindow(
             crate::app::ColorPickTarget::Interface(target),
-            codec::types::Color::Rgb { r, g, b },
+            document::types::Color::Rgb { r, g, b },
         ))
         .padding(0)
         .style(button::text)
@@ -368,7 +388,7 @@ pub fn view_window<'a>(
             text(crate::tr!("options", "language-label"))
                 .size(12)
                 .width(150),
-            iced::widget::pick_list(selected_language, language_options, |choice| choice
+            crate::ui::dropdown_list::pick_list(selected_language, language_options, |choice| choice
                 .label
                 .clone(),)
             .on_select(|choice| Message::LanguageChanged(choice.value))
@@ -449,7 +469,7 @@ pub fn view_window<'a>(
             text(crate::tr!("options", "default-save-format-label"))
                 .size(12)
                 .width(150),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 selected_format,
                 // Drawings, not the template entry (the list's last).
                 &crate::io::SAVE_FORMAT_OPTIONS[..crate::io::SAVE_FORMAT_OPTIONS.len() - 1],
@@ -658,7 +678,7 @@ pub fn view_window<'a>(
             text(crate::tr!("options", "theme-label"))
                 .size(12)
                 .width(150),
-            iced::widget::pick_list(selected_theme, theme_options, |choice| choice.label.clone(),)
+            crate::ui::dropdown_list::pick_list(selected_theme, theme_options, |choice| choice.label.clone(),)
                 .on_select(|choice| Message::OptionsThemeChanged(choice.value))
                 .width(sizing.width),
         ]
@@ -675,7 +695,7 @@ pub fn view_window<'a>(
         // value changes, which would drag a slider along with it.
         row![
             text(crate::t!("Interface scale")).size(12).width(150),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(format!("{}%", prefs.ui_scale_percent)),
                 [75u16, 100, 125, 150, 175, 200]
                     .map(|p| format!("{p}%"))
@@ -702,7 +722,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Canvas mode")).size(12).width(140),
-            iced::widget::pick_list(selected_mode, mode_options, |choice| choice.label.clone(),)
+            crate::ui::dropdown_list::pick_list(selected_mode, mode_options, |choice| choice.label.clone(),)
                 .on_select(|choice| Message::ModelSpaceModeChanged(choice.value))
                 .width(Fill),
         ]
@@ -799,7 +819,7 @@ pub fn view_window<'a>(
         .push(
             row![
                 text(crate::t!("Cursor type")).size(12).width(140),
-                iced::widget::pick_list(
+                crate::ui::dropdown_list::pick_list(
                     selected_cursor,
                     cursor_options,
                     |choice| choice.label.clone(),
@@ -1001,7 +1021,7 @@ pub fn view_window<'a>(
             };
             row![
                 text(crate::t!("Command line font")).size(12).width(140),
-                iced::widget::pick_list(Some(selected), families, |family| family.clone())
+                crate::ui::dropdown_list::pick_list(Some(selected), families, |family| family.clone())
                     .on_select(move |family| {
                         Message::CommandLineFontChanged(if family == default_label {
                             String::new()
@@ -1010,7 +1030,7 @@ pub fn view_window<'a>(
                         })
                     })
                     .width(Fill),
-                iced::widget::pick_list(
+                crate::ui::dropdown_list::pick_list(
                     Some(prefs.command_line_font_size),
                     (8..=24u16).collect::<Vec<_>>(),
                     |size| size.to_string(),
@@ -1140,7 +1160,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Window selection color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_window_color),
                 color_choice_options.clone(),
                 |choice| choice.label.clone(),
@@ -1153,7 +1173,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Crossing selection color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_crossing_color),
                 color_choice_options.clone(),
                 |choice| choice.label.clone(),
@@ -1175,7 +1195,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Selection highlight color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_highlight_color),
                 color_choice_options.clone(),
                 |choice| choice.label.clone(),
@@ -1293,7 +1313,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Unselected grip color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_grip_color),
                 color_choice_options.clone(),
                 |choice| choice.label.clone(),
@@ -1306,7 +1326,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Selected/hot grip color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_grip_hot),
                 color_choice_options.clone(),
                 |choice| choice.label.clone(),
@@ -1319,7 +1339,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Hover grip color")).size(12).width(140),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 Some(selected_grip_hover),
                 color_choice_options,
                 |choice| choice.label.clone(),
@@ -1375,7 +1395,7 @@ pub fn view_window<'a>(
         Space::new().height(12),
         text(crate::t!("Navigation style")).size(15),
         Space::new().height(10),
-        iced::widget::pick_list(
+        crate::ui::dropdown_list::pick_list(
             Some(prefs.navigation_style),
             crate::app::settings::NavigationStyle::ALL,
             |style| style.to_string(),
@@ -1465,7 +1485,7 @@ pub fn view_window<'a>(
         Space::new().height(12),
         row![
             text(crate::t!("QDIM origin priority")).size(12).width(150),
-            iced::widget::pick_list(selected_qdim, qdim_options, |choice| choice.label.clone())
+            crate::ui::dropdown_list::pick_list(selected_qdim, qdim_options, |choice| choice.label.clone())
                 .on_select(|choice| Message::QdimSnapPriorityChanged(choice.value))
                 .width(Fill),
         ]
@@ -1482,7 +1502,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Add scales automatically")).size(12).width(150),
-            iced::widget::pick_list(selected_auto_scale, auto_scale_options, |choice| {
+            crate::ui::dropdown_list::pick_list(selected_auto_scale, auto_scale_options, |choice| {
                 choice.label.clone()
             })
             .on_select(|choice| Message::AnnoAutoScaleChanged(choice.value))
@@ -1501,7 +1521,7 @@ pub fn view_window<'a>(
         Space::new().height(10),
         row![
             text(crate::t!("Right-click in drawing area")).size(12).width(150),
-            iced::widget::pick_list(
+            crate::ui::dropdown_list::pick_list(
                 selected_right_click,
                 right_click_options,
                 |choice| choice.label.clone(),
@@ -1530,6 +1550,136 @@ pub fn view_window<'a>(
         Space::new().height(6),
         text(crate::t!(
             "Shortcut menu: right-click always opens the menu. Time-sensitive: a quick click is Enter, holding longer opens the menu (SHORTCUTMENUDURATION)."
+        ))
+        .size(11)
+        .width(sizing.width),
+                
+        Space::new().height(24),
+        // ── Quad cursor menu ─────────────────────────────────────────────
+        // docs/quad-menu.md §3.7: the master switch, the four QUADDISPLAY
+        // bits, QUADWIDTH, the hover delay and QUADCOMMANDLAUNCH — each row
+        // reported as a `QuadOption` message like its neighbours.
+        text(crate::t!("Quad Cursor Menu")).size(15),
+        Space::new().height(10),
+        row![
+            iced::widget::checkbox(prefs.quad_on)
+                .on_toggle(|on| Message::QuadOption(crate::QuadOptionMsg::Quad(on)))
+                .size(15),
+            text(crate::t!("Show the Quad cursor menu (Shift+F12, QUAD)")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(8),
+        row![
+            iced::widget::checkbox(prefs.quad_on_hover)
+                .on_toggle(|on| Message::QuadOption(crate::QuadOptionMsg::OnHover(on)))
+                .size(15),
+            text(crate::t!("Hover an object: offer its commands")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(8),
+        row![
+            iced::widget::checkbox(prefs.quad_on_select)
+                .on_toggle(|on| Message::QuadOption(crate::QuadOptionMsg::OnSelect(on)))
+                .size(15),
+            text(crate::t!("A selection offers its shared commands")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(8),
+        row![
+            iced::widget::checkbox(prefs.quad_on_right_click)
+                .on_toggle(|on| Message::QuadOption(crate::QuadOptionMsg::OnRightClick(on)))
+                .size(15),
+            text(crate::t!("Right-click in the void: creation commands")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(8),
+        row![
+            iced::widget::checkbox(prefs.quad_suppress_hover_when_selection)
+                .on_toggle(|on| {
+                    Message::QuadOption(crate::QuadOptionMsg::SuppressHoverWhenSelection(on))
+                })
+                .size(15),
+            text(crate::t!("Suppress the hover quad while a selection exists")).size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(12),
+        row![
+            text(crate::t!("Hover delay")).size(12).width(150),
+            slider(
+                0..=crate::app::settings::QUAD_HOVER_DELAY_MAX as i32,
+                prefs.quad_hover_delay_ms.clamp(
+                    0,
+                    crate::app::settings::QUAD_HOVER_DELAY_MAX,
+                ) as i32,
+                |ms| Message::QuadOption(crate::QuadOptionMsg::HoverDelay(ms as u64)),
+            )
+            .step(50)
+            .width(Fill),
+            text(format!(
+                "{} ms",
+                prefs.quad_hover_delay_ms.clamp(
+                    0,
+                    crate::app::settings::QUAD_HOVER_DELAY_MAX,
+                )
+            ))
+            .size(11)
+            .width(52),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        Space::new().height(12),
+        row![
+            text(crate::t!("Quad width")).size(12).width(150),
+            slider(
+                crate::app::settings::QUAD_WIDTH_MIN as i32
+                    ..=crate::app::settings::QUAD_WIDTH_MAX as i32,
+                i32::from(prefs.quad_width.clamp(
+                    crate::app::settings::QUAD_WIDTH_MIN,
+                    crate::app::settings::QUAD_WIDTH_MAX,
+                )),
+                |cols| Message::QuadOption(crate::QuadOptionMsg::Width(
+                    cols
+                        .clamp(
+                            crate::app::settings::QUAD_WIDTH_MIN as i32,
+                            crate::app::settings::QUAD_WIDTH_MAX as i32,
+                        )
+                        as u8
+                )),
+            )
+            .step(1)
+            .width(Fill),
+            text(format!(
+                "{} columns",
+                prefs.quad_width.clamp(
+                    crate::app::settings::QUAD_WIDTH_MIN,
+                    crate::app::settings::QUAD_WIDTH_MAX,
+                )
+            ))
+            .size(11)
+            .width(52),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        Space::new().height(12),
+        row![
+            iced::widget::checkbox(prefs.quad_command_launch)
+                .on_toggle(|on| Message::QuadOption(crate::QuadOptionMsg::CommandLaunch(on)))
+                .size(15),
+            text(crate::t!(
+                "Right-click over an object launches its default command directly (QUADCOMMANDLAUNCH)"
+            ))
+            .size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+        Space::new().height(6),
+        text(crate::t!(
+            "The Quad cursor menu appears at the cursor: default commands for what it points at, recent and creation commands otherwise (QUAD, QUADWIDTH)."
         ))
         .size(11)
         .width(sizing.width),
@@ -1628,7 +1778,7 @@ pub fn view_window<'a>(
             text(crate::t!("Polar tracking increment"))
                 .size(12)
                 .width(150),
-            iced::widget::pick_list(Some(selected_polar), polar_options, |choice| {
+            crate::ui::dropdown_list::pick_list(Some(selected_polar), polar_options, |choice| {
                 choice.label.clone()
             })
             .on_select(|choice| Message::PolarIncrementChanged(choice.value))
@@ -1816,7 +1966,7 @@ pub fn view_window<'a>(
             .push(
                 row![
                     text(crate::t!("Surface type")).size(12).width(150),
-                    iced::widget::pick_list(
+                    crate::ui::dropdown_list::pick_list(
                         selected_surface_type,
                         surface_type_options,
                         |choice| choice.label.clone(),
@@ -1854,7 +2004,7 @@ pub fn view_window<'a>(
             .push(
                 row![
                     text(crate::t!("Show solid history")).size(12).width(150),
-                    iced::widget::pick_list(
+                    crate::ui::dropdown_list::pick_list(
                         selected_show_history,
                         show_history_options,
                         |choice| choice.label.clone(),

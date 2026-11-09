@@ -4,9 +4,9 @@
 //! `Scene::add_hatch` all write gradients through here, so a gradient can
 //! never be persisted two different ways.
 
-use codec::entities::hatch::GradientColorEntry;
-use codec::entities::{Hatch, HatchPatternType, HatchStyleType};
-use codec::types::Color as AcadColor;
+use document::entities::hatch::GradientColorEntry;
+use document::entities::{Hatch, HatchPatternType, HatchStyleType};
+use document::types::Color as AcadColor;
 
 use crate::scene::model::hatch_model::GradientKind;
 use crate::scene::model::hatch_patterns::{self, PatternEntry};
@@ -240,7 +240,7 @@ fn stop_entry(value: f64, color: AcadColor) -> GradientColorEntry {
 /// when a gradient is created or a hatch becomes one.
 pub fn apply_gradient(hatch: &mut Hatch, spec: &GradientSpec) {
     if !hatch.gradient_color.enabled {
-        hatch.pattern = codec::entities::hatch::HatchPattern::solid();
+        hatch.pattern = document::entities::hatch::HatchPattern::solid();
     }
     hatch.is_solid = true;
     // A tint or angle that is not a finite number is never stored.
@@ -321,7 +321,7 @@ pub fn set_catalog_pattern(h: &mut Hatch, entry: &PatternEntry, scale: f64, angl
         crate::scene::model::hatch_model::HatchPattern::Solid
     );
     h.pattern_type = HatchPatternType::Predefined;
-    h.gradient_color = codec::entities::hatch::HatchGradientPattern::new();
+    h.gradient_color = document::entities::hatch::HatchGradientPattern::new();
 }
 
 /// Origin, association and island style: the part of an update that is the
@@ -333,7 +333,7 @@ pub fn apply_common_update(
     style: Option<HatchStyleType>,
 ) {
     if let Some((x, y)) = origin {
-        h.set_pattern_origin(codec::types::Vector2::new(x, y));
+        h.set_pattern_origin(document::types::Vector2::new(x, y));
     }
     if disassociate {
         for path in &mut h.paths {
@@ -507,8 +507,8 @@ pub fn apply_window_edit(h: &mut Hatch, edit: &HatchWindowEdit) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codec::entities::hatch::HatchPattern as CodecPattern;
-    use codec::types::Vector2;
+    use document::entities::hatch::HatchPattern as CodecPattern;
+    use document::types::Vector2;
 
     fn spec() -> GradientSpec {
         GradientSpec {
@@ -555,7 +555,7 @@ mod tests {
 
     fn pattern_hatch() -> Hatch {
         let mut hatch = Hatch::with_pattern(CodecPattern::new("ANSI31"));
-        hatch.pattern.lines.push(codec::entities::HatchPatternLine {
+        hatch.pattern.lines.push(document::entities::HatchPatternLine {
             angle: 0.0,
             base_point: Vector2::new(1.0, 2.0),
             offset: Vector2::new(0.0, 3.0),
@@ -914,7 +914,7 @@ mod tests {
         set_catalog_pattern(&mut hatch, entry, 1.0, 0.0);
         assert!(!hatch.is_solid);
         assert!(!hatch.pattern.lines.is_empty());
-        assert_eq!(hatch.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
+        assert_eq!(hatch.gradient_color, document::entities::hatch::HatchGradientPattern::new());
         assert_eq!(FillKind::of(&hatch), FillKind::Pattern);
     }
 
@@ -984,8 +984,8 @@ mod tests {
     #[test]
     fn disassociating_clears_the_source_handles_and_the_flag() {
         let mut hatch = ansi31_hatch(1.0, 0.0);
-        let mut path = codec::entities::BoundaryPath::new();
-        path.add_boundary_handle(codec::Handle::new(9));
+        let mut path = document::entities::BoundaryPath::new();
+        path.add_boundary_handle(document::Handle::new(9));
         path.flags.set_external(true);
         hatch.paths.push(path);
         hatch.is_associative = true;
@@ -1002,9 +1002,9 @@ mod tests {
             &mut hatch,
             Some((5.0, 6.0)),
             false,
-            Some(codec::entities::HatchStyleType::Outer),
+            Some(document::entities::HatchStyleType::Outer),
         );
-        assert_eq!(hatch.style, codec::entities::HatchStyleType::Outer);
+        assert_eq!(hatch.style, document::entities::HatchStyleType::Outer);
         assert_eq!(hatch.pattern_origin(), Vector2::new(5.0, 6.0));
     }
 
@@ -1015,8 +1015,8 @@ mod tests {
     fn bounded_hatch() -> Hatch {
         let mut hatch = ansi31_hatch(1.0, 0.0);
         for (index, handle) in [(0u64, 11u64), (1, 12)] {
-            let mut path = codec::entities::BoundaryPath::new();
-            path.add_boundary_handle(codec::Handle::new(handle));
+            let mut path = document::entities::BoundaryPath::new();
+            path.add_boundary_handle(document::Handle::new(handle));
             path.flags.set_external(index == 0);
             hatch.paths.push(path);
         }
@@ -1088,7 +1088,7 @@ mod tests {
             },
         );
         assert_eq!(FillKind::of(&solid), FillKind::Solid);
-        assert_eq!(solid.gradient_color, codec::entities::hatch::HatchGradientPattern::new());
+        assert_eq!(solid.gradient_color, document::entities::hatch::HatchGradientPattern::new());
         same_everything_but_the_fill(&before, &solid);
     }
 

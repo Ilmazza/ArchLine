@@ -1,7 +1,7 @@
 //! Avvisi del modulo BIM: i comandi li raccolgono e li scrivono in riga di
 //! comando. Coordinate in unità del disegno, aree già in m².
 
-use codec::Handle;
+use document::Handle;
 
 use super::units::{format_decimal, format_m2};
 
