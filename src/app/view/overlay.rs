@@ -1622,9 +1622,9 @@ const MENU_EDITOR_W: f32 = 300.0;
 /// not the row carries a glyph (object snaps, command icons).
 const MENU_GUTTER_W: f32 = 18.0;
 const MENU_ICON_SIZE: f32 = km::ROW_ICON;
-/// Height `sep()` really renders (the model's `MENU_SEP_H` also counts padding
-/// the view does not draw), used to line a submenu up with its header.
-const MENU_SEP_RENDERED_H: f32 = 1.0;
+/// Height `sep()` renders: the kit's separator is centred in the height the
+/// model counts, so the two agree. Used to line a submenu up with its header.
+const MENU_SEP_RENDERED_H: f32 = crate::ui::popup::context_menu::MENU_SEP_H;
 /// Trailing check mark of checked rows; sits in the submenu caret column.
 const MENU_CHECK_SIZE: f32 = km::BAR_ICON;
 

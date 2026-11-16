@@ -1579,6 +1579,8 @@ mod hatch_transparency_tests {
     #[test]
     fn a_new_hatch_takes_the_panel_transparency_percent() {
         let mut app = OpenCADStudio::new_for_test();
+        // ArchLine: the panel belongs to the ribbon workspace.
+        crate::workspace::set_classic(false);
         let _ = app.automation_op(r#"{"op":"new"}"#);
         let i = app.active_tab;
         let mut square = document::entities::LwPolyline::from_points(vec![

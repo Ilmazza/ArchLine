@@ -2491,6 +2491,8 @@ mod tests {
         select(&mut app, line);
         let _ = run(&mut app, "LAYCUR");
         assert_eq!(layer_of(&app, line), "Walls");
+        // The current layer cannot be frozen or turned off: "0" is current again.
+        make_current(&mut app, "0");
         (app, line)
     }
 

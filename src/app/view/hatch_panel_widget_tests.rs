@@ -11,6 +11,8 @@ const SIZE: iced::Size = iced::Size::new(1600.0, 900.0);
 
 fn hatching() -> OpenCADStudio {
     let mut app = OpenCADStudio::new_for_test();
+    // ArchLine: the Hatch panel is the ribbon workspace's; AutoCAD Classic has our window.
+    crate::workspace::set_classic(false);
     app.tabs
         .push(crate::app::tab_document::DocumentTab::new_drawing(1));
     app.active_tab = 1;
@@ -139,6 +141,8 @@ fn the_type_list_switches_a_new_hatch_to_user_defined() {
 fn editing_hatch() -> (OpenCADStudio, document::Handle) {
     use document::entities::{BoundaryEdge, BoundaryPath, Hatch, PolylineEdge};
     let mut app = OpenCADStudio::new_for_test();
+    // ArchLine: the Hatch panel is the ribbon workspace's; AutoCAD Classic has our window.
+    crate::workspace::set_classic(false);
     let _ = app.automation_op(r#"{"op":"new"}"#);
     let i = app.active_tab;
     let mut hatch = Hatch::new();

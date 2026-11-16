@@ -273,6 +273,12 @@ fn build_table(text: &TableText, at: [f64; 2], unit: DrawingUnit) -> Table {
         for (col, cell) in cells.iter().enumerate().take(cols) {
             if !cell.text.is_empty() {
                 put(&mut table, row, col, &cell.text, cell.missing, h);
+            } else {
+                // Da upstream v2026.46 una cella senza contenuto vale una riga
+                // vuota alta come il testo della cella: senza l'altezza del
+                // testo (0,25 m) varrebbe quella dello stile (4,5) e farebbe
+                // crescere la riga.
+                style_cell(&mut table, row, col, false, h);
             }
         }
         merge(&mut table, row, span);
@@ -364,6 +370,11 @@ fn merge(table: &mut Table, row: usize, span: usize) {
 /// in un DWG 2004 o 2007.
 fn put(table: &mut Table, row: usize, col: usize, text: &str, missing: bool, h: f64) {
     table.set_cell_text(row, col, text);
+    style_cell(table, row, col, missing, h);
+}
+
+/// Lo stile di una cella d'abaco: altezza del testo e, per un `n.d.`, il rosso.
+fn style_cell(table: &mut Table, row: usize, col: usize, missing: bool, h: f64) {
     let Some(cell) = table.cell_mut(row, col) else {
         return;
     };

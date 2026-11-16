@@ -246,7 +246,13 @@ mod tests {
     fn a_glyph_uses_the_themed_stroke_so_it_can_be_tinted() {
         for (command, bytes) in MONO {
             let text = std::str::from_utf8(bytes).expect("utf-8 svg");
-            assert!(text.contains("#B4B6B9"), "{command}: not a themable glyph");
+            // Themable = drawn in the stroke the theme recolours: #B4B6B9, or the
+            // white of upstream's newer quick-access glyphs.
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                lower.contains("#b4b6b9") || lower.contains("#ffffff"),
+                "{command}: not a themable glyph"
+            );
         }
     }
 }
