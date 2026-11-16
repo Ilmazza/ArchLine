@@ -32,6 +32,21 @@ impl Scene {
         Ok(handle)
     }
 
+    /// Create the normal first model-content viewport for a layout without
+    /// activating it. The document mutation belongs to the caller's undo step.
+    pub fn initialize_layout_default_viewport(&mut self, layout_name: &str) {
+        if self.current_layout == layout_name {
+            self.add_layout_default_viewport(layout_name);
+            return;
+        }
+        // Viewport placement and the current-layout content list are scoped to
+        // the target sheet. Restore the view's current name directly afterward;
+        // no camera, persisted active-tab state, or selection is switched.
+        let previous = std::mem::replace(&mut self.current_layout, layout_name.to_owned());
+        self.add_layout_default_viewport(layout_name);
+        self.current_layout = previous;
+    }
+
     /// Give layout `name` the page of layout `source`: its page setup,
     /// limits and UCS, and the sheet viewport's view. It opens as it is, so
     /// it does not get the first viewport a new layout gets. The paper-space
@@ -84,10 +99,10 @@ impl Scene {
         if let Some(EntityType::Viewport(sheet)) = self.document.get_entity(from.viewport).cloned()
         {
             if let Some(EntityType::Viewport(target)) = self.document.get_entity_mut(to.viewport) {
-                *target = Box::new(document::entities::Viewport {
+                **target = document::entities::Viewport {
                     common: target.common.clone(),
                     ..*sheet
-                });
+                };
             }
         }
         self.unopened_layouts.remove(name);
@@ -96,12 +111,17 @@ impl Scene {
 
     /// The paper-space objects of layout `name`, without its sheet viewport.
     pub fn layout_paper_entities(&self, name: &str) -> Vec<Handle> {
-        let Some((record, sheet)) = self.document.objects.values().find_map(|object| match object {
-            ObjectType::Layout(layout) if layout.name == name => {
-                Some((layout.block_record, layout.viewport))
-            }
-            _ => None,
-        }) else {
+        let Some((record, sheet)) =
+            self.document
+                .objects
+                .values()
+                .find_map(|object| match object {
+                    ObjectType::Layout(layout) if layout.name == name => {
+                        Some((layout.block_record, layout.viewport))
+                    }
+                    _ => None,
+                })
+        else {
             return Vec::new();
         };
         self.document
@@ -124,20 +144,34 @@ impl Scene {
             .unwrap_or_default()
     }
 
-    /// Rename a paper-space layout.  Updates the Layout object name in the document.
+    /// Rename a paper-space layout, including its ACAD_LAYOUT dictionary key.
     pub fn rename_layout(&mut self, old_name: &str, new_name: &str) {
+        let mut renamed = false;
         for obj in self.document.objects.values_mut() {
             if let ObjectType::Layout(l) = obj {
                 if l.name == old_name {
                     l.name = new_name.to_string();
-                    if self.unopened_layouts.remove(old_name) {
-                        self.unopened_layouts.insert(new_name.to_string());
-                    }
-                    self.bump_layout_epoch();
-                    return;
+                    renamed = true;
+                    break;
                 }
             }
         }
+        if !renamed {
+            return;
+        }
+        if self.unopened_layouts.remove(old_name) {
+            self.unopened_layouts.insert(new_name.to_string());
+        }
+        let dictionary = self.document.header.acad_layout_dict_handle;
+        if let Some(ObjectType::Dictionary(dictionary)) = self.document.objects.get_mut(&dictionary)
+        {
+            for (key, _) in dictionary.entries.iter_mut() {
+                if *key == old_name {
+                    *key = new_name.to_string();
+                }
+            }
+        }
+        self.bump_layout_epoch();
     }
 
     /// Delete a paper-space layout and all entities owned by it.
@@ -605,7 +639,6 @@ impl Scene {
     /// (clipped to its rectangle) in paper space. Derived from the same
     /// `active_viewports` enumeration the renderer uses, so the grid overlay can
     /// never drift from the views actually on screen (issue #121). The grid
-
     pub fn active_model_tile_bounds(&self, vw: f32, vh: f32) -> iced::Rectangle {
         if self.current_layout != "Model" {
             return iced::Rectangle {

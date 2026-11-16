@@ -26,28 +26,36 @@ impl Scene {
                     !Self::is_sheet_viewport(&self.document, vp)
                 }
         };
-        let content = if let Some(block) = self
+        // The block record's owned list keeps the drawing's stored order on a
+        // healthy layout, but it is a hint, never the sole source: an import
+        // whose assigned handles no longer match the stored list (or one holding
+        // handles the entity table cannot resolve) must not silently drop the
+        // layout's whole content. Union the resolving list entries with the same
+        // ownership scan the empty-list path already used.
+        let record = self
             .document
             .block_records
             .iter()
-            .find(|block| block.handle == layout_block)
-            .filter(|block| !block.entity_handles.is_empty())
-        {
-            block
-                .entity_handles
-                .iter()
-                .copied()
-                .filter(|handle| is_content(*handle))
-                .collect()
-        } else {
-            self.document
-                .entities()
-                .filter_map(|entity| {
-                    let handle = entity.common().handle;
-                    is_content(handle).then_some(handle)
-                })
-                .collect()
-        };
+            .find(|block| block.handle == layout_block);
+        let record_list = record
+            .map(|block| block.entity_handles.as_slice())
+            .unwrap_or(&[]);
+        let record_unresolved = record_list
+            .iter()
+            .any(|handle| self.document.get_entity(*handle).is_none());
+        let mut content: Vec<Handle> = record_list
+            .iter()
+            .copied()
+            .filter(|handle| is_content(*handle))
+            .collect();
+        if record.is_none() || record_unresolved || content.is_empty() {
+            for entity in self.document.entities() {
+                let handle = entity.common().handle;
+                if is_content(handle) && !content.contains(&handle) {
+                    content.push(handle);
+                }
+            }
+        }
         let content = Arc::new(content);
         self.paper_viewport_cache.borrow_mut().insert(
             self.current_layout.clone(),
@@ -267,7 +275,7 @@ impl Scene {
                     && self.category_cache_valid(
                         cache.epoch,
                         super::CACHE_CATEGORY_IMAGE,
-                        |handle| self.images.contains_key(&handle),
+                        |handle| self.is_image_entity(handle),
                     )
                 {
                     Some((
@@ -423,14 +431,11 @@ impl Scene {
         // never changes within a build.
         let layer_walk = self.render_space_layer_walk(layout_block, None);
         let layer_hidden = |layer: &str| {
-            self.document
-                .layers
-                .get(layer)
-                .is_some_and(|l| {
-                    l.flags.off
-                        || l.flags.frozen
-                        || layer_walk.is_some_and(|walk| !walk.contains(&l.handle))
-                })
+            self.document.layers.get(layer).is_some_and(|l| {
+                l.flags.off
+                    || l.flags.frozen
+                    || layer_walk.is_some_and(|walk| !walk.contains(&l.handle))
+            })
         };
         let mut models: Vec<HatchModel> = Vec::new();
         let annotation_scale_handle = self.paper_annotation_scale_handle();
@@ -554,14 +559,11 @@ impl Scene {
         // foreign blocks / plot passes resolve to `None` and stay complete.
         let layer_walk = self.render_space_layer_walk(block, None);
         let layer_hidden = |layer: &str| {
-            self.document
-                .layers
-                .get(layer)
-                .is_some_and(|l| {
-                    l.flags.off
-                        || l.flags.frozen
-                        || layer_walk.is_some_and(|walk| !walk.contains(&l.handle))
-                })
+            self.document.layers.get(layer).is_some_and(|l| {
+                l.flags.off
+                    || l.flags.frozen
+                    || layer_walk.is_some_and(|walk| !walk.contains(&l.handle))
+            })
         };
         let layer_plottable = |layer: &str| {
             self.document
@@ -616,6 +618,7 @@ impl Scene {
                 }
                 _ => model.clone(),
             };
+            hatch.entity = Some(handle);
             // Resolve against the sheet, like the block-child fills below, not
             // the screen: in Model the screen is dark, so colour 7 / ByBlock
             // fills stayed white and vanished on the white page.
@@ -638,6 +641,7 @@ impl Scene {
                 if let Some(mut backdrop) = self.hatch_backdrop(dxf, &hatch, fill_style, None) {
                     backdrop.color = view::render::adapt_to_bg(backdrop.color, self.paper_bg_color);
                     backdrop.name = hatch.name.clone();
+                    backdrop.entity = Some(handle);
                     models.push(backdrop);
                 }
                 if let model::hatch_model::HatchPattern::Pattern(_) = &hatch.pattern {
@@ -716,6 +720,22 @@ impl Scene {
     /// Used by `active_viewports` to render model-space content through each
     /// content viewport's own view direction and scale.
     pub(super) fn camera_for_viewport(&self, vp_handle: Handle) -> Option<view::camera::Camera> {
+        let mut camera = self.viewport_view_camera(vp_handle)?;
+        // The view decides where the camera looks; its depth range must still
+        // hold the whole model. Sized from the view height alone (64 times
+        // it, around the target), a viewport whose target sits far above or
+        // below the geometry lost it: a top view with its target 808 above
+        // the drawing and a view height under 12.6 showed nothing, although
+        // a view straight down sees the drawing wherever the target is.
+        if let Some((min, max)) = self.model_space_extents() {
+            camera.fit_depth_to_bounds_f64(min.as_dvec3(), max.as_dvec3());
+        }
+        Some(camera)
+    }
+
+    /// The camera a floating viewport's view (or its auto-fit) aims, before
+    /// its depth range is sized to the model.
+    fn viewport_view_camera(&self, vp_handle: Handle) -> Option<view::camera::Camera> {
         let vp = match self.document.get_entity(vp_handle) {
             Some(EntityType::Viewport(vp)) => vp,
             _ => return None,
@@ -804,7 +824,7 @@ impl Scene {
             }
             let half_h = saved_h * 0.5;
             let half_w = half_h * aspect_d;
-            let (tx, ty) = (cam.target.x as f64, cam.target.y as f64);
+            let (tx, ty) = (cam.target.x, cam.target.y);
             // Prefer the true model bounds; fall back to the median cluster box.
             let (bx0, by0, bx1, by1) = full_bounds.unwrap_or((
                 cx - cluster_half,
@@ -870,7 +890,49 @@ impl Scene {
             Some(vp_handle),
         );
         self.viewport_complex_lt.set(None);
-        wires
+        self.without_viewport_frozen_members(wires, &frozen)
+    }
+
+    /// `wires` without the block lines on a layer the viewport freezes.
+    ///
+    /// The resident set leaves out the objects on those layers, but a block
+    /// reference is drawn from definitions shared by every viewport, so the
+    /// lines its members draw on a frozen layer came along. Each such line
+    /// knows the layer it shows on (`effective_layer`); a copy of a block
+    /// drawn as a stub is expanded only when its definition holds one.
+    fn without_viewport_frozen_members(
+        &self,
+        wires: Arc<Vec<WireModel>>,
+        frozen: &rustc_hash::FxHashSet<Handle>,
+    ) -> Arc<Vec<WireModel>> {
+        if frozen.is_empty() {
+            return wires;
+        }
+        let sig = Self::frozen_layers_sig(frozen);
+        if let Some((source, kept)) = self.viewport_frozen_member_cache.borrow().get(&sig) {
+            if source
+                .upgrade()
+                .is_some_and(|source| Arc::ptr_eq(&source, &wires))
+            {
+                return Arc::clone(kept);
+            }
+        }
+        let layer_frozen = |layer: &str| {
+            !crate::scene::view::render::is_effective_layer_zero(layer)
+                && self
+                    .document
+                    .layers
+                    .get(layer)
+                    .is_some_and(|record| frozen.contains(&record.handle))
+        };
+        let kept = match crate::scene::model::instance_model::without_layers(&wires, layer_frozen) {
+            Some(kept) => Arc::new(kept),
+            None => Arc::clone(&wires),
+        };
+        self.viewport_frozen_member_cache
+            .borrow_mut()
+            .insert(sig, (Arc::downgrade(&wires), Arc::clone(&kept)));
+        kept
     }
 
     /// PSLTSCALE's factor on linetypes in a viewport: 1 / viewport scale, which

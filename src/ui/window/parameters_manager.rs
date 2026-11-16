@@ -2,9 +2,9 @@
 use crate::app::Message;
 use crate::scene::block_parameters_manager::{self as manager, Group, Row};
 use crate::ui::dock::{self, Chrome, PanelId};
-use iced::widget::{
-    button, canvas, column, container, mouse_area, row, scrollable, text, text_input,
-};
+use crate::ui::kit;
+use crate::ui::style::{chrome, kit_metrics as km};
+use iced::widget::{button, canvas, column, container, mouse_area, row, text, text_input, Space};
 use iced::{Element, Fill, Length, Point, Rectangle, Size};
 
 /// Every column stays visible in the panel's default width, so the fixed cells
@@ -77,6 +77,8 @@ const SPACING: f32 = 2.0;
 /// The leading glyph column. Its width is fixed so a row without a glyph keeps
 /// the same cells in the same places as one with a glyph.
 const GLYPH_WIDTH: f32 = 16.0;
+/// Width of the filter field beside the search.
+const FILTER_W: f32 = 96.0;
 
 /// The shapes the pane draws in its fixed-width leading cell: a group header's
 /// box, a row kind's glyph, and the toolbar's funnel. Every other row kind (a
@@ -116,8 +118,7 @@ impl<Message> canvas::Program<Message> for Glyph {
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let palette = theme.palette();
-        let line = palette.background.base.text;
+        let line = chrome::text(theme);
         let centre = Point::new(bounds.width / 2.0, bounds.height / 2.0);
         let reach = bounds.width.min(bounds.height) / 2.0 - 1.0;
         let stroke = canvas::Stroke::default().with_color(line).with_width(1.0);
@@ -129,7 +130,7 @@ impl<Message> canvas::Program<Message> for Glyph {
         };
         match self.0 {
             GlyphKind::GroupBox => {
-                frame.stroke(&square(reach), stroke.clone());
+                frame.stroke(&square(reach), stroke);
                 frame.stroke(
                     &canvas::Path::line(
                         Point::new(centre.x - reach + 2.0, centre.y),
@@ -150,24 +151,22 @@ impl<Message> canvas::Program<Message> for Glyph {
                 frame.fill(&canvas::Path::circle(centre, 1.6), line);
             }
             GlyphKind::Xy => {
-                let grid = canvas::Stroke::default()
-                    .with_color(palette.primary.strong.color)
-                    .with_width(1.0);
-                frame.stroke(&square(reach), grid.clone());
-                frame.stroke(
-                    &canvas::Path::line(
-                        Point::new(centre.x, centre.y - reach),
-                        Point::new(centre.x, centre.y + reach),
-                    ),
-                    grid.clone(),
-                );
-                frame.stroke(
-                    &canvas::Path::line(
-                        Point::new(centre.x - reach, centre.y),
-                        Point::new(centre.x + reach, centre.y),
-                    ),
-                    grid,
-                );
+                let colour = chrome::accent(theme);
+                let gap = 1.0;
+                let cell = reach - gap / 2.0;
+                let left = centre.x - reach;
+                let top = centre.y - reach;
+                for (x, y) in [
+                    (left, top),
+                    (left + cell + gap, top),
+                    (left, top + cell + gap),
+                    (left + cell + gap, top + cell + gap),
+                ] {
+                    frame.fill(
+                        &canvas::Path::rectangle(Point::new(x, y), Size::new(cell, cell)),
+                        colour,
+                    );
+                }
             }
             GlyphKind::Tag => {
                 let tag = canvas::Path::new(|p| {
@@ -209,17 +208,50 @@ fn glyph_cell(kind: GlyphKind, id: String) -> Element<'static, Message> {
     container(
         canvas(Glyph(kind))
             .width(Length::Fixed(GLYPH_WIDTH))
-            .height(Length::Fixed(14.0)),
+            .height(Length::Fixed(km::CHECK)),
     )
     .width(Length::Fixed(GLYPH_WIDTH))
+    .height(Length::Fixed(km::ROW_H))
+    .align_y(iced::Center)
     .id(iced::widget::Id::from(id))
     .into()
 }
 
 fn glyph_spacer() -> Element<'static, Message> {
-    container(text(" ").size(11))
+    container(ui_text(" "))
         .width(Length::Fixed(GLYPH_WIDTH))
         .into()
+}
+
+/// Text of a cell or a menu entry: 11 px on a whole-pixel line.
+fn ui_text(value: impl Into<String>) -> iced::widget::Text<'static> {
+    text(value.into())
+        .size(crate::ui::style::text::UI)
+        .line_height(crate::ui::style::text::line())
+}
+
+/// A cell's printed value that opens its field: flat until hovered.
+fn cell_button(value: &str, message: Message) -> button::Button<'static, Message> {
+    button(ui_text(
+        if value.is_empty() { " " } else { value }.to_owned(),
+    ))
+    .clip(true)
+    .padding([0.0, km::CELL_PAD_X])
+    .height(Length::Fixed(km::ROW_H))
+    .style(kit::flat_button_style(false))
+    .on_press(message)
+}
+
+/// The field a cell opens, in the grid's field style.
+fn cell_field(placeholder: &str, value: &str) -> iced::widget::TextInput<'static, Message> {
+    text_input(placeholder, value)
+        .id(edit_input_id())
+        .on_input(Message::ParametersManagerInput)
+        .on_submit(Message::ParametersManagerCommit)
+        .size(crate::ui::style::text::UI)
+        .line_height(crate::ui::style::text::line())
+        .padding(kit::FIELD_PAD)
+        .style(kit::field_style)
 }
 
 /// The cells of a row that open a field. The two numeric cells print the same
@@ -230,6 +262,16 @@ pub enum Cell {
     Expression,
     Value,
     Description,
+    Order,
+}
+
+impl Cell {
+    /// Whether the cell opens on the text it replaces. A numeric cell opens
+    /// empty, so an untouched field writes nothing; a text cell can be emptied
+    /// on purpose, so moving the click away is a write of its text.
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Description | Self::Order)
+    }
 }
 
 /// The cell a manager edit is open on, and the parameter it writes. The panel is
@@ -280,7 +322,9 @@ impl Default for Panel {
             search: String::new(),
             mode: manager::FilterMode::All,
             filter_menu: false,
-            columns: [true; 6],
+            // The columns the recorded header menu leaves ticked when it first
+            // opens: Type and Description start hidden.
+            columns: [true, true, false, true, true, false],
             header_menu: false,
         }
     }
@@ -301,7 +345,7 @@ pub fn edit_input_id() -> iced::widget::Id {
 }
 
 fn cell(value: &str, width: f32) -> Element<'static, Message> {
-    let body = text(if value.is_empty() { " " } else { value }.to_owned()).size(11);
+    let body = ui_text(if value.is_empty() { " " } else { value }.to_owned());
     if width > 0.0 {
         container(body.width(Length::Fixed(width - 8.0)))
             .width(Length::Fixed(width))
@@ -324,33 +368,30 @@ fn number_cell(
     if panel.is_open(definition, name, which) {
         // The field starts empty — a typed number replaces the printed one
         // without first deleting it — but it shows what it will replace.
-        return container(
-            text_input(if value.is_empty() { " " } else { value }, &panel.edit_buf)
-                .id(edit_input_id())
-                .on_input(Message::ParametersManagerInput)
-                .on_submit(Message::ParametersManagerCommit)
-                .size(11),
-        )
+        return container(cell_field(
+            if value.is_empty() { " " } else { value },
+            &panel.edit_buf,
+        ))
         .width(Length::Fixed(width))
         .into();
     }
-    container(
-        button(text(if value.is_empty() { " " } else { value }.to_owned()).size(11))
-            .clip(true)
-            .on_press(Message::ParametersManagerEdit(name.to_owned(), which)),
-    )
+    container(cell_button(
+        value,
+        Message::ParametersManagerEdit(name.to_owned(), which),
+    ))
     .width(Length::Fixed(width))
     .into()
 }
 
-/// A description cell: a row that names parameter text opens an in-place field
+/// A text cell: a row that names parameter text opens an in-place field
 /// carrying the text it will replace; a row that names none keeps the printed
-/// cell. The writable cell fills the flexible Description column, so the click
+/// cell. A zero width fills the flexible Description column, so the click
 /// target stays the whole cell as the pane grows.
-fn description_cell(
+fn text_cell(
     definition: document::Handle,
     name: &str,
     value: &str,
+    which: Cell,
     writable: bool,
     panel: &Panel,
     width: f32,
@@ -358,36 +399,33 @@ fn description_cell(
     if !writable {
         return cell(value, width);
     }
-    if panel.is_open(definition, name, Cell::Description) {
-        return container(
-            text_input(" ", &panel.edit_buf)
-                .id(edit_input_id())
-                .on_input(Message::ParametersManagerInput)
-                .on_submit(Message::ParametersManagerCommit)
-                .size(11),
-        )
-        .width(Fill)
-        .into();
+    if panel.is_open(definition, name, which) {
+        let field = container(cell_field(" ", &panel.edit_buf));
+        return if width > 0.0 {
+            field.width(Length::Fixed(width)).into()
+        } else {
+            field.width(Fill).into()
+        };
     }
-    container(
-        button(text(if value.is_empty() { " " } else { value }.to_owned()).size(11))
-            .width(Fill)
-            .clip(true)
-            .on_press(Message::ParametersManagerEdit(
-                name.to_owned(),
-                Cell::Description,
-            )),
-    )
-    .width(Fill)
-    .into()
+    let printed = container(
+        cell_button(
+            value,
+            Message::ParametersManagerEdit(name.to_owned(), which),
+        )
+        .width(Fill),
+    );
+    if width > 0.0 {
+        printed.width(Length::Fixed(width)).into()
+    } else {
+        printed.width(Fill).into()
+    }
 }
 
 fn show_cell(name: &str, show: bool, width: f32) -> Element<'static, Message> {
-    container(
-        button(text(crate::t!(if show { "Yes" } else { "No" }).into_owned()).size(11))
-            .clip(true)
-            .on_press(Message::ParametersManagerShow(name.to_owned())),
-    )
+    container(cell_button(
+        &crate::t!(if show { "Yes" } else { "No" }),
+        Message::ParametersManagerShow(name.to_owned()),
+    ))
     .width(Length::Fixed(width))
     .id(iced::widget::Id::from(format!(
         "parameters-manager-show-{name}"
@@ -419,7 +457,17 @@ fn header_line(panel: &Panel) -> Element<'static, Message> {
             ));
         }
     }
-    row(cells).spacing(SPACING).into()
+    // The kit's column header look: titles on the bar colour, semibold.
+    container(row(cells).spacing(SPACING).align_y(iced::Center))
+        .width(Fill)
+        .height(Length::Fixed(km::ROW_H))
+        .padding(iced::Padding::ZERO.left(km::CELL_PAD_X))
+        .style(|theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(chrome::surface_raised(theme))),
+            text_color: Some(chrome::text(theme)),
+            ..Default::default()
+        })
+        .into()
 }
 
 /// The header row is the surface the menu opens from; the id sits on the whole
@@ -436,14 +484,29 @@ fn group_line(group: Group) -> Element<'static, Message> {
         Group::ActionParameters => crate::tr!("parameters-manager", "action-parameters"),
         Group::Attributes => crate::t!(group.name()).into_owned(),
     };
-    row(vec![
-        glyph_cell(
-            GlyphKind::GroupBox,
-            format!("parameters-manager-group-{:?}", group),
-        ),
-        container(text(label).size(11)).padding([6, 0]).into(),
-    ])
-    .spacing(SPACING)
+    // A section bar: the gap above, the group on the bar colour.
+    column![
+        Space::new().height(km::CATEGORY_GAP),
+        container(
+            row(vec![
+                glyph_cell(
+                    GlyphKind::GroupBox,
+                    format!("parameters-manager-group-{:?}", group),
+                ),
+                ui_text(label).font(kit::SEMIBOLD).into(),
+            ])
+            .spacing(SPACING)
+            .align_y(iced::Center),
+        )
+        .width(Fill)
+        .height(Length::Fixed(km::CATEGORY_H))
+        .padding(iced::Padding::ZERO.left(km::CELL_PAD_X))
+        .style(|theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(chrome::surface_raised(theme))),
+            text_color: Some(chrome::text(theme)),
+            ..Default::default()
+        }),
+    ]
     .into()
 }
 
@@ -454,32 +517,39 @@ fn toolbar(panel: &Panel) -> Element<'static, Message> {
     row(vec![
         container(
             button(
-                canvas(Glyph(GlyphKind::Funnel))
-                    .width(Length::Fixed(12.0))
-                    .height(Length::Fixed(12.0)),
+                container(
+                    canvas(Glyph(GlyphKind::Funnel))
+                        .width(Length::Fixed(km::BAR_ICON))
+                        .height(Length::Fixed(km::BAR_ICON)),
+                )
+                .center(Fill),
             )
             .on_press(Message::ParametersManagerFilterMenu)
-            .padding([2, 4]),
+            .width(Length::Fixed(km::TOOL_H))
+            .height(Length::Fixed(km::TOOL_H))
+            .padding(0)
+            .style(kit::flat_button_style(panel.filter_menu)),
         )
-        .width(Length::Fixed(24.0))
+        .width(Length::Fixed(km::TOOL_H))
         .id(iced::widget::Id::from("parameters-manager-funnel"))
         .into(),
-        container(
-            text_input(&crate::tr!("parameters-manager", "filter"), &panel.filter)
-                .on_input(Message::ParametersManagerFilter)
-                .size(11),
-        )
-        .width(Length::Fixed(96.0))
+        container(kit::search_field(
+            &crate::tr!("parameters-manager", "filter"),
+            &panel.filter,
+            Message::ParametersManagerFilter,
+        ))
+        .width(Length::Fixed(FILTER_W))
         .into(),
-        container(
-            text_input(&crate::tr!("parameters-manager", "search"), &panel.search)
-                .on_input(Message::ParametersManagerSearch)
-                .size(11),
-        )
+        container(kit::search_field(
+            &crate::tr!("parameters-manager", "search"),
+            &panel.search,
+            Message::ParametersManagerSearch,
+        ))
         .width(Fill)
         .into(),
     ])
-    .spacing(SPACING)
+    .spacing(km::TOOL_GAP)
+    .align_y(iced::Center)
     .into()
 }
 
@@ -487,7 +557,7 @@ fn toolbar(panel: &Panel) -> Element<'static, Message> {
 /// entry is what sets the filter; the menu then closes. Only the active entry
 /// carries the tick's id, so a test can tell which one is marked.
 fn filter_menu(panel: &Panel) -> Element<'static, Message> {
-    let mut list = column![].spacing(2);
+    let mut list = column![];
     for mode in manager::FilterMode::ALL {
         let active = mode == panel.mode;
         let tick = container(crate::ui::icons::themed_check_cell::<Message>(active));
@@ -500,19 +570,20 @@ fn filter_menu(panel: &Panel) -> Element<'static, Message> {
         };
         list = list.push(
             button(
-                row![tick, text(mode.menu_label()).size(11)]
-                    .spacing(4)
+                row![tick, ui_text(mode.menu_label())]
+                    .spacing(km::TOOL_GAP)
                     .align_y(iced::Center),
             )
             .on_press(Message::ParametersManagerFilterMode(mode))
-            .style(button::text)
-            .padding([2, 4])
+            .style(kit::flat_button_style(false))
+            .padding([0.0, km::CELL_PAD_X])
+            .height(Length::Fixed(km::MENU_ITEM_H))
             .width(Fill),
         );
     }
     container(list)
-        .style(container::bordered_box)
-        .padding(4)
+        .style(crate::ui::kit::menu::frame_style)
+        .padding(crate::ui::kit::menu::inset(km::MENU_PAD_Y))
         .width(Fill)
         .into()
 }
@@ -521,11 +592,17 @@ fn filter_menu(panel: &Panel) -> Element<'static, Message> {
 /// can hide, ticked while it is shown. Picking one toggles it and closes the
 /// menu, as the reference's own list does.
 fn column_menu(panel: &Panel) -> Element<'static, Message> {
-    let mut list = column![].spacing(2);
+    let mut list = column![];
     list = list.push(
-        container(text(crate::t!("Name").into_owned()).size(11))
-            .padding([2, 4])
-            .id(iced::widget::Id::new("parameters-manager-column-Name")),
+        container(
+            ui_text(crate::t!("Name").into_owned()).style(|theme: &iced::Theme| text::Style {
+                color: Some(chrome::muted(theme)),
+            }),
+        )
+        .padding([0.0, km::CELL_PAD_X])
+        .height(Length::Fixed(km::MENU_ITEM_H))
+        .align_y(iced::Center)
+        .id(iced::widget::Id::new("parameters-manager-column-Name")),
     );
     for column in Column::ALL {
         let shown = panel.columns[column.index()];
@@ -541,13 +618,14 @@ fn column_menu(panel: &Panel) -> Element<'static, Message> {
         list = list.push(
             container(
                 button(
-                    row![tick, text(column.label()).size(11)]
-                        .spacing(4)
+                    row![tick, ui_text(column.label())]
+                        .spacing(km::TOOL_GAP)
                         .align_y(iced::Center),
                 )
                 .on_press(Message::ParametersManagerColumn(column))
-                .style(button::text)
-                .padding([2, 4])
+                .style(kit::flat_button_style(false))
+                .padding([0.0, km::CELL_PAD_X])
+                .height(Length::Fixed(km::MENU_ITEM_H))
                 .width(Fill),
             )
             .width(Fill)
@@ -558,8 +636,8 @@ fn column_menu(panel: &Panel) -> Element<'static, Message> {
         );
     }
     container(list)
-        .style(container::bordered_box)
-        .padding(4)
+        .style(crate::ui::kit::menu::frame_style)
+        .padding(crate::ui::kit::menu::inset(km::MENU_PAD_Y))
         .width(Fill)
         .into()
 }
@@ -617,19 +695,32 @@ fn row_line(entry: &Row, panel: &Panel, definition: document::Handle) -> Element
         cells.push(show_cell(name, entry.show, COLUMNS[4].0));
     }
     if panel.columns[Column::Order.index()] {
-        cells.push(cell(&entry.order, COLUMNS[5].0));
+        cells.push(text_cell(
+            definition,
+            name,
+            &entry.order,
+            Cell::Order,
+            entry.order_writable,
+            panel,
+            COLUMNS[5].0,
+        ));
     }
     if panel.columns[Column::Description.index()] {
-        cells.push(description_cell(
+        cells.push(text_cell(
             definition,
             name,
             &entry.description,
+            Cell::Description,
             entry.description_writable,
             panel,
             COLUMNS[6].0,
         ));
     }
-    row(cells).spacing(SPACING).into()
+    row(cells)
+        .spacing(SPACING)
+        .height(Length::Fixed(km::ROW_H))
+        .align_y(iced::Center)
+        .into()
 }
 
 pub fn view(
@@ -656,30 +747,23 @@ pub fn view(
         }
     }
     let footer = manager::footer(panel.mode, rows.len(), listed.len());
-    let mut body = column![container(toolbar(panel)).width(Fill).padding([2, 2])].spacing(2);
+    let mut body = column![kit::band(toolbar(panel))];
     if panel.filter_menu {
-        body = body.push(container(filter_menu(panel)).width(Fill).padding([0, 2]));
+        body = body.push(kit::band(filter_menu(panel)));
     }
     if panel.header_menu {
-        body = body.push(container(column_menu(panel)).width(Fill).padding([0, 2]));
+        body = body.push(kit::band(column_menu(panel)));
     }
-    dock::frame(
+    kit::palette(
         dock::title_bar(
             PanelId::ParametersManager,
             crate::t!("Parameters Manager").into_owned(),
             chrome,
         ),
-        body.push(
-            container(
-                scrollable(column(lines.into_iter()).spacing(2))
-                    .width(Fill)
-                    .height(Fill),
-            )
-            .width(Fill)
+        body.push(Space::new().height(km::TOOL_GAP))
+            .push(container(kit::scroll_area(column(lines).spacing(km::line()))).height(Fill))
+            .push(kit::footer(kit::footer_text(footer)))
             .height(Fill),
-        )
-        .push(container(text(footer).size(11)).width(Fill).padding([2, 2]))
-        .height(Fill),
         width,
     )
 }
@@ -707,7 +791,8 @@ mod tests {
                 type_name: "Polar",
                 numeric: true,
                 show: true,
-                order: String::new(),
+                order: "2".into(),
+                order_writable: true,
                 description: "Left edge".into(),
                 description_writable: true,
             },
@@ -720,6 +805,7 @@ mod tests {
                 numeric: false,
                 show: true,
                 order: String::new(),
+                order_writable: true,
                 description: String::new(),
                 description_writable: true,
             },
@@ -732,6 +818,7 @@ mod tests {
                 numeric: false,
                 show: true,
                 order: String::new(),
+                order_writable: false,
                 description: String::new(),
                 description_writable: false,
             },
@@ -806,6 +893,23 @@ mod tests {
         assert_eq!(
             manager::footer(manager::FilterMode::All, 3, 3),
             "All: 3 of 3 parameters displayed"
+        );
+    }
+
+    #[test]
+    fn the_used_filter_matches_a_name_whole_rather_than_inside_a_longer_one() {
+        let mut rows = sample();
+        rows[0].name = "Distance1".into();
+        rows[1].name = "Distance10".into();
+        rows[2].expression = "Distance10*2".into();
+        let listed = manager::displayed(&rows, manager::FilterMode::UsedInExpressions, "*", "");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Distance10"],
+            "the expression names the longer identifier, not the shorter one"
         );
     }
 
@@ -934,8 +1038,13 @@ mod tests {
         );
         assert_eq!(panel.search, "", "and the search field is empty");
         assert_eq!(
-            manager::displayed(&rows, manager::FilterMode::All, &panel.filter, &panel.search)
-                .len(),
+            manager::displayed(
+                &rows,
+                manager::FilterMode::All,
+                &panel.filter,
+                &panel.search
+            )
+            .len(),
             rows.len(),
             "which lists every row"
         );
@@ -1076,6 +1185,7 @@ mod tests {
             numeric: true,
             show: true,
             order: String::new(),
+            order_writable: true,
             description: String::new(),
             description_writable: true,
         });
@@ -1115,6 +1225,12 @@ mod tests {
         // `locate` draws the pane on this definition, so the open cell names it.
         let definition = document::Handle::new(1);
         let width = PanelId::ParametersManager.default_width();
+        // Description is hidden when the pane opens, so the cells under test
+        // are drawn by asking for the column outright.
+        let shown = || Panel {
+            columns: [true, true, false, true, true, true],
+            ..Panel::default()
+        };
         let open = |name: &str| Panel {
             editing: Some(Edit {
                 definition,
@@ -1124,7 +1240,7 @@ mod tests {
                 cell: Cell::Description,
             }),
             edit_buf: "typed note".to_owned(),
-            ..Panel::default()
+            ..shown()
         };
         let mut parameter = iced_test::simulator::Simulator::with_size(
             Default::default(),
@@ -1136,7 +1252,7 @@ mod tests {
             "the description cell of a parameter opens its own field"
         );
         assert!(
-            locate(&Panel::default(), "Left edge").is_some(),
+            locate(&shown(), "Left edge").is_some(),
             "a closed description cell prints the stored text"
         );
         assert!(
@@ -1151,6 +1267,49 @@ mod tests {
         assert!(
             attribute.find(edit_input_id()).is_err(),
             "an attribute row has no parameter text to edit"
+        );
+    }
+
+    #[test]
+    fn the_order_field_opens_only_on_a_parameter_row() {
+        let definition = document::Handle::new(1);
+        let width = PanelId::ParametersManager.default_width();
+        let open = |name: &str| Panel {
+            editing: Some(Edit {
+                definition,
+                parameter: document::Handle::new(9),
+                component: crate::scene::model::object::BlockParameterComponent::Angle,
+                name: name.to_owned(),
+                cell: Cell::Order,
+            }),
+            edit_buf: "3".to_owned(),
+            ..Panel::default()
+        };
+        let mut parameter = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(width, 800.0),
+            view(&sample(), &open("Angle1"), definition, width, chrome()),
+        );
+        assert!(
+            parameter.find(edit_input_id()).is_ok(),
+            "the order cell of a parameter opens its own field"
+        );
+        assert!(
+            locate(&Panel::default(), "2").is_some(),
+            "a closed order cell prints the stored rank"
+        );
+        assert!(
+            locate(&open("Angle1"), "2").is_none(),
+            "and the open field replaces the rank it is editing"
+        );
+        let mut attribute = iced_test::simulator::Simulator::with_size(
+            Default::default(),
+            iced::Size::new(width, 800.0),
+            view(&sample(), &open("TAG1"), definition, width, chrome()),
+        );
+        assert!(
+            attribute.find(edit_input_id()).is_err(),
+            "an attribute row has no parameter order to edit"
         );
     }
 
@@ -1200,24 +1359,28 @@ mod tests {
         )
     }
 
-    /// The pane opens with every toggled column shown and no menu over it.
+    /// The pane opens with the columns the recorded menu leaves ticked: Type
+    /// and Description start hidden, and Name always draws.
     #[test]
-    fn the_header_starts_with_every_toggled_column_shown() {
+    fn the_pane_opens_with_only_the_columns_the_recorded_menu_ticks() {
         let panel = Panel::default();
-        assert!(
-            panel.columns.iter().all(|&shown| shown),
-            "every column the menu can toggle is shown when the pane opens"
+        assert_eq!(
+            panel.columns,
+            [true, true, false, true, true, false],
+            "Expression, Value, Show and Order start shown; Type and Description start hidden"
         );
         assert!(!panel.header_menu, "with no column menu over the header");
         let mut ui = build(&panel);
         for column in Column::ALL {
-            assert!(
+            let shown = panel.columns[column.index()];
+            assert_eq!(
                 ui.find(iced::widget::Id::from(format!(
                     "parameters-manager-header-{}",
                     column.name()
                 )))
                 .is_ok(),
-                "the header draws {}",
+                shown,
+                "the header draws {} only when the menu leaves it ticked",
                 column.name()
             );
         }
@@ -1252,13 +1415,15 @@ mod tests {
                 "the menu lists {}",
                 column.name()
             );
-            assert!(
+            let shown = open.columns[column.index()];
+            assert_eq!(
                 ui.find(iced::widget::Id::from(format!(
                     "parameters-manager-column-check-{}",
                     column.name()
                 )))
                 .is_ok(),
-                "and ticks {}, which is shown",
+                shown,
+                "and ticks {} only while it is shown",
                 column.name()
             );
         }

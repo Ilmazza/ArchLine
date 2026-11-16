@@ -92,7 +92,10 @@ fn width_code(raw: &str, range: &Range<usize>) -> Result<f64, EditError> {
         .ok_or(EditError::ObjectDefault)
 }
 
-fn text_style<'a>(doc: &'a document::Document, name: &str) -> Option<&'a document::tables::TextStyle> {
+fn text_style<'a>(
+    doc: &'a document::Document,
+    name: &str,
+) -> Option<&'a document::tables::TextStyle> {
     doc.text_styles.iter().find(|s| {
         s.name.eq_ignore_ascii_case(name)
             || (name.trim().is_empty() && s.name.eq_ignore_ascii_case("Standard"))
@@ -103,11 +106,8 @@ impl ObjectStyle {
     pub(super) fn of(doc: &document::Document, name: &str) -> Self {
         use crate::entities::text_support::{TTF_FLAG_BOLD, TTF_FLAG_ITALIC};
         let style = text_style(doc, name);
-        let font = crate::entities::text_support::resolve_text_style(name, doc).font_name;
         Self {
-            face: crate::scene::text::sysfont::split_style(&font)
-                .0
-                .to_string(),
+            face: style_font_family(name, doc),
             font: style.and_then(crate::ui::font_picker::style_font),
             width: style
                 .map(|s| s.width_factor)

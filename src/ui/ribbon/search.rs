@@ -19,7 +19,7 @@ use iced::{
 
 use super::layout::{QatBuiltin, QatItem};
 use super::qat::FaceIcon;
-use super::widgets::{make_icon, make_tip, tip_style};
+use super::widgets::make_icon;
 use super::{app_menu, draw_panel, extras, Ribbon};
 use crate::app::Message;
 use crate::modules::{IconKind, ModuleEvent, RibbonItem, ToolDef};
@@ -46,7 +46,7 @@ const BOX_BUTTON: f32 = 18.0;
 const MAGNIFIER_W: f32 = 24.0;
 const MAGNIFIER_H: f32 = 20.0;
 /// Size of the typed text and the placeholder.
-const INPUT_SIZE: f32 = 11.5;
+const INPUT_SIZE: f32 = crate::ui::style::text::UI;
 /// The field over the magnifier button on a narrow window, and how far above
 /// the button it stands.
 const FIELD_W: f32 = 300.0;
@@ -291,9 +291,7 @@ impl Ribbon {
             .chain((0..self.modules.len()).filter(|i| *i != self.active));
         for index in tabs {
             let module = &self.modules[index];
-            if module.id() == "layout"
-                || self.contextual_off(module.id())
-                || self.tab_hidden(index)
+            if module.id() == "layout" || self.contextual_off(module.id()) || self.tab_hidden(index)
             {
                 continue;
             }
@@ -331,7 +329,7 @@ impl Ribbon {
                                 (
                                     crate::t!(label).into_owned(),
                                     Some(command),
-                                    Some(icon.clone()),
+                                    Some(*icon),
                                     Message::DropdownSelectItem {
                                         dropdown_id: id,
                                         cmd: command,
@@ -350,7 +348,7 @@ impl Ribbon {
                         found.push((
                             label.clone(),
                             Some(command),
-                            Some(more.tool.icon.clone()),
+                            Some(more.tool.icon),
                             Message::DropdownSelectItem {
                                 dropdown_id: panel.id,
                                 cmd: command,
@@ -361,7 +359,7 @@ impl Ribbon {
                             found.push((
                                 format!("{label} › {}", crate::t!(option_label)),
                                 Some(option),
-                                Some(more.tool.icon.clone()),
+                                Some(more.tool.icon),
                                 Message::DropdownSelectItem {
                                     dropdown_id: panel.id,
                                     cmd: option,
@@ -789,7 +787,7 @@ impl Ribbon {
             self.search.flash = None;
             self.search.lit = None;
         } else {
-            self.search.lit = (phase % 2 == 0).then(|| id.to_string());
+            self.search.lit = phase.is_multiple_of(2).then(|| id.to_string());
         }
     }
 
@@ -865,10 +863,12 @@ impl Ribbon {
                     crate::tr!("ribbon-menu", "search-commands-keep"),
                 )
             };
-            let magnifier = tooltip(magnifier, make_tip(tip), tooltip::Position::Bottom)
-                .gap(6.0)
-                .delay(Duration::from_millis(400))
-                .style(tip_style);
+            let magnifier = crate::ui::kit::tooltip_gap(
+                magnifier,
+                tip,
+                tooltip::Position::Bottom,
+                crate::ui::style::ribbon_metrics::TIP_GAP,
+            );
             return PosReport::new(BOX_ID, magnifier).into();
         }
         let end = if self.layout.search_expanded {
@@ -962,21 +962,17 @@ impl Ribbon {
             End::None => None,
         };
         if let Some((path, collapse, tip)) = end_button {
-            content = content.push(
-                tooltip(
-                    box_button(
-                        icons::line_icon(path, metrics::STRIP_ICON),
-                        SearchMsg::Collapse(collapse),
-                        chrome::muted,
-                        chrome::strong,
-                    ),
-                    make_tip(tip),
-                    tooltip::Position::Bottom,
-                )
-                .gap(6.0)
-                .delay(Duration::from_millis(400))
-                .style(tip_style),
-            );
+            content = content.push(crate::ui::kit::tooltip_gap(
+                box_button(
+                    icons::line_icon(path, metrics::STRIP_ICON),
+                    SearchMsg::Collapse(collapse),
+                    chrome::muted,
+                    chrome::strong,
+                ),
+                tip,
+                tooltip::Position::Bottom,
+                crate::ui::style::ribbon_metrics::TIP_GAP,
+            ));
         }
         let overlay = end == End::None;
         container(content)
@@ -1076,7 +1072,7 @@ impl Ribbon {
             list = list.push(
                 container(
                     text(group.title())
-                        .size(10.5)
+                        .size(crate::ui::style::text::UI_SMALL)
                         .style(|theme: &Theme| text::Style {
                             color: Some(chrome::muted(theme)),
                         }),
@@ -1128,7 +1124,7 @@ impl Ribbon {
     fn result_row(&self, index: usize, selected: bool) -> Element<'_, Message> {
         let hit = &self.search.hits[index];
         let icon: Element<'_, Message> = match &hit.icon {
-            Some(icon) => make_icon(icon.clone(), metrics::SMALL_ICON),
+            Some(icon) => make_icon(*icon, metrics::SMALL_ICON),
             None => Space::new()
                 .width(metrics::SMALL_ICON)
                 .height(metrics::SMALL_ICON)
@@ -1196,7 +1192,7 @@ fn tool_found(
     (
         crate::t!(tool.label).into_owned(),
         command,
-        Some(tool.icon.clone()),
+        Some(tool.icon),
         Message::RibbonToolClick {
             tool_id: tool.id.to_string(),
             event: tool.event.clone(),

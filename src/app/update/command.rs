@@ -3,9 +3,7 @@
 #![allow(unused_imports)]
 use super::util::*;
 use super::{format_size, VIEWCUBE_HIT_SIZE};
-use crate::app::helpers::{
-    parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind,
-};
+use crate::app::helpers::{parse_coord, ucs_rotate_vec, ucs_to_wcs, ucs_z_axis, CoordKind};
 use crate::app::TextEntryMode;
 use crate::app::{Message, OpenCADStudio, POLY_START_DELAY_MS};
 use crate::modules::ModuleEvent;
@@ -160,6 +158,39 @@ impl iced::advanced::widget::Operation<crate::app::PasteFocus> for PasteFocusPro
     }
 }
 
+/// The pixels read off the system clipboard (RGBA, row by row) as a PNG.
+#[cfg(not(target_arch = "wasm32"))]
+fn clipboard_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let pixels = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
+/// The file name, without its extension, of a picture pasted now.
+#[cfg(not(target_arch = "wasm32"))]
+fn pasted_image_stem() -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    format!("pasted-{stamp}")
+}
+
+/// Write a pasted picture into `folder` as `stem.png`, or under the next
+/// name not taken there, and give the file's path.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_pasted_png(
+    folder: &std::path::Path,
+    stem: &str,
+    png: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    let name = crate::sys::unique_pasted_image_name(stem, "png", |name| folder.join(name).exists());
+    let path = folder.join(name);
+    std::fs::create_dir_all(folder)?;
+    std::fs::write(&path, png)?;
+    Ok(path)
+}
+
 impl OpenCADStudio {
     pub(super) fn begin_tab_close_queue(&mut self, tab_ids: Vec<u64>) -> Task<Message> {
         self.pending_tab_closes.clear();
@@ -220,7 +251,7 @@ impl OpenCADStudio {
             self.tabs[idx].dirty = false;
         }
         // Start tab is fixed — close requests on it are no-ops.
-        if self.tabs.get(idx).map_or(false, |t| t.is_start) {
+        if self.tabs.get(idx).is_some_and(|t| t.is_start) {
             return Task::none();
         }
         if self
@@ -255,9 +286,13 @@ impl OpenCADStudio {
             self.cancel_insert_attr_dialog();
             self.close_active_modal();
         }
-        if self.tabs.get(idx).map_or(false, |t| t.dirty) {
+        if self.tabs.get(idx).is_some_and(|t| t.dirty) {
             self.pending_close = Some(crate::app::PendingClose::Tab(self.tabs[idx].id));
             return self.open_unsaved_dialog_window();
+        }
+        // A draft belongs to its original tab and cannot survive its closure.
+        if idx == self.active_tab && self.mtext_editor.is_some() {
+            self.mtext_cancel();
         }
         // Pending client interactive requests pinned to this drawing
         // can never be answered once the tab is gone — cancel them.
@@ -343,6 +378,9 @@ impl OpenCADStudio {
     }
 
     pub(super) fn on_command_append_char(&mut self, s: String) -> Task<Message> {
+        if let Some(task) = self.shift_glyph(&s) {
+            return task;
+        }
         // While the MText preview is up, typed glyphs edit it directly.
         if self.mtext_editor.as_ref().is_some_and(|e| e.show_preview) {
             if s.chars().all(|c| !c.is_control()) {
@@ -1066,11 +1104,23 @@ impl OpenCADStudio {
                     return task;
                 }
             }
-            if self.tabs[i]
-                .active_cmd
-                .as_ref()
-                .map(|c| c.input_kind().wants_text())
-                .unwrap_or(false)
+            // A point prompt that also takes keywords reads a typed
+            // coordinate as the point: handing `300,50` to the step's text
+            // reader would turn the comma into a decimal mark (300.5).
+            // A coordinate under a typed object snap is a point at any step
+            // that takes one, so the snap resolves it.
+            let coordinate_at_point_step = parse_coord(&text).is_some()
+                && (self.snapper.pending_override().is_some()
+                    || self.tabs[i]
+                        .active_cmd
+                        .as_ref()
+                        .is_some_and(|c| c.point_step_accepts_keywords()));
+            if !coordinate_at_point_step
+                && self.tabs[i]
+                    .active_cmd
+                    .as_ref()
+                    .map(|c| c.input_kind().wants_text())
+                    .unwrap_or(false)
             {
                 // An empty submit must not be handed to on_text_input —
                 // a text step would commit the empty string (wiping a
@@ -1078,13 +1128,8 @@ impl OpenCADStudio {
                 // to the Enter handling below, which ends the step the
                 // same way a bare Enter does: unchanged.
                 if !text.is_empty() {
-                    self.push_ucs_to_cmd(i);
-                    if let Some(result) = self.tabs[i]
-                        .active_cmd
-                        .as_mut()
-                        .and_then(|c| c.on_text_input(&text))
-                    {
-                        return self.apply_cmd_result(result);
+                    if let Some(task) = self.offer_typed_text(i, &text) {
+                        return task;
                     }
                 }
             }
@@ -1135,7 +1180,18 @@ impl OpenCADStudio {
                         }
                     }
                 };
+                // An object snap override typed before the point snaps it.
+                let (wcs_pt, snapped) = match self.typed_override_snap(i, wcs_pt) {
+                    Some(Err(())) => return self.focus_cmd_input(),
+                    Some(Ok(Some(hit))) => (hit.world, Some(hit)),
+                    Some(Ok(None)) | None => (wcs_pt, None),
+                };
                 if !self.command_point_allowed(i, wcs_pt) {
+                    return Task::none();
+                }
+                // The accepted-snap list stays index-parallel with the
+                // points the command collects, as on the feed path.
+                if !self.record_accepted_snap(i, snapped, None, wcs_pt) {
                     return Task::none();
                 }
                 self.last_point = Some(wcs_pt);
@@ -1161,13 +1217,8 @@ impl OpenCADStudio {
                 return Task::none();
             }
 
-            self.push_ucs_to_cmd(i);
-            if let Some(result) = self.tabs[i]
-                .active_cmd
-                .as_mut()
-                .and_then(|c| c.on_text_input(&text))
-            {
-                return self.apply_cmd_result(result);
+            if let Some(task) = self.offer_typed_text(i, &text) {
+                return task;
             }
 
             // Direct distance entry: if an anchor exists and a scalar distance was entered,
@@ -1179,16 +1230,10 @@ impl OpenCADStudio {
 
             // A point prompt refuses other text as the reference does, with
             // a plain line before asking again.
-            let has_options = self.tabs[i]
-                .active_cmd
-                .as_ref()
-                .is_some_and(|command| !command.options().is_empty());
-            self.command_line.push_rejection(if has_options {
-                crate::t!("Point or option keyword required.")
-            } else {
-                crate::t!("Invalid point.")
+            if let Some(command) = self.tabs[i].active_cmd.as_deref() {
+                let line = crate::command::point_rejection_line(command);
+                self.command_line.push_rejection(&line);
             }
-            .as_ref());
             return self.focus_cmd_input();
         }
         if let Some(cmd) = self.command_line.submit() {
@@ -1209,6 +1254,24 @@ impl OpenCADStudio {
             return self.dispatch_command(&cmd);
         }
         Task::none()
+    }
+
+    /// Hand typed command-line text to the active command's step. A step
+    /// that took it without a result (a count, a toggle) still moved its
+    /// prompt on: that is taken too, or the same text was read again by the
+    /// next step — ARRAYPOLAR's item count became its angle (#1571).
+    fn offer_typed_text(&mut self, i: usize, text: &str) -> Option<Task<Message>> {
+        self.push_ucs_to_cmd(i);
+        let command = self.tabs[i].active_cmd.as_mut()?;
+        let before = crate::command::step_signature(command.as_ref());
+        if let Some(result) = command.on_text_input(text) {
+            return Some(self.apply_cmd_result(result));
+        }
+        if crate::command::step_signature(command.as_ref()) == before {
+            return None;
+        }
+        self.refresh_active_cmd_preview(i);
+        Some(self.focus_cmd_input())
     }
 
     /// Attempt direct distance entry: if an active command is expecting a point,
@@ -1269,7 +1332,10 @@ impl OpenCADStudio {
             let d_ucs = xf.vec_to_ucs(w - anchor);
             let dx = d_ucs.x;
             let dy = d_ucs.y;
-            let dir_ucs = if (dx * dx + dy * dy) > 1e-12 {
+            // In the plane unless the cursor is tracked straight up or down
+            // (#2796), where what is left in the plane is only noise.
+            let in_plane = (dx * dx + dy * dy).sqrt();
+            let dir_ucs = if in_plane > 1e-6 && in_plane > d_ucs.z.abs() * 1e-6 {
                 glam::DVec3::new(dx, dy, 0.0).normalize()
             } else if d_ucs.length_squared() > 1e-12 {
                 d_ucs.normalize()
@@ -1309,11 +1375,8 @@ impl OpenCADStudio {
         let Some(active) = self.tabs[i].active_plugin_grip.clone() else {
             return Task::none();
         };
-        let dyn_locked = self.dyn_input
-            && self.tabs[i]
-                .dyn_fields
-                .iter()
-                .any(|field| field.locked());
+        let dyn_locked =
+            self.dyn_input && self.tabs[i].dyn_fields.iter().any(|field| field.locked());
         let target = if dyn_locked {
             self.dyn_resolve_point()
         } else {
@@ -1453,6 +1516,7 @@ impl OpenCADStudio {
 
     pub(in crate::app) fn on_command_escape(&mut self) -> Task<Message> {
         self.table_edit_command_line = false;
+        self.tabs[self.active_tab].multiple_cmd = None;
         self.tabs[self.active_tab].measurement.clear();
         // Escape also closes the overlapping-objects list.
         if self.cycle_candidates.take().is_some() {
@@ -1803,7 +1867,7 @@ impl OpenCADStudio {
                     ),
                     iced::widget::scrollable::AbsoluteOffset {
                         x: 0.0,
-                        y: idx as f32 * crate::ui::ROW_H,
+                        y: idx as f32 * crate::ui::window::layers::ROW_H,
                     },
                 ),
                 super::focus_layer_name_field(),
@@ -1955,9 +2019,8 @@ impl OpenCADStudio {
                     return Task::none();
                 }
                 if layer.frozen {
-                    self.command_line.push_error(
-                        crate::t!("A frozen layer can't be made current.").as_ref(),
-                    );
+                    self.command_line
+                        .push_error(crate::t!("A frozen layer can't be made current.").as_ref());
                     return Task::none();
                 }
                 // Mirror the change into the document header (CLAYER) too,
@@ -2081,7 +2144,7 @@ impl OpenCADStudio {
             A::FilterObjects => {
                 let layers = self.tabs[i].layers.selected_names().join(",");
                 self.filter_open_for_layers(layers);
-                self.layers_dialog_to_front()
+                Task::none()
             }
             A::MergeHere => {
                 let sources: Vec<String> = merge_sources
@@ -2346,7 +2409,7 @@ impl OpenCADStudio {
             }
         };
         self.filter_open_layers(name, filter);
-        self.layers_dialog_to_front()
+        Task::none()
     }
 
     /// Save as filter: the search text as a property filter on the name,
@@ -2405,11 +2468,10 @@ impl OpenCADStudio {
         let new = typed.trim().to_string();
         match node {
             TreeNode::Group(old) if !new.is_empty() && new != old => {
-                let taken = self.tabs[i]
-                    .layers
-                    .groups
-                    .iter()
-                    .any(|(g, _)| g.eq_ignore_ascii_case(&new) && !g.eq_ignore_ascii_case(&old));
+                let taken =
+                    self.tabs[i].layers.groups.iter().any(|(g, _)| {
+                        g.eq_ignore_ascii_case(&new) && !g.eq_ignore_ascii_case(&old)
+                    });
                 if taken {
                     self.command_line
                         .push_error(&crate::tr!("layer-groups", "exists", name = new));
@@ -2480,10 +2542,12 @@ impl OpenCADStudio {
             (TreeNode::Group(name) | TreeNode::Filter(name), A::Rename) => {
                 let panel = &mut self.tabs[i].layers;
                 panel.tree_rename = Some((node.clone(), name.clone()));
-                return iced::widget::operation::focus(crate::ui::window::layers::tree_rename_input_id())
-                    .chain(iced::widget::operation::select_all(
-                        crate::ui::window::layers::tree_rename_input_id(),
-                    ));
+                return iced::widget::operation::focus(
+                    crate::ui::window::layers::tree_rename_input_id(),
+                )
+                .chain(iced::widget::operation::select_all(
+                    crate::ui::window::layers::tree_rename_input_id(),
+                ));
             }
             (TreeNode::Unused, A::Purge) => {
                 let unused = self.tabs[i].layers.node_layers(&TreeNode::Unused);
@@ -2493,7 +2557,7 @@ impl OpenCADStudio {
                         *ticked = unused.iter().any(|u| u.eq_ignore_ascii_case(name));
                     }
                 }
-                return self.layers_dialog_to_front();
+                return Task::none();
             }
             (_, A::Edit | A::Delete | A::Rename | A::Purge) => return Task::none(),
             _ => {}
@@ -2559,7 +2623,9 @@ impl OpenCADStudio {
         scene
             .selected
             .iter()
-            .fold(0u64, |acc, h| acc ^ h.value().wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .fold(0u64, |acc, h| {
+                acc ^ h.value().wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            })
             .hash(&mut hasher);
         for layer in scene.document.layers.iter() {
             format!("{layer:?}").hash(&mut hasher);
@@ -3352,6 +3418,89 @@ impl OpenCADStudio {
         }
     }
 
+    /// Read the system clipboard for PASTESPEC — its text, then its picture
+    /// and the link a copied range of cells comes with — and report them at
+    /// once, so the prompt lists every format on hand. The web gets the
+    /// picture's encoded file from the Clipboard API; native gets pixels,
+    /// kept as a PNG.
+    pub(in crate::app) fn read_system_clipboard_formats(&self) -> Task<Message> {
+        use crate::io::ole_embed::EmbeddedImage;
+        #[cfg(target_arch = "wasm32")]
+        {
+            Task::perform(
+                async {
+                    let text = crate::sys::read_clipboard_text().await;
+                    let picture = crate::sys::read_clipboard_image()
+                        .await
+                        .and_then(|(name, bytes)| EmbeddedImage::from_bytes(name, bytes).ok());
+                    (text, picture)
+                },
+                |(text, picture)| Message::PasteSpecial(text, picture, None),
+            )
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            iced::clipboard::read_text().then(|text| {
+                let text = text.ok().map(|text| (*text).clone());
+                iced::clipboard::read_image().map(move |picture| {
+                    let picture = picture.ok().and_then(|picture| {
+                        let (width, height) = (picture.size.width, picture.size.height);
+                        Some(EmbeddedImage {
+                            bytes: clipboard_png(width, height, &picture.rgba)?,
+                            pixel_width: width,
+                            pixel_height: height,
+                            name: format!("{}.png", pasted_image_stem()),
+                        })
+                    });
+                    Message::PasteSpecial(text.clone(), picture, crate::sys::clipboard_link::read())
+                })
+            })
+        }
+    }
+
+    /// PASTESPEC's Image formats: place the picture read off the clipboard
+    /// as IMAGEEMBED places a picked file, inside the drawing, or as IMAGE
+    /// does, a file the drawing points at. For that the picture is saved
+    /// where a plain paste saves it: beside the drawing, or in the config
+    /// folder for a drawing never saved.
+    pub(in crate::app) fn place_pasted_image(
+        &mut self,
+        image: crate::io::ole_embed::EmbeddedImage,
+        embedded: bool,
+    ) -> Task<Message> {
+        if embedded {
+            return self.update(Message::ImageEmbedPickResult(Ok(image)));
+        }
+        // The web has no folder to save in: the read left the picture in
+        // the image registry under its name.
+        #[cfg(target_arch = "wasm32")]
+        let saved: Result<std::path::PathBuf, String> = Ok(std::path::PathBuf::from(&image.name));
+        #[cfg(not(target_arch = "wasm32"))]
+        let saved = self
+            .pasted_image_folder()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            .and_then(|folder| {
+                let stem = image.name.strip_suffix(".png").unwrap_or(&image.name);
+                save_pasted_png(&folder, stem, &image.bytes)
+            })
+            .map_err(|error| error.to_string());
+        self.update(Message::ImagePickResult(
+            saved.map(|path| (path, image.pixel_width, image.pixel_height)),
+        ))
+    }
+
+    /// Where a pasted picture is saved: beside the drawing, or in the config
+    /// folder for a drawing never saved.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pasted_image_folder(&self) -> Option<std::path::PathBuf> {
+        self.tabs[self.active_tab]
+            .current_path
+            .as_ref()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .or_else(|| crate::config::config_dir().map(|dir| dir.join("pasted")))
+    }
+
     /// Read an image off the system clipboard for a paste that found no
     /// text. The web gets the encoded file from the Clipboard API; native
     /// gets pixels, which are written as a PNG beside the drawing (or, for a
@@ -3367,33 +3516,12 @@ impl OpenCADStudio {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let folder = self.tabs[self.active_tab]
-                .current_path
-                .as_ref()
-                .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-                .filter(|folder| !folder.as_os_str().is_empty())
-                .or_else(|| crate::config::config_dir().map(|dir| dir.join("pasted")));
+            let folder = self.pasted_image_folder();
             iced::clipboard::read_image().map(move |image| {
                 let saved = image.ok().zip(folder.clone()).and_then(|(image, folder)| {
-                    let pixels = image::RgbaImage::from_raw(
-                        image.size.width,
-                        image.size.height,
-                        image.rgba.to_vec(),
-                    )?;
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    pixels.write_to(&mut png, image::ImageFormat::Png).ok()?;
-                    let stamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |elapsed| elapsed.as_millis());
-                    let name = crate::sys::unique_pasted_image_name(
-                        &format!("pasted-{stamp}"),
-                        "png",
-                        |name| folder.join(name).exists(),
-                    );
-                    let path = folder.join(name);
-                    std::fs::create_dir_all(&folder).ok()?;
-                    std::fs::write(&path, png.get_ref()).ok()?;
-                    Some((path.to_string_lossy().into_owned(), png.into_inner()))
+                    let png = clipboard_png(image.size.width, image.size.height, &image.rgba)?;
+                    let path = save_pasted_png(&folder, &pasted_image_stem(), &png).ok()?;
+                    Some((path.to_string_lossy().into_owned(), png))
                 });
                 Message::SystemClipboardPasteImage(saved)
             })
@@ -3783,7 +3911,7 @@ impl OpenCADStudio {
                         model.name = name.clone();
                     }
                 }
-                self.invalidate_property_targets(i, &handles);
+                self.invalidate_property_targets(i, handles);
                 self.tabs[i].dirty = true;
                 self.refresh_properties();
             }
@@ -3797,7 +3925,8 @@ impl OpenCADStudio {
         value: String,
     ) -> Task<Message> {
         let value = if field == "transparency" {
-            let Some(transparency) = crate::scene::creation_style::parse_current_transparency(&value)
+            let Some(transparency) =
+                crate::scene::creation_style::parse_current_transparency(&value)
             else {
                 self.command_line.push_error(
                     "Transparency: expected ByLayer, ByBlock, or an integer from 0 to 90.",
@@ -3813,7 +3942,12 @@ impl OpenCADStudio {
         } else {
             value
         };
-        if field == "authoring_alignment_type" { return self.set_authoring_alignment_type(&value); }
+        if field == "authoring_alignment_type" {
+            return self.set_authoring_alignment_type(&value);
+        }
+        if field == "authoring_base_location" {
+            return self.set_authoring_base_location(&value);
+        }
         if field.starts_with("bedit_") {
             return self.set_block_property(field, &value);
         }
@@ -3821,6 +3955,24 @@ impl OpenCADStudio {
             return self.on_dynamic_dimension_choice(field, &value);
         }
         let i = self.active_tab;
+        // Match orientation to layout: an annotative text's AcadAnnoPO flag.
+        if field == "anno_po" {
+            let on = value == crate::t!("Yes").as_ref() || value.eq_ignore_ascii_case("Yes");
+            let handles = self.property_target_handles(i);
+            self.apply_property_op(i, "CHPROP", &handles, |app, handle| {
+                let document = &mut app.tabs[i].scene.document;
+                crate::scene::block_metadata::ensure_application(document, "AcadAnnoPO");
+                crate::scene::view::dispatch::set_entity_xdata(
+                    document,
+                    handle,
+                    "AcadAnnoPO",
+                    on.then(|| vec![document::xdata::XDataValue::Integer16(1)]),
+                );
+            });
+            self.tabs[i].properties.edit_choice_open = None;
+            self.refresh_properties();
+            return Task::none();
+        }
         if field == "ole_lock_aspect" {
             self.set_ole_lock_aspect(i, &value);
             self.tabs[i].properties.edit_choice_open = None;
@@ -4083,7 +4235,8 @@ impl OpenCADStudio {
                                 .document
                                 .get_entity_mut(handle)
                                 .and_then(crate::entities::dimension::as_dimension_mut);
-                            if let Some(document::entities::Dimension::LargeRadial(dimension)) = radial
+                            if let Some(document::entities::Dimension::LargeRadial(dimension)) =
+                                radial
                             {
                                 dimension.base.text_user_positioned = false;
                             }
@@ -4122,9 +4275,9 @@ impl OpenCADStudio {
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
                             vp.ucs_handle = ucs.handle;
-                            vp.ucs_origin = ucs.origin.clone();
-                            vp.ucs_x_axis = ucs.x_axis.clone();
-                            vp.ucs_y_axis = ucs.y_axis.clone();
+                            vp.ucs_origin = ucs.origin;
+                            vp.ucs_x_axis = ucs.x_axis;
+                            vp.ucs_y_axis = ucs.y_axis;
                             vp.ucs_per_viewport = true;
                         }
                     });
@@ -4149,8 +4302,8 @@ impl OpenCADStudio {
                         if let Some(document::EntityType::Viewport(vp)) =
                             app.tabs[i].scene.document.get_entity_mut(handle)
                         {
-                            vp.view_target = view.target.clone();
-                            vp.view_direction = view.direction.clone();
+                            vp.view_target = view.target;
+                            vp.view_direction = view.direction;
                             if view.height > 0.0 {
                                 vp.view_height = view.height;
                             }
@@ -4607,13 +4760,27 @@ impl OpenCADStudio {
                     if self.tabs[i].scene.is_layer_locked(handle) {
                         continue;
                     }
-                    let result = if let Some(test) = self.tabs[i].block_test.as_ref().filter(|test| test.insert == handle) {
-                        crate::scene::block_lookup::evaluate_test_choice(&self.tabs[i].scene.document, &test.baseline, handle, &value)
-                    } else { crate::scene::block_lookup::evaluate_reference_choice(&self.tabs[i].scene.document, handle, &value) };
+                    let result = if let Some(test) = self.tabs[i]
+                        .block_test
+                        .as_ref()
+                        .filter(|test| test.insert == handle)
+                    {
+                        crate::scene::block_lookup::evaluate_test_choice(
+                            &self.tabs[i].scene.document,
+                            &test.baseline,
+                            handle,
+                            &value,
+                        )
+                    } else {
+                        crate::scene::block_lookup::evaluate_reference_choice(
+                            &self.tabs[i].scene.document,
+                            handle,
+                            &value,
+                        )
+                    };
                     match result {
                         Ok(Some(staged)) => {
-                            self.apply_action_document(i, staged);
-                            self.tabs[i].scene.bump_geometry();
+                            self.apply_action_document_and_bump(i, staged);
                             self.tabs[i].dirty = true;
                             changed = true;
                         }
@@ -4708,14 +4875,9 @@ impl OpenCADStudio {
                 // Named plot-style pick: ByLayer / ByBlock clear the
                 // handle; a named style resolves through the drawing's
                 // ACAD_PLOTSTYLENAME dictionary to its placeholder handle.
-                let dict_h = self.tabs[i]
-                    .scene
-                    .document
-                    .header
-                    .acad_plotstylename_dict_handle;
                 let ph: Option<document::Handle> =
-                    crate::scene::annotative::as_dict(&self.tabs[i].scene.document, dict_h)
-                        .and_then(|d| d.entries.iter().find(|(n, _)| *n == value).map(|(_, h)| *h));
+                    crate::app::properties::plot_style_entries(&self.tabs[i].scene.document)
+                        .and_then(|e| e.iter().find(|(n, _)| *n == value).map(|(_, h)| *h));
                 for &handle in &handles {
                     if self.tabs[i].scene.is_layer_locked(handle) {
                         continue;
@@ -4814,7 +4976,9 @@ impl OpenCADStudio {
                                 text.width_factor = style.width_factor;
                                 text.oblique_angle = style.oblique_angle;
                             }
-                            (document::EntityType::MText(text), Some(style)) if style.height > 0.0 => {
+                            (document::EntityType::MText(text), Some(style))
+                                if style.height > 0.0 =>
+                            {
                                 text.height = style.height;
                             }
                             _ => {}
@@ -4833,7 +4997,10 @@ impl OpenCADStudio {
                         let document = &mut self.tabs[i].scene.document;
                         let current = match document.get_entity(handle) {
                             Some(document::EntityType::Dimension(dimension))
-                                if !matches!(**dimension, document::entities::Dimension::Arc(_)) =>
+                                if !matches!(
+                                    **dimension,
+                                    document::entities::Dimension::Arc(_)
+                                ) =>
                             {
                                 crate::scene::annotative::object_is_annotative(
                                     document,
@@ -4908,7 +5075,9 @@ impl OpenCADStudio {
                         .objects
                         .iter()
                         .find_map(|(h, o)| match o {
-                            document::objects::ObjectType::Material(m) if m.name == value => Some(*h),
+                            document::objects::ObjectType::Material(m) if m.name == value => {
+                                Some(*h)
+                            }
                             _ => None,
                         });
                     match value.as_str() {
@@ -5230,8 +5399,12 @@ impl OpenCADStudio {
             }
             return Task::none();
         }
-        if field == "authoring_grip_count" { return self.commit_block_grip_count(); }
-        if field.starts_with("authoring_display_grip_") { return self.commit_native_grip_location(field); }
+        if field == "authoring_grip_count" {
+            return self.commit_block_grip_count();
+        }
+        if field.starts_with("authoring_display_grip_") {
+            return self.commit_native_grip_location(field);
+        }
         if field.starts_with("authoring_action_") {
             return self.commit_authoring_action_option(field);
         }
@@ -5332,7 +5505,8 @@ impl OpenCADStudio {
                     }
                 }
                 if field.starts_with("ole_") {
-                    if let Err(message) = crate::entities::ole2frame::validate_property(field, &val) {
+                    if let Err(message) = crate::entities::ole2frame::validate_property(field, &val)
+                    {
                         self.command_line.push_error(message);
                         return Task::none();
                     }
@@ -5526,6 +5700,13 @@ impl OpenCADStudio {
                         if self.tabs[i].scene.is_layer_locked(handle) {
                             continue;
                         }
+                        let insert_before = matches!(field, "ins_x" | "ins_y" | "ins_z")
+                            .then(|| self.tabs[i].scene.document.get_entity(handle))
+                            .flatten()
+                            .and_then(|entity| match entity {
+                                document::EntityType::Insert(insert) => Some(insert.clone()),
+                                _ => None,
+                            });
                         match field {
                             "tol_text_height" => {
                                 use crate::entities::dim_override as dov;
@@ -5573,16 +5754,44 @@ impl OpenCADStudio {
                                     }
                                 }
                             }
-                            // Annotative text: the row holds the paper height.
-                            "height"
+                            // Annotative multiline text: the distance is on the
+                            // model height of the shown representation.
+                            "line_space_distance"
                                 if self.tabs[i]
                                     .scene
                                     .annotative_text_height_factor(handle)
                                     .is_some() =>
                             {
-                                let factor = self.tabs[i]
+                                let shown = self.tabs[i].scene.displayed_annotation_scale_handle();
+                                let ratio = crate::scene::annotative::text_context_ratio(
+                                    &self.tabs[i].scene.document,
+                                    handle,
+                                    shown,
+                                )
+                                .unwrap_or(1.0)
+                                .max(1.0e-12);
+                                if let (Ok(model), Some(entity)) = (
+                                    val.trim().parse::<f64>(),
+                                    self.tabs[i].scene.document.get_entity_mut(handle),
+                                ) {
+                                    crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
+                                        entity,
+                                        field,
+                                        &(model / ratio).to_string(),
+                                        plane,
+                                    );
+                                }
+                            }
+                            // An annotative hatch's scale rows are on paper.
+                            "pattern_scale" | "spacing" | "iso_pen_width"
+                                if self.tabs[i]
                                     .scene
-                                    .annotative_text_height_factor(handle)
+                                    .annotative_hatch_model_per_paper(handle)
+                                    .is_some() =>
+                            {
+                                let per_paper = self.tabs[i]
+                                    .scene
+                                    .annotative_hatch_model_per_paper(handle)
                                     .unwrap_or(1.0);
                                 if let (Ok(paper), Some(entity)) = (
                                     val.trim().parse::<f64>(),
@@ -5590,10 +5799,52 @@ impl OpenCADStudio {
                                 ) {
                                     crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
                                         entity,
-                                        "height",
+                                        field,
+                                        &(paper * per_paper).to_string(),
+                                        plane,
+                                    );
+                                }
+                                self.tabs[i].scene.sync_displayed_annotation_context(handle);
+                            }
+                            // Annotative text: the row holds the paper height
+                            // (and, for multiline text, the paper width and
+                            // height of its box).
+                            "height" | "att_h" | "rect_w" | "rect_h"
+                                if self.tabs[i]
+                                    .scene
+                                    .annotative_text_height_factor(handle)
+                                    .is_some() =>
+                            {
+                                let mut factor = self.tabs[i]
+                                    .scene
+                                    .annotative_text_height_factor(handle)
+                                    .unwrap_or(1.0);
+                                // The box rows are the shown representation's:
+                                // its model size is the paper size times that
+                                // scale's model-per-paper.
+                                if matches!(field, "rect_w" | "rect_h") {
+                                    let shown = self.tabs[i].scene.displayed_annotation_scale_handle();
+                                    factor *= crate::scene::annotative::text_context_ratio(
+                                        &self.tabs[i].scene.document,
+                                        handle,
+                                        shown,
+                                    )
+                                    .unwrap_or(1.0);
+                                }
+                                if let (Ok(paper), Some(entity)) = (
+                                    val.trim().parse::<f64>(),
+                                    self.tabs[i].scene.document.get_entity_mut(handle),
+                                ) {
+                                    crate::scene::view::dispatch::apply_geom_prop_in_working_plane(
+                                        entity,
+                                        field,
                                         &(paper * factor).to_string(),
                                         plane,
                                     );
+                                }
+                                // The shown representation keeps the new box.
+                                if matches!(field, "rect_w" | "rect_h") {
+                                    self.tabs[i].scene.sync_displayed_annotation_context(handle);
                                 }
                             }
                             "hyperlink" => {
@@ -5702,8 +5953,10 @@ impl OpenCADStudio {
                                                     plane,
                                                 );
                                         if field == "ml_scale" {
-                                            if let (document::EntityType::MLine(mline), Some(style)) =
-                                                (entity, mline_style.as_ref())
+                                            if let (
+                                                document::EntityType::MLine(mline),
+                                                Some(style),
+                                            ) = (entity, mline_style.as_ref())
                                             {
                                                 crate::modules::draw::draw::mline::sync_mline_element_parameters(
                                                             mline, style,
@@ -5716,6 +5969,13 @@ impl OpenCADStudio {
                                     }
                                 }
                             }
+                        }
+                        if let Some(before) = insert_before {
+                            self.tabs[i]
+                                .scene
+                                .carry_insert_attribute_contexts_after_position_edit(
+                                    handle, &before,
+                                );
                         }
                     }
                 }
@@ -6118,7 +6378,7 @@ pub(crate) fn attr_row_from_entity(
     let fmt = |v: f64| format!("{v}");
     let ad_meta = meta.get(&a.tag);
     let prompt = ad_meta.map(|m| m.prompt.clone()).unwrap_or_default();
-    let is_constant = a.flags.constant || ad_meta.map_or(false, |m| m.constant);
+    let is_constant = a.flags.constant || ad_meta.is_some_and(|m| m.constant);
     AttrRow {
         tag: a.tag.clone(),
         prompt,
@@ -6566,7 +6826,9 @@ mod layer_name_target_tests {
         let mut line = document::entities::Line::new();
         line.common.color = Color::Index(2);
         line.common.layer = "ZULU".into();
-        let handle = app.tabs[i].scene.add_entity(document::EntityType::Line(line));
+        let handle = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::Line(line));
         app.tabs[i].scene.select_entity(handle, true);
         let epoch = app.tabs[i].scene.geometry_epoch;
         let _ = app.update(Message::RibbonLayerColorChanged {
@@ -6760,16 +7022,31 @@ mod layer_name_target_tests {
         let current = app.tabs[i].scene.document.header.current_layer_name.clone();
         let _ = app.update(Message::LayerToggleFreeze(current.clone()));
         assert!(
-            !app.tabs[i].scene.document.layers.get(&current).unwrap().is_frozen(),
+            !app.tabs[i]
+                .scene
+                .document
+                .layers
+                .get(&current)
+                .unwrap()
+                .is_frozen(),
             "the current layer stays thawed"
         );
 
         let _ = app.update(Message::LayerToggleFreeze("ZULU".to_string()));
-        assert!(app.tabs[i].scene.document.layers.get("ZULU").unwrap().is_frozen());
+        assert!(app.tabs[i]
+            .scene
+            .document
+            .layers
+            .get("ZULU")
+            .unwrap()
+            .is_frozen());
         let zulu = app.layer_panel_index(i, "ZULU").unwrap();
         app.tabs[i].layers.selected = Some(zulu);
         let _ = app.on_layer_set_current();
-        assert_eq!(app.tabs[i].scene.document.header.current_layer_name, current);
+        assert_eq!(
+            app.tabs[i].scene.document.header.current_layer_name,
+            current
+        );
 
         for name in ["Defpoints", "XREF|WALLS"] {
             let mut layer = document::tables::layer::Layer::new(name);
@@ -6780,7 +7057,10 @@ mod layer_name_target_tests {
             app.tabs[i].layers.selected = Some(idx);
             app.tabs[i].layers.selected_multi = vec![idx];
             let _ = app.on_layer_delete();
-            assert!(app.tabs[i].scene.document.layers.contains(name), "{name} kept");
+            assert!(
+                app.tabs[i].scene.document.layers.contains(name),
+                "{name} kept"
+            );
         }
     }
 
@@ -7841,11 +8121,10 @@ mod tablestyle_ribbon_tests {
         let mut extra = document::objects::TableStyle::standard();
         extra.name = "EXTRA".to_string();
         extra.handle = app.tabs[i].scene.document.allocate_handle();
-        app.tabs[i]
-            .scene
-            .document
-            .objects
-            .insert(extra.handle, document::objects::ObjectType::TableStyle(extra));
+        app.tabs[i].scene.document.objects.insert(
+            extra.handle,
+            document::objects::ObjectType::TableStyle(extra),
+        );
         app.tabs[i].dirty = false;
         let _ = app.on_ribbon_style_changed(StyleKey::TableStyle, "EXTRA".to_string());
         assert_eq!(
@@ -7867,11 +8146,10 @@ mod tablestyle_ribbon_tests {
         let mut extra = document::objects::TableStyle::standard();
         extra.name = "EXTRA".to_string();
         extra.handle = app.tabs[i].scene.document.allocate_handle();
-        app.tabs[i]
-            .scene
-            .document
-            .objects
-            .insert(extra.handle, document::objects::ObjectType::TableStyle(extra));
+        app.tabs[i].scene.document.objects.insert(
+            extra.handle,
+            document::objects::ObjectType::TableStyle(extra),
+        );
         let _ = app.on_ribbon_style_changed(StyleKey::TableStyle, "EXTRA".to_string());
         app.open_table_insert();
         assert_eq!(
@@ -8000,7 +8278,9 @@ mod tab_close_tests {
         let id = app.tabs[i].id;
         crate::modules::draw::draw::attdef::session().set_place(id, &Default::default());
         assert!(
-            crate::modules::draw::draw::attdef::session().last_in(id).is_some(),
+            crate::modules::draw::draw::attdef::session()
+                .last_in(id)
+                .is_some(),
             "the drawing remembered a place"
         );
 
@@ -8385,7 +8665,11 @@ pub(super) fn layer_rename_problem(
         );
     }
     // A case-only change finds the layer itself, which is fine.
-    if document.layers.get(new).is_some_and(|taken| taken.name != old) {
+    if document
+        .layers
+        .get(new)
+        .is_some_and(|taken| taken.name != old)
+    {
         return Some(crate::tf!("A layer named \"{new}\" already exists.").into_owned());
     }
     None

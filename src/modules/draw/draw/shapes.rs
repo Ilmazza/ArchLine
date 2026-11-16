@@ -371,10 +371,16 @@ enum RectStep {
     RotationPick(Option<DVec3>),
     AreaValue,
     AreaBasis(f64),
-    AreaDimension { area: f64, by_length: bool },
+    AreaDimension {
+        area: f64,
+        by_length: bool,
+    },
     DimensionsLength,
     DimensionsWidth(f64),
-    PlaceSized { width: f64, height: f64 },
+    PlaceSized {
+        width: f64,
+        height: f64,
+    },
 }
 
 pub struct RectCommand {
@@ -390,6 +396,12 @@ pub struct RectCommand {
     rotation_deg: f64,
     /// HATCH's Rectangle: its prompts, and no Thickness or Width.
     hatch: bool,
+}
+
+impl Default for RectCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RectCommand {
@@ -419,7 +431,11 @@ impl RectCommand {
             modes.push(format!("Elevation={}", format_length(self.elevation)));
         }
         (!modes.is_empty()).then(|| {
-            crate::tr!("hatch-cmd", "rect-modes", modes = format!("{}  ", modes.join("  ")))
+            crate::tr!(
+                "hatch-cmd",
+                "rect-modes",
+                modes = format!("{}  ", modes.join("  "))
+            )
         })
     }
 
@@ -465,12 +481,16 @@ impl RectCommand {
                 value = format_length(defaults::get_rect_area())
             ),
             RectStep::AreaBasis(_) => crate::tr!("hatch-cmd", "rect-area-basis"),
-            RectStep::AreaDimension { by_length: true, .. } => crate::tr!(
+            RectStep::AreaDimension {
+                by_length: true, ..
+            } => crate::tr!(
                 "hatch-cmd",
                 "rect-area-length",
                 value = format_length(defaults::get_rect_length())
             ),
-            RectStep::AreaDimension { by_length: false, .. } => crate::tr!(
+            RectStep::AreaDimension {
+                by_length: false, ..
+            } => crate::tr!(
                 "hatch-cmd",
                 "rect-area-width",
                 value = format_length(defaults::get_rect_side())
@@ -498,7 +518,11 @@ impl RectCommand {
             2.0 * self.chamfer_first * self.chamfer_second
         };
         let other = (area + cut) / value;
-        let (width, height) = if by_length { (value, other) } else { (other, value) };
+        let (width, height) = if by_length {
+            (value, other)
+        } else {
+            (other, value)
+        };
         if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
             return None;
         }
@@ -978,6 +1002,12 @@ pub struct RectRotCommand {
     plane: WorkingPlane,
 }
 
+impl Default for RectRotCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RectRotCommand {
     pub fn new() -> Self {
         Self {
@@ -1104,6 +1134,12 @@ pub struct RectCenCommand {
     plane: WorkingPlane,
 }
 
+impl Default for RectCenCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RectCenCommand {
     pub fn new() -> Self {
         Self {
@@ -1194,6 +1230,12 @@ thread_local! {
     static POLYGON_CIRCUMSCRIBED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+impl Default for PolyCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolyCommand {
     pub fn new() -> Self {
         Self {
@@ -1227,7 +1269,11 @@ impl PolyCommand {
     /// A typed radius sets the size with the bottom edge level.
     fn typed(&self, r: f64) -> (f64, f64) {
         let half = PI / self.sides as f64;
-        let vertex_r = if self.circumscribed { r / half.cos() } else { r };
+        let vertex_r = if self.circumscribed {
+            r / half.cos()
+        } else {
+            r
+        };
         (vertex_r, -PI / 2.0 + half)
     }
 }
@@ -1318,7 +1364,10 @@ impl CadCommand for PolyCommand {
                 Some(CmdResult::NeedPoint)
             }
             _ => {
-                let r = word.parse::<f64>().ok().filter(|r| r.is_finite() && *r > 0.0)?;
+                let r = word
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|r| r.is_finite() && *r > 0.0)?;
                 let (vertex_r, start) = self.typed(r);
                 let vertices = poly_verts(self.center, vertex_r, self.sides, start, self.plane);
                 Some(CmdResult::CommitAndExit(make_pline(&vertices, self.plane)))
@@ -1385,7 +1434,13 @@ impl CadCommand for PolyCommand {
             return None;
         }
         let (vertex_r, start) = self.picked(pt);
-        Some(poly_wire(self.center, vertex_r, self.sides, start, self.plane))
+        Some(poly_wire(
+            self.center,
+            vertex_r,
+            self.sides,
+            start,
+            self.plane,
+        ))
     }
 }
 
@@ -1398,6 +1453,12 @@ pub struct PolyCCommand {
     step: u8,
     center: DVec3,
     plane: WorkingPlane,
+}
+
+impl Default for PolyCCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PolyCCommand {
@@ -1525,6 +1586,12 @@ pub struct PolyECommand {
     step: u8,
     a: DVec3,
     plane: WorkingPlane,
+}
+
+impl Default for PolyECommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PolyECommand {

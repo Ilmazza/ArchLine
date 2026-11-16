@@ -1,5 +1,6 @@
 // Hatch, gradient, and boundary commands.
 
+use super::polyline::{ArcStep, Sub};
 use crate::command::{CadCommand, CmdResult, WorkingPlane};
 use crate::modules::draw::draw::hatch_settings::{
     add_region, HatchRegion, RegionOrigin, ResolvedFill, ResolvedSettings,
@@ -8,7 +9,6 @@ use crate::modules::IconKind;
 use crate::scene::model::hatch_model::{GradientKind, HatchModel, HatchPattern, PatFamily};
 use crate::scene::model::wire_model::WireModel;
 use crate::t;
-use super::polyline::{ArcStep, Sub};
 use document::Handle;
 use glam::DVec3;
 use kernel::geom2d::{
@@ -111,7 +111,10 @@ fn polygon_contains_polygon(outer: &[[f64; 2]], inner: &[[f64; 2]]) -> bool {
 }
 
 /// Resolve the innermost clicked ring and its direct holes.
-pub(crate) fn resolve_hatch_rings(outlines: &[Vec<[f64; 2]>], p: [f64; 2]) -> Option<Vec<Vec<[f64; 2]>>> {
+pub(crate) fn resolve_hatch_rings(
+    outlines: &[Vec<[f64; 2]>],
+    p: [f64; 2],
+) -> Option<Vec<Vec<[f64; 2]>>> {
     let mut containing: Vec<(usize, f64)> = outlines
         .iter()
         .enumerate()
@@ -363,7 +366,10 @@ pub enum HatchFill {
     Solid,
     Pattern(String),
     /// Parallel lines `spacing` apart, crossed at 90° when `double`.
-    User { spacing: f64, double: bool },
+    User {
+        spacing: f64,
+        double: bool,
+    },
     Gradient(GradientKind, bool),
 }
 
@@ -479,8 +485,10 @@ fn parse_number(text: &str) -> Option<f64> {
 
 /// The pattern a fill draws with, and its name.
 /// GFCLR1 / GFCLR2: the two colours a new gradient starts with.
-pub const GRADIENT_COLORS: [document::types::Color; 2] =
-    [document::types::Color::Index(5), document::types::Color::Index(2)];
+pub const GRADIENT_COLORS: [document::types::Color; 2] = [
+    document::types::Color::Index(5),
+    document::types::Color::Index(2),
+];
 
 /// A colour as the fill renders it.
 pub fn color_rgba(color: &document::types::Color, alpha: f32) -> [f32; 4] {
@@ -600,7 +608,10 @@ fn offset_rail(
         let at = |p: [f64; 2]| {
             let (vx, vy) = (p[0] - arc.center[0], p[1] - arc.center[1]);
             let r = vx.hypot(vy);
-            [arc.center[0] + vx / r * radius, arc.center[1] + vy / r * radius]
+            [
+                arc.center[0] + vx / r * radius,
+                arc.center[1] + vy / r * radius,
+            ]
         };
         moved.push((at(a), at(b), bulge));
     }
@@ -613,7 +624,10 @@ fn offset_rail(
         if ab.abs() > 1.0e-12 || bb.abs() > 1.0e-12 {
             return None;
         }
-        let (d1, d2) = ([a1[0] - a0[0], a1[1] - a0[1]], [b1[0] - b0[0], b1[1] - b0[1]]);
+        let (d1, d2) = (
+            [a1[0] - a0[0], a1[1] - a0[1]],
+            [b1[0] - b0[0], b1[1] - b0[1]],
+        );
         let cross = d1[0] * d2[1] - d1[1] * d2[0];
         if cross.abs() <= 1.0e-12 * d1[0].hypot(d1[1]) * d2[0].hypot(d2[1]) {
             return Some(a1);
@@ -661,7 +675,9 @@ fn chain_loops(mut edges: Vec<[[f64; 2]; 2]>) -> Vec<Vec<[f64; 2]>> {
                 ring.pop();
                 break;
             }
-            let Some(index) = edges.iter().position(|e| same(e[0], end) || same(e[1], end))
+            let Some(index) = edges
+                .iter()
+                .position(|e| same(e[0], end) || same(e[1], end))
             else {
                 break;
             };
@@ -671,7 +687,11 @@ fn chain_loops(mut edges: Vec<[[f64; 2]; 2]>) -> Vec<Vec<[f64; 2]>> {
         let count = ring.len();
         let ring: Vec<[f64; 2]> = (0..count)
             .filter(|&i| {
-                let [a, b, c] = [ring[(i + count - 1) % count], ring[i], ring[(i + 1) % count]];
+                let [a, b, c] = [
+                    ring[(i + count - 1) % count],
+                    ring[i],
+                    ring[(i + 1) % count],
+                ];
                 let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
                 cross.abs() > tolerance * tolerance
             })
@@ -724,7 +744,11 @@ pub struct HatchCommand {
     gradient_colors: [document::types::Color; 2],
     /// The elevation of the boundary being finished (a rectangle's).
     elevation: f64,
-    inherited: Option<(HatchModel, document::types::Color, document::types::Transparency)>,
+    inherited: Option<(
+        HatchModel,
+        document::types::Color,
+        document::types::Transparency,
+    )>,
     plane: WorkingPlane,
     /// HPGAPTOL: gaps up to this size count as closed for a picked point.
     gap_tolerance: f64,
@@ -747,7 +771,11 @@ impl HatchCommand {
     pub fn new(
         boundary_sources: rustc_hash::FxHashMap<Handle, crate::scene::BoundarySource>,
         selected_objects: Vec<Handle>,
-        inherited: Option<(HatchModel, document::types::Color, document::types::Transparency)>,
+        inherited: Option<(
+            HatchModel,
+            document::types::Color,
+            document::types::Transparency,
+        )>,
         plane: WorkingPlane,
     ) -> Self {
         let selected_objects: Vec<_> = selected_objects
@@ -1157,11 +1185,11 @@ impl HatchCommand {
             separate: self.separate_hatches,
             keep_boundaries: self.retain_boundaries,
             gap_tolerance: self.gap_tolerance,
-            color: self.color.clone(),
-            background: self.background.clone(),
+            color: self.color,
+            background: self.background,
             layer: self.layer.clone(),
             transparency: self.transparency,
-            gradient_colors: self.gradient_colors.clone(),
+            gradient_colors: self.gradient_colors,
             draw_order: self.draw_order,
             annotative: self.annotative,
         }
@@ -1296,7 +1324,11 @@ impl HatchCommand {
         }
         let mut ring: (Vec<[f64; 2]>, Vec<f64>) = (Vec::new(), Vec::new());
         for (point, bulge) in points.into_iter().zip(out) {
-            if ring.0.last().is_some_and(|last: &[f64; 2]| same_point(*last, point)) {
+            if ring
+                .0
+                .last()
+                .is_some_and(|last: &[f64; 2]| same_point(*last, point))
+            {
                 *ring.1.last_mut().unwrap() = bulge;
                 continue;
             }
@@ -1321,7 +1353,10 @@ impl HatchCommand {
                 return Vec::new();
             }
             let side = if self.prefs.alignment == 1 { 1.0 } else { -1.0 };
-            let normal = [-(b[1] - a[1]) / length * side, (b[0] - a[0]) / length * side];
+            let normal = [
+                -(b[1] - a[1]) / length * side,
+                (b[0] - a[0]) / length * side,
+            ];
             let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
             let probe = [mid[0] + normal[0] * width, mid[1] + normal[1] * width];
             match kernel::geom2d::offset_polyline(&source, width * 0.5, probe)
@@ -1366,7 +1401,9 @@ impl HatchCommand {
                         let vertices: Vec<[f64; 3]> = points
                             .iter()
                             .enumerate()
-                            .map(|(index, p)| [p[0], p[1], bulges.get(index).copied().unwrap_or(0.0)])
+                            .map(|(index, p)| {
+                                [p[0], p[1], bulges.get(index).copied().unwrap_or(0.0)]
+                            })
                             .collect();
                         crate::scene::drawn_hatch_path(&vertices)
                     })
@@ -1577,12 +1614,14 @@ impl HatchCommand {
         let near =
             crate::scene::sources_near_rings(&rings, &self.boundary_sources, self.boundary_tolerance());
         let near_source_count = near.len();
-        let mut boundary_sources: Vec<Vec<Handle>> = rings
-            .iter()
-            .map(|ring| crate::scene::ring_source_handles(ring, &near))
-            .collect();
+        let mut boundary_sources = crate::scene::rings_source_handles(&rings, &near);
         let source_of = |index: usize| {
-            if self.point_regions.iter().flatten().any(|ring| *ring == rings[index]) {
+            if self
+                .point_regions
+                .iter()
+                .flatten()
+                .any(|ring| *ring == rings[index])
+            {
                 crate::scene::HatchLoopSource::Picked
             } else {
                 crate::scene::HatchLoopSource::Selected
@@ -1608,6 +1647,8 @@ impl HatchCommand {
         if let Some(spec) = &self.gradient_spec {
             let (pattern, color) = spec.model_pattern();
             return HatchModel {
+                entity: None,
+                effective_layer: None,
                 pattern_origin: None,
                 render_instance: None,
                 boundary: std::sync::Arc::new(rel),
@@ -1663,6 +1704,8 @@ impl HatchCommand {
                 );
             }
             return HatchModel {
+                entity: None,
+                effective_layer: None,
                 pattern_origin: source.pattern_origin,
                 render_instance: None,
                 boundary: std::sync::Arc::new(rel),
@@ -1684,12 +1727,11 @@ impl HatchCommand {
                 draw_depth: source.draw_depth,
             };
         }
-        let (name, mut pattern) =
-            fill_pattern(
-                &self.current_fill(),
-                self.angle_override.unwrap_or(0.0).to_degrees(),
-                &self.gradient_colors,
-            );
+        let (name, mut pattern) = fill_pattern(
+            &self.current_fill(),
+            self.angle_override.unwrap_or(0.0).to_degrees(),
+            &self.gradient_colors,
+        );
         let angle = self.angle_override.unwrap_or(0.0);
         let scale = self.scale_override.unwrap_or(1.0).max(1.0e-6);
         if let (HatchPattern::Pattern(families), Some(anchor)) =
@@ -1717,6 +1759,8 @@ impl HatchCommand {
             );
         }
         HatchModel {
+            entity: None,
+            effective_layer: None,
             pattern_origin: Some(self.default_origin),
             render_instance: None,
             boundary: std::sync::Arc::new(rel),
@@ -1967,8 +2011,10 @@ impl CadCommand for HatchCommand {
                             crate::tr!("hatch-cmd", "selecting-visible"),
                             crate::tr!("hatch-cmd", "analyzing-data"),
                         ]
-                        .join("
-")
+                        .join(
+                            "
+",
+                        )
                     }),
                 }
             }
@@ -1982,7 +2028,8 @@ impl CadCommand for HatchCommand {
                 } else if self.arc_sub != Sub::None {
                     let a = self.last_point2().unwrap_or_default();
                     if let Some(step) =
-                        self.arc_sub.arc_point(glam::DVec2::new(pt.x, pt.y), a, self.end_tangent())
+                        self.arc_sub
+                            .arc_point(glam::DVec2::new(pt.x, pt.y), a, self.end_tangent())
                     {
                         return self.arc_step(step);
                     }
@@ -1998,11 +2045,7 @@ impl CadCommand for HatchCommand {
         self.shape.as_ref().is_some_and(Shape::wants_tangent)
     }
 
-    fn on_tangent_point(
-        &mut self,
-        obj: crate::command::TangentObject,
-        hit: DVec3,
-    ) -> CmdResult {
+    fn on_tangent_point(&mut self, obj: crate::command::TangentObject, hit: DVec3) -> CmdResult {
         match &mut self.shape {
             Some(shape) => {
                 let result = shape.command_mut().on_tangent_point(obj, hit);
@@ -2019,9 +2062,9 @@ impl CadCommand for HatchCommand {
             }
             // Enter at a point the shape needs is no answer: it asks again.
             let result = match shape.command_mut().on_enter() {
-                CmdResult::Cancel => CmdResult::ReportError(
-                    t!("Point or option keyword required.").into_owned(),
-                ),
+                CmdResult::Cancel => {
+                    CmdResult::ReportError(t!("Point or option keyword required.").into_owned())
+                }
                 result => result,
             };
             return self.finish_shape(result);
@@ -2151,7 +2194,9 @@ impl CadCommand for HatchCommand {
     }
 
     fn dyn_spec(&self) -> Option<crate::command::DynSpec> {
-        self.shape.as_ref().and_then(|shape| shape.command().dyn_spec())
+        self.shape
+            .as_ref()
+            .and_then(|shape| shape.command().dyn_spec())
     }
 
     fn dyn_live_value(&self, cursor: DVec3) -> Option<f64> {
@@ -2161,7 +2206,9 @@ impl CadCommand for HatchCommand {
     }
 
     fn is_selection_gathering(&self) -> bool {
-        self.shape.is_none() && self.mode == HatchMode::SelectObjects && self.step == HatchStep::Main
+        self.shape.is_none()
+            && self.mode == HatchMode::SelectObjects
+            && self.step == HatchStep::Main
     }
 
     fn selection_forces_add(&self) -> bool {
@@ -2590,12 +2637,7 @@ impl BoundaryCommand {
                 })
                 .collect();
         }
-        crate::scene::boundary_polyline_entities(
-            &self.point_regions,
-            self.plane,
-            sources,
-            1.0e-6,
-        )
+        crate::scene::boundary_polyline_entities(&self.point_regions, self.plane, sources, 1.0e-6)
     }
 }
 
@@ -2627,7 +2669,11 @@ impl CadCommand for BoundaryCommand {
                 t!("%{cmd}  Select objects:", cmd = self.name()).into_owned()
             }
             BoundaryMode::GapTolerance { .. } => {
-                format!("BOUNDARY  {} <{}>:", t!("Gap tolerance"), self.gap_tolerance)
+                format!(
+                    "BOUNDARY  {} <{}>:",
+                    t!("Gap tolerance"),
+                    self.gap_tolerance
+                )
             }
         }
     }
@@ -2851,13 +2897,13 @@ impl CadCommand for BoundaryCommand {
         let hovered = self.picked_region([local.x, local.y]);
         let mut rings: Vec<&Vec<[f64; 2]>> = Vec::new();
         for ring in self.point_regions.iter().flat_map(|region| region.iter()) {
-            if !rings.iter().any(|existing| *existing == ring) {
+            if !rings.contains(&ring) {
                 rings.push(ring);
             }
         }
         if let Some(region) = &hovered {
             for ring in region {
-                if !rings.iter().any(|existing| *existing == ring) {
+                if !rings.contains(&ring) {
                     rings.push(ring);
                 }
             }
@@ -2991,6 +3037,64 @@ mod tests {
         assert_eq!(command.point_regions[0].len(), 2, "outer ring plus island");
     }
 
+    /// A hatch over many selected outlines reads each boundary source a few
+    /// times. Reading every source again for each outline made HATCH take
+    /// seconds to start on a few thousand selected objects, and four times
+    /// as long for twice as many.
+    #[test]
+    fn hatch_over_many_selected_outlines_reads_each_source_a_few_times() {
+        use document::entities::{LwPolyline, LwVertex};
+        use document::types::Vector2;
+
+        const OUTLINES: usize = 400;
+        let mut scene = crate::scene::Scene::new();
+        let handles: Vec<Handle> = (0..OUTLINES)
+            .map(|index| {
+                let x = (index % 20) as f64 * 10.0;
+                let y = (index / 20) as f64 * 10.0;
+                let mut outline = LwPolyline::new();
+                outline.vertices = [(0.0, 0.0), (8.0, 0.0), (8.0, 6.0), (0.0, 6.0)]
+                    .into_iter()
+                    .map(|(dx, dy)| LwVertex::new(Vector2::new(x + dx, y + dy)))
+                    .collect();
+                outline.is_closed = true;
+                scene.add_entity(EntityType::LwPolyline(outline))
+            })
+            .collect();
+        let plane = WorkingPlane::default();
+        let sources = scene.boundary_sources_on_plane(plane, 1.0e-6);
+        assert_eq!(sources.len(), OUTLINES);
+        let command = HatchCommand::new(sources, handles.clone(), None, plane);
+        assert_eq!(command.object_regions.len(), OUTLINES);
+
+        let examined = || crate::scene::SOURCES_EXAMINED.with(std::cell::Cell::get);
+        let before = examined();
+        let preview = command.hatch_preview_models().expect("a hatch preview");
+        let examined = examined() - before;
+
+        // The hatch is the same whatever the search costs: one loop for each
+        // outline, bounded by that outline alone.
+        assert_eq!(preview.len(), 1);
+        let paths = preview[0].boundary_paths.as_ref().expect("boundary paths");
+        assert_eq!(paths.len(), OUTLINES);
+        let mut bounded_by: Vec<Handle> = paths
+            .iter()
+            .map(|path| match path.boundary_handles.as_slice() {
+                [handle] => *handle,
+                other => panic!("a loop bounded by {other:?}"),
+            })
+            .collect();
+        bounded_by.sort_by_key(|handle| handle.value());
+        let mut expected = handles;
+        expected.sort_by_key(|handle| handle.value());
+        assert_eq!(bounded_by, expected);
+
+        assert!(
+            examined <= 40 * OUTLINES,
+            "the hatch read {examined} boundary sources for {OUTLINES} outlines"
+        );
+    }
+
     #[test]
     fn three_nested_levels() {
         let a = rect(-30.0, -30.0, 30.0, 30.0);
@@ -3062,7 +3166,10 @@ mod tests {
             WorkingPlane::default(),
         );
         let mut settings = command.hatch_settings().unwrap();
-        assert_eq!((settings.fill.clone(), settings.scale), (HatchFill::Solid, 1.0));
+        assert_eq!(
+            (settings.fill.clone(), settings.scale),
+            (HatchFill::Solid, 1.0)
+        );
         settings.fill = HatchFill::Pattern("ANSI37".into());
         settings.scale = 2.5;
         settings.angle_deg = 30.0;

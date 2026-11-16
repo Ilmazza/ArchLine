@@ -267,7 +267,7 @@ impl canvas::Program<Message> for MLinePreviewCanvas {
                 t!("Elements"),
                 self.elements.len()
             ),
-            position: Point::new(10.0, bounds.height - 9.0),
+            position: crate::ui::style::text::snap_point(Point::new(10.0, bounds.height - 9.0)),
             color: ink.scale_alpha(0.62),
             size: iced::Pixels(10.0),
             align_y: iced::alignment::Vertical::Center,
@@ -447,10 +447,16 @@ pub fn view_window<'a>(
         on_set_current: Message::MlStyleDialogSetCurrent,
         on_apply: Message::MlStyleApply,
         read_only: false,
+        locked_keeps_actions: false,
+        on_list_scroll: None,
         in_use_filter: None,
         apply_blocked: None,
         rows: None,
         compact: false,
+        apply_pending: true,
+        delete_in_use: false,
+        on_context: None,
+        context_menu: None,
         editor,
     })
 }

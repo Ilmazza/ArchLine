@@ -37,6 +37,12 @@ pub struct DiameterDimensionCommand {
     source_handle: Option<Handle>,
 }
 
+impl Default for DiameterDimensionCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiameterDimensionCommand {
     pub fn new() -> Self {
         Self {
@@ -128,10 +134,7 @@ impl CadCommand for DiameterDimensionCommand {
             return t!("DIMDIAMETER  Specify text angle (degrees):").into_owned();
         }
         match self.step {
-            Step::SelectObject => {
-                t!("DIMDIAMETER  Select arc or circle:")
-                    .into_owned()
-            }
+            Step::SelectObject => t!("DIMDIAMETER  Select arc or circle:").into_owned(),
             Step::DimLine(_) => {
                 t!("DIMDIAMETER  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()
             }

@@ -4,7 +4,8 @@
 
 use crate::app::{Message, OpenCADStudio};
 use crate::modules::insert::block_cmdline::{
-    AttsyncCommand, BlockTable, DashBeditCommand, DashBlockCommand, DashWblockCommand, WblockSource,
+    AttsyncCommand, BlockReplaceCommand, BlockTable, DashBeditCommand, DashBlockCommand,
+    DashWblockCommand, WblockSource,
 };
 use iced::Task;
 
@@ -138,6 +139,22 @@ impl OpenCADStudio {
                 }
                 self.attredef_block(i, &name);
             }
+            // BLOCKREPLACE — retarget references of one block to another and
+            // rebuild their attributes from the new definition.
+            "BLOCKREPLACE" => {
+                let table = BlockTable::of(&self.tabs[i].scene.document);
+                let command = BlockReplaceCommand::new(table);
+                self.command_line.push_info(&command.prompt());
+                self.start_block_cmdline(i, Box::new(command));
+            }
+            cmd if cmd.starts_with("_BLOCKREPLACE_APPLY ") => {
+                self.tabs[i].active_cmd = None;
+                let rest = &cmd["_BLOCKREPLACE_APPLY ".len()..];
+                let Some((old, new)) = rest.split_once('\t') else {
+                    return None;
+                };
+                self.blockreplace(i, old.trim(), new.trim());
+            }
             "INSBASE" => {
                 let base = self.current_insertion_base(i);
                 let command = crate::modules::insert::base_point::BaseCommand::insbase(base);
@@ -196,7 +213,6 @@ impl OpenCADStudio {
 
     /// [`Self::attsync_block`], opening its own undo step only when `undo`.
     pub(in crate::app) fn attsync_block_with(&mut self, i: usize, block: &str, undo: bool) {
-        use document::Entity as _;
         let doc = &self.tabs[i].scene.document;
         let attdefs = block_attribute_definitions(doc, block);
         let base = crate::scene::render_graph::block_base_point(doc, block);
@@ -220,12 +236,24 @@ impl OpenCADStudio {
         if inserts.is_empty() {
             return;
         }
+        // A definition that hosts a field hands it to every reference's
+        // attribute. The rebuild below creates fresh attributes, which do not
+        // carry the definition's field dictionary, so the field has to be
+        // copied onto each reference after its attributes exist.
+        let attribute_fields = crate::entities::field::block_has_attribute_fields(doc, block);
         if undo {
             self.push_undo_snapshot(i, "ATTSYNC");
         }
         let mut changes = Vec::new();
         for handle in inserts {
-            if self.rebuild_block_attributes(i, handle, &attdefs, base) {
+            let rebuilt = self.rebuild_block_attributes(i, handle, &attdefs, base);
+            let fielded = attribute_fields
+                && !crate::entities::field::attach_attribute_fields(
+                    &mut self.tabs[i].scene.document,
+                    handle,
+                )
+                .is_empty();
+            if rebuilt || fielded {
                 changes.push((handle, crate::scene::ChangeKind::Modified));
             }
         }
@@ -302,8 +330,8 @@ impl OpenCADStudio {
     /// world placement is folded back through the insert transform, so the
     /// definitions keep sitting on the geometry they were authored against.
     pub(in crate::app) fn attredef_block(&mut self, i: usize, block: &str) {
-        use document::Entity as _;
         use document::entities::{AttributeDefinition, EntityType};
+        use document::Entity as _;
 
         let doc = &self.tabs[i].scene.document;
         let Some(record) = doc
@@ -311,9 +339,8 @@ impl OpenCADStudio {
             .iter()
             .find(|record| record.name.eq_ignore_ascii_case(block))
         else {
-            self.command_line.push_error(
-                crate::tf!("ATTREDEF: no block named \"{block}\".").as_ref(),
-            );
+            self.command_line
+                .push_error(crate::tf!("ATTREDEF: no block named \"{block}\".").as_ref());
             return;
         };
         let name = record.name.clone();
@@ -435,13 +462,14 @@ impl OpenCADStudio {
                 mtext.common.xdictionary_handle = None;
                 mtext.common.reactors.clear();
             }
-            match doc.add_entity(EntityType::AttributeDefinition(definition)) {
-                Ok(handle) => new_handles.push(handle),
-                Err(_) => {}
+            if let Ok(handle) = doc.add_entity(EntityType::AttributeDefinition(definition)) {
+                new_handles.push(handle)
             }
         }
         if let Some(record) = doc.block_records.get_mut(&name) {
-            record.entity_handles.retain(|handle| !replaced.contains(handle));
+            record
+                .entity_handles
+                .retain(|handle| !replaced.contains(handle));
             for handle in &new_handles {
                 if !record.entity_handles.contains(handle) {
                     record.entity_handles.push(*handle);
@@ -455,6 +483,83 @@ impl OpenCADStudio {
             crate::tf!(
                 "ATTREDEF: redefined \"{name}\" from its reference ({} attribute(s)).",
                 new_handles.len()
+            )
+            .as_ref(),
+        );
+    }
+
+    /// BLOCKREPLACE: point every reference of `old` at `new`, then rebuild its
+    /// attributes from the new definition. Values whose tag survives are kept;
+    /// tags only the new block defines take their default; tags only the old
+    /// block had are dropped.
+    pub(in crate::app) fn blockreplace(&mut self, i: usize, old: &str, new: &str) {
+        let doc = &self.tabs[i].scene.document;
+        let Some(old_name) = doc
+            .block_records
+            .iter()
+            .find(|record| record.name.eq_ignore_ascii_case(old))
+            .map(|record| record.name.clone())
+        else {
+            self.command_line
+                .push_error(crate::tf!("BLOCKREPLACE: no block named \"{old}\".").as_ref());
+            return;
+        };
+        let Some(new_name) = doc
+            .block_records
+            .iter()
+            .find(|record| record.name.eq_ignore_ascii_case(new))
+            .map(|record| record.name.clone())
+        else {
+            self.command_line
+                .push_error(crate::tf!("BLOCKREPLACE: no block named \"{new}\".").as_ref());
+            return;
+        };
+        if old_name.eq_ignore_ascii_case(&new_name) {
+            self.command_line.push_info(
+                crate::tf!("BLOCKREPLACE: \"{new_name}\" already is the target.").as_ref(),
+            );
+            return;
+        }
+        let targets: Vec<document::Handle> = doc
+            .entities()
+            .filter_map(|entity| match entity {
+                document::EntityType::Insert(insert)
+                    if insert.block_name.eq_ignore_ascii_case(&old_name) =>
+                {
+                    Some(insert.common.handle)
+                }
+                _ => None,
+            })
+            .collect();
+        if targets.is_empty() {
+            self.command_line.push_info(
+                crate::tf!("BLOCKREPLACE: no references of \"{old_name}\" to replace.").as_ref(),
+            );
+            return;
+        }
+        let attdefs = block_attribute_definitions(doc, &new_name);
+        let base = crate::scene::render_graph::block_base_point(doc, &new_name);
+
+        self.push_undo_snapshot(i, "BLOCKREPLACE");
+        for handle in &targets {
+            if let Some(document::EntityType::Insert(insert)) =
+                self.tabs[i].scene.document.get_entity_mut(*handle)
+            {
+                insert.block_name = new_name.clone();
+            }
+        }
+        let mut changes = Vec::with_capacity(targets.len());
+        for handle in &targets {
+            if self.rebuild_block_attributes(i, *handle, &attdefs, base) {
+                changes.push((*handle, crate::scene::ChangeKind::Modified));
+            }
+        }
+        self.tabs[i].scene.bump_entities(&changes);
+        self.tabs[i].dirty = true;
+        self.command_line.push_output(
+            crate::tf!(
+                "BLOCKREPLACE: {} reference(s) of \"{old_name}\" now use \"{new_name}\".",
+                targets.len()
             )
             .as_ref(),
         );

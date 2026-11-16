@@ -113,6 +113,8 @@ pub struct ArrayRectCommand {
     default_col_sp: f64,
     associative: bool,
     plane: WorkingPlane,
+    base_point: Option<DVec3>,
+    awaiting_base: bool,
 }
 
 impl ArrayRectCommand {
@@ -127,6 +129,8 @@ impl ArrayRectCommand {
             default_col_sp: defaults::get_array_col_sp(),
             associative: defaults::get_array_assoc() != 0.0,
             plane: WorkingPlane::default(),
+            base_point: None,
+            awaiting_base: false,
         }
     }
 
@@ -159,7 +163,10 @@ impl CadCommand for ArrayRectCommand {
     }
 
     fn options(&self) -> Vec<crate::command::CmdOption> {
-        vec![associative_option(self.associative)]
+        vec![
+            associative_option(self.associative),
+            crate::command::CmdOption::new("Basepoint", "B"),
+        ]
     }
 
     fn set_working_plane(&mut self, plane: WorkingPlane) {
@@ -202,6 +209,27 @@ impl CadCommand for ArrayRectCommand {
             self.associative = !self.associative;
             defaults::set_array_assoc(f64::from(u8::from(self.associative)));
             return None;
+        }
+        if self.awaiting_base {
+            self.awaiting_base = false;
+            let mut parts = text.split(',');
+            let parsed = (|| {
+                let x = parts.next()?.trim().parse().ok()?;
+                let y = parts.next()?.trim().parse().ok()?;
+                let z = parts.next().and_then(|z| z.trim().parse().ok()).unwrap_or(0.0);
+                Some(DVec3::new(x, y, z))
+            })();
+            return Some(match parsed {
+                Some(pt) => {
+                    self.base_point = Some(pt);
+                    CmdResult::NeedPoint
+                }
+                None => CmdResult::ReportError("Enter a base point as x,y[,z].".to_string()),
+            });
+        }
+        if matches!(text.trim().to_ascii_uppercase().as_str(), "B" | "BASEPOINT" | "BP") {
+            self.awaiting_base = true;
+            return Some(CmdResult::NeedPoint);
         }
         let t = text.trim().replace(',', ".");
         let t = t.as_str();
@@ -262,6 +290,7 @@ impl CadCommand for ArrayRectCommand {
                 if self.associative && world_plane(self.plane) {
                     return Some(CmdResult::AssocArray {
                         handles: self.handles.clone(),
+                        base_point: self.base_point,
                         spec: crate::scene::assoc_array::AssocArraySpec::Rectangular {
                             columns: cols,
                             rows,
@@ -316,7 +345,11 @@ impl CadCommand for ArrayRectCommand {
             .collect()
     }
 
-    fn on_point(&mut self, _pt: DVec3) -> CmdResult {
+    fn on_point(&mut self, pt: DVec3) -> CmdResult {
+        if self.awaiting_base {
+            self.base_point = Some(pt);
+            self.awaiting_base = false;
+        }
         CmdResult::NeedPoint
     }
 
@@ -446,6 +479,7 @@ impl CadCommand for ArrayPolarCommand {
                 if self.associative && world_plane(self.plane) {
                     return Some(CmdResult::AssocArray {
                         handles: self.handles.clone(),
+                        base_point: None,
                         spec: crate::scene::assoc_array::AssocArraySpec::Polar {
                             center,
                             items: count,
@@ -534,9 +568,13 @@ use std::f64::consts::TAU as FTAU;
 enum PathStep {
     SelectPath,
     /// Divide: the item count, spread over the whole path.
-    Count { path_entity: EntityType },
+    Count {
+        path_entity: EntityType,
+    },
     /// Measure: the distance between items.
-    Spacing { path_entity: EntityType },
+    Spacing {
+        path_entity: EntityType,
+    },
     /// Measure: how many items, at most as many as the path holds.
     MeasuredCount {
         path_entity: EntityType,
@@ -566,7 +604,12 @@ pub struct ArrayPathCommand {
 /// The Method option button, labelled with the current method.
 fn method_option(measure: bool) -> crate::command::CmdOption {
     crate::command::CmdOption {
-        label: crate::t!(if measure { "Method: Measure" } else { "Method: Divide" }).into_owned(),
+        label: crate::t!(if measure {
+            "Method: Measure"
+        } else {
+            "Method: Divide"
+        })
+        .into_owned(),
         keyword: "M".to_string(),
     }
 }
@@ -612,6 +655,7 @@ impl ArrayPathCommand {
     ) -> Option<CmdResult> {
         (self.associative && world_plane(self.plane)).then(|| CmdResult::AssocArray {
             handles: self.handles.clone(),
+            base_point: None,
             spec: crate::scene::assoc_array::AssocArraySpec::Path {
                 path: path_entity.common().handle,
                 items,
@@ -664,7 +708,11 @@ impl ArrayPathCommand {
         }
         let along = (length / spacing + 1e-9).floor();
         // A closed path ends where it starts: the last place is the first.
-        let items = if curve.is_closed() { along } else { along + 1.0 };
+        let items = if curve.is_closed() {
+            along
+        } else {
+            along + 1.0
+        };
         items.clamp(1.0, MAX_ARRAY_ITEMS as f64) as u32
     }
 
@@ -677,10 +725,10 @@ impl ArrayPathCommand {
         // Walk from the end nearest the pick, as Divide does.
         let start_point = curve.point_at_distance(0.0);
         let end_point = curve.point_at_distance(length);
-        let from_end = self
-            .pick_pt
-            .distance_squared(DVec3::from_array(end_point))
-            < self.pick_pt.distance_squared(DVec3::from_array(start_point));
+        let from_end = self.pick_pt.distance_squared(DVec3::from_array(end_point))
+            < self
+                .pick_pt
+                .distance_squared(DVec3::from_array(start_point));
         (0..count)
             .map(|i| {
                 let along = (spacing * i as f64).min(length);
@@ -883,7 +931,10 @@ impl CadCommand for ArrayPathCommand {
     fn options(&self) -> Vec<crate::command::CmdOption> {
         match self.step {
             PathStep::Count { .. } | PathStep::Spacing { .. } => {
-                vec![method_option(self.measure), associative_option(self.associative)]
+                vec![
+                    method_option(self.measure),
+                    associative_option(self.associative),
+                ]
             }
             _ => Vec::new(),
         }
@@ -966,9 +1017,9 @@ impl CadCommand for ArrayPathCommand {
             "MEASURE" | "_MEASURE" => Some(true),
             _ => None,
         };
-        if let Some(measure) = method.filter(|_| {
-            matches!(self.step, PathStep::Count { .. } | PathStep::Spacing { .. })
-        }) {
+        if let Some(measure) = method
+            .filter(|_| matches!(self.step, PathStep::Count { .. } | PathStep::Spacing { .. }))
+        {
             self.measure = measure;
             defaults::set_array_path_measure(f64::from(u8::from(self.measure)));
             let path_entity = match std::mem::replace(&mut self.step, PathStep::SelectPath) {
@@ -1394,4 +1445,3 @@ mod item_limit_tests {
         ));
     }
 }
-

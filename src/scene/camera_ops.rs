@@ -291,7 +291,11 @@ impl Scene {
 
     /// Restores a model-space view into a paper-space viewport: its camera,
     /// a copy of the view's background (or none) and the view's visual style.
-    pub fn restore_named_view_in_viewport(&mut self, view: &document::tables::View, viewport: Handle) {
+    pub fn restore_named_view_in_viewport(
+        &mut self,
+        view: &document::tables::View,
+        viewport: Handle,
+    ) {
         let mut camera = self.navigation_camera();
         named_view_camera(view, &mut camera);
         self.apply_navigation_camera(camera);
@@ -474,9 +478,9 @@ impl Scene {
             z: 0.0,
         };
         view.target = Vector3 {
-            x: cam.target.x as f64,
-            y: cam.target.y as f64,
-            z: cam.target.z as f64,
+            x: cam.target.x,
+            y: cam.target.y,
+            z: cam.target.z,
         };
         view.direction = Vector3 {
             x: eye_dir.x as f64,
@@ -662,7 +666,11 @@ impl Scene {
         let camera = self.camera.borrow();
         let height = 2.0 * f64::from(camera.ortho_size());
         let pixel = self.world_per_pixel().map_or(0.0, f64::from);
-        ([camera.target.x, camera.target.y], [height * aspect, height], pixel)
+        (
+            [camera.target.x, camera.target.y],
+            [height * aspect, height],
+            pixel,
+        )
     }
 
     /// Aspect ratio of the active camera's actual render rectangle. Model
@@ -720,7 +728,11 @@ impl Scene {
             return;
         }
         let aspect = self.active_camera_aspect();
-        self.camera.borrow_mut().fit_to_bounds(min, max, aspect);
+        let mut camera = self.camera.borrow_mut();
+        let known = camera.known_depth_bounds();
+        camera.fit_to_bounds(min, max, aspect);
+        camera.keep_depth_bounds(known);
+        drop(camera);
         self.projection_bounds_epoch.set(self.geometry_epoch);
         self.camera_generation += 1;
     }
@@ -771,9 +783,11 @@ impl Scene {
         }
         let aspect = self.active_camera_aspect();
         let pixels = self.active_camera_pixels();
-        self.camera
-            .borrow_mut()
-            .fit_to_bounds_bordered_f32(min, max, aspect, pixels);
+        let mut camera = self.camera.borrow_mut();
+        let known = camera.known_depth_bounds();
+        camera.fit_to_bounds_bordered_f32(min, max, aspect, pixels);
+        camera.keep_depth_bounds(known);
+        drop(camera);
         self.projection_bounds_epoch.set(self.geometry_epoch);
         self.camera_generation += 1;
         true
@@ -1092,6 +1106,7 @@ impl Scene {
             // fills it in from $EXTMIN/$EXTMAX right after, so the near/far tracks
             // the eye direction once the view is orbited.
             model_bounds: None,
+            stale_bounds: None,
         })
     }
 
@@ -1173,7 +1188,9 @@ impl Scene {
     /// Convert a `ModelTile`'s normalized iced rectangle (top-left origin) to
     /// the (lower_left, upper_right) pair the VPort table uses (bottom-left
     /// origin).
-    fn tile_rect_to_vport(rect: iced::Rectangle) -> (document::types::Vector2, document::types::Vector2) {
+    fn tile_rect_to_vport(
+        rect: iced::Rectangle,
+    ) -> (document::types::Vector2, document::types::Vector2) {
         let lower_left = document::types::Vector2 {
             x: rect.x as f64,
             y: (1.0 - rect.y - rect.height) as f64,
@@ -1258,7 +1275,7 @@ impl Scene {
             .enumerate()
             .find_map(|(index, entry)| {
                 (is_active_vport_name(&entry.name)
-                    && bounds.map_or(true, |(ll, ur)| Self::vport_rect_matches(entry, ll, ur)))
+                    && bounds.is_none_or(|(ll, ur)| Self::vport_rect_matches(entry, ll, ur)))
                 .then_some(index)
             })
     }
@@ -1412,7 +1429,10 @@ impl Scene {
                     .get(&entry.sun_handle)
                     .and_then(|object| match object {
                         document::objects::ObjectType::ClassObject(value)
-                            if matches!(&value.data, document::objects::ClassObjectData::Sun(_)) =>
+                            if matches!(
+                                &value.data,
+                                document::objects::ClassObjectData::Sun(_)
+                            ) =>
                         {
                             Some(value.clone())
                         }
@@ -1571,9 +1591,9 @@ impl Scene {
             true
         } else {
             let target_wcs = document::types::Vector3 {
-                x: cam.target.x as f64,
-                y: cam.target.y as f64,
-                z: cam.target.z as f64,
+                x: cam.target.x,
+                y: cam.target.y,
+                z: cam.target.z,
             };
 
             // The sheet viewport entity is the authoritative paper-space view;
@@ -1596,6 +1616,17 @@ impl Scene {
     /// Restore the camera from the file's saved view (called once on open).
     /// Falls back to fit_all() if no saved view is available.
     pub fn restore_saved_camera(&mut self) {
+        self.restore_saved_camera_inner(true);
+    }
+
+    /// Restore only camera/view state for automation's layout activation.
+    /// Unlike an interactive first open, this never initializes a page setup,
+    /// creates a viewport, or consumes the layout's unopened marker.
+    pub fn restore_saved_camera_view_only(&mut self) {
+        self.restore_saved_camera_inner(false);
+    }
+
+    fn restore_saved_camera_inner(&mut self, initialize_layout: bool) {
         let restored = if self.current_layout == "Model" {
             // Tiled-layout restore takes precedence — it sets the camera too.
             // Single-tile files fall through to the *Active branch.
@@ -1609,14 +1640,16 @@ impl Scene {
             // with no paper), or it was created in this session and not
             // opened yet. Its page setup is initialized and, with
             // LAYOUTCREATEVIEWPORT, it gets its first viewport.
-            let unopened = self.unopened_layouts.remove(&layout);
-            let initialized = self.initialize_layout_page_setup(&layout);
-            if unopened && !initialized {
-                self.fit_layout_sheet(&layout);
-            }
-            self.ensure_sheet_viewport(&layout);
-            if unopened || initialized {
-                self.add_layout_default_viewport(&layout);
+            if initialize_layout {
+                let unopened = self.unopened_layouts.remove(&layout);
+                let initialized = self.initialize_layout_page_setup(&layout);
+                if unopened && !initialized {
+                    self.fit_layout_sheet(&layout);
+                }
+                self.ensure_sheet_viewport(&layout);
+                if unopened || initialized {
+                    self.add_layout_default_viewport(&layout);
+                }
             }
             self.apply_sheet_viewport_camera()
         };
@@ -1760,14 +1793,12 @@ impl Scene {
         if min == max {
             max += glam::Vec3::splat(1.0);
         }
-        self.camera
-            .borrow_mut()
-            .fit_to_bounds_bordered_f32(
-                min,
-                max,
-                self.last_render_aspect.get().max(0.01),
-                self.active_camera_pixels(),
-            );
+        self.camera.borrow_mut().fit_to_bounds_bordered_f32(
+            min,
+            max,
+            self.last_render_aspect.get().max(0.01),
+            self.active_camera_pixels(),
+        );
         self.camera_generation += 1;
     }
 
@@ -1782,7 +1813,7 @@ impl Scene {
     /// refused to reach it. `SANE_EXTENT` and the finite test are the only
     /// filters now; the ±1e6 display segments that motivated the old heuristic
     /// come from XLine / Ray, which are handled explicitly below.
-    pub(super) fn visible_block_bounds(&self, block: Handle) -> Option<(glam::DVec3, glam::DVec3)> {
+    pub(crate) fn visible_block_bounds(&self, block: Handle) -> Option<(glam::DVec3, glam::DVec3)> {
         if block.is_null() {
             return None;
         }
@@ -1893,8 +1924,8 @@ impl Scene {
             {
                 continue;
             }
-            let is_infinite =
-                entity.is_some_and(|entity| matches!(entity, EntityType::XLine(_) | EntityType::Ray(_)));
+            let is_infinite = entity
+                .is_some_and(|entity| matches!(entity, EntityType::XLine(_) | EntityType::Ray(_)));
             if is_infinite {
                 infinite_base.extend(
                     wire.key_vertices
@@ -1943,7 +1974,10 @@ impl Scene {
             None,
         ) {
             if let Some([x0, y0, z0, x1, y1, z1]) = set.instance_aabb {
-                fold!(Some((glam::DVec3::new(x0, y0, z0), glam::DVec3::new(x1, y1, z1))));
+                fold!(Some((
+                    glam::DVec3::new(x0, y0, z0),
+                    glam::DVec3::new(x1, y1, z1)
+                )));
             }
         }
 

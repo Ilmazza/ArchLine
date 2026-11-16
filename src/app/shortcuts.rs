@@ -78,6 +78,8 @@ pub(super) fn default_bindings() -> BTreeMap<String, String> {
         (format!("{ACCEL}+X"), "CUTCLIP"),
         (format!("{ACCEL}+V"), "PASTECLIP"),
         (format!("{ACCEL}+SHIFT+V"), "PASTEBLOCK"),
+        // Group selection on and off (PICKSTYLE bit 1), as in AutoCAD.
+        (format!("{ACCEL}+SHIFT+A"), "TOGGLEGROUPS"),
         ("ENTER".to_string(), "FINALIZE"),
         ("SPACE".to_string(), "COMMANDSPACE"),
         ("ESCAPE".to_string(), "CANCEL"),
@@ -91,7 +93,11 @@ pub(super) fn default_bindings() -> BTreeMap<String, String> {
         ("RIGHT".to_string(), "CARETRIGHT"),
     ]
     .into_iter()
-    .chain(PLATFORM_BINDINGS.iter().map(|(key, action)| (key.to_string(), *action)))
+    .chain(
+        PLATFORM_BINDINGS
+            .iter()
+            .map(|(key, action)| (key.to_string(), *action)),
+    )
     .map(|(key, action)| (key, action.to_string()))
     .collect()
 }
@@ -208,6 +214,7 @@ pub(super) const INPUT_ACTIONS: &[&str] = &[
     "OTRACK",
     "DYNINPUT",
     "TOGGLESELECTIONCYCLING",
+    "TOGGLEGROUPS",
     "NEXTVIEWPORT",
     "SELECTALL",
     "PASTECLIP",
@@ -322,9 +329,15 @@ impl OpenCADStudio {
         if scene.current_layout == "Model" {
             return Task::none();
         }
-        let viewports: Vec<document::Handle> =
-            scene.viewport_list().into_iter().map(|vp| vp.handle).collect();
-        let next = match scene.active_viewport.and_then(|h| viewports.iter().position(|v| *v == h)) {
+        let viewports: Vec<document::Handle> = scene
+            .viewport_list()
+            .into_iter()
+            .map(|vp| vp.handle)
+            .collect();
+        let next = match scene
+            .active_viewport
+            .and_then(|h| viewports.iter().position(|v| *v == h))
+        {
             Some(index) => viewports.get((index + 1) % viewports.len()),
             None => viewports.first(),
         };
@@ -345,19 +358,29 @@ impl OpenCADStudio {
         };
         let builtin = builtin.filter(|_| !self.shortcut_bindings.contains_key(key));
         // Alt+letter opens that menu of the menu bar, unless it is bound.
-        if let Some(letter) = key.strip_prefix("ALT+").filter(|rest| rest.chars().count() == 1) {
+        if let Some(letter) = key
+            .strip_prefix("ALT+")
+            .filter(|rest| rest.chars().count() == 1)
+        {
             if !self.shortcut_bindings.contains_key(key) {
-                if let Some(task) = letter.chars().next().and_then(|ch| self.open_menu_bar_menu(ch)) {
+                if let Some(task) = letter
+                    .chars()
+                    .next()
+                    .and_then(|ch| self.open_menu_bar_menu(ch))
+                {
                     return task;
                 }
             }
         }
-        let action = builtin.as_ref().or_else(|| self.shortcut_bindings.get(key)).or_else(|| {
-            let base = key.rsplit('+').next()?;
-            is_named_key(base)
-                .then(|| self.shortcut_bindings.get(base))
-                .flatten()
-        });
+        let action = builtin
+            .as_ref()
+            .or_else(|| self.shortcut_bindings.get(key))
+            .or_else(|| {
+                let base = key.rsplit('+').next()?;
+                is_named_key(base)
+                    .then(|| self.shortcut_bindings.get(base))
+                    .flatten()
+            });
         let Some(action) = action.cloned() else {
             return Task::none();
         };
@@ -409,6 +432,13 @@ impl OpenCADStudio {
             "OTRACK" => Message::ToggleOTrack,
             "DYNINPUT" => Message::ToggleDynInput,
             "TOGGLESELECTIONCYCLING" => Message::ToggleSelectionCycling,
+            "TOGGLEGROUPS" => {
+                let header = &mut self.tabs[self.active_tab].scene.document.header;
+                header.pick_style ^= 1;
+                let state = if header.pick_style & 1 != 0 { "on" } else { "off" };
+                self.command_line.push_info(&format!("<Groups {state}>"));
+                return Task::none();
+            }
             // Quad cursor menu master toggle (Shift+F12, Options window,
             // status-bar field): the pure on/off flip, quad panel updates
             // included, lives in the quad router (docs/quad-menu.md §3.6).
@@ -420,7 +450,11 @@ impl OpenCADStudio {
                 if count < 2 {
                     return Task::none();
                 }
-                let step = if action == "NEXTDRAWING" { 1 } else { count - 1 };
+                let step = if action == "NEXTDRAWING" {
+                    1
+                } else {
+                    count - 1
+                };
                 Message::TabSwitch((self.active_tab + step) % count)
             }
             "SELECTALL" => Message::SelectAllShortcut,
@@ -482,11 +516,7 @@ mod tests {
 
         let dyn_before = app.dyn_input;
         let _ = app.run_shortcut("F12");
-        assert_eq!(
-            app.dyn_input,
-            !dyn_before,
-            "bare F12 toggles dynamic input"
-        );
+        assert_eq!(app.dyn_input, !dyn_before, "bare F12 toggles dynamic input");
         assert!(!app.quad, "bare F12 must not touch the quad");
 
         let _ = app.run_shortcut("SHIFT+F12");
@@ -508,5 +538,24 @@ mod tests {
         app.shortcut_bindings.remove("CTRL+TAB");
         let _ = app.update(Message::ShortcutPressed("CTRL+TAB".into()));
         assert_eq!(app.active_tab, (start + 1) % count);
+    }
+
+    /// #2805: Ctrl+Shift+A turns group selection on and off.
+    #[test]
+    fn ctrl_shift_a_toggles_group_selection() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let style = |app: &OpenCADStudio| app.tabs[i].scene.document.header.pick_style;
+        let before = style(&app);
+        // Also from a configuration saved before the binding existed.
+        let mut cfg = crate::app::config::AppConfig::default();
+        cfg.shortcuts.bindings.remove(&format!("{ACCEL}+SHIFT+A"));
+        app.apply_config(cfg);
+        let key = format!("{ACCEL}+SHIFT+A");
+        let _ = app.update(Message::ShortcutPressed(key.clone()));
+        assert_eq!(style(&app), before ^ 1);
+        let _ = app.update(Message::ShortcutPressed(key));
+        assert_eq!(style(&app), before);
     }
 }

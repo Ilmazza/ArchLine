@@ -25,8 +25,8 @@ impl Scene {
             .filter(|vp| {
                 vp.common.owner_handle == paper_block
                     && vp.is_on()
-                    && only_vp.map_or(true, |h| vp.common.handle == h)
-                    && exclude_vp.map_or(true, |h| vp.common.handle != h)
+                    && only_vp.is_none_or(|h| vp.common.handle == h)
+                    && (exclude_vp != Some(vp.common.handle))
             })
             .collect();
 
@@ -98,6 +98,9 @@ impl Scene {
                 let view = (cam_frame.rotation * glam::Vec3::Z).as_dvec3().to_array();
                 let mesh_wires = self.mesh_plot_wires(&meshes, view, Some(vp_handle));
                 model_wires.to_mut().extend(mesh_wires);
+                for wire in model_wires.to_mut() {
+                    wire.resample_plot_curve();
+                }
             }
 
             // ── Project and clip wires into viewport ──────────────────────
@@ -130,9 +133,9 @@ impl Scene {
             // already folded view_center through the (twisted) view basis and
             // applied the empty-WCS auto-fit, so taking its target keeps the CPU
             // projection identical to the GPU renderer under any twist.
-            let display_center_x = cam_frame.target.x as f64 + [0.0_f64; 3][0];
-            let display_center_y = cam_frame.target.y as f64 + [0.0_f64; 3][1];
-            let display_center_z = cam_frame.target.z as f64 + [0.0_f64; 3][2];
+            let display_center_x = cam_frame.target.x + [0.0_f64; 3][0];
+            let display_center_y = cam_frame.target.y + [0.0_f64; 3][1];
+            let display_center_z = cam_frame.target.z + [0.0_f64; 3][2];
             let view_right_d = (
                 view_right.x as f64,
                 view_right.y as f64,
@@ -246,7 +249,10 @@ impl Scene {
                         [p[0], p[1]]
                     };
                     let corners = [corner(0), corner(1), corner(2)];
-                    if corners.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
+                    if corners
+                        .iter()
+                        .any(|p| !p[0].is_finite() || !p[1].is_finite())
+                    {
                         continue;
                     }
                     let clipped = clip_polygon_to_rect(&corners, vp_x0, vp_y0, vp_x1, vp_y1);
@@ -283,10 +289,7 @@ impl Scene {
                 // A text-only wire (TEXT / MTEXT carry no stroke `points` since
                 // text went SDF-only) has nothing to pre-reject on, so gate both
                 // rejections on the glyphs too or it never reaches the sheet.
-                if !any_near
-                    && !aabb_hits
-                    && projected_text.is_empty()
-                    && projected_fill.is_empty()
+                if !any_near && !aabb_hits && projected_text.is_empty() && projected_fill.is_empty()
                 {
                     continue;
                 }
@@ -670,11 +673,15 @@ impl Scene {
                     }
                     if !points.is_empty() {
                         let mut wire = WireModel::solid(
-                            "viewport_hatch_pattern".into(),
+                            hatch
+                                .entity
+                                .map(|handle| handle.value().to_string())
+                                .unwrap_or_else(|| "viewport_hatch_pattern".to_string()),
                             points,
                             hatch.color,
                             false,
                         );
+                        wire.effective_layer = hatch.effective_layer.clone();
                         wire.aci = hatch.aci;
                         wire.line_weight_px = hatch.line_weight_px;
                         wire.aabb = aabb;
@@ -838,7 +845,9 @@ impl Scene {
             let generators = set
                 .instance_source
                 .as_ref()
-                .map_or(set.curved_gens.as_slice(), |source| source.curved_gens.as_slice());
+                .map_or(set.curved_gens.as_slice(), |source| {
+                    source.curved_gens.as_slice()
+                });
             for generator in generators {
                 // A block instance's source is block-local: place it first, so
                 // the contour is taken against the world view direction.
@@ -866,6 +875,7 @@ impl Scene {
             }
             let color = set.display_color().unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let mut wire = WireModel::solid_f64(handle.value().to_string(), points, color, false);
+            wire.effective_layer = set.effective_layer.clone();
             if let Some(entity) = self.document.get_entity(handle) {
                 wire.line_weight_px =
                     view::render::render_style_for_viewport(&self.document, entity, viewport).3;
@@ -1144,7 +1154,6 @@ fn polygon_edge_intersection(start: [f32; 2], end: [f32; 2], edge: u8, value: f3
 /// Clip a single segment (x0,y0)→(x1,y1) against the axis-aligned rectangle
 /// [xmin,xmax]×[ymin,ymax].  Returns the clipped endpoints or `None` if the
 /// segment is entirely outside.
-
 fn cs_clip(
     mut x0: f32,
     mut y0: f32,

@@ -19,6 +19,14 @@ fn resolve_font_reference(reference: &str) -> Option<String> {
     crate::scene::text::sysfont::family_for_reference(reference)
 }
 
+fn resolve_font_reference_at(reference: &str, document: &Document) -> Option<String> {
+    if lff::is_builtin(reference) {
+        return None;
+    }
+    let base = crate::io::drawing_dir(document);
+    crate::scene::text::sysfont::family_for_reference_at(reference, base)
+}
+
 /// `font_name` naming its own bold / italic face when it is a TrueType
 /// family that has one (see `sysfont::styled_family`); `None` for a stroke
 /// font, a big-font pairing, or a family without such a face — bold stroke
@@ -72,12 +80,12 @@ fn resolve_style(
     style_name: &str,
     document: &Document,
 ) -> ResolvedTextStyle {
-
     let mut font_name = if let Some(style) = style {
         // A style names a font *file* — `GOST2304_TypeA_italic.ttf`,
         // `romans.shx`, sometimes with a directory; `true_type_font` carries the
         // same thing for the styles that set it.
-        let file = if !style.true_type_font.trim().is_empty() {
+        let from_true_type = !style.true_type_font.trim().is_empty();
+        let file = if from_true_type {
             style.true_type_font.trim()
         } else {
             style.font_file.trim()
@@ -93,7 +101,10 @@ fn resolve_style(
             let explicit_shx = lff::is_shx_name(file);
             let shx_file = if explicit_shx {
                 Some(file.to_string())
-            } else if std::path::Path::new(file).extension().is_none() {
+            } else if !from_true_type && std::path::Path::new(file).extension().is_none() {
+                // Only a font *file* name: a bare TrueType family
+                // (`NLCS-ISO`) is that face even when an .shx of the same
+                // name sits in the support folder.
                 Some(format!("{file}.shx"))
             } else {
                 None
@@ -104,10 +115,7 @@ fn resolve_style(
                     .as_deref()
                     .map(std::path::Path::new)
                     .and_then(|p| p.parent());
-                crate::io::resolve_image_file(&shx_file, base).or_else(|| {
-                    crate::io::font_repo::local_font_file(&shx_file)
-                        .map(|path| path.to_string_lossy().into_owned())
-                })
+                crate::io::font_repo::font_file_path(&shx_file, base)
             });
             if let Some(p) = shx_path {
                 p
@@ -117,7 +125,7 @@ fn resolve_style(
                 // the user chose another font for it (`font_alt`).
                 crate::font_alt::replacement(file)
                     .unwrap_or_else(|| file.rsplit(['/', '\\']).next().unwrap_or(file).trim().to_string())
-            } else if let Some(family) = resolve_font_reference(file) {
+            } else if let Some(family) = resolve_font_reference_at(file, document) {
                 // The file is installed, so its family is the face to draw with.
                 // Substituting a stroke font instead drops every letter that
                 // font does not have — for a Cyrillic drawing, all of them.
@@ -163,6 +171,17 @@ fn resolve_style(
         }
     }
 
+    // Legacy SHX glyphs are keyed in the drawing's code page, not necessarily
+    // by Unicode. Carry that page in the resolved font identity so every text
+    // renderer and the SDF cache uses the right shape; Unicode unifonts ignore
+    // it. Apply this before pairing a big font so its primary face keeps it.
+    if font_name.to_ascii_lowercase().ends_with(".shx")
+        && crate::scene::text::shx::file_on_disk(&font_name)
+        && crate::scene::text::shx::font_metrics(&font_name).is_some()
+    {
+        font_name = Face::with_code_page(&font_name, &document.header.code_page);
+    }
+
     // A style's "Big Font" (`chineset.shx`, `hztxt.shx`, …) supplies the
     // double-byte characters. Resolve it like the primary font (next to the
     // drawing, then the per-user fonts folder) and pair it with the face; an
@@ -176,9 +195,24 @@ fn resolve_style(
             .as_deref()
             .map(std::path::Path::new)
             .and_then(|p| p.parent());
-        let big_path = crate::io::resolve_image_file(big, base).or_else(|| {
-            crate::io::font_repo::local_font_file(big).map(|p| p.to_string_lossy().into_owned())
-        });
+        let resolve_big = |name: &str| crate::io::font_repo::font_file_path(name, base);
+        let mut big_path = resolve_big(big);
+        // If the referenced big font is not a valid big font (e.g. legacy Chinese
+        // shape-only container `chinese.shx`), try the standard Big5 big font
+        // `chineset.shx`.
+        if big_path
+            .as_deref()
+            .map_or(true, |p| !crate::scene::text::shx::is_bigfont(p))
+        {
+            let stem = big.rsplit(['/', '\\']).next().unwrap_or(big);
+            if stem.eq_ignore_ascii_case("chinese.shx") {
+                if let Some(alt) = resolve_big("chineset.shx") {
+                    if crate::scene::text::shx::is_bigfont(&alt) {
+                        big_path = Some(alt);
+                    }
+                }
+            }
+        }
         if let Some(big_path) = big_path {
             font_name = Face::with_big_font(&font_name, &big_path);
         }
@@ -672,9 +706,12 @@ pub fn adapt_mtext_paragraphs(
     // starts with i, l, r or t; alignment (`ql`, `qc`, …) and spacing codes
     // don't.
     let sets_indent = |props: &str| {
-        props.split(';').next().unwrap_or("").split(',').any(|code| {
-            code.starts_with(['i', 'l', 'r', 't'])
-        })
+        props
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .any(|code| code.starts_with(['i', 'l', 'r', 't']))
     };
     let (mut has_px_indent, mut has_bare_p_indent) = (false, false);
     for (i, _) in s.match_indices("\\p") {
@@ -1277,7 +1314,11 @@ fn side_bearing(
         return 0.0;
     }
     let mut chars = text.chars().filter(|c| *c != LRM);
-    let ch = if trailing { chars.last() } else { chars.next() };
+    let ch = if trailing {
+        chars.next_back()
+    } else {
+        chars.next()
+    };
     let Some(glyph) = ch.and_then(|c| face.glyph(c)) else {
         return 0.0;
     };
@@ -1683,7 +1724,7 @@ pub struct MTextRenderOpts<'a> {
     /// DXF code 44 — multiplier on the default 5/3-em baseline gap.
     pub line_spacing_factor: f32,
     /// `true` fixes every baseline advance to the entity spacing. `false`
-    /// treats it as a minimum and expands for taller inline runs.
+    /// sizes each advance from the taller of its two adjacent lines.
     pub exact_line_spacing: bool,
     /// User-defined text-box/column height. Zero means content-driven.
     pub rectangle_height: f32,
@@ -1787,6 +1828,10 @@ pub struct MTextLayout {
     /// Y of the first sub-line's baseline relative to the insertion point
     /// (in the entity-local, pre-rotation frame).
     pub v_offset: f32,
+    /// Every sub-line's baseline relative to the insertion point, in the same
+    /// local frame. Unlike `v_offset - index * line_height`, these include
+    /// paragraph spacing and exact line-spacing adjustments.
+    pub line_baselines: Vec<f32>,
     /// One world-space AABB per visible character — only populated when
     /// `MTextRenderOpts::want_glyph_boxes` is set.
     pub glyph_boxes: Vec<GlyphBox>,
@@ -2111,8 +2156,10 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
     // Per-line vertical advance: a varying-height MText (inline `\H`) must
     // space each line by its own content height, not the entity height —
     // otherwise a small line still leaves a full-height gap and the block
-    // grows several times too tall. Accumulated per column (columns stack
-    // independently). Uniform-height text reduces to the constant `line_h`.
+    // grows several times too tall. The gap between two lines uses the taller
+    // line, so a small line between two full-height lines does not collapse
+    // both gaps and a tall line has room on both sides. Accumulated per column
+    // (columns stack independently). Uniform-height text reduces to `line_h`.
     // A blank line (an empty `\P` paragraph) carries no glyph to size it, so it
     // takes the height of the text around it — the last non-empty line — not the
     // full entity height, which would blow a small-text blank line up several
@@ -2148,7 +2195,7 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                     mh * m * (5.0 / 3.0) * base_font.line_spacing()
                 }
                 _ if opts.exact_line_spacing => entity_gap,
-                _ => (mh * ls_factor * (5.0 / 3.0) * base_font.line_spacing()).max(entity_gap),
+                _ => mh * ls_factor * (5.0 / 3.0) * base_font.line_spacing(),
             }
         })
         .collect();
@@ -2278,7 +2325,9 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         let depth = exact_drop[i].unwrap_or(line_text_h[i]);
                         per_line_h[i - 1] - depth_above + depth
                     } else {
-                        per_line_h[i]
+                        // AtLeast/multiple spacing must fit both lines around
+                        // this baseline gap, not just the line below it.
+                        per_line_h[i - 1].max(per_line_h[i])
                     };
                     if s.is_first_in_paragraph {
                         col_y[c] -= s.space_before + pending_after[c];
@@ -2524,7 +2573,10 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                     side_bearing(atom, entity_h, base_wf, &base_font_name, trailing)
                 })
             };
-            (bearing(visible.first(), false), bearing(visible.last(), true))
+            (
+                bearing(visible.first(), false),
+                bearing(visible.last(), true),
+            )
         };
         let line_w = line_w - lead - trail;
         line_widths.push(line_w);
@@ -2629,7 +2681,11 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         // own single-glyph run so the SDF path draws it at its
                         // cell origin; 1.4×height is the classic vertical cell
                         // advance.
-                        let color = atom.state.color.as_ref().and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
+                        let color = atom
+                            .state
+                            .color
+                            .as_ref()
+                            .and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
                         let cell = run_h * 1.4;
                         // Word wrap, vertically: a word that would overrun the
                         // column limit moves WHOLE to the next column (the
@@ -2730,7 +2786,11 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                         2 => line_max_h - run_h,
                         _ => 0.0,
                     };
-                    let color = atom.state.color.as_ref().and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
+                    let color = atom
+                        .state
+                        .color
+                        .as_ref()
+                        .and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
 
                     let lx = cursor_x;
                     let ly = valign_dy;
@@ -2924,7 +2984,11 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                     let oblique = base_oblique + atom.state.oblique_rad;
                     let font_name = resolve_font(&atom.state, &base_font_name);
                     let tracking = atom.state.tracking;
-                    let color = atom.state.color.as_ref().and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
+                    let color = atom
+                        .state
+                        .color
+                        .as_ref()
+                        .and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
                     let valign_dy = match atom.state.valign {
                         1 => (line_max_h - run_h) * 0.5,
                         2 => line_max_h - run_h,
@@ -3140,7 +3204,11 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
                             2 => line_max_h - run_h,
                             _ => 0.0,
                         };
-                        let color = atom.state.color.as_ref().and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
+                        let color = atom
+                            .state
+                            .color
+                            .as_ref()
+                            .and_then(|c| resolve_inline_color(c, opts.layer_color.as_ref()));
                         let lx = cursor_x;
                         let ly = valign_dy;
                         let origin: [f64; 2] = [
@@ -3297,6 +3365,7 @@ pub fn layout_mtext(opts: &MTextRenderOpts) -> MTextLayout {
         line_count: sub_lines.len(),
         line_height: line_h,
         v_offset,
+        line_baselines: line_y_offset.iter().map(|y| y + v_offset).collect(),
         glyph_boxes,
         local_bounds,
     }
@@ -3323,6 +3392,34 @@ mod tests {
             .iter()
             .map(|s| s.strokes.iter().map(Vec::len).sum::<usize>() + s.fill_tris.len())
             .sum()
+    }
+
+    /// A style whose `.shx` file is not on disk is searched for in the font
+    /// folders once, not again for every text drawn in that style.
+    #[test]
+    fn a_missing_font_file_is_searched_for_once_for_many_texts() {
+        let mut doc = document::CadDocument::default();
+        let mut gone = document::tables::TextStyle::new("GONE");
+        gone.font_file = "ocs_no_such_font_for_lookup.shx".into();
+        doc.text_styles.add(gone).unwrap();
+        let doc: document::Document = doc.into();
+        let searches = || crate::io::font_repo::FOLDER_SEARCHES.with(std::cell::Cell::get);
+        let _keep = crate::io::font_repo::KEEP_FONT_PATHS
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let before = searches();
+        for _ in 0..50 {
+            assert_eq!(
+                resolve_text_style("GONE", &doc).font_name,
+                "ocs_no_such_font_for_lookup.shx"
+            );
+        }
+        assert_eq!(
+            searches() - before,
+            1,
+            "fifty texts in one style must share one search of the font folders"
+        );
     }
 
     /// AutoCAD 2025 places a bottom-attached MTEXT by the ink of its last
@@ -3891,7 +3988,7 @@ mod v_anchor_tests {
 
     /// Baseline of each line, as a multiple of the text height, for a
     /// top-left MTEXT at the origin.
-    fn baselines_in_heights(value: &str, height: f32) -> Vec<f32> {
+    fn baselines_in_heights(value: &str, height: f32, exact: bool) -> Vec<f32> {
         use crate::entities::text_support::{
             layout_mtext, MTextRenderOpts, MTextVAnchor, ResolvedTextStyle,
         };
@@ -3915,7 +4012,7 @@ mod v_anchor_tests {
             attach_h_anchor: 0.0,
             v_anchor: MTextVAnchor::Top,
             line_spacing_factor: 1.0,
-            exact_line_spacing: false,
+            exact_line_spacing: exact,
             rectangle_height: 0.0,
             vertical_text: false,
             want_glyph_boxes: false,
@@ -3938,9 +4035,9 @@ mod v_anchor_tests {
             .collect()
     }
 
-    fn assert_baselines(value: &str, expected: &[f32]) {
+    fn assert_baselines_with_style(value: &str, exact: bool, expected: &[f32]) {
         for height in [2.0, 10.0] {
-            let got = baselines_in_heights(value, height);
+            let got = baselines_in_heights(value, height, exact);
             assert_eq!(got.len(), expected.len(), "{value} at h {height}: {got:?}");
             for (g, e) in got.iter().zip(expected) {
                 assert!(
@@ -3949,6 +4046,10 @@ mod v_anchor_tests {
                 );
             }
         }
+    }
+
+    fn assert_baselines(value: &str, expected: &[f32]) {
+        assert_baselines_with_style(value, false, expected);
     }
 
     /// `\pxb#;` and `\pxa#;` are multiples of the text height, like the
@@ -3960,6 +4061,22 @@ mod v_anchor_tests {
         assert_baselines(r"\pxa2;AAA\P\pxa0;BBB", &[-1.0, -4.667]);
         // The space before carries to the next paragraph.
         assert_baselines(r"AAA\P\pxb2;BBB\PCCC", &[-1.0, -4.667, -8.333]);
+    }
+
+    /// AtLeast uses the taller run next to each baseline gap. Uniform inline
+    /// shrinking shortens the whole block; an interior size change does not
+    /// collapse a gap that still has to fit its full-height neighbour.
+    #[test]
+    fn at_least_line_spacing_follows_both_adjacent_line_heights() {
+        assert_baselines(r"\H0.5x;AAA\PBBB\PCCC", &[-0.5, -1.333, -2.167]);
+        assert_baselines(r"AAA\P\H0.5x;BBB\P\H2x;CCC", &[-1.0, -2.667, -4.333]);
+        assert_baselines(r"AAA\P\H2x;BBB\P\H0.5x;CCC", &[-1.0, -4.333, -7.667]);
+    }
+
+    /// Exactly keeps the entity-height pitch even when every run is smaller.
+    #[test]
+    fn exact_line_spacing_ignores_inline_height_shrinking() {
+        assert_baselines_with_style(r"\H0.5x;AAA\PBBB\PCCC", true, &[-0.5, -2.167, -3.833]);
     }
 
     /// `\pxse#;` is a factor of the default line pitch (5/3 of the height),
@@ -4070,7 +4187,11 @@ mod v_anchor_tests {
             .expect("the list item must wrap");
         assert!(layout.strokes[0].origin[0].abs() < 1e-3);
         assert!((first.origin[0] - 36.0).abs() < 1e-3, "{:?}", first.origin);
-        assert!((wrapped.origin[0] - 36.0).abs() < 1e-3, "{:?}", wrapped.origin);
+        assert!(
+            (wrapped.origin[0] - 36.0).abs() < 1e-3,
+            "{:?}",
+            wrapped.origin
+        );
     }
 
     /// Paragraph indents with bare `\p` and paragraph alignment `\pxqc` or `\pqc`
@@ -4081,8 +4202,16 @@ mod v_anchor_tests {
         // Case 1: AutoCAD standard bare \pi with drawing units (e.g. beam label SB5: height 250, indent -250, left 500)
         let doc1 = adapt_mtext_paragraphs("\\A1;\\pi-250,l500,t500,1000;{\\W1;SB5}", 250.0, true);
         assert_eq!(doc1.len(), 1);
-        assert!((doc1[0].indent_first - 250.0).abs() < 1e-3, "first indent should be 250, got {}", doc1[0].indent_first);
-        assert!((doc1[0].indent_left - 500.0).abs() < 1e-3, "left margin should be 500, got {}", doc1[0].indent_left);
+        assert!(
+            (doc1[0].indent_first - 250.0).abs() < 1e-3,
+            "first indent should be 250, got {}",
+            doc1[0].indent_first
+        );
+        assert!(
+            (doc1[0].indent_left - 500.0).abs() < 1e-3,
+            "left margin should be 500, got {}",
+            doc1[0].indent_left
+        );
         assert_eq!(doc1[0].tab_stops.len(), 2);
         assert!((doc1[0].tab_stops[0].position - 500.0).abs() < 1e-3);
         assert!((doc1[0].tab_stops[1].position - 1000.0).abs() < 1e-3);
@@ -4090,18 +4219,38 @@ mod v_anchor_tests {
         // Case 2: \pxqc paragraph alignment combined with bare \pi indents
         let doc2 = adapt_mtext_paragraphs("\\pxqc;\\pi-250,l500;SB5", 250.0, true);
         assert_eq!(doc2.len(), 1);
-        assert!((doc2[0].indent_first - 250.0).abs() < 1e-3, "first indent should be 250, got {}", doc2[0].indent_first);
-        assert!((doc2[0].indent_left - 500.0).abs() < 1e-3, "left margin should be 500, got {}", doc2[0].indent_left);
+        assert!(
+            (doc2[0].indent_first - 250.0).abs() < 1e-3,
+            "first indent should be 250, got {}",
+            doc2[0].indent_first
+        );
+        assert!(
+            (doc2[0].indent_left - 500.0).abs() < 1e-3,
+            "left margin should be 500, got {}",
+            doc2[0].indent_left
+        );
 
         // Case 3: Bare \p with alignment first (\pqc,i-250,l500;)
         let doc3 = adapt_mtext_paragraphs("\\pqc,i-250,l500;SB5", 250.0, true);
         assert_eq!(doc3.len(), 1);
-        assert!((doc3[0].indent_first - 250.0).abs() < 1e-3, "first indent should be 250, got {}", doc3[0].indent_first);
-        assert!((doc3[0].indent_left - 500.0).abs() < 1e-3, "left margin should be 500, got {}", doc3[0].indent_left);
+        assert!(
+            (doc3[0].indent_first - 250.0).abs() < 1e-3,
+            "first indent should be 250, got {}",
+            doc3[0].indent_first
+        );
+        assert!(
+            (doc3[0].indent_left - 500.0).abs() < 1e-3,
+            "left margin should be 500, got {}",
+            doc3[0].indent_left
+        );
 
         // Case 4: left alignment beside the extended form keeps text heights.
         let doc4 = adapt_mtext_paragraphs("\\pql;\\pxi-1,l2;SB5", 250.0, true);
-        assert!((doc4[0].indent_left - 500.0).abs() < 1e-3, "got {}", doc4[0].indent_left);
+        assert!(
+            (doc4[0].indent_left - 500.0).abs() < 1e-3,
+            "got {}",
+            doc4[0].indent_left
+        );
     }
 
     #[test]
@@ -4264,5 +4413,87 @@ mod font_style_tests {
         style.handle = doc.allocate_handle();
         doc.text_styles.add(style).unwrap();
         assert_eq!(resolve_text_style("B", &doc).font_name, bold);
+    }
+
+    #[test]
+    fn chinese_shx_aliases_to_chineset_shx_when_chinese_is_not_a_bigfont() {
+        let dir = std::env::temp_dir().join(format!("ocs-bigfont-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A dummy non-bigfont chinese.shx (e.g. shapes container)
+        std::fs::write(dir.join("chinese.shx"), b"AutoCAD-86 shapes 1.0\r\n\x1a").unwrap();
+        // A valid synthetic bigfont chineset.shx
+        std::fs::write(
+            dir.join("chineset.shx"),
+            &crate::scene::text::shx::tests::synthetic_bigfont(),
+        )
+        .unwrap();
+
+        let mut doc = document::Document::new();
+        doc.source_path = Some(dir.join("drawing.dwg").to_string_lossy().into_owned());
+        let mut style = document::tables::TextStyle::new("TOMO");
+        style.font_file = "txt.shx".into();
+        style.big_font_file = "chinese.shx".into();
+        doc.text_styles.add(style).unwrap();
+
+        let resolved = resolve_text_style("TOMO", &doc);
+        assert!(
+            resolved.font_name.contains("chineset.shx"),
+            "expected alias to chineset.shx, got {}",
+            resolved.font_name
+        );
+    }
+
+    /// A style's TrueType family draws with that face even when an .shx of
+    /// the same name sits next to the drawing; a bare font *file* name still
+    /// finds its .shx.
+    #[test]
+    fn a_truetype_family_is_not_looked_up_as_an_shx_file() {
+        let dir = std::env::temp_dir().join(format!("ocs-ttf-family-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("NLCS-ISO.shx"), b"AutoCAD-86 shapes 1.0\r\n\x1a").unwrap();
+        let mut doc = document::Document::new();
+        doc.source_path = Some(dir.join("drawing.dwg").to_string_lossy().into_owned());
+        let mut ttf = document::tables::TextStyle::new("TTF");
+        ttf.true_type_font = "NLCS-ISO".into();
+        doc.text_styles.add(ttf).unwrap();
+        let mut shx = document::tables::TextStyle::new("SHX");
+        shx.font_file = "NLCS-ISO".into();
+        doc.text_styles.add(shx).unwrap();
+
+        let ttf = resolve_text_style("TTF", &doc).font_name;
+        assert!(!ttf.to_ascii_lowercase().ends_with(".shx"), "{ttf}");
+        let shx = resolve_text_style("SHX", &doc).font_name;
+        assert!(shx.ends_with("NLCS-ISO.shx"), "{shx}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_legacy_shx_style_carries_the_documents_code_page() {
+        let dir =
+            std::env::temp_dir().join(format!("ocs-cp1250-style-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("cs_ENGINEERING.shx"),
+            crate::scene::text::shx::tests::synthetic_shapes(&[0xEC, 0xF9]),
+        )
+        .unwrap();
+        let mut doc = document::Document::new();
+        doc.header.code_page = "ANSI_1250".into();
+        doc.source_path = Some(dir.join("drawing.dwg").to_string_lossy().into_owned());
+        let mut style = document::tables::TextStyle::new("CS");
+        style.font_file = "cs_ENGINEERING.shx".into();
+        doc.text_styles.add(style).unwrap();
+
+        let resolved = resolve_text_style("CS", &doc);
+        let (path, page) = resolved
+            .font_name
+            .split_once(crate::scene::text::font_face::CODE_PAGE_SEP)
+            .expect("the resolved SHX identity carries its code page");
+        assert!(path.ends_with("cs_ENGINEERING.shx"), "{path}");
+        assert_eq!(page, "ANSI_1250");
+        let face = crate::scene::text::font_face::Face::resolve(&resolved.font_name);
+        assert!(face.own_glyph('ě').is_some());
+        assert!(face.own_glyph('ů').is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

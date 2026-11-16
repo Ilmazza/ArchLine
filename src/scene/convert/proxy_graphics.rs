@@ -102,6 +102,9 @@ pub struct ProxyText {
     pub text: String,
     pub font: String,
     pub style: ProxyStyle,
+    /// Where `position` sits on the text, as fractions of its width and
+    /// height: `[0, 0]` is the baseline start, `[1, 0.5]` middle right.
+    pub align: [f64; 2],
 }
 
 /// Everything a preview decodes to.
@@ -157,7 +160,11 @@ fn f64_at(b: &[u8], o: usize) -> Option<f64> {
 }
 
 fn pt3_at(b: &[u8], o: usize) -> Option<DVec3> {
-    Some(DVec3::new(f64_at(b, o)?, f64_at(b, o + 8)?, f64_at(b, o + 16)?))
+    Some(DVec3::new(
+        f64_at(b, o)?,
+        f64_at(b, o + 8)?,
+        f64_at(b, o + 16)?,
+    ))
 }
 
 fn align4(o: usize) -> usize {
@@ -178,7 +185,10 @@ fn padded_string(data: &[u8], o: usize, unicode: bool) -> Option<(String, usize)
         Some((String::from_utf16_lossy(&units), align4(end)))
     } else {
         let n = raw.iter().position(|&b| b == 0)?;
-        Some((String::from_utf8_lossy(&raw[..n]).into_owned(), align4(o + n + 1)))
+        Some((
+            String::from_utf8_lossy(&raw[..n]).into_owned(),
+            align4(o + n + 1),
+        ))
     }
 }
 
@@ -244,7 +254,10 @@ impl State {
             DVec3::X
         };
         let world_dir = self.xform.transform_vector3(dir);
-        t.position = self.xform.transform_point3(DVec3::from(t.position)).to_array();
+        t.position = self
+            .xform
+            .transform_point3(DVec3::from(t.position))
+            .to_array();
         t.height *= world_dir.length();
         t.rotation = world_dir.y.atan2(world_dir.x);
         t.style = self.style;
@@ -406,7 +419,10 @@ fn decode_shell(d: &[u8]) -> Vec<Vec<DVec3>> {
     if n < 2 || 4 + n * 24 + 4 > d.len() {
         return faces;
     }
-    let Some(verts) = (0..n).map(|i| pt3_at(d, 4 + i * 24)).collect::<Option<Vec<_>>>() else {
+    let Some(verts) = (0..n)
+        .map(|i| pt3_at(d, 4 + i * 24))
+        .collect::<Option<Vec<_>>>()
+    else {
         return faces;
     };
     let mut fp = 4 + n * 24;
@@ -444,8 +460,9 @@ fn three_point_circle(d: &[u8]) -> Option<(DVec3, f64, DVec3, DVec3, f64)> {
     if axb.length_squared() < 1e-24 {
         return None;
     }
-    let c = p3 + (b * a.length_squared() - a * b.length_squared()).cross(axb)
-        / (2.0 * axb.length_squared());
+    let c = p3
+        + (b * a.length_squared() - a * b.length_squared()).cross(axb)
+            / (2.0 * axb.length_squared());
     let n = (p2 - p1).cross(p3 - p2).normalize();
     let u = (p1 - c).normalize();
     let w = p3 - c;
@@ -477,7 +494,12 @@ fn arc_points(
         .normalize();
     let v = n.cross(u);
     let closed = sweep.abs() >= std::f64::consts::TAU - 1e-9;
-    let segs = ((sweep.abs() / std::f64::consts::TAU * 64.0).ceil() as usize).clamp(2, 512);
+    // Steps short enough that a chord strays at most a thousandth of a unit
+    // from the arc, between 64 and 512 steps a turn: a large-radius arc in a
+    // display cache (an alignment curve) otherwise shows its chords.
+    let tau = std::f64::consts::TAU;
+    let step = (2.0 * (1.0 - (1e-3 / radius).min(1.0)).acos()).clamp(tau / 512.0, tau / 64.0);
+    let segs = ((sweep.abs() / step).ceil() as usize).clamp(2, 512);
     // A full circle is closed by the caller; don't repeat its first point.
     let last = if closed { segs - 1 } else { segs };
     Some(
@@ -502,7 +524,11 @@ fn decode_lwpolyline(d: &[u8]) -> Option<(Vec<DVec3>, bool)> {
     if flags & 4 != 0 {
         r.read_bit_double(); // constant width
     }
-    let elevation = if flags & 8 != 0 { r.read_bit_double() } else { 0.0 };
+    let elevation = if flags & 8 != 0 {
+        r.read_bit_double()
+    } else {
+        0.0
+    };
     if flags & 2 != 0 {
         r.read_bit_double(); // thickness
     }
@@ -514,8 +540,16 @@ fn decode_lwpolyline(d: &[u8]) -> Option<(Vec<DVec3>, bool)> {
     };
     let count = |v: i32| (0..=max_items as i32).contains(&v).then_some(v as usize);
     let n_points = count(r.read_bit_long())?;
-    let n_bulges = if flags & 16 != 0 { count(r.read_bit_long())? } else { 0 };
-    let n_ids = if flags & 1024 != 0 { count(r.read_bit_long())? } else { 0 };
+    let n_bulges = if flags & 16 != 0 {
+        count(r.read_bit_long())?
+    } else {
+        0
+    };
+    let n_ids = if flags & 1024 != 0 {
+        count(r.read_bit_long())?
+    } else {
+        0
+    };
     if flags & 32 != 0 {
         count(r.read_bit_long())?; // widths follow the ids; unused
     }
@@ -525,7 +559,10 @@ fn decode_lwpolyline(d: &[u8]) -> Option<(Vec<DVec3>, bool)> {
     let mut pts = vec![[r.read_raw_double(), r.read_raw_double()]];
     for i in 1..n_points {
         let [px, py] = pts[i - 1];
-        pts.push([r.read_bit_double_with_default(px), r.read_bit_double_with_default(py)]);
+        pts.push([
+            r.read_bit_double_with_default(px),
+            r.read_bit_double_with_default(py),
+        ]);
     }
     let bulges: Vec<f64> = (0..n_bulges).map(|_| r.read_bit_double()).collect();
     for _ in 0..n_ids {
@@ -575,6 +612,7 @@ fn decode_text(d: &[u8], unicode: bool) -> Option<(ProxyText, DVec3)> {
             text,
             font: String::new(),
             style: ProxyStyle::default(),
+            align: [0.0, 0.0],
         },
         dir,
     ))
@@ -592,7 +630,9 @@ fn decode_text2(d: &[u8], unicode: bool) -> Option<(ProxyText, DVec3)> {
         o += 16; // bold, italic, charset, pitch
         o = padded_string(d, o, true).map_or(o, |(_, next)| next); // typeface
     }
-    let font = padded_string(d, o, unicode).map(|(f, _)| f).unwrap_or_default();
+    let font = padded_string(d, o, unicode)
+        .map(|(f, _)| f)
+        .unwrap_or_default();
     Some((
         ProxyText {
             position: position.to_array(),
@@ -603,6 +643,7 @@ fn decode_text2(d: &[u8], unicode: bool) -> Option<(ProxyText, DVec3)> {
             text,
             font,
             style: ProxyStyle::default(),
+            align: [0.0, 0.0],
         },
         dir,
     ))
@@ -689,7 +730,9 @@ mod tests {
     }
 
     fn translate(x: f64) -> Vec<u8> {
-        f64s(&[1., 0., 0., x, 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.])
+        f64s(&[
+            1., 0., 0., x, 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ])
     }
 
     /// Pushes compose onto the current transform; a pop restores the outer one.
@@ -735,7 +778,9 @@ mod tests {
     #[test]
     fn decodes_circles_arcs_and_fills() {
         let on_circle = |p: &ProxyPolyline, r: f64| {
-            p.points.iter().all(|q| ((q[0] * q[0] + q[1] * q[1]).sqrt() - r).abs() < 1e-9)
+            p.points
+                .iter()
+                .all(|q| ((q[0] * q[0] + q[1] * q[1]).sqrt() - r).abs() < 1e-9)
         };
         let mut arc = f64s(&[0., 0., 0., 2., 0., 0., 1., 1., 0., 0., std::f64::consts::PI]);
         arc.extend(0u32.to_le_bytes());
@@ -765,12 +810,33 @@ mod tests {
         assert_eq!(dec.fills[0].tris.len(), 6);
     }
 
+    /// A large-radius arc keeps its chords close to the curve.
+    #[test]
+    fn large_arcs_are_finely_divided() {
+        let mut arc = f64s(&[0., 0., 0., 1000., 0., 0., 1., 1., 0., 0., 0.25]);
+        arc.extend(0u32.to_le_bytes());
+        let dec = decode(&blob(&[(REC_ARC, arc)]));
+        let pts = &dec.polylines[0].points;
+        let worst = pts
+            .windows(2)
+            .map(|w| {
+                let (mx, my) = ((w[0][0] + w[1][0]) / 2.0, (w[0][1] + w[1][1]) / 2.0);
+                1000.0 - (mx * mx + my * my).sqrt()
+            })
+            .fold(0.0, f64::max);
+        assert!(worst < 0.02, "chord strays {worst}");
+    }
+
     /// A styled unicode label: height comes from its own field, not the
     /// (unit) direction vector, and the font name follows the typeface.
     #[test]
     fn decodes_styled_unicode_text() {
         let utf16 = |s: &str| {
-            let mut b: Vec<u8> = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+            let mut b: Vec<u8> = s
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
             b.resize((b.len() + 3) & !3, 0);
             b
         };

@@ -29,10 +29,10 @@ impl FieldContext for OcsFieldContext<'_> {
                 let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
                 Some(secs / 86_400.0 + 2_440_587.5 + utc_offset_days())
             };
-            return Some((
+            Some((
                 julian(meta.created().ok()?)?,
                 julian(meta.modified().ok()?)?,
-            ));
+            ))
         }
         #[cfg(target_arch = "wasm32")]
         None
@@ -64,7 +64,7 @@ impl FieldContext for OcsFieldContext<'_> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let path = self.0?.source_path.as_deref()?;
-            return std::fs::metadata(path).ok().map(|m| m.len());
+            std::fs::metadata(path).ok().map(|m| m.len())
         }
         #[cfg(target_arch = "wasm32")]
         None
@@ -79,13 +79,13 @@ impl FieldContext for OcsFieldContext<'_> {
         f: &mut dyn FnMut(&document::sheet_set::SheetSetDatabase) -> Option<String>,
     ) -> Option<String> {
         let sets = SHEET_SETS.read().ok()?;
-        sets.iter().find_map(|db| f(db))
+        sets.iter().find_map(f)
     }
 
     fn getenv(&self, name: &str) -> Option<String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            return std::env::var(name).ok().filter(|v| !v.is_empty());
+            std::env::var(name).ok().filter(|v| !v.is_empty())
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -140,7 +140,28 @@ pub fn update_fields(
     }
     let snapshot = document.clone();
     let context = OcsFieldContext(Some(&snapshot));
-    let (mut changed, found) = document.update_fields(&context, event, hosts);
+    let (mut changed, found) = if let (32, Some(hosts)) = (event, hosts) {
+        let (mut tables, text_hosts): (Vec<_>, Vec<_>) =
+            hosts.iter().copied().partition(|handle| {
+                matches!(
+                    snapshot.get_entity(*handle),
+                    Some(document::EntityType::Table(_))
+                )
+            });
+        tables.sort_unstable();
+        tables.dedup();
+        let (mut changed, mut found) = document.update_fields(&context, event, Some(&text_hosts));
+        for table in tables {
+            let (updated, count) = document.update_table_cell_fields(&context, table);
+            found += count;
+            if updated {
+                changed.push(table);
+            }
+        }
+        (changed, found)
+    } else {
+        document.update_fields(&context, event, hosts)
+    };
     // What the codec cannot measure (Area/Length of polylines, hatches, ...).
     changed.extend(super::field_measure::update(document, event, hosts, &context));
     (changed, found)
@@ -410,7 +431,12 @@ pub(crate) fn os_currency_symbol() -> String {
         let mut buffer = [0u16; 16];
         // LOCALE_SCURRENCY of the user's default locale.
         let len = unsafe {
-            GetLocaleInfoEx(std::ptr::null(), 0x14, buffer.as_mut_ptr(), buffer.len() as i32)
+            GetLocaleInfoEx(
+                std::ptr::null(),
+                0x14,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
         };
         if len > 1 {
             return String::from_utf16_lossy(&buffer[..len as usize - 1]);
@@ -501,7 +527,13 @@ pub const BACKGROUND: [f32; 4] = [203.0 / 255.0, 203.0 / 255.0, 203.0 / 255.0, 1
 
 /// Whether `entity` hosts a field: its extension dictionary has ACAD_FIELD.
 pub fn hosts_field(document: &Document, entity: &document::entities::EntityType) -> bool {
-    common_hosts_field(document, entity.common())
+    matches!(entity, document::EntityType::Table(table) if table
+        .rows
+        .iter()
+        .flat_map(|row| &row.cells)
+        .flat_map(|cell| &cell.contents)
+        .any(|item| item.field_handle.is_some()))
+        || common_hosts_field(document, entity.common())
 }
 
 /// [`hosts_field`] for an entity known only by its common data, such as an
@@ -791,7 +823,11 @@ mod tests {
             r"\AcVar CustomDP.CLIENT",
             r"%<\AcVar CustomDP.Client>%",
         ] {
-            assert_eq!(evaluate(&document, code, &[], None).as_deref(), Some("Acme"), "{code}");
+            assert_eq!(
+                evaluate(&document, code, &[], None).as_deref(),
+                Some("Acme"),
+                "{code}"
+            );
         }
         assert_eq!(
             evaluate(&document, r"\AcVar CustomDP.job no", &[], None).as_deref(),

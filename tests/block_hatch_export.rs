@@ -92,6 +92,62 @@ fn block_internal_hatch_reaches_export() {
     );
 }
 
+#[test]
+fn block_hatches_keep_placement_and_nonzero_child_layers() {
+    use document::entities::Insert;
+    use document::tables::{BlockRecord, Layer};
+    use document::types::Vector3;
+
+    let mut scene = Scene::new();
+    for name in ["FIRST", "SECOND", "STICKY"] {
+        scene.document.layers.add(Layer::new(name)).unwrap();
+    }
+    let mut record = BlockRecord::new("HATCHES");
+    record.handle = scene.document.allocate_handle();
+    let owner = record.handle;
+    scene.document.block_records.add(record).unwrap();
+
+    let mut inherited = square_hatch(5);
+    inherited.common.owner_handle = owner;
+    inherited.common.layer = "0".into();
+    let raw_handle = scene
+        .document
+        .add_entity(EntityType::Hatch(Box::new(inherited)))
+        .unwrap();
+    let mut sticky = square_hatch(3);
+    sticky.common.owner_handle = owner;
+    sticky.common.layer = "STICKY".into();
+    scene
+        .document
+        .add_entity(EntityType::Hatch(Box::new(sticky)))
+        .unwrap();
+
+    for (layer, x) in [("FIRST", 0.0), ("SECOND", 100.0)] {
+        let mut insert = Insert::new("HATCHES", Vector3::new(x, 0.0, 0.0));
+        insert.common.layer = layer.into();
+        scene.add_entity(EntityType::Insert(insert));
+    }
+    scene.populate_hatches_from_document();
+    let mut layers: Vec<String> = scene
+        .paper_plot_hatches()
+        .iter()
+        .filter_map(|hatch| hatch.effective_layer.as_deref())
+        .map(str::to_string)
+        .collect();
+    layers.sort();
+    layers.dedup();
+    assert_eq!(layers, ["FIRST", "SECOND", "STICKY"]);
+    assert_eq!(
+        scene
+            .document
+            .get_entity(raw_handle)
+            .unwrap()
+            .common()
+            .layer,
+        "0"
+    );
+}
+
 // A pattern hatch that stores its own resolved line geometry must render at
 // THAT spacing — not the name-matched catalog spacing × pattern_scale. Before
 // the fix, ANSI31 was re-derived from the metric catalog (3.175) × scale, so a
@@ -143,7 +199,9 @@ fn far_from_origin_pattern_hatch_still_fills() {
     // the perpendicular index is |k| ≈ 4000·sin45°/0.3 ≈ 9400, well past the
     // 4096 clamp on both ends; the old absolute-index clamp inverts the range
     // (k_lo > k_hi) there and emits nothing.
-    scene.add_entity(EntityType::Hatch(Box::new(ansi31_stored_at(0.3, 1.0, 4000.0, 0.0))));
+    scene.add_entity(EntityType::Hatch(Box::new(ansi31_stored_at(
+        0.3, 1.0, 4000.0, 0.0,
+    ))));
     scene.populate_hatches_from_document();
 
     let hatches = scene.paper_plot_hatches();
@@ -242,6 +300,8 @@ fn app_created_hatch_roundtrips_catalog_spacing() {
     let mut scene = Scene::new();
     let boundary: Vec<[f32; 2]> = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
     let model = HatchModel {
+        entity: None,
+        effective_layer: None,
         pattern_origin: None,
         render_instance: None,
         world_origin: [0.0, 0.0],
@@ -303,6 +363,8 @@ fn nested_hatch_serializes_only_outer_as_external() {
     let boundary_f32: Vec<[f32; 2]> = wcs.iter().map(|&[x, y]| [x as f32, y as f32]).collect();
 
     let model = HatchModel {
+        entity: None,
+        effective_layer: None,
         pattern_origin: None,
         render_instance: None,
         world_origin: [0.0, 0.0],

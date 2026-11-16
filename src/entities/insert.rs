@@ -3,11 +3,11 @@ use document::types::{Matrix3, Transform, Vector3};
 use document::{Document, EntityType, Handle};
 use glam::Vec3;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     edit_angle_prop as edit_angle, edit_prop as edit, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::Grippable;
+use crate::entities::transform::EntityTransform;
 
 use crate::scene::cache::block_cache;
 use crate::scene::convert::tessellate;
@@ -120,11 +120,19 @@ fn scale_attribute_for_insert(
     attribute.alignment_point = scale_about(attribute.alignment_point);
 }
 
+/// The insertion point grip drags the whole reference, attributes included.
+fn insert_point_grip(world: Vector3) -> GripDef {
+    GripDef {
+        is_midpoint: true,
+        ..square_grip(0, glam::DVec3::new(world.x, world.y, world.z))
+    }
+}
+
 fn grips(ins: &Insert) -> Vec<GripDef> {
     // `insert_point` is in the OCS defined by `normal`; the grip must sit at
     // the world placement, so map it through the OCS. Identity for +Z.
     let w = Matrix3::arbitrary_axis(ins.normal) * ins.insert_point;
-    let mut out = vec![square_grip(0, glam::DVec3::new(w.x, w.y, w.z))];
+    let mut out = vec![insert_point_grip(w)];
     // One grip per attribute, so an attribute can be moved off the place the
     // block definition put it without dragging the whole block (#1259).
     // Attributes are stored beside the block in world space — the same space
@@ -149,9 +157,10 @@ pub(crate) fn visible_attribute_grips(
     document: &Document,
     insert: &Insert,
     annotation_scale: f32,
+    annotation_scale_handle: Option<Handle>,
 ) -> Vec<GripDef> {
     let w = Matrix3::arbitrary_axis(insert.normal) * insert.insert_point;
-    let mut out = vec![square_grip(0, glam::DVec3::new(w.x, w.y, w.z))];
+    let mut out = vec![insert_point_grip(w)];
     let visibility = document.header.attribute_visibility;
     let block_scale = insert_attribute_block_scale(
         insert,
@@ -170,7 +179,13 @@ pub(crate) fn visible_attribute_grips(
                     return None;
                 }
                 let mut attribute = attribute.clone();
-                scale_attribute_for_insert(insert, &mut attribute, block_scale);
+                if !crate::scene::annotative::place_attribute_for_annotation_scale(
+                    document,
+                    &mut attribute,
+                    annotation_scale_handle,
+                ) {
+                    scale_attribute_for_insert(insert, &mut attribute, block_scale);
+                }
                 let grip = Grippable::grips(&attribute).into_iter().next()?;
                 Some(GripDef {
                     id: ATTRIBUTE_GRIP_BASE + i,
@@ -289,8 +304,8 @@ fn apply_grip(ins: &mut Insert, grip_id: usize, apply: GripApply) {
     let ocs = Matrix3::arbitrary_axis(ins.normal);
     let old_world = ocs * ins.insert_point;
     let world = match apply {
-        GripApply::Absolute(p) => Vector3::new(p.x as f64, p.y as f64, p.z as f64),
-        GripApply::Translate(d) => old_world + Vector3::new(d.x as f64, d.y as f64, d.z as f64),
+        GripApply::Absolute(p) => Vector3::new(p.x, p.y, p.z),
+        GripApply::Translate(d) => old_world + Vector3::new(d.x, d.y, d.z),
     };
     ins.insert_point = ocs.transpose() * world;
     // Attributes sit in world space beside the block, so move them by the same
@@ -303,8 +318,8 @@ fn apply_grip(ins: &mut Insert, grip_id: usize, apply: GripApply) {
 
 fn apply_transform(ins: &mut Insert, t: &EntityTransform) {
     crate::scene::view::transform::apply_standard_entity_transform(ins, t, |entity, p1, p2| {
-        let dx = (p2.x - p1.x) as f64;
-        let dy = (p2.y - p1.y) as f64;
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
         let len = (dx * dx + dy * dy).sqrt();
         if len < 1e-12 {
             return;
@@ -320,13 +335,9 @@ fn apply_transform(ins: &mut Insert, t: &EntityTransform) {
                 [0.0, 0.0, 0.0, 1.0],
             ],
         };
-        let t = Transform::from_translation(Vector3::new(-(p1.x as f64), -(p1.y as f64), 0.0))
+        let t = Transform::from_translation(Vector3::new(-p1.x, -p1.y, 0.0))
             .then(&Transform::from_matrix(mirror))
-            .then(&Transform::from_translation(Vector3::new(
-                p1.x as f64,
-                p1.y as f64,
-                0.0,
-            )));
+            .then(&Transform::from_translation(Vector3::new(p1.x, p1.y, 0.0)));
         document::Entity::apply_transform(entity, &t);
     });
 }
@@ -413,6 +424,9 @@ pub(crate) fn append_insert_attribute_wires(
         annotation_scale_handle,
         crate::scene::BlockScalePolicy::FromInsert,
     );
+    if attributes.is_empty() {
+        return;
+    }
     for offset in crate::scene::render_graph::array_offsets(ins) {
         let delta = crate::scene::render_graph::insert_instance_translation_delta(
             document,
@@ -469,8 +483,16 @@ pub(crate) fn append_insert_attribute_wires(
                 bg_color,
                 false,
             );
+            let effective_layer = if render::is_effective_layer_zero(&attr.layer)
+                && !render::is_effective_layer_zero(&ins.common.layer)
+            {
+                ins.common.layer.as_str()
+            } else {
+                attr.layer.as_str()
+            };
             for w in &mut attr_wires {
                 w.name = insert_handle.value().to_string();
+                w.effective_layer = Some(std::sync::Arc::from(effective_layer));
                 w.aci = sub_aci;
                 w.aabb = sub_aabb;
                 w.plot_visible &= attr_plottable;
@@ -558,6 +580,26 @@ mod tests {
         assert_eq!(
             ins.attributes[1].insertion_point,
             Vector3::new(6.0, 8.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn justified_attribute_grip_preserves_its_text_alignment() {
+        let mut attribute = attribute("ROOM", 3.0, 4.0);
+        attribute.alignment_point = Vector3::new(5.0, 6.0, 0.0);
+        let mut insert = block_with(vec![attribute]);
+        apply_grip(
+            &mut insert,
+            ATTRIBUTE_GRIP_BASE,
+            GripApply::Absolute(glam::DVec3::new(13.0, 14.0, 0.0)),
+        );
+        assert_eq!(
+            insert.attributes[0].insertion_point,
+            Vector3::new(13.0, 14.0, 0.0)
+        );
+        assert_eq!(
+            insert.attributes[0].alignment_point,
+            Vector3::new(15.0, 16.0, 0.0)
         );
     }
 
@@ -683,6 +725,213 @@ mod tests {
         let (x, height) = painted_attribute(&document, &insert, at_50);
         assert!((x - 10.2).abs() < 1e-9, "x = {x}");
         assert!((height - 0.125).abs() < 1e-9, "height = {height}");
+    }
+
+    #[test]
+    fn annotative_attribute_grip_moves_the_painted_text_during_drag() {
+        let (document, insert, at_50, at_100, _) = annotative_attribute();
+        let grips = visible_attribute_grips(&document, &insert, 1.0, Some(at_100));
+        assert!((grips[1].world.x - 12.4).abs() < 1e-9);
+
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        scene.document.header.current_annotation_scale = "1:100".into();
+        let handle = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+        let preview_text_min_x = |scene: &crate::scene::Scene| {
+            scene
+                .grip_wire_models_for(&[handle])
+                .iter()
+                .flat_map(|wire| wire.text_verts.iter())
+                .map(|vertex| f64::from(vertex.pos[0]) + f64::from(vertex.pos_low[0]))
+                .reduce(f64::min)
+                .expect("attribute text must be present in the grip preview")
+        };
+        let original_text_x = preview_text_min_x(&scene);
+        scene.apply_grip(
+            handle,
+            grips[1].id,
+            GripApply::Absolute(glam::DVec3::new(20.4, 10.0, 0.0)),
+        );
+
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        assert!((insert.attributes[0].insertion_point.x - 18.2).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, insert, at_100).0 - 20.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, insert, at_50).0 - 18.2).abs() < 1e-9);
+        let grips = visible_attribute_grips(&scene.document, insert, 1.0, Some(at_100));
+        assert!((grips[1].world.x - 20.4).abs() < 1e-9);
+        assert!((preview_text_min_x(&scene) - original_text_x - 8.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn insert_grip_moves_annotative_attribute_text_with_the_block() {
+        let (document, insert, _, at_100, _) = annotative_attribute();
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        scene.document.header.current_annotation_scale = "1:100".into();
+        let handle = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+        scene.apply_grip(
+            handle,
+            0,
+            GripApply::Translate(glam::DVec3::new(8.0, 0.0, 0.0)),
+        );
+
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        assert!((painted_attribute(&scene.document, insert, at_100).0 - 20.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn block_move_records_attribute_contexts_for_delta_undo() {
+        let (document, insert, at_50, at_100, _) = annotative_attribute();
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        let handle = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+
+        scene.begin_undo_recording();
+        scene.transform_entities(
+            &[handle],
+            &EntityTransform::Translate(glam::DVec3::new(8.0, 3.0, 0.0)),
+        );
+        let recording = scene.take_undo_recording().unwrap();
+        assert!(!recording.is_poisoned());
+        let (_, objects, _, _, _) = recording.into_recorded_images();
+        assert!(
+            objects.len() >= 2,
+            "each scale context needs a before-image"
+        );
+        assert!(objects.iter().all(|(object_handle, before)| {
+            before.as_ref() != scene.document.objects.get(object_handle)
+        }));
+
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        assert!((painted_attribute(&scene.document, insert, at_100).0 - 20.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, insert, at_50).0 - 18.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn block_move_and_rotate_carry_each_attribute_scale_context() {
+        let (document, insert, at_50, at_100, _) = annotative_attribute();
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        let handle = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+
+        scene.transform_entities(
+            &[handle],
+            &EntityTransform::Translate(glam::DVec3::new(8.0, 3.0, 0.0)),
+        );
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        assert!((painted_attribute(&scene.document, insert, at_100).0 - 20.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, insert, at_50).0 - 18.2).abs() < 1e-9);
+
+        scene.transform_entities(
+            &[handle],
+            &EntityTransform::Rotate {
+                center: glam::DVec3::ZERO,
+                axis: glam::DVec3::Z,
+                angle_rad: std::f64::consts::FRAC_PI_2,
+            },
+        );
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        let painted = |scale| {
+            let entities = insert_attribute_entities(
+                &scene.document,
+                insert,
+                1.0,
+                Some(scale),
+                crate::scene::BlockScalePolicy::FromInsert,
+            );
+            let EntityType::AttributeEntity(attribute) = &entities[0] else {
+                panic!("expected ATTRIB")
+            };
+            attribute.insertion_point
+        };
+        let at_100_position = painted(at_100);
+        let at_50_position = painted(at_50);
+        assert!((at_100_position.x + 13.0).abs() < 1e-9);
+        assert!((at_100_position.y - 20.4).abs() < 1e-9);
+        assert!((at_50_position.x + 13.0).abs() < 1e-9);
+        assert!((at_50_position.y - 18.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn block_copy_carries_attribute_contexts_to_the_new_position() {
+        let (document, insert, at_50, at_100, _) = annotative_attribute();
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        let source = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+        let copies = scene.copy_entities(
+            &[source],
+            &EntityTransform::Translate(glam::DVec3::new(8.0, 0.0, 0.0)),
+        );
+        let [copy] = copies.as_slice() else {
+            panic!("expected one copy")
+        };
+        let EntityType::Insert(original) = scene.document.get_entity(source).unwrap() else {
+            panic!("expected source INSERT")
+        };
+        let EntityType::Insert(copied) = scene.document.get_entity(*copy).unwrap() else {
+            panic!("expected copied INSERT")
+        };
+        assert!((painted_attribute(&scene.document, original, at_100).0 - 12.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, copied, at_100).0 - 20.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, copied, at_50).0 - 18.2).abs() < 1e-9);
+        assert_ne!(
+            original.attributes[0].common.xdictionary_handle,
+            copied.attributes[0].common.xdictionary_handle,
+        );
+    }
+
+    #[test]
+    fn block_position_property_carries_attribute_contexts() {
+        let (document, insert, at_50, at_100, _) = annotative_attribute();
+        let mut scene = crate::scene::Scene::new();
+        scene.document = document;
+        scene.current_layout = "Model".into();
+        let handle = scene
+            .document
+            .add_entity(EntityType::Insert(insert.clone()))
+            .unwrap();
+        crate::scene::view::dispatch::apply_geom_prop(
+            scene.document.get_entity_mut(handle).unwrap(),
+            "ins_x",
+            "8",
+        );
+        scene.carry_insert_attribute_contexts_after_position_edit(handle, &insert);
+
+        let EntityType::Insert(insert) = scene.document.get_entity(handle).unwrap() else {
+            panic!("expected INSERT")
+        };
+        assert!((painted_attribute(&scene.document, insert, at_100).0 - 20.4).abs() < 1e-9);
+        assert!((painted_attribute(&scene.document, insert, at_50).0 - 18.2).abs() < 1e-9);
     }
 
     #[test]
@@ -819,7 +1068,7 @@ mod tests {
         let visible = attribute("TAG_VISIBLE", 4.0, 4.0);
         let ins = block_with(vec![common_invisible, off, frozen, visible]);
 
-        let grips = visible_attribute_grips(&document, &ins, 1.0);
+        let grips = visible_attribute_grips(&document, &ins, 1.0, None);
 
         assert_eq!(grips.len(), 2, "base grip plus only rendered attributes");
         assert_eq!(grips[1].id, ATTRIBUTE_GRIP_BASE + 3);
@@ -827,7 +1076,7 @@ mod tests {
 
         document.header.attribute_visibility = 0;
         assert_eq!(
-            visible_attribute_grips(&document, &ins, 1.0).len(),
+            visible_attribute_grips(&document, &ins, 1.0, None).len(),
             1,
             "ATTMODE=0 should hide every attribute grip",
         );
@@ -924,7 +1173,7 @@ mod tests {
                 "rendered geometry for ATTMODE={mode}"
             );
 
-            let grips = visible_attribute_grips(&document, &insert, 1.0);
+            let grips = visible_attribute_grips(&document, &insert, 1.0, None);
             let grip_indices: Vec<usize> = grips
                 .iter()
                 .skip(1)
@@ -947,7 +1196,7 @@ mod tests {
             .extended_data
             .add_record(ExtendedDataRecord::new("AcAnnotativeData"));
 
-        let grips = visible_attribute_grips(&document, &insert, 2.0);
+        let grips = visible_attribute_grips(&document, &insert, 2.0, None);
 
         assert_eq!(grips.len(), 2);
         assert_eq!(grips[1].world, glam::DVec3::new(12.0, 10.0, 0.0));

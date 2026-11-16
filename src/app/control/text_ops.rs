@@ -624,7 +624,8 @@ pub fn entity_text_info(
         }
         EntityType::MText(t) => {
             let raw = t.value.clone();
-            let plain_raw = document::entities::mtext_format::parse_mtext(&raw, true).to_plain_text();
+            let plain_raw =
+                document::entities::mtext_format::parse_mtext(&raw, true).to_plain_text();
             let plain = decode_dxf_escapes(&plain_raw);
             let pos = [
                 t.insertion_point.x,
@@ -1591,8 +1592,7 @@ impl OpenCADStudio {
 
         if !dry_run {
             // Refresh scene caches and dirty flags
-            self.invalidate_property_targets(i, &changed_handles);
-            self.tabs[i].scene.bump_geometry();
+            self.invalidate_property_targets_or_blocks(i, &changed_handles);
             self.tabs[i].dirty = true;
             self.refresh_properties();
 

@@ -101,7 +101,10 @@ pub fn import_layers(document: &mut Document, state: &LayerImportState) -> Impor
     let mut deps = crate::app::ClipboardDeps::default();
     let bring_linetype = |document: &Document, deps: &mut crate::app::ClipboardDeps, name: &str| {
         if document.line_types.contains(name)
-            || deps.linetypes.iter().any(|lt| lt.name.eq_ignore_ascii_case(name))
+            || deps
+                .linetypes
+                .iter()
+                .any(|lt| lt.name.eq_ignore_ascii_case(name))
         {
             return;
         }
@@ -118,7 +121,11 @@ pub fn import_layers(document: &mut Document, state: &LayerImportState) -> Impor
                 .iter()
                 .find(|style| style.handle == complex.style_handle)
             {
-                if !deps.linetype_styles.iter().any(|s| s.handle == style.handle) {
+                if !deps
+                    .linetype_styles
+                    .iter()
+                    .any(|s| s.handle == style.handle)
+                {
                     deps.linetype_styles.push(style.clone());
                 }
             }
@@ -150,7 +157,9 @@ pub fn import_layers(document: &mut Document, state: &LayerImportState) -> Impor
                 }
                 report.overwritten += 1;
                 report.overwritten_names.push(source.name.clone());
-                report.targets.push((source.name.clone(), source.name.clone()));
+                report
+                    .targets
+                    .push((source.name.clone(), source.name.clone()));
                 continue;
             }
             (true, OnConflict::Rename) => (2..)
@@ -182,7 +191,7 @@ impl OpenCADStudio {
                 Ok(document) => {
                     // The whole path, as the mockup's Source field shows it.
                     self.layer_import_open(path.display().to_string(), &document);
-                    return self.layers_dialog_to_front();
+                    return Task::none();
                 }
                 Err(why) => self
                     .command_line
@@ -433,7 +442,7 @@ mod view {
             text(s)
                 .size(11)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().background.base.text.scale_alpha(0.7)),
+                    color: Some(crate::ui::style::readable::muted_text(theme)),
                 })
         };
         // As in the mockup: Source with Browse…; All · None · Only new and
@@ -510,7 +519,7 @@ mod view {
                     .width(Length::Fixed(w))
                     .wrapping(iced::widget::text::Wrapping::None)
                     .style(move |theme: &Theme| iced::widget::text::Style {
-                        color: dim.then(|| theme.palette().background.base.text.scale_alpha(0.55)),
+                        color: dim.then(|| crate::ui::style::readable::hint_text(theme)),
                     })
             };
             let line = row![

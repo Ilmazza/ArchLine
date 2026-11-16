@@ -122,6 +122,7 @@ mod tests {
             clip: None,
             options: PdfPlotOptions::default(),
             plot_style: None,
+            geopdf: None,
         }
     }
 

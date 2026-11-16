@@ -1,12 +1,12 @@
 use crate::t;
 use document::{entities::Line, Entity};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_prop as edit, format_direction, format_length, oriented_triangle_grip,
     parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::RenderConvertible;
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::TangentGeom;
@@ -23,7 +23,13 @@ fn to_render(line: &Line) -> RenderEntity {
             + crate::scene::centermark::dvec(association.plane_y);
         let segments: Vec<_> = crate::scene::centermark::render_segments(&association)
             .into_iter()
-            .map(|[a, b]| if (b - a).dot(axes) < 0.0 { [b, a] } else { [a, b] })
+            .map(|[a, b]| {
+                if (b - a).dot(axes) < 0.0 {
+                    [b, a]
+                } else {
+                    [a, b]
+                }
+            })
             .collect();
         let extensions = 2..crate::scene::centermark::mark_segments(&association).len();
         let mut points = Vec::with_capacity(segments.len() * 3);
@@ -234,8 +240,12 @@ fn properties(line: &Line) -> Vec<PropSection> {
             label: t!("Show extension").into_owned(),
             field: "centermark_show_extension",
             value: PropValue::Choice {
-                selected: if association.show_extensions { t!("Yes") } else { t!("No") }
-                    .into_owned(),
+                selected: if association.show_extensions {
+                    t!("Yes")
+                } else {
+                    t!("No")
+                }
+                .into_owned(),
                 options: vec![t!("Yes").into_owned(), t!("No").into_owned()],
             },
         });
@@ -248,13 +258,21 @@ fn properties(line: &Line) -> Vec<PropSection> {
             PropSection {
                 title: t!("Misc").into_owned(),
                 props: vec![
-                    ro(t!("Type").as_ref(), "center_type", t!("Center Mark").into_owned()),
+                    ro(
+                        t!("Type").as_ref(),
+                        "center_type",
+                        t!("Center Mark").into_owned(),
+                    ),
                     crate::entities::common::edit_angle_prop(
                         t!("Rotation").as_ref(),
                         "centermark_rotation",
                         x.y.atan2(x.x).to_degrees(),
                     ),
-                    ro(t!("Annotative").as_ref(), "annotative", t!("No").into_owned()),
+                    ro(
+                        t!("Annotative").as_ref(),
+                        "annotative",
+                        t!("No").into_owned(),
+                    ),
                 ],
             },
         ];
@@ -266,9 +284,21 @@ fn properties(line: &Line) -> Vec<PropSection> {
             PropSection {
                 title: t!("Geometry").into_owned(),
                 props: vec![
-                    ro(t!("Start X").as_ref(), "start_x", format_length(line.start.x)),
-                    ro(t!("Start Y").as_ref(), "start_y", format_length(line.start.y)),
-                    ro(t!("Start Z").as_ref(), "start_z", format_length(line.start.z)),
+                    ro(
+                        t!("Start X").as_ref(),
+                        "start_x",
+                        format_length(line.start.x),
+                    ),
+                    ro(
+                        t!("Start Y").as_ref(),
+                        "start_y",
+                        format_length(line.start.y),
+                    ),
+                    ro(
+                        t!("Start Z").as_ref(),
+                        "start_z",
+                        format_length(line.start.z),
+                    ),
                     ro(t!("End X").as_ref(), "end_x", format_length(line.end.x)),
                     ro(t!("End Y").as_ref(), "end_y", format_length(line.end.y)),
                     ro(t!("End Z").as_ref(), "end_z", format_length(line.end.z)),
@@ -287,8 +317,16 @@ fn properties(line: &Line) -> Vec<PropSection> {
             PropSection {
                 title: t!("Misc").into_owned(),
                 props: vec![
-                    ro(t!("Type").as_ref(), "center_type", t!("Centerline").into_owned()),
-                    ro(t!("Annotative").as_ref(), "annotative", t!("No").into_owned()),
+                    ro(
+                        t!("Type").as_ref(),
+                        "center_type",
+                        t!("Centerline").into_owned(),
+                    ),
+                    ro(
+                        t!("Annotative").as_ref(),
+                        "annotative",
+                        t!("No").into_owned(),
+                    ),
                 ],
             },
         ];
@@ -438,7 +476,8 @@ fn apply_grip(line: &mut Line, grip_id: usize, apply: GripApply) {
                 let moved = center + delta;
                 association.center = document::types::Vector3::new(moved.x, moved.y, moved.z);
                 let origin = crate::scene::centermark::dvec(association.plane_origin) + delta;
-                association.plane_origin = document::types::Vector3::new(origin.x, origin.y, origin.z);
+                association.plane_origin =
+                    document::types::Vector3::new(origin.x, origin.y, origin.z);
                 association.associated = false;
             }
             (id @ 1..=4, GripApply::Absolute(point)) => {
@@ -508,22 +547,22 @@ fn apply_grip(line: &mut Line, grip_id: usize, apply: GripApply) {
     }
     match (grip_id, apply) {
         (0, GripApply::Absolute(p)) => {
-            line.start.x = p.x as f64;
-            line.start.y = p.y as f64;
-            line.start.z = p.z as f64;
+            line.start.x = p.x;
+            line.start.y = p.y;
+            line.start.z = p.z;
         }
         (1, GripApply::Absolute(p)) => {
-            line.end.x = p.x as f64;
-            line.end.y = p.y as f64;
-            line.end.z = p.z as f64;
+            line.end.x = p.x;
+            line.end.y = p.y;
+            line.end.z = p.z;
         }
         (2, GripApply::Translate(d)) => {
-            line.start.x += d.x as f64;
-            line.start.y += d.y as f64;
-            line.start.z += d.z as f64;
-            line.end.x += d.x as f64;
-            line.end.y += d.y as f64;
-            line.end.z += d.z as f64;
+            line.start.x += d.x;
+            line.start.y += d.y;
+            line.start.z += d.z;
+            line.end.x += d.x;
+            line.end.y += d.y;
+            line.end.z += d.z;
         }
         _ => {}
     }

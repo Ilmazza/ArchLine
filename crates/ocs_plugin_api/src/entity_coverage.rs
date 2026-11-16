@@ -1835,7 +1835,8 @@ pub fn validate_entity_mutation(
             Err(format!("{name} must contain finite coordinates"))
         }
     };
-    let same3 = |a: &crate::host::document::types::Vector3, b: &crate::host::document::types::Vector3| {
+    let same3 = |a: &crate::host::document::types::Vector3,
+                 b: &crate::host::document::types::Vector3| {
         a.x.to_bits() == b.x.to_bits()
             && a.y.to_bits() == b.y.to_bits()
             && a.z.to_bits() == b.z.to_bits()
@@ -2212,7 +2213,9 @@ pub fn validate_entity_mutation(
             if old.embedded_mtext != new.embedded_mtext {
                 return Err("AttributeEntity.embedded_mtext is unmapped and read-only".into());
             }
+            // A missing link (attributes read from a file have none) may be filled in.
             if old.attdef_handle != new.attdef_handle
+                && !old.attdef_handle.is_null()
                 && !(old.tag != new.tag && !new.attdef_handle.is_null())
             {
                 return Err("AttributeEntity.attdef_handle is read-only".into());
@@ -2488,7 +2491,9 @@ pub fn validate_canvas_entity_references(
         if let Some(handle) = value.definition_handle.filter(|handle| !handle.is_null()) {
             if !matches!(
                 document.objects.get(&handle),
-                Some(crate::host::document::objects::ObjectType::ImageDefinition(_))
+                Some(crate::host::document::objects::ObjectType::ImageDefinition(
+                    _
+                ))
             ) {
                 return Err(format!(
                     "RasterImage image definition {handle:?} does not exist"
@@ -3344,8 +3349,10 @@ mod tests {
     fn tolerance_geometry_and_style_references_are_validated() {
         use crate::host::document::{self, types::Vector3};
         let document = document::Document::new();
-        let mut tolerance =
-            document::entities::Tolerance::with_text(Vector3::new(1.0, 2.0, 0.0), "{\\Fgdt;p}%%v0.1");
+        let mut tolerance = document::entities::Tolerance::with_text(
+            Vector3::new(1.0, 2.0, 0.0),
+            "{\\Fgdt;p}%%v0.1",
+        );
         let entity = document::EntityType::Tolerance(tolerance.clone());
         validate_new_canvas_entity(&entity).unwrap();
         validate_canvas_entity_references(&document, &entity).unwrap();
@@ -3373,7 +3380,9 @@ mod tests {
         let mut text = document::entities::Text::new();
         text.common.handle = document.allocate_handle();
         let text_handle = text.common.handle;
-        document.add_entity(document::EntityType::Text(text)).unwrap();
+        document
+            .add_entity(document::EntityType::Text(text))
+            .unwrap();
         let mut leader = document::entities::Leader::two_point(
             Vector3::new(0.0, 0.0, 0.0),
             Vector3::new(10.0, 5.0, 0.0),
@@ -3393,11 +3402,12 @@ mod tests {
         .contains("does not match"));
         let mut missing = leader.clone();
         missing.annotation_handle = document::Handle::new(0xdead);
-        assert!(
-            validate_canvas_entity_references(&document, &document::EntityType::Leader(missing))
-                .unwrap_err()
-                .contains("does not exist")
-        );
+        assert!(validate_canvas_entity_references(
+            &document,
+            &document::EntityType::Leader(missing)
+        )
+        .unwrap_err()
+        .contains("does not exist"));
         let mut none_with_handle = leader.clone();
         none_with_handle.creation_type = LeaderCreationType::NoAnnotation;
         assert!(
@@ -3445,15 +3455,18 @@ mod tests {
         let mut entity = document::EntityType::MLine(mline.clone());
         validate_new_canvas_entity(&entity).unwrap();
         bind_canvas_entity_references(&document, &mut entity).unwrap();
-        assert!(matches!(&entity, document::EntityType::MLine(value) if value.style_handle.is_some()));
+        assert!(
+            matches!(&entity, document::EntityType::MLine(value) if value.style_handle.is_some())
+        );
 
         let mut missing = mline.clone();
         missing.style_name = "Missing".into();
-        assert!(
-            bind_canvas_entity_references(&document, &mut document::EntityType::MLine(missing))
-                .unwrap_err()
-                .contains("does not exist")
-        );
+        assert!(bind_canvas_entity_references(
+            &document,
+            &mut document::EntityType::MLine(missing)
+        )
+        .unwrap_err()
+        .contains("does not exist"));
         let mut wrong_segments = mline.clone();
         wrong_segments.vertices[0].init_segments(3);
         assert!(bind_canvas_entity_references(
@@ -3464,9 +3477,11 @@ mod tests {
         .contains("segments but style"));
         let mut one = mline.clone();
         one.vertices.truncate(1);
-        assert!(validate_new_canvas_entity(&document::EntityType::MLine(one))
-            .unwrap_err()
-            .contains("at least 2"));
+        assert!(
+            validate_new_canvas_entity(&document::EntityType::MLine(one))
+                .unwrap_err()
+                .contains("at least 2")
+        );
         let mut closed = mline.clone();
         closed.flags |= document::entities::MLineFlags::CLOSED;
         assert!(
@@ -3476,9 +3491,11 @@ mod tests {
         );
         let mut scale = mline.clone();
         scale.scale_factor = 0.0;
-        assert!(validate_new_canvas_entity(&document::EntityType::MLine(scale))
-            .unwrap_err()
-            .contains("nonzero"));
+        assert!(
+            validate_new_canvas_entity(&document::EntityType::MLine(scale))
+                .unwrap_err()
+                .contains("nonzero")
+        );
     }
 
     #[cfg(feature = "host")]
@@ -3509,9 +3526,11 @@ mod tests {
             unreachable!()
         };
         bad.size = 0.0;
-        assert!(validate_new_canvas_entity(&document::EntityType::Shape(bad))
-            .unwrap_err()
-            .contains("greater than zero"));
+        assert!(
+            validate_new_canvas_entity(&document::EntityType::Shape(bad))
+                .unwrap_err()
+                .contains("greater than zero")
+        );
     }
 
     #[test]
@@ -3635,9 +3654,11 @@ mod tests {
 
         let mut xline = document::entities::XLine::default();
         xline.base_point.x = f64::NAN;
-        assert!(validate_new_canvas_entity(&document::EntityType::XLine(xline))
-            .unwrap_err()
-            .contains("XLine.base_point"));
+        assert!(
+            validate_new_canvas_entity(&document::EntityType::XLine(xline))
+                .unwrap_err()
+                .contains("XLine.base_point")
+        );
 
         let solid = document::entities::Solid::new(
             Vector3::ZERO,
@@ -3788,6 +3809,81 @@ mod tests {
                 .contains("no whitespace")
         );
     }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn attribute_without_definition_link_can_be_edited() {
+        use crate::host::document::{
+            self,
+            entities::{Block, BlockEnd},
+            types::{Handle, Vector3},
+        };
+        let mut document = document::Document::new();
+        let next = document.next_handle();
+        let record_handle = Handle::new(next);
+        let block_handle = Handle::new(next + 1);
+        let end_handle = Handle::new(next + 2);
+        let mut record = document::tables::BlockRecord::new("TAGBLOCK");
+        record.handle = record_handle;
+        record.block_entity_handle = block_handle;
+        record.block_end_handle = end_handle;
+        document.block_records.add(record).unwrap();
+        let mut block = Block::new("TAGBLOCK", Vector3::ZERO);
+        block.common.handle = block_handle;
+        block.common.owner_handle = record_handle;
+        document
+            .add_entity(document::EntityType::Block(block))
+            .unwrap();
+        let mut end = BlockEnd::new();
+        end.common.handle = end_handle;
+        end.common.owner_handle = record_handle;
+        document
+            .add_entity(document::EntityType::BlockEnd(end))
+            .unwrap();
+        let mut definition = document::entities::AttributeDefinition::new(
+            "PART_NO".into(),
+            "Part number".into(),
+            "PN-001".into(),
+        );
+        definition.common.owner_handle = record_handle;
+        let definition_handle = document
+            .add_entity(document::EntityType::AttributeDefinition(definition))
+            .unwrap();
+        let insert_handle = document
+            .add_entity(document::EntityType::Insert(
+                document::entities::Insert::new("TAGBLOCK", Vector3::ZERO),
+            ))
+            .unwrap();
+
+        // An attribute read from a DXF or DWG file has no definition link.
+        let mut loaded =
+            document::entities::AttributeEntity::new("PART_NO".into(), "PN-101".into());
+        loaded.common.owner_handle = insert_handle;
+        assert!(loaded.attdef_handle.is_null());
+        let mut edited = loaded.clone();
+        edited.value = "PN-202".into();
+        let mut edited = document::EntityType::AttributeEntity(edited);
+        bind_canvas_entity_references(&document, &mut edited).unwrap();
+        assert!(matches!(&edited,
+            document::EntityType::AttributeEntity(value) if value.attdef_handle == definition_handle));
+        validate_entity_mutation(
+            &document::EntityType::AttributeEntity(loaded.clone()),
+            &edited,
+        )
+        .unwrap();
+
+        // A link that is already set stays read-only.
+        let mut bound = loaded;
+        bound.attdef_handle = definition_handle;
+        let mut moved = bound.clone();
+        moved.attdef_handle = insert_handle;
+        assert!(validate_entity_mutation(
+            &document::EntityType::AttributeEntity(bound),
+            &document::EntityType::AttributeEntity(moved)
+        )
+        .unwrap_err()
+        .contains("read-only"));
+    }
     #[cfg(feature = "host")]
     #[test]
     fn hatch_geometry_and_boundaries_are_validated() {
@@ -3831,10 +3927,12 @@ mod tests {
 
         let mut document = document::Document::new();
         let boundary = document
-            .add_entity(document::EntityType::Line(document::entities::Line::from_points(
-                document::types::Vector3::ZERO,
-                document::types::Vector3::UNIT_X,
-            )))
+            .add_entity(document::EntityType::Line(
+                document::entities::Line::from_points(
+                    document::types::Vector3::ZERO,
+                    document::types::Vector3::UNIT_X,
+                ),
+            ))
             .unwrap();
         let mut associative = hatch.clone();
         associative.is_associative = true;

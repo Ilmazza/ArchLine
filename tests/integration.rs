@@ -30,11 +30,17 @@ mod dim_leader_render_check;
 #[path = "dim_line_color_roundtrip.rs"]
 mod dim_line_color_roundtrip;
 
+#[path = "entity_transform_regression.rs"]
+mod entity_transform_regression;
+
 #[path = "explode_regression.rs"]
 mod explode_regression;
 
 #[path = "flatten_regression.rs"]
 mod flatten_regression;
+
+#[path = "geodata_roundtrip.rs"]
+mod geodata_roundtrip;
 
 #[path = "hatch_shader_lod.rs"]
 mod hatch_shader_lod;

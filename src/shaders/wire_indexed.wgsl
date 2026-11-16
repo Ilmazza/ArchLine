@@ -74,7 +74,7 @@ const MODEL_LINEWEIGHT_MAX_PX: f32 = 10.0;
 const MITER_LIMIT: f32 = 8.0;
 
 struct VertexOut {
-    @builtin(position)              clip_pos:       vec4<f32>,
+    @invariant @builtin(position)              clip_pos:       vec4<f32>,
     @location(0)                    color:          vec4<f32>,
     @location(1)                    distance:       f32,
     @location(2)                    pattern_length: f32,
@@ -89,6 +89,8 @@ struct VertexOut {
     @location(8)                    cap:            vec2<f32>,
     // (segment pixel length, end half-width at A, end half-width at B).
     @location(9) @interpolate(flat) cap_ends:       vec3<f32>,
+    // Dot half-width and signed across distance, both in world units.
+    @location(10)                   dot:            vec2<f32>,
 }
 
 // Half-width of one segment end: a tapered band's own end width wins, then a
@@ -141,6 +143,17 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
     return origin_relative + axial + planar * world_size;
 }
 
+// How far along a segment its end (clip w `w`, other end `other`) moves to
+// lie in front of the eye. An end behind it — a ray or xline in perspective —
+// would flip through w <= 0 and stretch the band over the screen (#2801).
+fn front_t(w: f32, other: f32) -> f32 {
+    let eps = max(max(w, other) * 1e-4, 1e-6);
+    if w >= eps || other <= w {
+        return 0.0;
+    }
+    return (eps - w) / (other - w);
+}
+
 @vertex fn vs_main(@builtin(vertex_index) vid: u32, in: InstanceIn) -> VertexOut {
     let c = wire_consts[in.wire_id];
 
@@ -159,6 +172,7 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
     var out_dist: f32;
     var out_cap: vec2<f32>;
     var out_cap_ends: vec3<f32>;
+    var out_dot: vec2<f32>;
 
     if is_world {
         // Wide polylines have physical world-unit width (world_half_width or taper > 0).
@@ -205,10 +219,15 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
         out_dist = mix(in.distance_a, in.distance_b, which_end) + along * (in.distance_b - in.distance_a) / max(world_len, 1e-6);
         out_cap = vec2<f32>(which_end * world_len, eff_hw * side);
         out_cap_ends = vec3<f32>(world_len, world_hw_a, world_hw_b);
+        out_dot = vec2<f32>(max(cur_world_hw, 0.75 * u.world_per_pixel), eff_hw * side);
     } else {
         // Thin wires expand in screen pixels facing the camera with rounded end caps / joints.
-        let clip_a = u.view_rot * vec4<f32>(rel_a, 1.0);
-        let clip_b = u.view_rot * vec4<f32>(rel_b, 1.0);
+        let raw_a = u.view_rot * vec4<f32>(rel_a, 1.0);
+        let raw_b = u.view_rot * vec4<f32>(rel_b, 1.0);
+        let t_a = front_t(raw_a.w, raw_b.w);
+        let t_b = front_t(raw_b.w, raw_a.w);
+        let clip_a = mix(raw_a, raw_b, t_a);
+        let clip_b = mix(raw_b, raw_a, t_b);
 
         let ndc_a = clip_a.xy / clip_a.w;
         let ndc_b = clip_b.xy / clip_b.w;
@@ -236,9 +255,10 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
         clip_pos_out = apply_draw_order(clip_pos_out, c.draw_depth);
 
         final_clip = clip_pos_out;
-        out_dist = mix(in.distance_a, in.distance_b, which_end) + ext * hw * u.world_per_pixel;
+        out_dist = mix(in.distance_a, in.distance_b, mix(t_a, 1.0 - t_b, which_end)) + ext * hw * u.world_per_pixel;
         out_cap = vec2<f32>(which_end * seg_len + ext * hw, hw * side);
         out_cap_ends = vec3<f32>(seg_len, hw, hw);
+        out_dot = vec2<f32>(max(hw, 0.75) * u.world_per_pixel, hw * side * u.world_per_pixel);
     }
 
     let lt_scale = u.linetype_scale;
@@ -260,6 +280,7 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
     out.distance       = out_dist;
     out.cap            = out_cap;
     out.cap_ends       = out_cap_ends;
+    out.dot            = out_dot;
     out.pattern_length = c.pattern_length * lt_scale;
     out.pat0           = c.pat0 * lt_scale;
     out.pat1           = c.pat1 * lt_scale;
@@ -280,7 +301,7 @@ fn marker_relative(position_high: vec3<f32>, position_low: vec3<f32>, c: WireCon
     return out;
 }
 
-fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>, align_end: f32, align_total: f32) -> bool {
+fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>, align_end: f32, align_total: f32, dot: vec2<f32>) -> bool {
     let elems = array<f32, 8>(p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w);
     var count = 0u;
     for (var i = 0u; i < 8u; i++) {
@@ -313,12 +334,12 @@ fn in_dash(dist: f32, pat_len: f32, p0: vec4<f32>, p1: vec4<f32>, align_end: f32
     }
 
     var pos = 0.0f;
-    let dot_half = u.world_per_pixel * 0.75;
     for (var i = 0u; i < count; i++) {
         let elem = elems[i];
         if elem == 0.0 {
             let dd = abs(d - pos);
-            if min(dd, pat_len - dd) <= dot_half { return true; }
+            let along = min(dd, pat_len - dd);
+            if along * along + dot.y * dot.y <= dot.x * dot.x { return true; }
         } else if elem > 0.0 {
             if d >= pos && d < pos + elem { return true; }
             pos += elem;
@@ -352,7 +373,7 @@ fn cap_clipped(cap: vec2<f32>, cap_ends: vec3<f32>) -> bool {
     }
     if in.pattern_length > 0.0 {
         if in.min_elem >= u.world_per_pixel {
-            if !in_dash(in.distance, in.pattern_length, in.pat0, in.pat1, in.align_end, in.align_total) {
+            if !in_dash(in.distance, in.pattern_length, in.pat0, in.pat1, in.align_end, in.align_total, in.dot) {
                 discard;
             }
         }
@@ -373,7 +394,7 @@ fn cap_clipped(cap: vec2<f32>, cap_ends: vec3<f32>) -> bool {
     }
     if in.pattern_length > 0.0 {
         if in.min_elem >= u.world_per_pixel {
-            if !in_dash(in.distance, in.pattern_length, in.pat0, in.pat1, in.align_end, in.align_total) {
+            if !in_dash(in.distance, in.pattern_length, in.pat0, in.pat1, in.align_end, in.align_total, in.dot) {
                 discard;
             }
         }

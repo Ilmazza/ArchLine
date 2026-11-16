@@ -1,12 +1,12 @@
 use crate::t;
 use document::entities::Arc;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_angle_prop as edit_angle, edit_prop as edit, format_angle, format_area,
     format_decimal, format_length, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::RenderConvertible;
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::TangentGeom;
@@ -210,11 +210,27 @@ fn properties(arc: &Arc) -> Vec<PropSection> {
                 "total_angle",
                 format_angle(total_angle.to_radians()),
             ),
-            ro(t!("Arc length").as_ref(), "arc_length", format_length(arc_length)),
+            ro(
+                t!("Arc length").as_ref(),
+                "arc_length",
+                format_length(arc_length),
+            ),
             ro(t!("Area").as_ref(), "area", format_area(area)),
-            ro(t!("Normal X").as_ref(), "normal_x", format_decimal(arc.normal.x)),
-            ro(t!("Normal Y").as_ref(), "normal_y", format_decimal(arc.normal.y)),
-            ro(t!("Normal Z").as_ref(), "normal_z", format_decimal(arc.normal.z)),
+            ro(
+                t!("Normal X").as_ref(),
+                "normal_x",
+                format_decimal(arc.normal.x),
+            ),
+            ro(
+                t!("Normal Y").as_ref(),
+                "normal_y",
+                format_decimal(arc.normal.y),
+            ),
+            ro(
+                t!("Normal Z").as_ref(),
+                "normal_z",
+                format_decimal(arc.normal.z),
+            ),
         ],
     }]
 }
@@ -284,8 +300,8 @@ fn apply_transform(arc: &mut Arc, t: &EntityTransform) {
             p1,
             p2,
         );
-        let dx = (p2.x - p1.x) as f64;
-        let dy = (p2.y - p1.y) as f64;
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
         let line_angle = dy.atan2(dx);
         let tmp = entity.start_angle;
         entity.start_angle = 2.0 * line_angle - entity.end_angle;

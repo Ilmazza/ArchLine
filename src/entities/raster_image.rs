@@ -1,13 +1,13 @@
 use crate::t;
 use document::entities::{RasterImage, Wipeout};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_angle_prop as edit_angle, edit_prop as edit, parse_angle_deg, parse_f64,
     ro_prop as ro, square_grip,
 };
 use crate::entities::text_support::{resolve_text_style, text_local_bounds};
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{GlyphRun, RenderEntity, RenderObject, TextStroke};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -268,14 +268,14 @@ impl Grippable for RasterImage {
         if grip_id == 0 {
             match apply {
                 GripApply::Translate(d) => {
-                    self.insertion_point.x += d.x as f64;
-                    self.insertion_point.y += d.y as f64;
-                    self.insertion_point.z += d.z as f64;
+                    self.insertion_point.x += d.x;
+                    self.insertion_point.y += d.y;
+                    self.insertion_point.z += d.z;
                 }
                 GripApply::Absolute(p) => {
-                    self.insertion_point.x = p.x as f64;
-                    self.insertion_point.y = p.y as f64;
-                    self.insertion_point.z = p.z as f64;
+                    self.insertion_point.x = p.x;
+                    self.insertion_point.y = p.y;
+                    self.insertion_point.z = p.z;
                 }
             }
         }
@@ -439,8 +439,8 @@ impl Transformable for RasterImage {
                     p1,
                     p2,
                 );
-                let ax = (p2.x - p1.x) as f64;
-                let ay = (p2.y - p1.y) as f64;
+                let ax = p2.x - p1.x;
+                let ay = p2.y - p1.y;
                 let len2 = ax * ax + ay * ay;
                 if len2 > 1e-12 {
                     reflect_vec3(&mut entity.u_vector.x, &mut entity.u_vector.y, ax, ay, len2);
@@ -504,6 +504,48 @@ fn wipeout_world_to_clip(wipeout: &Wipeout, world: [f64; 3]) -> Option<document:
     ))
 }
 
+/// STRETCH for a wipeout: its frame corners for which `in_window` holds move
+/// by `delta`, the rest stay. A wipeout with every corner inside moves whole;
+/// a rectangular frame becomes the same four corner polygon first, so one
+/// corner can move on its own. Returns whether anything moved.
+pub(crate) fn stretch_wipeout(
+    wipeout: &mut Wipeout,
+    in_window: &dyn Fn(f64, f64) -> bool,
+    delta: glam::DVec3,
+) -> bool {
+    let boundary = wipeout_boundary(wipeout);
+    let inside: Vec<bool> = boundary.iter().map(|p| in_window(p[0], p[1])).collect();
+    if !inside.contains(&true) {
+        return false;
+    }
+    if !inside.contains(&false) {
+        wipeout.insertion_point.x += delta.x;
+        wipeout.insertion_point.y += delta.y;
+        wipeout.insertion_point.z += delta.z;
+        return true;
+    }
+    let mut clip = Vec::with_capacity(boundary.len() + 1);
+    for (point, moves) in boundary.iter().zip(&inside) {
+        let target = if *moves {
+            [point[0] + delta.x, point[1] + delta.y, point[2] + delta.z]
+        } else {
+            *point
+        };
+        let Some(vertex) = wipeout_world_to_clip(wipeout, target) else {
+            return false;
+        };
+        clip.push(vertex);
+    }
+    if !wipeout_is_polygonal(wipeout) {
+        // Closed like a polygon drawn here: the first corner repeats.
+        clip.push(clip[0]);
+        wipeout.clip_type = document::entities::WipeoutClipType::Polygonal;
+        wipeout.clipping_enabled = true;
+    }
+    wipeout.clip_boundary_vertices = clip;
+    true
+}
+
 impl RenderConvertible for Wipeout {
     fn to_render(&self, _document: &document::Document) -> Option<RenderEntity> {
         let boundary = wipeout_boundary(self);
@@ -557,15 +599,16 @@ impl Grippable for Wipeout {
                 let current_world = [current.x, current.y, current.z];
                 let new_w = match apply {
                     GripApply::Translate(d) => [
-                        current_world[0] + d.x as f64,
-                        current_world[1] + d.y as f64,
-                        current_world[2] + d.z as f64,
+                        current_world[0] + d.x,
+                        current_world[1] + d.y,
+                        current_world[2] + d.z,
                     ],
-                    GripApply::Absolute(p) => [p.x as f64, p.y as f64, p.z as f64],
+                    GripApply::Absolute(p) => [p.x, p.y, p.z],
                 };
                 if let Some(clip) = wipeout_world_to_clip(self, new_w) {
                     let closes = self.clip_boundary_vertices.len() > 3
-                        && self.clip_boundary_vertices.first() == self.clip_boundary_vertices.last();
+                        && self.clip_boundary_vertices.first()
+                            == self.clip_boundary_vertices.last();
                     self.clip_boundary_vertices[grip_id] = clip;
                     // The first corner is repeated to close the boundary.
                     if grip_id == 0 && closes {
@@ -707,13 +750,21 @@ impl PropertyEditable for Wipeout {
                 props: vec![
                     toggle("Show image", "wo_show_image", show_image),
                     toggle("Show clipped", "wo_show_clipped", show_clipped),
-                    toggle("Background transparency", "wo_bg_transparency", bg_transparency),
+                    toggle(
+                        "Background transparency",
+                        "wo_bg_transparency",
+                        bg_transparency,
+                    ),
                 ],
             },
             // The transparent colour of a bitonal image; a wipeout has none.
             PropSection {
                 title: t!("Misc").into_owned(),
-                props: vec![ro(t!("Transparency Color").as_ref(), "wo_transparency_color", "")],
+                props: vec![ro(
+                    t!("Transparency Color").as_ref(),
+                    "wo_transparency_color",
+                    "",
+                )],
             },
         ]
     }
@@ -727,7 +778,11 @@ impl PropertyEditable for Wipeout {
             _ => None,
         };
         if let Some(flag) = flag {
-            let on = if value == "toggle" { !self.flags.contains(flag) } else { value == "true" };
+            let on = if value == "toggle" {
+                !self.flags.contains(flag)
+            } else {
+                value == "true"
+            };
             self.flags.set(flag, on);
             if flag == Flags::USE_CLIPPING_BOUNDARY {
                 self.clipping_enabled = on;
@@ -736,7 +791,9 @@ impl PropertyEditable for Wipeout {
         }
         if field == "wo_scale" {
             // Scale about the insertion point; the row reads 1 again after.
-            if let Some(factor) = parse_f64(value).filter(|factor| factor.is_finite() && *factor > 0.0) {
+            if let Some(factor) =
+                parse_f64(value).filter(|factor| factor.is_finite() && *factor > 0.0)
+            {
                 for vector in [&mut self.u_vector, &mut self.v_vector] {
                     vector.x *= factor;
                     vector.y *= factor;
@@ -818,8 +875,8 @@ impl Transformable for Wipeout {
                     p1,
                     p2,
                 );
-                let ax = (p2.x - p1.x) as f64;
-                let ay = (p2.y - p1.y) as f64;
+                let ax = p2.x - p1.x;
+                let ay = p2.y - p1.y;
                 let len2 = ax * ax + ay * ay;
                 if len2 > 1e-12 {
                     reflect_vec3(&mut entity.u_vector.x, &mut entity.u_vector.y, ax, ay, len2);

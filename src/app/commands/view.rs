@@ -1,8 +1,65 @@
 use super::*;
 
+// ArchLine: HELP apre la pagina di ArchLine (`privacy::HELP_URL`), non la wiki di
+// upstream; `help_url` resta (con i suoi test) per chi riattivasse l'aiuto per comando.
+#[cfg_attr(not(test), allow(dead_code))]
+const WIKI_URL: &str = "https://github.com/HakanSeven12/OpenCADStudio/wiki";
+
+/// The wiki page for a help topic: a system variable has a page of its own
+/// (`OSMODE-System-Variable`), and so has a registered command (`LINE-Command`;
+/// the `-LINE` command-line form and ribbon tokens such as `ARC_3P` share their
+/// command's page). Anything else is searched for, and no topic opens the
+/// wiki's home page.
+#[cfg_attr(not(test), allow(dead_code))]
+fn help_url(topic: Option<&str>) -> String {
+    let Some(topic) = topic.map(str::trim).filter(|topic| !topic.is_empty()) else {
+        return WIKI_URL.to_string();
+    };
+    if crate::modules::registry::is_system_variable(topic) {
+        return format!("{WIKI_URL}/{}-System-Variable", topic.to_ascii_uppercase());
+    }
+    let names = crate::command::all_registered_command_names();
+    let registered = |name: &str| names.iter().any(|known| known.eq_ignore_ascii_case(name));
+    let bare = topic.trim_start_matches(['-', '\'', '_']);
+    let base = [bare.split('_').next().unwrap_or(bare), bare]
+        .into_iter()
+        .find(|name| registered(name))
+        .or_else(|| registered(&format!("-{bare}")).then_some(bare));
+    match base {
+        Some(name) => format!("{WIKI_URL}/{}-Command", name.to_ascii_uppercase()),
+        None => format!(
+            "https://github.com/HakanSeven12/OpenCADStudio/search?type=wikis&q={}",
+            topic
+                .bytes()
+                .filter(u8::is_ascii_alphanumeric)
+                .map(char::from)
+                .collect::<String>()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod help_url_tests {
+    use super::help_url;
+
+    #[test]
+    fn help_opens_the_command_page_or_searches_the_wiki() {
+        assert!(help_url(None).ends_with("/wiki"));
+        assert!(help_url(Some("LINE")).ends_with("/wiki/LINE-Command"));
+        assert!(help_url(Some("-LAYER")).ends_with("/wiki/LAYER-Command"));
+        assert!(help_url(Some("ARC_3P")).ends_with("/wiki/ARC-Command"));
+        assert!(help_url(Some("-LAYOUT")).ends_with("/wiki/LAYOUT-Command"));
+        assert!(help_url(Some("osmode")).ends_with("/wiki/OSMODE-System-Variable"));
+        assert!(help_url(Some("NOSUCHTOPIC")).ends_with("search?type=wikis&q=NOSUCHTOPIC"));
+    }
+}
+
 // Sort tables belong to the block's extension dictionary. Reserve real handles
 // and reconnect older unattached tables without losing their existing entries.
-fn ensure_draw_order_table(doc: &mut document::Document, block: document::Handle) -> document::Handle {
+fn ensure_draw_order_table(
+    doc: &mut document::Document,
+    block: document::Handle,
+) -> document::Handle {
     use document::objects::{Dictionary, ObjectType, SortEntitiesTable};
 
     // Older commands inserted objects using the unreserved next-handle value.
@@ -100,6 +157,9 @@ impl OpenCADStudio {
             "DWGPROPS" | "DWGPROP" => {
                 self.open_drawing_properties();
             }
+            "GEOGRAPHICLOCATION" => {
+                self.open_geographic_location();
+            }
 
             // Edit a USERI1..USERI5 / USERR1..USERR5 slot. Lets the user
             // store drawing-scoped scalars (and save them through round-trip)
@@ -193,7 +253,23 @@ impl OpenCADStudio {
                 return Some(Task::done(Message::AboutOpen));
             }
 
-            "PLUGINS" | "PLUGINMANAGER" => {
+            // The check the program makes at start, on request: the notice
+            // when a newer release is out, a line saying so when not.
+            "CHECKFORUPDATES" => {
+                if cfg!(target_arch = "wasm32") {
+                    self.command_line
+                        .push_output(&crate::tr!("view", "web-always-latest"));
+                    return Some(Task::none());
+                }
+                self.command_line
+                    .push_info(&crate::tr!("view", "checking-for-updates"));
+                return Some(Task::perform(
+                    crate::io::update_check::check_for_update(),
+                    Message::UpdateCheckManual,
+                ));
+            }
+
+            "PLUGINS" | "PLUGINMANAGER" | "APPLOAD" => {
                 return Some(Task::done(Message::PluginManagerOpen));
             }
 
@@ -440,6 +516,7 @@ impl OpenCADStudio {
                         "DARK LIGHT DRACULA NORD SOLARIZED_LIGHT SOLARIZED_DARK \
                          GRUVBOX_LIGHT GRUVBOX_DARK TOKYONIGHT TOKYONIGHTSTORM TOKYONIGHTLIGHT \
                          KANAGAWAWAVE KANAGAWADRAGON KANAGAWALOTUS MOONFLY NIGHTFLY OXOCARBON FERRA \
+                         FUSION_BLACK FUSION_WHITE STUDIO_DARK \
                          SYSTEM (follows the OS or browser color scheme)",
                     ));
                     return Some(Task::none());
@@ -460,7 +537,7 @@ impl OpenCADStudio {
                         self.saved_custom_palette = Some(self.ui_theme.palette);
                     }
                     let resolved = crate::app::config::resolve_system_theme();
-                    let name = format!("{resolved:?}");
+                    let name = resolved.to_string();
                     self.ui_theme.name = "System".to_string();
                     self.ui_theme.palette =
                         crate::app::config::UiThemePalette::from_iced(resolved.seed());
@@ -478,7 +555,7 @@ impl OpenCADStudio {
                     if self.ui_theme.name == "Custom" {
                         self.saved_custom_palette = Some(self.ui_theme.palette);
                     }
-                    let name = format!("{:?}", t);
+                    let name = t.to_string();
                     self.ui_theme.name = t.to_string();
                     self.ui_theme.palette = crate::app::config::UiThemePalette::from_iced(t.seed());
                     self.theme_color_inputs = self.ui_theme.palette.hex_values();
@@ -589,10 +666,10 @@ impl OpenCADStudio {
                         .map(|(_, _, factor)| factor)
                         .or_else(|| parse_viewport_scale(&value));
                     let applied = factor
-                        .and_then(|factor| {
-                            Some(self.tabs[i]
+                        .map(|factor| {
+                            self.tabs[i]
                                 .scene
-                                .set_viewport_scale_factor_for(target, factor))
+                                .set_viewport_scale_factor_for(target, factor)
                         })
                         .unwrap_or(false);
                     if applied {
@@ -615,10 +692,8 @@ impl OpenCADStudio {
                         .push_error(crate::t!("VPLOCK: switch to a paper layout first.").as_ref());
                 } else {
                     use crate::command::ValuePromptCommand;
-                    let c = ValuePromptCommand::new(
-                        "VPLOCK",
-                        "VPLOCK  Enter ON/OFF/TOGGLE <toggle>:",
-                    );
+                    let c =
+                        ValuePromptCommand::new("VPLOCK", "VPLOCK  Enter ON/OFF/TOGGLE <toggle>:");
                     self.command_line.push_info(&c.prompt());
                     self.tabs[i].active_cmd = Some(Box::new(c));
                 }
@@ -645,9 +720,8 @@ impl OpenCADStudio {
                         })
                         .or_else(|| scene.layout_viewport_handles().into_iter().next());
                     let Some(target) = target else {
-                        self.command_line.push_error(
-                            crate::t!("VPLOCK: no layout viewport to lock.").as_ref(),
-                        );
+                        self.command_line
+                            .push_error(crate::t!("VPLOCK: no layout viewport to lock.").as_ref());
                         return Some(Task::none());
                     };
                     let current = matches!(
@@ -797,7 +871,9 @@ impl OpenCADStudio {
                     return Some(Task::none());
                 };
                 let scene = &self.tabs[i].scene;
-                let Some(frame) = scene.active_viewport.and_then(|vp| scene.viewport_frame(vp))
+                let Some(frame) = scene
+                    .active_viewport
+                    .and_then(|vp| scene.viewport_frame(vp))
                 else {
                     self.command_line.push_error(
                         crate::t!("CHSPACE: No plan-view viewport to change space through.")
@@ -824,9 +900,8 @@ impl OpenCADStudio {
             "VPMAX" | "-VPMAX" => {
                 let scene = &self.tabs[i].scene;
                 if scene.current_layout == "Model" {
-                    self.command_line.push_error(
-                        crate::t!("VPMAX: switch to a paper layout first.").as_ref(),
-                    );
+                    self.command_line
+                        .push_error(crate::t!("VPMAX: switch to a paper layout first.").as_ref());
                     return Some(Task::none());
                 }
                 if self.vpmax_state.is_some() {
@@ -843,22 +918,18 @@ impl OpenCADStudio {
                     );
                     return Some(Task::none());
                 };
-                let Some(document::EntityType::Viewport(vp)) =
-                    scene.document.get_entity(handle)
+                let Some(document::EntityType::Viewport(vp)) = scene.document.get_entity(handle)
                 else {
                     self.command_line
                         .push_error(crate::t!("VPMAX: the active viewport is gone.").as_ref());
                     return Some(Task::none());
                 };
-                let scale = crate::scene::vp_effective_scale(
-                    vp.custom_scale,
-                    vp.view_height,
-                    vp.height,
-                );
+                let scale =
+                    crate::scene::vp_effective_scale(vp.custom_scale, vp.view_height, vp.height);
                 let saved = crate::app::VpMaxState {
                     layout: scene.current_layout.clone(),
                     handle,
-                    center: vp.center.clone(),
+                    center: vp.center,
                     width: vp.width,
                     height: vp.height,
                     view_height: vp.view_height,
@@ -958,8 +1029,9 @@ impl OpenCADStudio {
                 match sub.as_str() {
                     "SAVE" => {
                         let Some(name) = tail.first() else {
-                            self.command_line
-                                .push_error(crate::t!("VPORTS SAVE: name the configuration.").as_ref());
+                            self.command_line.push_error(
+                                crate::t!("VPORTS SAVE: name the configuration.").as_ref(),
+                            );
                             return Some(Task::none());
                         };
                         if scene.current_layout == "Model" {
@@ -976,21 +1048,20 @@ impl OpenCADStudio {
                                 document::EntityType::Viewport(vp)
                                     if vp.id > 1 && vp.common.owner_handle == layout_block =>
                                 {
-                                    Some((vp.center.x, vp.center.z, vp.width, vp.height))
+                                    Some((vp.center.x, vp.center.y, vp.width, vp.height))
                                 }
                                 _ => None,
                             })
                             .collect();
                         if rects.is_empty() {
-                            self.command_line
-                                .push_error(crate::t!("VPORTS SAVE: this layout has no viewports.").as_ref());
+                            self.command_line.push_error(
+                                crate::t!("VPORTS SAVE: this layout has no viewports.").as_ref(),
+                            );
                             return Some(Task::none());
                         }
                         let value = rects
                             .iter()
-                            .map(|(x, z, w, h)| {
-                                format!("{x:.9},{z:.9},{w:.9},{h:.9}")
-                            })
+                            .map(|(x, y, w, h)| format!("{x:.9},{y:.9},{w:.9},{h:.9}"))
                             .collect::<Vec<_>>()
                             .join(";");
                         let key = vports_config_key(name);
@@ -1073,8 +1144,9 @@ impl OpenCADStudio {
                     }
                     "DELETE" | "DEL" => {
                         let Some(name) = tail.first() else {
-                            self.command_line
-                                .push_error(crate::t!("VPORTS DELETE: name the configuration.").as_ref());
+                            self.command_line.push_error(
+                                crate::t!("VPORTS DELETE: name the configuration.").as_ref(),
+                            );
                             return Some(Task::none());
                         };
                         let key = vports_config_key(name);
@@ -1089,11 +1161,7 @@ impl OpenCADStudio {
                             return Some(Task::none());
                         }
                         self.push_undo_snapshot(i, "VPORTS DELETE");
-                        crate::io::set_drawing_variable(
-                            &mut self.tabs[i].scene.document,
-                            &key,
-                            "",
-                        );
+                        crate::io::set_drawing_variable(&mut self.tabs[i].scene.document, &key, "");
                         vports_config_forget(&mut self.tabs[i].scene.document, name);
                         self.tabs[i].dirty = true;
                         self.command_line
@@ -1203,7 +1271,7 @@ impl OpenCADStudio {
                                 if vp.id > 1 && vp.common.owner_handle == layout_block {
                                     Some((
                                         vp.id,
-                                        vp.center.clone(),
+                                        vp.center,
                                         vp.width,
                                         vp.height,
                                         crate::scene::vp_effective_scale(
@@ -1246,60 +1314,24 @@ impl OpenCADStudio {
                         }
                     }
                 } else {
-                    // ── Preset viewport layout ───────────────────────────
-                    let ((x0, y0), (x1, y1)) = scene
+                    // ── Preset arrangement: new viewports in an area ─────
+                    // Asks for the area (Fit = the printable area) and adds
+                    // the viewports there; existing ones stay.
+                    use crate::modules::layout::mview::MviewCommand;
+                    let layout = scene.current_layout.clone();
+                    let paper_bounds = scene
                         .printable_area_limits()
+                        .or_else(|| scene.paper_limits())
                         .unwrap_or(((0.0, 0.0), (297.0, 210.0)));
-                    let uw = (x1 - x0).max(1.0);
-                    let uh = (y1 - y0).max(1.0);
-                    let gap = 2.0 * scene.paper_space_unit_factor();
-                    let rects: Vec<(f64, f64, f64, f64)> = match sub.as_str() {
-                        "2H" => {
-                            // Two viewports side by side (horizontal split)
-                            let vw = (uw - gap) / 2.0;
-                            vec![
-                                (x0 + vw / 2.0, y0 + uh / 2.0, vw, uh),
-                                (x0 + vw + gap + vw / 2.0, y0 + uh / 2.0, vw, uh),
-                            ]
+                    match MviewCommand::with_tiles(layout, paper_bounds, &sub) {
+                        Some(new_cmd) => {
+                            self.command_line.push_info(&new_cmd.prompt());
+                            self.tabs[i].active_cmd = Some(Box::new(new_cmd));
                         }
-                        "2V" => {
-                            // Two viewports stacked (vertical split)
-                            let vh = (uh - gap) / 2.0;
-                            vec![
-                                (x0 + uw / 2.0, y0 + vh + gap + vh / 2.0, uw, vh),
-                                (x0 + uw / 2.0, y0 + vh / 2.0, uw, vh),
-                            ]
-                        }
-                        "4" => {
-                            // Four equal viewports (2×2 grid)
-                            let vw = (uw - gap) / 2.0;
-                            let vh = (uh - gap) / 2.0;
-                            vec![
-                                (x0 + vw / 2.0, y0 + vh + gap + vh / 2.0, vw, vh),
-                                (x0 + vw + gap + vw / 2.0, y0 + vh + gap + vh / 2.0, vw, vh),
-                                (x0 + vw / 2.0, y0 + vh / 2.0, vw, vh),
-                                (x0 + vw + gap + vw / 2.0, y0 + vh / 2.0, vw, vh),
-                            ]
-                        }
-                        "SINGLE" | "1" => {
-                            // Single full-page viewport
-                            vec![(x0 + uw / 2.0, y0 + uh / 2.0, uw, uh)]
-                        }
-                        _ => {
-                            self.command_line.push_error(
-                                crate::t!(
-                                    "VPORTS: unknown option. Use VPORTS 2H | 2V | 4 | SINGLE"
-                                )
+                        None => self.command_line.push_error(
+                            crate::t!("VPORTS: unknown option. Use VPORTS 2H | 2V | 4 | SINGLE")
                                 .as_ref(),
-                            );
-                            vec![]
-                        }
-                    };
-                    if !rects.is_empty() {
-                        let n = self.apply_viewport_rects(i, &rects, &sub);
-                        self.command_line.push_output(
-                            crate::tf!("VPORTS: created {n} viewport(s) [{}].", sub).as_ref(),
-                        );
+                        ),
                     }
                 }
             }
@@ -1730,24 +1762,24 @@ impl OpenCADStudio {
             .iter()
             .any(|handle| self.tabs[i].scene.is_layer_locked(*handle))
         {
-            self.command_line.push_error(
-                crate::t!("VPORTS: unlock existing viewport layers first.").as_ref(),
-            );
+            self.command_line
+                .push_error(crate::t!("VPORTS: unlock existing viewport layers first.").as_ref());
             return 0;
         }
         self.push_undo_snapshot(i, label);
         self.tabs[i].scene.erase_entities(&to_erase);
         let mut created = 0usize;
-        for (cx, cz, w, h) in rects {
+        for (cx, cy, w, h) in rects {
             let mut vp = document::entities::Viewport::new();
-            vp.center = document::types::Vector3::new(*cx, 0.0, *cz);
+            vp.center = document::types::Vector3::new(*cx, *cy, 0.0);
             vp.width = *w;
             vp.height = *h;
             vp.id = 2; // re-numbered below
-            match self.tabs[i].scene.document.add_entity_to_layout(
-                document::EntityType::Viewport(Box::new(vp)),
-                &layout_name,
-            ) {
+            match self.tabs[i]
+                .scene
+                .document
+                .add_entity_to_layout(document::EntityType::Viewport(Box::new(vp)), &layout_name)
+            {
                 Ok(handle) => {
                     self.tabs[i].scene.auto_fit_viewport(handle);
                     created += 1;
@@ -1835,7 +1867,8 @@ fn viewport_scale_text(scale: f64) -> String {
     }
 }
 
-fn parse_vport_rects(value: &str) -> Vec<(f64, f64, f64, f64)> {    value
+fn parse_vport_rects(value: &str) -> Vec<(f64, f64, f64, f64)> {
+    value
         .split(';')
         .filter_map(|entry| {
             let mut parts = entry.split(',');
@@ -1994,7 +2027,10 @@ impl CadCommand for DrawOrderCommand {
         )
     }
 
-    fn on_selection_complete(&mut self, handles: Vec<document::Handle>) -> crate::command::CmdResult {
+    fn on_selection_complete(
+        &mut self,
+        handles: Vec<document::Handle>,
+    ) -> crate::command::CmdResult {
         if matches!(self.step, DrawOrderStep::PickReference { .. }) {
             self.references = handles
                 .into_iter()
@@ -2136,7 +2172,11 @@ impl OpenCADStudio {
                 above,
             )
         });
-        let to_front_opt = if relative_assignments.is_some() { None } else { to_front_opt };
+        let to_front_opt = if relative_assignments.is_some() {
+            None
+        } else {
+            to_front_opt
+        };
         if relative_assignments.is_none() && to_front_opt.is_none() {
             return None;
         }
@@ -2162,12 +2202,7 @@ impl OpenCADStudio {
                         if t.block_owner_handle == block_handle {
                             return Some(
                                 t.entries()
-                                    .map(|e| {
-                                        (
-                                            e.entity_handle.value(),
-                                            e.sort_handle.value(),
-                                        )
-                                    })
+                                    .map(|e| (e.entity_handle.value(), e.sort_handle.value()))
                                     .collect(),
                             );
                         }
@@ -2218,8 +2253,7 @@ impl OpenCADStudio {
 
         let doc = &mut self.tabs[i].scene.document;
         let th = ensure_draw_order_table(doc, block_handle);
-        if let Some(ObjectType::SortEntitiesTable(table)) = doc.objects.get_mut(&th)
-        {
+        if let Some(ObjectType::SortEntitiesTable(table)) = doc.objects.get_mut(&th) {
             if let Some(assignments) = &relative_assignments {
                 for (handle, sort) in assignments {
                     table.add_entry(*handle, document::Handle::new(*sort));

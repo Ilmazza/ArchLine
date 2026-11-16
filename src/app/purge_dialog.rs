@@ -30,8 +30,12 @@ impl OpenCADStudio {
             .iter()
             .map(|session| session.br_handle)
             .collect();
-        let mut lists =
-            super::commands::purge_pass(&self.tabs[i].scene.document, &open_edits, [true; KINDS]);
+        let mut lists = super::commands::purge_pass(
+            &self.tabs[i].scene.document,
+            &open_edits,
+            [true; KINDS],
+            &self.tabs[i].active_mleader_style,
+        );
         for list in &mut lists {
             list.sort_by_key(|name| name.to_lowercase());
         }
@@ -41,7 +45,9 @@ impl OpenCADStudio {
     pub(in crate::app) fn open_purge_dialog(&mut self) {
         let nested = self.purge_dialog.as_ref().is_none_or(|state| state.nested);
         self.purge_dialog = Some(State {
-            items: self.purge_lists().map(|names| names.into_iter().map(|n| (n, false)).collect()),
+            items: self
+                .purge_lists()
+                .map(|names| names.into_iter().map(|n| (n, false)).collect()),
             nested,
         });
         self.active_modal = Some(ModalKind::Purge);
@@ -87,7 +93,8 @@ impl OpenCADStudio {
             listed: names(false),
             nested: state.nested,
         });
-        let task = self.dispatch_command("PURGE ALL");
+        // The dialog's own pass also takes the geometry it lists.
+        let task = self.dispatch_command("PURGE DIALOG");
         self.purge_only = None;
         // What is left, as the dialog stays open.
         self.open_purge_dialog();

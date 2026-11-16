@@ -40,6 +40,7 @@ impl OpenCADStudio {
             self.tabs[i].active_cmd = None;
             return Some(Task::none());
         }
+        let ucs_z = self.tabs[i].ucs_xform().axes().3.to_array();
         let pending = self.begin_undo(i, "EXTRUDE", handles.len(), true);
         let mut created_handles = Vec::new();
         let mut associative_sources = Vec::new();
@@ -55,9 +56,8 @@ impl OpenCADStudio {
                 continue;
             };
             let direction = match extent {
-                ExtrudeExtent::Height(height) => profile.plane.normal().map(|normal| {
-                    glam::DVec3::new(normal[0] * height, normal[1] * height, normal[2] * height)
-                }),
+                ExtrudeExtent::Height(height) => sweep_model::extrusion_axis(&entity, ucs_z)
+                    .map(|normal| glam::DVec3::from_array(normal) * height),
                 ExtrudeExtent::Direction(direction) => Some(direction),
                 ExtrudeExtent::Path(_) => None,
             };
@@ -416,7 +416,7 @@ impl OpenCADStudio {
             } else {
                 let result = sweep_model::revolve_history(&entity, from, to, angle, start_angle)
                     .and_then(|history| {
-                        kernel::acis::rebuild_body(&history)
+                        ocs_acis::rebuild_body(&history)
                             .ok()
                             .map(|solid| (solid, history))
                     })
@@ -535,21 +535,21 @@ impl OpenCADStudio {
                 if sweep_model::spatial_profile(&profile).is_some() {
                     let record = sweep_model::spatial_sweep_record(&profile, path, options)?;
                     let body =
-                        kernel::acis::rebuild_sweep_with_mode(&record, true).map_err(|_| None)?;
+                        ocs_acis::rebuild_sweep_with_mode(&record, true).map_err(|_| None)?;
                     return Ok((body, record, true));
                 }
                 let mut record = sweep_model::sweep_record(&profile, path, options).ok_or(None)?;
                 record.flags_294_296[0] |= picked_base;
-                let (_, _, closed) = kernel::acis::sweep_profile_geometry(
+                let (_, _, closed) = ocs_acis::sweep_profile_geometry(
                     record.sweep_entity.as_ref().ok_or(None)?,
                     record.sweep_entity_transform,
                 )
                 .map_err(|_| None)?;
                 let surface = mode == ExtrudeMode::Surface || !closed;
                 let body =
-                    kernel::acis::rebuild_sweep_with_mode(&record, surface).map_err(|error| {
+                    ocs_acis::rebuild_sweep_with_mode(&record, surface).map_err(|error| {
                         match error {
-                            kernel::acis::HistoryRebuildError::Refused(why) => {
+                            ocs_acis::HistoryRebuildError::Refused(why) => {
                                 Some(sweep_model::sweep_refusal_code(why))
                             }
                             _ => None,
@@ -708,7 +708,7 @@ impl OpenCADStudio {
         } else {
             loft_command_model::record(&sections, &guides, path, &available, mode, options)
                 .and_then(|record| {
-                    kernel::acis::rebuild_loft_with_options(&record).map(|body| (body, record))
+                    ocs_acis::rebuild_loft_with_options(&record).map(|body| (body, record))
                 })
         };
         match result {
@@ -902,3 +902,4 @@ impl OpenCADStudio {
         task
     }
 }
+

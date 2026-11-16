@@ -1,16 +1,14 @@
 use document::entities::{LwPolyline, LwVertex};
-use kernel::geom2d::{
-    Curve, Polyline, PolylineVertex, RectangleFrame, Tolerance, Vec2,
-};
+use kernel::geom2d::{Curve, Polyline, PolylineVertex, RectangleFrame, Tolerance, Vec2};
 
 use crate::t;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
-    edit_prop as edit, format_area, format_length, parse_f64,
-    rectangle_grip, ro_prop as ro, square_grip, stepper_prop as stepper, VARIES_LABEL,
+    edit_prop as edit, format_area, format_length, parse_f64, rectangle_grip, ro_prop as ro,
+    square_grip, stepper_prop as stepper, VARIES_LABEL,
 };
 use crate::entities::traits::RenderConvertible;
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
@@ -584,7 +582,10 @@ fn centerline_metadata(
 
 /// Split at vertex `idx`: a closed polyline re-opens there (one piece); an
 /// open one splits into two (interior vertices only). `None` when invalid.
-pub(crate) fn break_at_vertex(p: &document::LwPolyline, idx: usize) -> Option<Vec<document::EntityType>> {
+pub(crate) fn break_at_vertex(
+    p: &document::LwPolyline,
+    idx: usize,
+) -> Option<Vec<document::EntityType>> {
     use document::EntityType;
     let n = p.vertices.len();
     if n < 3 || idx >= n {
@@ -850,12 +851,12 @@ fn apply_grip(pline: &mut LwPolyline, grip_id: usize, apply: GripApply) {
         let v = &mut pline.vertices[grip_id];
         match apply {
             GripApply::Absolute(p) => {
-                v.location.x = p.x as f64;
-                v.location.y = p.y as f64;
+                v.location.x = p.x;
+                v.location.y = p.y;
             }
             GripApply::Translate(d) => {
-                v.location.x += d.x as f64;
-                v.location.y += d.y as f64;
+                v.location.x += d.x;
+                v.location.y += d.y;
             }
         }
     } else {
@@ -879,7 +880,12 @@ fn segment_points(pline: &LwPolyline) -> Vec<([f64; 2], f64)> {
 /// given as (vertex, bulge) pairs, ids from `first_id`. The marker is a small
 /// box rotated along the chord direction so the shape itself signals which
 /// way the segment runs.
-pub(crate) fn mid_grips(points: &[([f64; 2], f64)], closed: bool, elev: f64, first_id: usize) -> Vec<GripDef> {
+pub(crate) fn mid_grips(
+    points: &[([f64; 2], f64)],
+    closed: bool,
+    elev: f64,
+    first_id: usize,
+) -> Vec<GripDef> {
     let n = points.len();
     let seg_count = if closed { n } else { n.saturating_sub(1) };
     (0..seg_count)
@@ -906,7 +912,12 @@ pub(crate) fn mid_grips(points: &[([f64; 2], f64)], closed: bool, elev: f64, fir
 /// Drag of the mid grip of segment `seg`: a straight segment translates both
 /// its endpoints (the shared vertices carry the neighbouring segments along);
 /// an arc segment takes the bulge that puts its midpoint at the new spot.
-pub(crate) fn apply_mid_grip(points: &mut [([f64; 2], f64)], closed: bool, seg: usize, apply: GripApply) {
+pub(crate) fn apply_mid_grip(
+    points: &mut [([f64; 2], f64)],
+    closed: bool,
+    seg: usize,
+    apply: GripApply,
+) {
     let n = points.len();
     let count = if closed { n } else { n.saturating_sub(1) };
     if seg >= count {
@@ -1069,7 +1080,7 @@ impl crate::entities::traits::Grippable for LwPolyline {
         let is_arc = self
             .vertices
             .get(seg)
-            .map_or(false, |v| v.bulge.abs() >= 1e-9);
+            .is_some_and(|v| v.bulge.abs() >= 1e-9);
         let convert = if is_arc {
             GripMenuItem {
                 label: "Convert to Line",
@@ -1096,8 +1107,12 @@ impl crate::entities::traits::Grippable for LwPolyline {
         if is_rectangle(self) && seg < 4 {
             // Moving an edge changes the dimension perpendicular to it.
             items.push(GripMenuItem {
-                label: if seg % 2 == 0 { "Height" } else { "Width" },
-                action: if seg % 2 == 0 {
+                label: if seg.is_multiple_of(2) {
+                    "Height"
+                } else {
+                    "Width"
+                },
+                action: if seg.is_multiple_of(2) {
                     GripMenuAction::RectangleHeight
                 } else {
                     GripMenuAction::RectangleWidth
@@ -1279,7 +1294,7 @@ impl crate::entities::traits::Grippable for LwPolyline {
                 // moves it with the cursor until the placement click.
                 if grip_id == n - 1 && !self.is_closed {
                     self.vertices[grip_id].bulge = 0.0;
-                    let mut new_v = self.vertices[grip_id].clone();
+                    let mut new_v = self.vertices[grip_id];
                     new_v.bulge = 0.0;
                     new_v.vertex_id = 0;
                     self.vertices.push(new_v);
@@ -1363,7 +1378,7 @@ impl crate::entities::traits::PropertyEditable for LwPolyline {
 }
 
 impl crate::entities::traits::Transformable for LwPolyline {
-    fn apply_transform(&mut self, t: &crate::command::EntityTransform) {
+    fn apply_transform(&mut self, t: &crate::entities::transform::EntityTransform) {
         apply_transform(self, t);
     }
 }

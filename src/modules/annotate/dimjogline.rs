@@ -32,6 +32,12 @@ pub struct DimJogLineCommand {
     dimension: Option<Dimension>,
 }
 
+impl Default for DimJogLineCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DimJogLineCommand {
     pub fn new() -> Self {
         Self {
@@ -104,9 +110,7 @@ impl CadCommand for DimJogLineCommand {
 
     fn prompt(&self) -> String {
         match self.step {
-            Step::PickDim if self.remove => {
-                t!("DIMJOGLINE  Select jog to remove:").into_owned()
-            }
+            Step::PickDim if self.remove => t!("DIMJOGLINE  Select jog to remove:").into_owned(),
             Step::PickDim => {
                 t!("DIMJOGLINE  Select dimension to add jog or [Remove]:").into_owned()
             }

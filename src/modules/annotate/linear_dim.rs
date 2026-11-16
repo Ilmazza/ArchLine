@@ -91,6 +91,12 @@ pub struct LinearDimensionCommand {
     mtext_override: bool,
 }
 
+impl Default for LinearDimensionCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinearDimensionCommand {
     pub fn new() -> Self {
         Self {
@@ -152,6 +158,11 @@ impl CadCommand for LinearDimensionCommand {
         "DIMLINEAR"
     }
 
+    /// A dimension's point prompts refuse unusable input this way (measured).
+    fn point_rejection(&self) -> Option<String> {
+        Some(t!("Invalid point input.").into_owned())
+    }
+
     fn set_working_plane(&mut self, plane: WorkingPlane) {
         self.plane = plane;
     }
@@ -179,7 +190,7 @@ impl CadCommand for LinearDimensionCommand {
         }
         match self.step {
             Step::FirstPoint => {
-                t!("DIMLINEAR  Specify first extension line origin or press Enter to select object:")
+                t!("DIMLINEAR  Specify first extension line origin or <select object>:")
                     .into_owned()
             }
             Step::SecondPoint(_) => {

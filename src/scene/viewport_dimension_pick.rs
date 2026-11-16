@@ -3,7 +3,7 @@
 
 use super::*;
 
-use crate::command::EntityTransform;
+use crate::entities::transform::EntityTransform;
 use crate::scene::viewport_ref::ViewportFrame;
 use document::types::{Matrix4, Transform};
 #[cfg(test)]
@@ -341,7 +341,8 @@ pub fn planar_pick_distance(entity: &EntityType, point: DVec3) -> Option<f64> {
     // A centre mark is picked by every line it draws, not only the stored
     // carrier line (its horizontal cross arm).
     if let EntityType::Line(line) = entity {
-        if let Some(mark) = document::entities::CenterMarkAssociation::read(&line.common.extended_data)
+        if let Some(mark) =
+            document::entities::CenterMarkAssociation::read(&line.common.extended_data)
         {
             return crate::scene::centermark::render_segments(&mark)
                 .into_iter()

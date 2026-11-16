@@ -38,7 +38,10 @@ pub(super) async fn pick(title: String, filters: Vec<(String, Vec<String>)>) -> 
 
 fn dgn_filters() -> Vec<(String, Vec<String>)> {
     vec![
-        ("MicroStation DGN (*.dgn)".to_string(), vec!["dgn".to_string()]),
+        (
+            "MicroStation DGN (*.dgn)".to_string(),
+            vec!["dgn".to_string()],
+        ),
         ("All DGN Files (*.*)".to_string(), vec!["*".to_string()]),
     ]
 }
@@ -58,7 +61,9 @@ fn exists(path: &str) -> bool {
 fn is_dgn(path: &str) -> bool {
     crate::scene::model::underlay_vector::dgn_import_models(path)
         .and_then(|models| models.into_iter().next())
-        .is_some_and(|model| crate::scene::model::underlay_vector::dgn_import(path, &model).is_some())
+        .is_some_and(|model| {
+            crate::scene::model::underlay_vector::dgn_import(path, &model, None).is_some()
+        })
 }
 
 /// The importer a file goes to.
@@ -69,6 +74,7 @@ enum Route {
     Wmf,
     Svg,
     Tds,
+    Obj,
 }
 
 /// The importer for `path` chosen as `format` (an index of [`FORMATS`]; `None`
@@ -82,6 +88,10 @@ fn route(path: &str, format: Option<usize>) -> Result<Route, String> {
     }
     let ext = extension(path);
     let by_extension = f.is_none_or(|f| f.support == Support::ByExtension);
+    // Wavefront OBJ is not among the listed types; All Files still reads it.
+    if by_extension && ext == "obj" {
+        return Ok(Route::Obj);
+    }
     // The chosen format, or the one whose patterns name the extension.
     let named = if by_extension {
         FORMATS
@@ -99,7 +109,11 @@ fn route(path: &str, format: Option<usize>) -> Result<Route, String> {
         Some("3D Studio") => return Ok(Route::Tds),
         _ => {}
     }
-    let pdf = if by_extension { ext == "pdf" } else { f.is_some_and(|f| f.name == "PDF Files") };
+    let pdf = if by_extension {
+        ext == "pdf"
+    } else {
+        f.is_some_and(|f| f.name == "PDF Files")
+    };
     if pdf {
         return Ok(Route::Pdf);
     }
@@ -114,10 +128,12 @@ fn route(path: &str, format: Option<usize>) -> Result<Route, String> {
     let named = FORMATS
         .iter()
         .find(|f| f.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)));
-    Err(match named.and_then(|f| unsupported_reason(f.support).map(|r| (f, r))) {
-        Some((f, reason)) => format!("{}: {reason}", f.name),
-        None => crate::t!("OpenCAD Studio has no importer for this format.").into_owned(),
-    })
+    Err(
+        match named.and_then(|f| unsupported_reason(f.support).map(|r| (f, r))) {
+            Some((f, reason)) => format!("{}: {reason}", f.name),
+            None => crate::t!("OpenCAD Studio has no importer for this format.").into_owned(),
+        },
+    )
 }
 
 impl OpenCADStudio {
@@ -136,7 +152,8 @@ impl OpenCADStudio {
             }
             ("IMPORT", true) => {
                 use crate::command::{CadCommand, FreeTextValuePromptCommand};
-                let command = FreeTextValuePromptCommand::new("_IMPORTFILE", "Enter import file name:");
+                let command =
+                    FreeTextValuePromptCommand::new("_IMPORTFILE", "Enter import file name:");
                 self.command_line.push_info(&command.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(command));
                 Some(Task::none())
@@ -169,7 +186,12 @@ impl OpenCADStudio {
     }
 
     pub(in crate::app) fn open_import_file_dialog(&mut self) {
-        let path = self.import_dialogs.recent.first().cloned().unwrap_or_default();
+        let path = self
+            .import_dialogs
+            .recent
+            .first()
+            .cloned()
+            .unwrap_or_default();
         self.import_dialogs.file = Some(ImportFileState {
             path,
             format: 0,
@@ -184,16 +206,18 @@ impl OpenCADStudio {
     pub(in crate::app) fn open_dgn_import_dialog(&mut self, path: &str) -> Result<(), String> {
         use crate::scene::model::underlay_vector::{dgn_import, dgn_import_models};
         let models = dgn_import_models(path).unwrap_or_default();
-        let Some(import) = models.first().and_then(|m| dgn_import(path, m)) else {
+        let Some(import) = models
+            .first()
+            .and_then(|m| dgn_import(path, m, dgn_import::settings().code_page))
+        else {
             return Err(crate::t!("Invalid or unsupported DGN file.").into_owned());
         };
         // The options chosen last (DGNIMPORTMODE and the kept import
         // settings when the window opens) stay when the file is changed.
         let previous = self.import_dialogs.dgn.take();
         let saved = dgn_import::settings();
-        let keep = |f: fn(&DgnImportState) -> bool, default: bool| {
-            previous.as_ref().map_or(default, f)
-        };
+        let keep =
+            |f: fn(&DgnImportState) -> bool, default: bool| previous.as_ref().map_or(default, f);
         self.import_dialogs.dgn = Some(DgnImportState {
             path: path.to_string(),
             version: if import.v7 { "V7" } else { "V8" },
@@ -210,6 +234,7 @@ impl OpenCADStudio {
             prefix_duplicates: keep(|s| s.prefix_duplicates, saved.mode == 2),
             sub_units: keep(|s| s.sub_units, false),
             explode_text_nodes: keep(|s| s.explode_text_nodes, saved.explode_text_nodes),
+            code_page: previous.as_ref().map_or(saved.code_page, |s| s.code_page),
             references: previous.as_ref().map_or(saved.references, |s| s.references),
             existing_reference: previous
                 .as_ref()
@@ -274,6 +299,10 @@ impl OpenCADStudio {
                 }
                 Task::none()
             }
+            Ok(Route::Obj) => {
+                self.remember_import(path);
+                self.on_obj_import_path_some(path.into())
+            }
             Err(error) => {
                 self.command_line.push_error(&error);
                 Task::none()
@@ -281,7 +310,10 @@ impl OpenCADStudio {
         }
     }
 
-    pub(in crate::app) fn update_import_dialog(&mut self, message: ImportDialogMsg) -> Task<Message> {
+    pub(in crate::app) fn update_import_dialog(
+        &mut self,
+        message: ImportDialogMsg,
+    ) -> Task<Message> {
         let i = self.active_tab;
         match message {
             ImportDialogMsg::Help(which) => {
@@ -290,10 +322,12 @@ impl OpenCADStudio {
                         "Imports a DGN model as drawing objects: levels as layers, cells as blocks."
                     ),
                     "3ds" => std::borrow::Cow::Owned(crate::tr!("import-3ds", "help")),
-                    "3ds-material" => std::borrow::Cow::Owned(crate::tr!("import-3ds-alert", "help")),
-                    _ => crate::t!(
-                        "Imports a file of the chosen format with the format's importer."
-                    ),
+                    "3ds-material" => {
+                        std::borrow::Cow::Owned(crate::tr!("import-3ds-alert", "help"))
+                    }
+                    _ => {
+                        crate::t!("Imports a file of the chosen format with the format's importer.")
+                    }
                 };
                 self.command_line.push_info(help.as_ref());
             }
@@ -405,6 +439,11 @@ impl OpenCADStudio {
                             self.command_line.push_error(&error);
                         }
                     }
+                    Ok(Route::Obj) => {
+                        self.remember_import(&path);
+                        self.close_active_modal();
+                        return self.on_obj_import_path_some(path.into());
+                    }
                 }
             }
             // ── 3D Studio Import ─────────────────────────────────────────
@@ -422,7 +461,12 @@ impl OpenCADStudio {
             }
             ImportDialogMsg::TdsPicked(None) => {}
             ImportDialogMsg::TdsCheck(k, on) => {
-                if let Some(c) = self.import_dialogs.tds.as_mut().and_then(|s| s.checked.get_mut(k)) {
+                if let Some(c) = self
+                    .import_dialogs
+                    .tds
+                    .as_mut()
+                    .and_then(|s| s.checked.get_mut(k))
+                {
                     *c = on;
                 }
             }
@@ -501,8 +545,12 @@ impl OpenCADStudio {
                 use crate::scene::model::underlay_vector::dgn_import;
                 if let Some(s) = self.import_dialogs.dgn.as_mut() {
                     if let Some(model) = s.models.get(k) {
-                        if let Some(import) = dgn_import(&s.path, &model.label) {
-                            s.mapping = [0, 1, 2, 3].map(|tab| dgn_import::mapping_rows(&import, tab));
+                        // Re-decode the mapping rows for the page the window
+                        // chose, so the layer names match what the import uses.
+                        let code_page = s.code_page;
+                        if let Some(import) = dgn_import(&s.path, &model.label, code_page) {
+                            s.mapping =
+                                [0, 1, 2, 3].map(|tab| dgn_import::mapping_rows(&import, tab));
                             s.units = import.unit_names.clone();
                         }
                         s.model = k;
@@ -527,6 +575,29 @@ impl OpenCADStudio {
             ImportDialogMsg::DgnExplode(on) => {
                 if let Some(s) = self.import_dialogs.dgn.as_mut() {
                     s.explode_text_nodes = on;
+                }
+            }
+            ImportDialogMsg::DgnCodePage(label) => {
+                use crate::scene::model::underlay_vector::dgn_import;
+                if let Some(s) = self.import_dialogs.dgn.as_mut() {
+                    // The picker labels map to the page the parser takes; an
+                    // unknown label keeps the dialog as it was.
+                    let Some(code_page) =
+                        crate::modules::insert::dgn_import::code_page_from_label(&label)
+                    else {
+                        return Task::none();
+                    };
+                    s.code_page = code_page;
+                    // Re-decode the mapping rows and unit names with the new
+                    // page, the way switching models does, so the preview
+                    // layer names match the level names the import will use.
+                    if let Some(model) = s.models.get(s.model) {
+                        if let Some(import) = dgn_import(&s.path, &model.label, code_page) {
+                            s.mapping =
+                                [0, 1, 2, 3].map(|tab| dgn_import::mapping_rows(&import, tab));
+                            s.units = import.unit_names.clone();
+                        }
+                    }
                 }
             }
             ImportDialogMsg::DgnReferences(mode) => {
@@ -561,6 +632,9 @@ impl OpenCADStudio {
                     prefix_duplicates: s.prefix_duplicates,
                     references: s.references,
                     existing_reference: s.existing_reference,
+                    // The window's picker chooses the V7 text code page; it
+                    // overrides the code-page token the command line stored.
+                    code_page: s.code_page,
                 };
                 // The window's choices become DGNIMPORTMODE and the kept
                 // settings the command line imports with.
@@ -573,6 +647,7 @@ impl OpenCADStudio {
                     explode_text_nodes: s.explode_text_nodes,
                     references: s.references,
                     existing_reference: s.existing_reference,
+                    code_page: s.code_page,
                 });
                 self.save_config();
                 self.close_active_modal();
@@ -583,24 +658,54 @@ impl OpenCADStudio {
     }
 
     /// The import: into a new drawing (or the current one), one undo step;
-    /// then the model's reference attachments as the request says.
-    pub(in crate::app) fn run_dgn_import(&mut self, i: usize, request: DgnImportRequest) -> Task<Message> {
-        let Some(import) =
-            crate::scene::model::underlay_vector::dgn_import(&request.path, &request.model)
-        else {
-            self.command_line
-                .push_error(crate::t!("Invalid or unsupported DGN file.").as_ref());
-            return Task::none();
+    /// then the model's reference attachments as the request says. The GUI and
+    /// positional command keep their command-line error reporting.
+    pub(in crate::app) fn run_dgn_import(
+        &mut self,
+        i: usize,
+        request: DgnImportRequest,
+    ) -> Task<Message> {
+        match self.try_run_dgn_import(i, request) {
+            Ok((task, _)) => task,
+            Err(error) => {
+                match error {
+                    dgn_import::DgnImportError::InvalidDgn => self
+                        .command_line
+                        .push_error(crate::t!("Invalid or unsupported DGN file.").as_ref()),
+                    dgn_import::DgnImportError::EmptyModel => self.command_line.push_error(
+                        crate::t!("The DGN model has nothing that can be imported.").as_ref(),
+                    ),
+                    other => {
+                        let message = other.to_string();
+                        self.command_line.push_error(&message);
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Fallible execution for semantic callers. On success the count is the
+    /// model's top-level converted entities, excluding block-definition members
+    /// and any reference entities attached afterwards.
+    pub(in crate::app) fn try_run_dgn_import(
+        &mut self,
+        i: usize,
+        request: DgnImportRequest,
+    ) -> Result<(Task<Message>, usize), dgn_import::DgnImportError> {
+        let Some(import) = crate::scene::model::underlay_vector::dgn_import(
+            &request.path,
+            &request.model,
+            request.code_page,
+        ) else {
+            return Err(dgn_import::DgnImportError::InvalidDgn);
         };
-        let converted =
-            dgn_import::convert(&import, request.sub_units, request.explode_text_nodes);
+        let converted = dgn_import::convert(&import, request.sub_units, request.explode_text_nodes);
+        let entities = converted.entities.len();
         let no_references =
             request.references == ReferenceMode::Ignore || import.references.is_empty();
         if converted.entities.is_empty() && no_references {
-            self.command_line.push_error(
-                crate::t!("The DGN model has nothing that can be imported.").as_ref(),
-            );
-            return Task::none();
+            return Err(dgn_import::DgnImportError::EmptyModel);
         }
         let mut task = Task::none();
         let i = if request.current_drawing {
@@ -643,7 +748,7 @@ impl OpenCADStudio {
         self.command_line.push_output("Regenerating model.");
         self.refresh_layer_panel();
         self.refresh_properties();
-        task
+        Ok((task, entities))
     }
 
     /// One reference attachment: its file translated to "<file>-<model>.dwg"
@@ -721,7 +826,7 @@ impl OpenCADStudio {
         // drawing, like "Do not overwrite"; add a confirmation if wanted.
         let write = !target.is_file() || request.existing_reference == ExistingReference::Overwrite;
         if write {
-            let Some(source) = dgn_import(&path, &model) else {
+            let Some(source) = dgn_import(&path, &model, request.code_page) else {
                 return;
             };
             let mut scene = crate::scene::Scene::new();
@@ -784,8 +889,7 @@ impl Naming {
         match self {
             Naming::Keep => name.to_string(),
             Naming::Prefix(p) => {
-                let shared = kind == 'l'
-                    && (name == "0" || name.eq_ignore_ascii_case("Defpoints"));
+                let shared = kind == 'l' && (name == "0" || name.eq_ignore_ascii_case("Defpoints"));
                 if shared {
                     name.to_string()
                 } else {
@@ -820,7 +924,12 @@ fn place_converted(
         let doc = &scene.document;
         let taken = |n: &str| doc.layers.iter().any(|l| l.name.eq_ignore_ascii_case(n));
         let target = naming.name('l', name, &taken);
-        if !scene.document.layers.iter().any(|l| l.name.eq_ignore_ascii_case(&target)) {
+        if !scene
+            .document
+            .layers
+            .iter()
+            .any(|l| l.name.eq_ignore_ascii_case(&target))
+        {
             let mut layer = document::tables::Layer::new(target.as_str());
             layer.handle = scene.document.allocate_handle();
             layer.color = *color;
@@ -834,9 +943,18 @@ fn place_converted(
     let mut styles: HashMap<String, String> = HashMap::new();
     for (name, font) in &converted.styles {
         let doc = &scene.document;
-        let taken = |n: &str| doc.text_styles.iter().any(|s| s.name.eq_ignore_ascii_case(n));
+        let taken = |n: &str| {
+            doc.text_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(n))
+        };
         let target = naming.name('s', name, &taken);
-        if !scene.document.text_styles.iter().any(|s| s.name.eq_ignore_ascii_case(&target)) {
+        if !scene
+            .document
+            .text_styles
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(&target))
+        {
             let mut style = document::tables::TextStyle::new(target.as_str());
             style.handle = scene.document.allocate_handle();
             style.font_file = font.clone();
@@ -850,33 +968,53 @@ fn place_converted(
     let mut dim_styles: HashMap<String, String> = HashMap::new();
     for (name, values) in &converted.dim_styles {
         let doc = &scene.document;
-        let taken = |n: &str| doc.dim_styles.iter().any(|s| s.name.eq_ignore_ascii_case(n));
+        let taken = |n: &str| {
+            doc.dim_styles
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(n))
+        };
         let target = naming.name('s', name, &taken);
-        if !scene.document.dim_styles.iter().any(|s| s.name.eq_ignore_ascii_case(&target)) {
+        if !scene
+            .document
+            .dim_styles
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(&target))
+        {
             let doc = &scene.document;
             let base = values.clone().or_else(|| {
                 doc.dim_styles
                     .iter()
                     .find(|s| s.name.eq_ignore_ascii_case(name))
                     .or_else(|| {
-                        doc.dim_styles
-                            .iter()
-                            .find(|s| s.name.eq_ignore_ascii_case(&doc.header.current_dimstyle_name))
+                        doc.dim_styles.iter().find(|s| {
+                            s.name
+                                .eq_ignore_ascii_case(&doc.header.current_dimstyle_name)
+                        })
                     })
                     .cloned()
             });
-            let mut style = base.unwrap_or_else(|| document::tables::DimStyle::new(target.as_str()));
+            let mut style =
+                base.unwrap_or_else(|| document::tables::DimStyle::new(target.as_str()));
             if values.is_some() {
-                let text = styles.get(&style.dimtxsty).cloned().unwrap_or_else(|| style.dimtxsty.clone());
-                if let Some(t) = scene.document.text_styles.iter().find(|t| t.name.eq_ignore_ascii_case(&text)) {
+                let text = styles
+                    .get(&style.dimtxsty)
+                    .cloned()
+                    .unwrap_or_else(|| style.dimtxsty.clone());
+                if let Some(t) = scene
+                    .document
+                    .text_styles
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(&text))
+                {
                     style.dimtxsty = t.name.clone();
                     style.dimtxsty_handle = t.handle;
                 }
                 let arrow = crate::entities::arrowheads::resolve(&mut scene.document, "_Closed");
                 style.dimblk1 = arrow.unwrap_or(document::Handle::NULL);
                 style.dimblk2 = style.dimblk1;
-                style.dimldrblk = crate::entities::arrowheads::resolve(&mut scene.document, "_None")
-                    .unwrap_or(document::Handle::NULL);
+                style.dimldrblk =
+                    crate::entities::arrowheads::resolve(&mut scene.document, "_None")
+                        .unwrap_or(document::Handle::NULL);
             }
             style.name = target.clone();
             style.handle = scene.document.allocate_handle();
@@ -887,8 +1025,12 @@ fn place_converted(
     let mut blocks: HashMap<String, String> = HashMap::new();
     // Names the drawing has or this import gave, upper-cased: one lookup
     // each, however many blocks the file brings.
-    let mut claimed: std::collections::HashSet<String> =
-        scene.document.block_records.iter().map(|b| b.name.to_ascii_uppercase()).collect();
+    let mut claimed: std::collections::HashSet<String> = scene
+        .document
+        .block_records
+        .iter()
+        .map(|b| b.name.to_ascii_uppercase())
+        .collect();
     for (name, _) in &converted.blocks {
         let taken = |n: &str| claimed.contains(&n.to_ascii_uppercase());
         let target = naming.name('b', name, &taken);
@@ -939,7 +1081,9 @@ fn place_converted(
             .into_iter()
             .map(|e| placed_dimension_text(&scene.document, fix(e)))
             .collect();
-        if let Ok(handles) = scene.define_block_from_owned_entities(entities, target, glam::DVec3::ZERO) {
+        if let Ok(handles) =
+            scene.define_block_from_owned_entities(entities, target, glam::DVec3::ZERO)
+        {
             scene.bind_outline_hatches(&handles);
         }
     }
@@ -966,4 +1110,82 @@ fn placed_dimension_text(
         }
     }
     entity
+}
+
+#[cfg(test)]
+mod dgn_dialog_tests {
+    use super::*;
+    use crate::scene::model::underlay_vector::dgn_import;
+    use crate::ui::window::pdf_dialogs::PageThumb;
+
+    fn stub_dialog() -> DgnImportState {
+        DgnImportState {
+            path: "/tmp/no-such-ocs-drawing.dgn".into(),
+            version: "V7",
+            models: vec![PageThumb {
+                label: "Default".into(),
+                image: None,
+            }],
+            model: 0,
+            current_drawing: false,
+            prefix_duplicates: false,
+            sub_units: false,
+            explode_text_nodes: false,
+            code_page: None,
+            references: crate::modules::insert::dgn_import::ReferenceMode::Translate,
+            existing_reference: crate::modules::insert::dgn_import::ExistingReference::Prompt,
+            units: ("m".into(), "mm".into()),
+            mapping_tab: 0,
+            mapping: Default::default(),
+        }
+    }
+
+    #[test]
+    fn dialog_code_page_choice_stores_the_v7_page() {
+        use crate::modules::insert::dgn_import::DgnImportSettings;
+        let _own = crate::modules::insert::dgn_import::OwnSettings::take();
+        // The checkbox must win over the stored code page for this window
+        // even when a command-line import earlier kept 1250.
+        dgn_import::set_settings(DgnImportSettings {
+            mode: 0,
+            explode_text_nodes: false,
+            references: crate::modules::insert::dgn_import::ReferenceMode::Translate,
+            existing_reference: crate::modules::insert::dgn_import::ExistingReference::Prompt,
+            code_page: Some(1250),
+        });
+        let mut app = OpenCADStudio::new_for_test();
+        app.import_dialogs.dgn = Some(stub_dialog());
+
+        let _ = app.update_import_dialog(ImportDialogMsg::DgnCodePage(
+            crate::modules::insert::dgn_import::code_page_label(None),
+        ));
+        assert_eq!(
+            app.import_dialogs.dgn.as_ref().expect("dialog").code_page,
+            None
+        );
+
+        // Unticking and importing resets the stored page to the default; the
+        // stub path only fails the import itself, after the choice is stored.
+        let _ = app.update_import_dialog(ImportDialogMsg::DgnOk);
+        assert_eq!(dgn_import::settings().code_page, None);
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.import_dialogs.dgn = Some(stub_dialog());
+        let _ = app.update_import_dialog(ImportDialogMsg::DgnCodePage(
+            crate::modules::insert::dgn_import::code_page_label(Some(1250)),
+        ));
+        let _ = app.update_import_dialog(ImportDialogMsg::DgnOk);
+        assert_eq!(dgn_import::settings().code_page, Some(1250));
+        // Unpicked defaults stay the plain 1252: the label round-trips.
+        assert_eq!(
+            crate::modules::insert::dgn_import::code_page_label(None),
+            "Windows-1252 (Western, default)"
+        );
+        assert_eq!(
+            crate::modules::insert::dgn_import::code_page_from_label(
+                &crate::modules::insert::dgn_import::code_page_label(Some(1257))
+            ),
+            Some(Some(1257))
+        );
+    }
 }

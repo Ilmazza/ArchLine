@@ -2,11 +2,11 @@
 //
 // Shared grips and properties for modeler entities.
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_prop as edit, format_area, format_length, parse_f64, ro_prop as ro,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::t;
 use document::entities::{Body, Region, Solid3D, Surface};
@@ -846,7 +846,10 @@ impl Grippable for Surface {
             return;
         }
         if let GripApply::Translate(delta) = apply {
-            translate_surface(self, document::types::Vector3::new(delta.x, delta.y, delta.z));
+            translate_surface(
+                self,
+                document::types::Vector3::new(delta.x, delta.y, delta.z),
+            );
         }
     }
 }
@@ -1017,7 +1020,7 @@ mod tests {
         let EntityType::Region(mut region) =
             crate::scene::model::presspull_model::region_from_loops(
                 &loops,
-                crate::command::WorkingPlane::default(),
+                crate::entities::transform::WorkingPlane::default(),
             )
             .unwrap()
         else {

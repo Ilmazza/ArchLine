@@ -19,12 +19,34 @@ use document::types::{Vector2, Vector3};
 use document::{Document, Handle};
 use std::borrow::Cow;
 
+static SELECTION_ANNO_DISPLAY: std::sync::atomic::AtomicI16 = std::sync::atomic::AtomicI16::new(1);
+static ANNO_MONITOR: std::sync::atomic::AtomicI16 = std::sync::atomic::AtomicI16::new(-2);
+
+/// SELECTIONANNODISPLAY, a profile setting: 1 shows a selected annotative
+/// object's other scale representations dimmed, 0 hides them.
+pub(crate) fn selection_anno_display() -> i16 {
+    SELECTION_ANNO_DISPLAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_selection_anno_display(value: i16) {
+    SELECTION_ANNO_DISPLAY.store(value.clamp(0, 1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// ANNOMONITOR, a profile setting.
+pub(crate) fn anno_monitor() -> i16 {
+    ANNO_MONITOR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_anno_monitor(value: i16) {
+    ANNO_MONITOR.store(value.clamp(-2, 2), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// MSLTSCALE: whether model-space linetypes follow the annotation scale. A
 /// drawing that doesn't store the variable gets its default, on.
 pub fn model_linetypes_follow_annotation(doc: &Document) -> bool {
     doc.drawing_variable("MSLTSCALE")
         .and_then(|value| value.trim().parse::<i32>().ok())
-        .map_or(true, |value| value != 0)
+        != Some(0)
 }
 
 /// Resolve a handle to a `Dictionary` object, if it is one.
@@ -646,11 +668,62 @@ pub fn remove_annotation_context_for_scale(
         set_entity_annotative(doc, entity, false);
         return true;
     }
+    let removed_default = match doc.objects.get(&leaf_h) {
+        Some(ObjectType::ObjectContextData(leaf)) if leaf.is_default => Some(leaf.scale),
+        _ => None,
+    };
     doc.objects.remove(&leaf_h);
     if let Some(ObjectType::Dictionary(coll)) = doc.objects.get_mut(&coll_h) {
         coll.entries.retain(|(_, h)| *h != leaf_h);
     }
+    // The object's own data is its default representation's. When that one
+    // goes, the first remaining representation becomes the default and the
+    // object takes its placement and size.
+    if let Some(old_scale) = removed_default {
+        promote_default_context(doc, entity, coll_h, old_scale);
+    }
     true
+}
+
+fn promote_default_context(doc: &mut Document, entity: Handle, coll_h: Handle, old_scale: Handle) {
+    let Some(next) = as_dict(doc, coll_h).and_then(|c| c.entries.first().map(|(_, h)| *h)) else {
+        return;
+    };
+    let new_scale = match doc.objects.get_mut(&next) {
+        Some(ObjectType::ObjectContextData(leaf)) => {
+            leaf.is_default = true;
+            leaf.scale
+        }
+        _ => return,
+    };
+    let inverse = |doc: &Document, scale: Handle| match doc.objects.get(&scale) {
+        Some(ObjectType::Scale(scale)) => Some(scale.inverse_factor()),
+        _ => None,
+    };
+    let ratio = match (inverse(doc, new_scale), inverse(doc, old_scale)) {
+        (Some(new), Some(old))
+            if old.abs() > 1e-12 && (new / old).is_finite() && new / old > 0.0 =>
+        {
+            new / old
+        }
+        _ => 1.0,
+    };
+    let Some(current) = doc.get_entity(entity) else {
+        return;
+    };
+    let mut placed = entity_for_annotation_context(doc, current, Some(new_scale)).into_owned();
+    match &mut placed {
+        EntityType::Text(text) => text.height *= ratio,
+        EntityType::MText(mtext) => {
+            mtext.height *= ratio;
+            mtext.rectangle_width *= ratio;
+        }
+        EntityType::AttributeDefinition(attribute) => attribute.height *= ratio,
+        _ => {}
+    }
+    if let Some(slot) = doc.get_entity_mut(entity) {
+        *slot = placed;
+    }
 }
 
 /// Resolve an entity's `ACDB_ANNOTATIONSCALES` collection dictionary handle, if
@@ -1072,6 +1145,144 @@ pub(crate) fn place_attribute_for_annotation_scale(
     true
 }
 
+/// Move the stored representations of an INSERT-owned ATTRIB with its grip.
+/// The ATTRIB is not a top-level document entity, so the normal entity
+/// context synchronization cannot reach these leaves.
+pub(crate) fn translate_insert_attribute_contexts(
+    doc: &mut Document,
+    attribute: &document::entities::AttributeEntity,
+    delta: glam::DVec3,
+) -> bool {
+    let mut changed = false;
+    for handle in insert_attribute_context_handles(doc, attribute) {
+        let Some(ObjectType::ObjectContextData(leaf)) = doc.objects.get_mut(&handle) else {
+            continue;
+        };
+        let ObjectContextKind::MTextAttribute(context) = &mut leaf.kind else {
+            continue;
+        };
+        context.insertion.x += delta.x;
+        context.insertion.y += delta.y;
+        context.alignment.x += delta.x;
+        context.alignment.y += delta.y;
+        if let Some(embedded) = context.context.as_mut() {
+            embedded.mtext.insertion.x += delta.x;
+            embedded.mtext.insertion.y += delta.y;
+            embedded.mtext.insertion.z += delta.z;
+        }
+        changed = true;
+    }
+    changed
+}
+
+/// Carry every annotation-scale representation of each INSERT-owned ATTRIB
+/// through the same MOVE/ROTATE/SCALE/MIRROR transform as the reference.
+/// These attributes are inline on the INSERT, so the top-level entity context
+/// walker cannot see their individual dictionaries.
+pub(crate) fn transform_insert_attribute_contexts(
+    doc: &mut Document,
+    attributes_before: &[document::entities::AttributeEntity],
+    transform: &crate::entities::transform::EntityTransform,
+) -> bool {
+    let mut changed = false;
+    for attribute in attributes_before {
+        for handle in insert_attribute_context_handles(doc, attribute) {
+            let scale = match doc.objects.get(&handle) {
+                Some(ObjectType::ObjectContextData(leaf)) => leaf.scale,
+                _ => continue,
+            };
+            let mut placed = attribute.clone();
+            if !place_attribute_for_annotation_scale(doc, &mut placed, Some(scale)) {
+                continue;
+            }
+            let mut entity = EntityType::AttributeEntity(placed);
+            crate::scene::view::dispatch::apply_transform(&mut entity, transform);
+            let EntityType::AttributeEntity(transformed) = entity else {
+                continue;
+            };
+            let Some(ObjectType::ObjectContextData(leaf)) = doc.objects.get_mut(&handle) else {
+                continue;
+            };
+            let ObjectContextKind::MTextAttribute(context) = &mut leaf.kind else {
+                continue;
+            };
+            context.horizontal_mode = transformed.horizontal_alignment.to_value();
+            context.rotation = transformed.rotation;
+            context.insertion =
+                Vector2::new(transformed.insertion_point.x, transformed.insertion_point.y);
+            context.alignment =
+                Vector2::new(transformed.alignment_point.x, transformed.alignment_point.y);
+            if let (Some(embedded), Some(mtext)) =
+                (&mut context.context, &transformed.embedded_mtext)
+            {
+                sync_mtext_context(&mut embedded.mtext, mtext);
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn insert_attribute_context_handles(
+    doc: &Document,
+    attribute: &document::entities::AttributeEntity,
+) -> Vec<Handle> {
+    if explicit_annotation_flag(doc, &attribute.common) == Some(false) {
+        return Vec::new();
+    }
+    attribute
+        .common
+        .xdictionary_handle
+        .and_then(|xdictionary| annotation_scales_in_xdictionary(doc, xdictionary))
+        .and_then(|collection| as_dict(doc, collection))
+        .map(|collection| {
+            collection
+                .entries
+                .iter()
+                .map(|(_, handle)| *handle)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Capture the context leaves changed by a transform or grip edit. INSERT
+/// attributes have their own dictionaries in addition to the INSERT's tree.
+pub(crate) fn annotation_context_objects_for_entity(
+    doc: &Document,
+    entity: &EntityType,
+) -> Vec<(Handle, ObjectType)> {
+    let mut seen = std::collections::HashSet::new();
+    let entity_handles: Vec<Handle> = annotation_scales_dict(doc, entity.common().handle)
+        .and_then(|collection| as_dict(doc, collection))
+        .map(|collection| {
+            collection
+                .entries
+                .iter()
+                .map(|(_, handle)| *handle)
+                .collect()
+        })
+        .unwrap_or_default();
+    let attribute_handles: Vec<Handle> = match entity {
+        EntityType::Insert(insert) => insert
+            .attributes
+            .iter()
+            .flat_map(|attribute| insert_attribute_context_handles(doc, attribute))
+            .collect(),
+        _ => Vec::new(),
+    };
+    attribute_handles
+        .into_iter()
+        .chain(entity_handles)
+        .filter(|handle| seen.insert(*handle))
+        .filter_map(|handle| {
+            doc.objects
+                .get(&handle)
+                .cloned()
+                .map(|object| (handle, object))
+        })
+        .collect()
+}
+
 fn apply_hatch_context(hatch: &mut document::entities::Hatch, context: &HatchScaleContext) {
     hatch.pattern.lines.clone_from(&context.pattern_lines);
     hatch.pattern_scale = context.pattern_scale;
@@ -1477,7 +1688,7 @@ pub fn translate_annotation_contexts(
     transform_annotation_contexts(
         doc,
         entity_handle,
-        &crate::command::EntityTransform::Translate(delta),
+        &crate::entities::transform::EntityTransform::Translate(delta),
     )
 }
 
@@ -1487,7 +1698,7 @@ pub fn translate_annotation_contexts(
 pub fn transform_annotation_contexts(
     doc: &mut Document,
     entity_handle: Handle,
-    t: &crate::command::EntityTransform,
+    t: &crate::entities::transform::EntityTransform,
 ) -> bool {
     let Some(base_entity) = doc.get_entity(entity_handle).cloned() else {
         return false;
@@ -1518,7 +1729,7 @@ pub fn transform_annotation_contexts(
         // while the complete per-segment list is a separate persisted field.
         if let (
             EntityType::MultiLeader(mleader),
-            crate::command::EntityTransform::Translate(delta),
+            crate::entities::transform::EntityTransform::Translate(delta),
         ) = (&mut placed, t)
         {
             let offset = Vector3::new(delta.x, delta.y, delta.z);
@@ -1628,6 +1839,56 @@ pub fn text_style_is_annotative(doc: &Document, name: &str) -> bool {
         .iter()
         .find(|s| name_matches(&s.name, name))
         .is_some_and(|s| s.annotative)
+}
+
+/// Whether the text style with this handle matches its text orientation to
+/// the layout: its `AcadAnnoPO` flag.
+pub fn text_style_orientation(doc: &Document, handle: Handle) -> bool {
+    doc.object_xdata(handle)
+        .and_then(|data| data.get_record("AcadAnnoPO"))
+        .is_some_and(|record| {
+            record.values.iter().any(|value| {
+                matches!(value, document::xdata::XDataValue::Integer16(n) if *n != 0)
+            })
+        })
+}
+
+/// Set or clear the text style's `AcadAnnoPO` flag.
+pub fn set_text_style_orientation(doc: &mut Document, handle: Handle, on: bool) {
+    if on == text_style_orientation(doc, handle) {
+        return;
+    }
+    if on {
+        crate::scene::block_metadata::ensure_application(doc, "AcadAnnoPO");
+        let mut record = document::xdata::ExtendedDataRecord::new("AcadAnnoPO");
+        record.values = vec![document::xdata::XDataValue::Integer16(1)];
+        doc.set_object_xdata_record(handle, record);
+    } else {
+        doc.remove_object_xdata_record(handle, "AcadAnnoPO");
+    }
+}
+
+/// A new text of the annotative style `name` that matches its orientation to
+/// the layout takes the same `AcadAnnoPO` flag.
+pub fn apply_style_orientation(doc: &mut Document, handle: Handle, style: &str) {
+    let Some(style) = doc
+        .text_styles
+        .iter()
+        .find(|s| name_matches(&s.name, style))
+        .filter(|s| s.annotative)
+        .map(|s| s.handle)
+    else {
+        return;
+    };
+    if text_style_orientation(doc, style) {
+        crate::scene::block_metadata::ensure_application(doc, "AcadAnnoPO");
+        crate::scene::view::dispatch::set_entity_xdata(
+            doc,
+            handle,
+            "AcadAnnoPO",
+            Some(vec![document::xdata::XDataValue::Integer16(1)]),
+        );
+    }
 }
 
 pub fn dim_style_is_annotative(doc: &Document, name: &str) -> bool {
@@ -2132,7 +2393,7 @@ fn annotation_flag(data: &document::xdata::ExtendedData) -> Option<bool> {
             document::xdata::XDataValue::Integer16(value) => Some(*value != 0),
             _ => None,
         })
-        .last()
+        .next_back()
 }
 
 fn definition_annotation_flag(doc: &Document, br: &document::tables::BlockRecord) -> Option<bool> {

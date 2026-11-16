@@ -8,8 +8,8 @@ use document::objects::{
 use document::EntityType;
 use kernel::brep::{Body, Surface};
 
-use crate::command::EntityTransform;
 use crate::entities::traits::EntityTypeOps;
+use crate::entities::transform::EntityTransform;
 use crate::scene::model::object::{
     GripApply, GripDef, GripShape, PropSection, PropValue, Property,
 };
@@ -192,7 +192,7 @@ fn placed_operands(
             let mut placed = operation.clone();
             let base = placed.base_mut()?;
             base.transform = (frame * matrix(base.transform)?).to_cols_array();
-            Some((id, kernel::acis::rebuild_body(&placed).ok()?))
+            Some((id, ocs_acis::rebuild_body(&placed).ok()?))
         })
         .collect()
 }
@@ -470,7 +470,10 @@ pub fn primitive_property_operation(
 /// the common entity rows plus [`primitive_properties`].  A generic B-rep has
 /// no stable primitive dimensions to expose, but it still uses the compact
 /// Solid History palette rather than the internal ACIS/cache diagnostics.
-pub fn has_compact_solid_properties(document: &document::Document, handle: document::Handle) -> bool {
+pub fn has_compact_solid_properties(
+    document: &document::Document,
+    handle: document::Handle,
+) -> bool {
     match document.get_entity(handle) {
         Some(document::EntityType::Solid3D(_)) => true,
         Some(document::EntityType::Surface(_)) => matches!(
@@ -489,7 +492,7 @@ pub fn reference_point(operation: &SolidHistoryOperation) -> Option<glam::DVec3>
         SolidHistoryOperation::Sphere(value) => world_point(value.base.transform, [0.0, 0.0, 0.0]),
         SolidHistoryOperation::Cone(value) => world_point(value.base.transform, [0.0; 3]),
         SolidHistoryOperation::Cylinder(value) => world_point(value.base.transform, [0.0; 3]),
-        SolidHistoryOperation::Sweep(value) => kernel::acis::sweep_history_reference_point(value)
+        SolidHistoryOperation::Sweep(value) => ocs_acis::sweep_history_reference_point(value)
             .ok()
             .map(glam::DVec3::from_array),
         SolidHistoryOperation::Extrusion(value) => world_point(
@@ -837,7 +840,9 @@ fn extrusion_properties(
 
 /// Native surface construction data mirrors the same local profile, placement,
 /// direction and taper used by the extrusion history rebuild.
-pub fn extrusion_surface_data(value: &SolidHistorySweep) -> Option<document::entities::SurfaceData> {
+pub fn extrusion_surface_data(
+    value: &SolidHistorySweep,
+) -> Option<document::entities::SurfaceData> {
     use document::entities::{SurfaceData, SurfaceSweepOptions};
 
     if value.path_entity.is_some() {
@@ -883,7 +888,7 @@ fn sweep_properties(
     let (show_history, show_history_editable) =
         displayed_history_state(object_show_history, show_history_mode);
     let show_value = if show_history { "Yes" } else { "No" };
-    let length = kernel::acis::sweep_history_path_length(value)
+    let length = ocs_acis::sweep_history_path_length(value)
         .ok()
         .map(crate::entities::common::format_length)
         .unwrap_or_default();
@@ -3164,7 +3169,7 @@ fn apply_extrusion_profile_grip(
 }
 
 fn sweep_placement_matrices(value: &SolidHistorySweep) -> Option<(glam::DMat4, glam::DMat4)> {
-    let (profile, path) = kernel::acis::sweep_history_placements(value).ok()?;
+    let (profile, path) = ocs_acis::sweep_history_placements(value).ok()?;
     let matrix = |place: kernel::brep::Placement| {
         glam::DMat4::from_cols(
             glam::DVec3::from_array(place.x_axis).extend(0.0),
@@ -3535,11 +3540,11 @@ fn extrusion_draft_rebuilds(value: &SolidHistorySweep, angle: f64) -> bool {
         return false;
     };
     let Ok((_, _, closed)) =
-        kernel::acis::sweep_profile_geometry(profile, candidate.sweep_entity_transform)
+        ocs_acis::sweep_profile_geometry(profile, candidate.sweep_entity_transform)
     else {
         return false;
     };
-    kernel::acis::rebuild_extrusion_with_mode(&candidate, !closed).is_ok()
+    ocs_acis::rebuild_extrusion_with_mode(&candidate, !closed).is_ok()
 }
 
 fn grip(id: usize, world: glam::DVec3, shape: GripShape, axis: Option<glam::DVec3>) -> GripDef {
@@ -3607,7 +3612,7 @@ pub fn chamfer_distance_grips(
     let Some(source) = document
         .solid_history_tree(handle)
         .and_then(|tree| tree.find(value.base.node_id())?.operands.first().cloned())
-        .and_then(|operand| kernel::acis::rebuild_history_tree(&operand).ok())
+        .and_then(|operand| ocs_acis::rebuild_history_tree(&operand).ok())
     else {
         return Vec::new();
     };
@@ -4168,7 +4173,8 @@ fn apply_primitive_grip_at_corner(
                 if (direction - current).length_squared() <= 1e-24 {
                     return false;
                 }
-                value.direction = document::types::Vector3::new(direction.x, direction.y, direction.z);
+                value.direction =
+                    document::types::Vector3::new(direction.x, direction.y, direction.z);
                 value.end_draft_distance = height;
             }
             _ => return false,

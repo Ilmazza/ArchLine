@@ -13,6 +13,8 @@ use super::OpenCADStudio;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugin::v4_support;
 
+use super::dock::PLUGIN_PALLET_MENU_MAX_ROWS;
+
 /// Session adapter: one active document tab, command line, undo.
 pub(crate) struct HostSession<'a> {
     app: &'a mut OpenCADStudio,
@@ -83,6 +85,17 @@ impl<'a> HostSession<'a> {
         self.app.tabs[self.tab].id
     }
 
+    /// Resolve the legacy panel aliases, then enforce the authenticated
+    /// transport owner. Alias lookup must not turn into an ownership bypass:
+    /// a title/command that resolves to another plugin's panel is refused.
+    fn owned_panel_id(&self, plugin_id: &str, panel_id: &str) -> Option<String> {
+        let resolved = resolve_toggle_panel_id(self.app, panel_id)?;
+        match self.app.plugin_panels.get(&resolved) {
+            Some(panel) if panel.owner_plugin_id.as_deref() == Some(plugin_id) => Some(resolved),
+            _ => None,
+        }
+    }
+
     pub fn document_path(&self, tab_id: u64) -> Option<std::path::PathBuf> {
         self.app
             .tabs
@@ -99,7 +112,10 @@ impl<'a> HostSession<'a> {
         if tab_id != self.tab_id() {
             return None;
         }
-        v4_support::open_document_view_v4(tab_id, self.document())
+        // A failed open is honest: the error lands in the plugin error queue
+        // surface (stderr log) and the caller sees None instead of a path
+        // that cannot be served.
+        v4_support::open_document_view_v4(tab_id, self.document()).ok()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -197,15 +213,26 @@ impl<'a> HostSession<'a> {
                 // the message boundary's fingerprint guard then dedupes.
                 v4_support::publish_document_changed(key.1);
             }
-            v4_support::publish_document_view_v4(self.tab_id(), doc);
-            if key_changed {
-                // API v13 dirty regions: the plugin-write boundary carries
-                // the touched identity set, so consumers visit only what
-                // changed (empty sets mean "walk everything").
-                self.publish_plugin_dirty_regions();
+            // API v13/P1-18: the snapshot publication is fallible. A failed
+            // publication must NOT broadcast dirty regions or record the key
+            // as settled — that would claim a boundary the plugins cannot
+            // observe. The failure is logged; the next publish retries.
+            match v4_support::publish_document_view_v4(self.tab_id(), doc) {
+                Ok(()) => {
+                    if key_changed {
+                        // API v13 dirty regions: the plugin-write boundary
+                        // carries the touched identity set, so consumers
+                        // visit only what changed (empty sets mean "walk
+                        // everything").
+                        self.publish_plugin_dirty_regions();
+                    }
+                    self.app.last_plugin_document =
+                        Some((self.tab_id(), self.app.tabs[self.tab].scene.geometry_epoch));
+                }
+                Err(e) => {
+                    eprintln!("[host] document boundary for tab {} withheld: {e}", self.tab);
+                }
             }
-            self.app.last_plugin_document =
-                Some((self.tab_id(), self.app.tabs[self.tab].scene.geometry_epoch));
         }
     }
 
@@ -380,6 +407,17 @@ impl<'a> HostSession<'a> {
         Ok(())
     }
 
+    /// True when `entity` (not yet in the document) targets a locked layer.
+    /// Additions apply the same lock refusal as stamps and edits (P1-10).
+    fn new_entity_layer_locked(&self, entity: &EntityType) -> bool {
+        self.app.tabs[self.tab]
+            .scene
+            .document
+            .layers
+            .get(&entity.common().layer)
+            .is_some_and(|layer| layer.is_locked())
+    }
+
     pub fn add_entity(&mut self, mut entity: EntityType) -> Handle {
         if self.prepare_scripted_raster_image(&mut entity).is_err() {
             return Handle::NULL;
@@ -419,6 +457,12 @@ impl<'a> HostSession<'a> {
             self.publish_document_view();
             return handle;
         }
+        // Locked layers refuse additions like every other mutation path
+        // (attributes ride their owning insert, which the scene refuses).
+        if self.new_entity_layer_locked(&entity) {
+            eprintln!("[plugin] add_entity refused: the target layer is locked");
+            return Handle::NULL;
+        }
         let handle = self.app.tabs[self.tab].scene.add_entity(entity);
         self.app.sync_registered_layers(self.tab);
         self.app.tabs[self.tab].mark_plugin_entity_dirty(handle, epoch);
@@ -427,24 +471,71 @@ impl<'a> HostSession<'a> {
     }
 
     pub fn add_entities(&mut self, mut entities: Vec<EntityType>) -> Vec<Handle> {
+        // P1-10: preparation/normalization/locked-layer failures are no
+        // longer ignored. A refused item keeps its result slot as NULL (the
+        // legacy positional contract holds) instead of entering the document
+        // unprepared, unnormalized, or on a locked layer; the valid remainder
+        // proceeds.
+        let mut flags = Vec::with_capacity(entities.len());
         for entity in &mut entities {
-            let _ = self.prepare_scripted_raster_image(entity);
-            // Creation input was validated by the caller; a degenerate MLine
-            // simply keeps its supplied (unnormalized) vertices.
-            let _ = self.normalize_scripted_entity(None, entity);
+            flags.push(
+                self.prepare_scripted_raster_image(entity).is_ok()
+                    && self.normalize_scripted_entity(None, entity).is_ok()
+                    && !self.new_entity_layer_locked(entity),
+            );
+        }
+        let mut prepared = Vec::with_capacity(entities.len());
+        let mut slots: Vec<Option<usize>> = Vec::with_capacity(entities.len());
+        for (entity, ok) in entities.drain(..).zip(flags.iter().copied()) {
+            if ok {
+                slots.push(Some(prepared.len()));
+                prepared.push(entity);
+            } else {
+                slots.push(None);
+            }
         }
         let epoch = self.geometry_epoch();
-        let handles = self.app.tabs[self.tab].scene.add_entities(entities);
+        let added = self.app.tabs[self.tab].scene.add_entities(prepared);
         self.app.sync_registered_layers(self.tab);
-        for handle in &handles {
-            self.app.tabs[self.tab].mark_plugin_entity_dirty(*handle, epoch);
+        let mut added_iter = added.into_iter();
+        let mut handles = Vec::with_capacity(slots.len());
+        let mut any_added = false;
+        for slot in slots {
+            match slot {
+                Some(_) => {
+                    let handle = added_iter.next().expect("one added handle per prepared item");
+                    self.app.tabs[self.tab].mark_plugin_entity_dirty(handle, epoch);
+                    handles.push(handle);
+                    any_added = true;
+                }
+                None => handles.push(Handle::NULL),
+            }
         }
-        self.publish_document_view();
+        if any_added {
+            self.publish_document_view();
+        }
         handles
     }
 
     pub fn bump_geometry(&mut self) {
         self.app.tabs[self.tab].scene.bump_geometry();
+    }
+
+    fn bump_handles_incremental(&mut self, handles: &[Handle]) {
+        if handles.is_empty() {
+            return;
+        }
+        let changes: Vec<_> = handles
+            .iter()
+            .copied()
+            .map(|h| (h, crate::scene::ChangeKind::Modified))
+            .collect();
+        let scene = &mut self.app.tabs[self.tab].scene;
+        if scene.changes_touch_block_definition(&changes) {
+            scene.bump_geometry();
+        } else {
+            scene.bump_entities(&changes);
+        }
     }
 
     /// Replace the entity carrying `entity`'s handle in place, refreshing the
@@ -461,6 +552,25 @@ impl<'a> HostSession<'a> {
 
     fn update_entity_inner(&mut self, mut entity: EntityType) -> bool {
         let old = self.document().get_entity(entity.common().handle).cloned();
+        // P1-10 route consistency: a direct update runs the same
+        // reference-coverage validation as the transaction route (attributes
+        // keep their nested replace path, which the scene validates).
+        if !matches!(entity, EntityType::AttributeEntity(_)) {
+            let Some(existing) = old.as_ref() else {
+                return false;
+            };
+            let bound = ocs_plugin_api::entity_coverage::bind_canvas_entity_references(
+                self.document(),
+                &mut entity,
+            )
+            .is_ok();
+            let valid = bound
+                && ocs_plugin_api::entity_coverage::validate_entity_mutation(existing, &entity)
+                    .is_ok();
+            if !valid {
+                return false;
+            }
+        }
         if self
             .normalize_scripted_entity(old.as_ref(), &mut entity)
             .is_err()
@@ -540,28 +650,103 @@ impl<'a> HostSession<'a> {
         // Nested attributes keep their special replace path (they are not
         // scene-model entities).
         let mut plain = Vec::with_capacity(entities.len());
+        // Before-images for a defensive rollback. Validation above makes the
+        // commit effectively infallible while the session owns the document
+        // exclusively, but the host must never PANIC on plugin input: a late
+        // refusal (locked layer re-locked mid-batch, hash miss, memory
+        // pressure) previously aborted the process AFTER earlier entries had
+        // already mutated. The applied writes are rolled back through the
+        // same plugin-write paths, so caches, undo deltas and the geometry
+        // bump see a coherent restored state and the caller gets an honest
+        // error.
+        let mut rollback_nested: Vec<EntityType> = Vec::new();
+        let mut rollback_plain: Vec<EntityType> = Vec::new();
         for entity in entities {
             match entity {
                 EntityType::AttributeEntity(attribute) => {
-                    // Validation above makes this infallible while the
-                    // session owns the document exclusively.
-                    assert!(self.replace_nested_attribute(attribute));
+                    let owner = attribute.common.owner_handle;
+                    if let Some(before) = self.host_model_entity(owner) {
+                        rollback_nested.push(before);
+                    }
+                    if !self.replace_nested_attribute(attribute) {
+                        self.rollback_transaction_writes(
+                            &mut rollback_nested,
+                            &mut rollback_plain,
+                            usize::MAX,
+                        );
+                        self.discard_pending_transaction_scope();
+                        return Err("transaction commit refused a nested attribute write after \
+                                    validation; applied writes were rolled back"
+                            .into());
+                    }
                 }
                 entity => plain.push(entity),
             }
         }
         if !plain.is_empty() {
+        rollback_plain = plain
+            .iter()
+            .filter_map(|entity| self.host_model_entity(entity.common().handle))
+            .collect();
             let expected = plain.len();
             let moved = self.app.tabs[self.tab].scene.update_entities_plugin(plain);
-            // Validation above makes the batch infallible while the session
-            // owns the document exclusively.
-            assert_eq!(moved, expected);
+            if moved != expected {
+                // Only the first `moved` entries were applied — restore those.
+                self.rollback_transaction_writes(
+                    &mut rollback_nested,
+                    &mut rollback_plain,
+                    moved,
+                );
+                self.discard_pending_transaction_scope();
+                return Err(format!(
+                    "transaction commit wrote {moved} of {expected} entities after \
+                     validation; applied writes were rolled back"
+                ));
+            }
         }
         self.app.sync_registered_layers(self.tab);
         self.set_dirty();
         self.publish_document_view();
         self.refresh_grips_of_active_tab();
         Ok(())
+    }
+
+    /// Restore the before-images of a partially applied transaction commit.
+    /// `plain_applied` bounds how many plain before-images to restore
+    /// (usize::MAX = all nested images and the whole plain set).
+    fn rollback_transaction_writes(
+        &mut self,
+        nested: &mut Vec<EntityType>,
+        plain: &mut Vec<EntityType>,
+        plain_applied: usize,
+    ) {
+        // Exact reverse of the application order (plain entries ride the
+        // batched write AFTER the nested attribute writes, and one batch can
+        // contain BOTH a nested attribute of insert H and H itself): undo the
+        // plain writes first, then the nested attribute writes. Restoring in
+        // the other order would splice the pre-plain (but already
+        // attribute-mutated) before-image over the original content.
+        if !plain.is_empty() {
+            let applied = plain.len().min(plain_applied);
+            let _ = self.app.tabs[self.tab]
+                .scene
+                .update_entities_plugin(plain.drain(..applied).collect());
+        }
+        for before in nested.drain(..).rev() {
+            let _ = self.app.tabs[self.tab].scene.update_entity_plugin(before);
+        }
+        self.app.sync_registered_layers(self.tab);
+        self.publish_document_view();
+    }
+
+    /// Close a failed transaction's pending undo scope so subsequent plugin
+    /// writes cannot silently merge into it: the rollback above restored the
+    /// content, and the scope's delta records are dropped (net-zero change,
+    /// no undo entry).
+    fn discard_pending_transaction_scope(&mut self) {
+        if self.app.tabs[self.tab].history.pending.is_some() {
+            self.app.discard_last_undo_entry(self.tab);
+        }
     }
 
     pub fn selection(&self) -> Vec<Handle> {
@@ -591,9 +776,12 @@ impl<'a> HostSession<'a> {
                     self.app.tabs[self.tab].scene.selection_fingerprint(),
                 ));
             }
-            crate::plugin::v4_support::publish_selection_changed_v4(
+            let revision = self.app.bump_selection_revision(self.tab_id());
+            crate::plugin::v4_support::publish_selection_changed_versioned(
                 self.tab_id(),
                 self.selection(),
+                revision,
+                false,
             );
         }
         Ok(())
@@ -623,13 +811,18 @@ impl<'a> HostSession<'a> {
 
     /// Delete the entity with `handle`, keeping the scene's render caches in
     /// sync. Returns `false` when the entity is absent or on a locked layer
-    /// (which `erase_entities` refuses to remove).
+    /// (which `erase_entities` refuses to remove). A failed removal no longer
+    /// marks the entity dirty (P1-17): the dirty-region claim follows the
+    /// actual outcome.
     pub fn remove_entity(&mut self, handle: Handle) -> bool {
-        // API v13 dirty regions: mark before the boundary publish; a removed
-        // handle still rides the set (consumers detect its absence).
+        self.remove_entity_inner(handle)
+    }
+
+    /// Dirty-region mark for a successful removal: a removed handle still
+    /// rides the set — consumers detect its absence.
+    fn mark_removed_entity_dirty(&mut self, handle: Handle) {
         let epoch = self.geometry_epoch();
         self.app.tabs[self.tab].mark_plugin_entity_dirty(handle, epoch);
-        self.remove_entity_inner(handle)
     }
 
     fn remove_entity_inner(&mut self, handle: Handle) -> bool {
@@ -649,6 +842,7 @@ impl<'a> HostSession<'a> {
                 .scene
                 .update_entity(EntityType::Insert(insert));
             if removed {
+                self.mark_removed_entity_dirty(handle);
                 self.publish_document_view();
                 self.refresh_grips_of_active_tab();
             }
@@ -674,6 +868,7 @@ impl<'a> HostSession<'a> {
                     record.entity_handles.retain(|member| *member != handle);
                 }
             }
+            self.mark_removed_entity_dirty(handle);
             self.publish_document_view();
             self.refresh_grips_of_active_tab();
         }
@@ -699,6 +894,19 @@ impl<'a> HostSession<'a> {
     /// missing so the file stays valid for other CAD apps. Returns `false` when
     /// the entity does not exist.
     pub fn write_record(&mut self, handle: Handle, record: ExtendedDataRecord) -> bool {
+        if !self.write_record_quiet(handle, record) {
+            return false;
+        }
+        self.bump_geometry();
+        self.set_dirty();
+        self.publish_document_view();
+        true
+    }
+
+    /// [`Self::write_record`] without the boundary publish/bump: batch paths
+    /// that stamp many records publish ONCE at the end (P1-17). The dirty
+    /// (entity, app) mark still runs so the final boundary carries it.
+    fn write_record_quiet(&mut self, handle: Handle, record: ExtendedDataRecord) -> bool {
         if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
             return false;
         }
@@ -732,9 +940,7 @@ impl<'a> HostSession<'a> {
         // boundary notification — marked BEFORE the publish that carries it.
         let epoch = self.geometry_epoch();
         self.app.tabs[self.tab].mark_plugin_record_dirty(handle, app, epoch);
-        self.bump_geometry();
-        self.set_dirty();
-        self.publish_document_view();
+        self.bump_handles_incremental(&[handle]);
         true
     }
 
@@ -775,7 +981,7 @@ impl<'a> HostSession<'a> {
         if let Some(ah) = app_handle {
             xd.raw_dwg_eed.retain(|(a, _)| *a != ah);
         }
-        self.bump_geometry();
+        self.bump_handles_incremental(&[handle]);
         self.set_dirty();
         self.publish_document_view();
         true
@@ -921,8 +1127,11 @@ impl<'a> HostSession<'a> {
                 let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
                     .ok_or("the region could not be exported losslessly")?;
                 let mut region = document::entities::Region::new();
-                region.point_of_reference =
-                    document::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
+                region.point_of_reference = document::types::Vector3::new(
+                    plane.origin[0],
+                    plane.origin[1],
+                    plane.origin[2],
+                );
                 region.wires = model::edge_wires(&body);
                 region.set_sat_document(&sat);
                 region.common.layer = layer;
@@ -952,8 +1161,11 @@ impl<'a> HostSession<'a> {
                     .ok_or("the surface could not be exported losslessly")?;
                 let mut surface =
                     document::entities::Surface::new(document::entities::SurfaceKind::Plane);
-                surface.point_of_reference =
-                    document::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
+                surface.point_of_reference = document::types::Vector3::new(
+                    plane.origin[0],
+                    plane.origin[1],
+                    plane.origin[2],
+                );
                 surface.wires = model::edge_wires(&body);
                 surface.acis_data = document::entities::AcisData::from_sat(&sat.to_sat_string());
                 surface.common.layer = layer;
@@ -999,7 +1211,8 @@ impl<'a> HostSession<'a> {
                     let mut surface =
                         document::entities::Surface::new(document::entities::SurfaceKind::Generic);
                     surface.wires = model::edge_wires(&body);
-                    surface.acis_data = document::entities::AcisData::from_sat(&sat.to_sat_string());
+                    surface.acis_data =
+                        document::entities::AcisData::from_sat(&sat.to_sat_string());
                     surface.common.layer = layer;
                     EntityType::Surface(Box::new(surface))
                 };
@@ -1169,7 +1382,8 @@ impl<'a> HostSession<'a> {
                         value.wires = model::edge_wires(&moved);
                         value.silhouettes.clear();
                         value.history_handle = None;
-                        value.acis_data = document::entities::AcisData::from_sat(&sat.to_sat_string());
+                        value.acis_data =
+                            document::entities::AcisData::from_sat(&sat.to_sat_string());
                         // A moved plane is still a plane; a swept surface no longer
                         // matches its stored sweep parameters, so it becomes generic.
                         if value.kind != document::entities::SurfaceKind::Plane {
@@ -1296,7 +1510,10 @@ impl<'a> HostSession<'a> {
         request["fields"] = serde_json::json!([]);
         let answer = self.app.entity_query(self.tab, &request);
         if answer["ok"] != true {
-            return Err(answer["error"].as_str().unwrap_or("query failed").to_owned());
+            return Err(answer["error"]
+                .as_str()
+                .unwrap_or("query failed")
+                .to_owned());
         }
         let entities = answer["entities"]
             .as_array()
@@ -1407,10 +1624,7 @@ impl<'a> HostSession<'a> {
         let resolved_lt = match config.linetype {
             // A name the drawing does not carry would leave the LAYER record
             // pointing at no LTYPE, so it is refused rather than written.
-            Some(ref lt_name) => match resolve_linetype(doc, lt_name) {
-                Some(name) => name,
-                None => return None,
-            },
+            Some(ref lt_name) => resolve_linetype(doc, lt_name)?,
             None => "Continuous".to_string(),
         };
 
@@ -1623,7 +1837,8 @@ impl<'a> HostSession<'a> {
             | TableOperation::LayoutRename { .. }
             | TableOperation::LayoutDelete { .. }
             | TableOperation::LayoutSetCurrent { .. }
-            | TableOperation::LayoutSetPage { .. }) => self.layout_operation(other),
+            | TableOperation::LayoutSetPage { .. }
+            | TableOperation::LayoutSetTabOrder { .. }) => self.layout_operation(other),
             other => self.style_operation(other),
         }
     }
@@ -1756,8 +1971,8 @@ impl<'a> HostSession<'a> {
                 if !editor_before {
                     self.app.text_inline = None;
                 }
-                if !mtext_before {
-                    self.app.mtext_editor = None;
+                if !mtext_before && self.app.mtext_editor.is_some() {
+                    self.app.mtext_cancel();
                 }
                 if !modal_before {
                     self.app.active_modal = None;
@@ -1916,44 +2131,9 @@ impl<'a> HostSession<'a> {
         &mut self,
         operation: ocs_plugin_api::host::TableOperation,
     ) -> Result<Handle, String> {
+        use crate::scene::linetype_service as service;
         use ocs_plugin_api::host::TableOperation;
-        let protected = |name: &str| {
-            ["CONTINUOUS", "BYLAYER", "BYBLOCK"].contains(&name.trim().to_uppercase().as_str())
-        };
-        let check_pattern = |pattern: &[f64]| -> Result<(), String> {
-            if !(2..=12).contains(&pattern.len()) {
-                return Err("a linetype pattern needs 2 to 12 elements".to_owned());
-            }
-            if pattern.iter().any(|v| !v.is_finite() || v.abs() > 1.0e6) {
-                return Err("linetype pattern lengths must be finite and within 1e6".to_owned());
-            }
-            if !pattern.iter().any(|v| *v >= 0.0) || !pattern.iter().any(|v| *v < 0.0) {
-                return Err(
-                    "a linetype pattern needs at least one dash or dot and one gap".to_owned(),
-                );
-            }
-            if pattern.iter().map(|v| v.abs()).sum::<f64>() <= 0.0 {
-                return Err("a linetype pattern must have a nonzero length".to_owned());
-            }
-            Ok(())
-        };
-        let build = |lt: &mut document::tables::LineType, pattern: &[f64]| {
-            lt.elements = pattern
-                .iter()
-                .map(|length| document::tables::linetype::LineTypeElement {
-                    length: *length,
-                    complex: None,
-                })
-                .collect();
-            lt.pattern_length = pattern.iter().map(|v| v.abs()).sum();
-        };
-        let check_description = |text: &str| {
-            if text.chars().any(|c| c.is_control()) || text.chars().count() > 255 {
-                Err("a linetype description must be text of at most 255 characters".to_owned())
-            } else {
-                Ok(())
-            }
-        };
+        let refused = |error: service::LinetypeError| error.to_string();
         // Loading the standard linetypes first means a name that already exists as a
         // standard pattern (Dashed, Center, ...) is seen as taken.
         crate::io::linetypes::populate_document(self.document_mut());
@@ -1963,22 +2143,12 @@ impl<'a> HostSession<'a> {
                 description,
                 pattern,
             } => {
-                let name = validated_symbol_name(&name, "a linetype name")?;
-                if self.document().line_types.contains(&name) {
-                    return Err(format!("linetype {name:?} already exists"));
-                }
-                check_pattern(&pattern)?;
-                check_description(&description)?;
+                let linetype = service::plan_create(self.document(), &name, &description, &pattern)
+                    .map_err(refused)?;
                 self.push_undo("Create linetype");
-                let mut lt = document::tables::LineType::new(name.clone());
-                lt.description = description;
-                build(&mut lt, &pattern);
-                let handle = self.document_mut().allocate_handle();
-                lt.handle = handle;
-                self.document_mut()
-                    .line_types
-                    .add(lt)
-                    .map_err(|e| format!("the linetype could not be created: {e}"))?;
+                let name = linetype.name.clone();
+                let handle =
+                    service::apply_create(self.document_mut(), linetype).map_err(refused)?;
                 self.finish_linetype_change(&[name]);
                 Ok(handle)
             }
@@ -1987,130 +2157,36 @@ impl<'a> HostSession<'a> {
                 description,
                 pattern,
             } => {
-                let existing = self
-                    .document()
-                    .line_types
-                    .get(name.trim())
-                    .cloned()
-                    .ok_or_else(|| format!("linetype {:?} does not exist", name.trim()))?;
-                if protected(&existing.name) || existing.xref_dependent {
-                    return Err(format!("linetype {:?} cannot be changed", existing.name));
-                }
-                if existing.elements.iter().any(|e| e.complex.is_some()) {
-                    return Err(
-                        "a linetype with text or shape elements cannot be changed from a script"
-                            .to_owned(),
-                    );
-                }
-                if description.is_none() && pattern.is_none() {
-                    return Err("no linetype properties to change".to_owned());
-                }
-                if let Some(text) = &description {
-                    check_description(text)?;
-                }
-                if let Some(pattern) = &pattern {
-                    check_pattern(pattern)?;
-                }
+                let linetype = service::plan_modify(
+                    self.document(),
+                    &name,
+                    description.as_deref(),
+                    pattern.as_deref(),
+                )
+                .map_err(refused)?;
                 self.push_undo("Modify linetype");
-                let mut lt = existing.clone();
-                if let Some(text) = description {
-                    lt.description = text;
-                }
-                if let Some(pattern) = &pattern {
-                    build(&mut lt, pattern);
-                }
-                if let Some(slot) = self.document_mut().line_types.get_mut(&existing.name) {
-                    *slot = lt;
-                }
-                self.finish_linetype_change(&[existing.name.clone()]);
-                Ok(existing.handle)
+                let name = linetype.name.clone();
+                let handle = service::apply_modify(self.document_mut(), linetype);
+                self.finish_linetype_change(&[name]);
+                Ok(handle)
             }
             TableOperation::LinetypeRename { from, to } => {
-                let existing = self
-                    .document()
-                    .line_types
-                    .get(from.trim())
-                    .cloned()
-                    .ok_or_else(|| format!("linetype {:?} does not exist", from.trim()))?;
-                if protected(&existing.name) || existing.xref_dependent {
-                    return Err(format!("linetype {:?} cannot be renamed", existing.name));
-                }
-                let to = validated_symbol_name(&to, "a linetype name")?;
-                if existing.name.eq_ignore_ascii_case(&to) {
+                if from.trim() != to.trim() && from.trim().eq_ignore_ascii_case(to.trim()) {
                     return Err("the new linetype name matches the current one (a case-only change is not supported)".to_owned());
                 }
-                if self.document().line_types.contains(&to) {
-                    return Err(format!("linetype {to:?} already exists"));
-                }
+                let rename = service::plan_rename(self.document(), &from, &to).map_err(refused)?;
                 self.push_undo("Rename linetype");
-                let old = existing.name.clone();
-                let handle = existing.handle;
-                let doc = self.document_mut();
-                let mut lt = existing;
-                lt.name = to.clone();
-                doc.line_types.remove(&old);
-                doc.line_types
-                    .add(lt)
-                    .map_err(|e| format!("the linetype could not be renamed: {e}"))?;
-                for layer in doc.layers.iter_mut() {
-                    if layer.line_type.eq_ignore_ascii_case(&old) {
-                        layer.line_type = to.clone();
-                    }
-                }
-                for entity in doc.entities_mut() {
-                    if entity.common().linetype.eq_ignore_ascii_case(&old) {
-                        entity.common_mut().linetype = to.clone();
-                    }
-                }
-                if doc.header.current_linetype_name.eq_ignore_ascii_case(&old) {
-                    doc.header.current_linetype_name = to.clone();
-                }
-                self.finish_linetype_change(&[old, to]);
+                let handle =
+                    service::apply_rename(self.document_mut(), &rename).map_err(refused)?;
+                self.finish_linetype_change(&[rename.old, rename.new]);
                 Ok(handle)
             }
             TableOperation::LinetypeDelete { name } => {
-                let existing = self
-                    .document()
-                    .line_types
-                    .get(name.trim())
-                    .cloned()
-                    .ok_or_else(|| format!("linetype {:?} does not exist", name.trim()))?;
-                if protected(&existing.name) || existing.xref_dependent {
-                    return Err(format!("linetype {:?} cannot be deleted", existing.name));
-                }
-                let doc = self.document();
-                let in_use = doc
-                    .header
-                    .current_linetype_name
-                    .eq_ignore_ascii_case(&existing.name)
-                    || doc
-                        .layers
-                        .iter()
-                        .any(|layer| layer.line_type.eq_ignore_ascii_case(&existing.name))
-                    || doc.entities().any(|entity| {
-                        entity
-                            .common()
-                            .linetype
-                            .eq_ignore_ascii_case(&existing.name)
-                    })
-                    || doc.dim_styles.iter().any(|style| {
-                        [
-                            style.dimltex_handle,
-                            style.dimltex1_handle,
-                            style.dimltex2_handle,
-                        ]
-                        .contains(&existing.handle)
-                    });
-                if in_use {
-                    return Err(format!(
-                        "linetype {:?} is current or still in use",
-                        existing.name
-                    ));
-                }
+                let linetype = service::plan_delete(self.document(), &name).map_err(refused)?;
                 self.push_undo("Delete linetype");
-                self.document_mut().line_types.remove(&existing.name);
-                self.finish_linetype_change(&[existing.name]);
-                Ok(existing.handle)
+                let handle = service::apply_delete(self.document_mut(), &linetype);
+                self.finish_linetype_change(&[linetype.name]);
+                Ok(handle)
             }
             _ => Err("unsupported table operation".to_owned()),
         }
@@ -2120,8 +2196,11 @@ impl<'a> HostSession<'a> {
         self.app.tabs[self.tab].dirty = true;
         self.app.tabs[self.tab]
             .scene
-            .invalidate_layer_dependencies(names);
-        self.app.tabs[self.tab].scene.bump_geometry();
+            .invalidate_linetype_dependencies(names);
+        if self.tab == self.app.active_tab {
+            self.app.sync_ribbon_layers();
+            self.app.sync_ribbon_from_selection();
+        }
         self.publish_document_view();
     }
 
@@ -2241,6 +2320,37 @@ impl<'a> HostSession<'a> {
                 self.finish_layout_change();
                 Ok(handle)
             }
+            TableOperation::LayoutSetTabOrder { names } => {
+                let current: Vec<String> = self.app.tabs[self.tab]
+                    .scene
+                    .layout_names()
+                    .into_iter()
+                    .filter(|name| !name.eq_ignore_ascii_case("Model"))
+                    .collect();
+                let mut ordered = Vec::with_capacity(names.len());
+                for name in &names {
+                    let name = name.trim();
+                    let Some(found) = current.iter().find(|n| n.eq_ignore_ascii_case(name)) else {
+                        return Err(format!("layout {name:?} is not a paper-space layout"));
+                    };
+                    if ordered.contains(found) {
+                        return Err(format!("layout {found:?} is listed twice"));
+                    }
+                    ordered.push(found.clone());
+                }
+                if let Some(missing) = current.iter().find(|n| !ordered.contains(n)) {
+                    return Err(format!(
+                        "the order must list every paper-space layout; {missing:?} is missing"
+                    ));
+                }
+                if ordered == current {
+                    return Ok(Handle::NULL);
+                }
+                self.push_undo("Layout order");
+                self.app.tabs[self.tab].scene.set_layout_tab_order(&ordered);
+                self.finish_layout_change();
+                Ok(Handle::NULL)
+            }
             TableOperation::LayoutSetCurrent { name } => {
                 let name = name.trim();
                 if name.eq_ignore_ascii_case("Model") {
@@ -2320,7 +2430,8 @@ impl<'a> HostSession<'a> {
                         layout.plot_scale_numerator = numerator;
                         layout.plot_scale_denominator = denominator;
                         layout.plot_scale_factor = numerator / denominator;
-                        layout.plot_scale_type = document::objects::ScaledType::CustomScale.to_code();
+                        layout.plot_scale_type =
+                            document::objects::ScaledType::CustomScale.to_code();
                         layout.plot_flags.use_standard_scale = false;
                     }
                     let quarter_turn = layout.plot_rotation
@@ -2350,6 +2461,8 @@ impl<'a> HostSession<'a> {
 
     fn finish_layout_change(&mut self) {
         self.app.tabs[self.tab].dirty = true;
+        // The layout tab bar reads `cached_layout_names`, keyed on this epoch.
+        self.app.tabs[self.tab].scene.bump_layout_epoch();
         self.app.tabs[self.tab].scene.bump_geometry();
         self.publish_document_view();
     }
@@ -2465,8 +2578,11 @@ impl<'a> HostSession<'a> {
                     .map(|r| r.block_entity_handle);
                 if let Some(marker) = marker {
                     if let Some(E::Block(block)) = self.document_mut().get_entity_mut(marker) {
-                        block.base_point =
-                            document::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
+                        block.base_point = document::types::Vector3::new(
+                            base_point[0],
+                            base_point[1],
+                            base_point[2],
+                        );
                     }
                 }
                 if erase_originals {
@@ -2818,6 +2934,10 @@ impl<'a> HostSession<'a> {
             }
             TableOperation::StyleSetCurrent { kind, name } => {
                 let (name, handle) = stored(self.document(), kind, name.trim())?;
+                // P1-16 route consistency: the "set current" arm runs the same
+                // undo scope + finish path as the rename/delete arms above
+                // (it used to bypass both).
+                self.push_undo("Set current style");
                 let header = &mut self.document_mut().header;
                 match kind {
                     TableStyleKind::Text => {
@@ -2831,7 +2951,7 @@ impl<'a> HostSession<'a> {
                         self.app.ribbon.active_dim_style = name;
                     }
                 }
-                self.app.tabs[self.tab].dirty = true;
+                self.finish_style_change(kind_of(kind));
                 Ok(handle)
             }
             _ => Err("unsupported table operation".to_owned()),
@@ -2868,8 +2988,20 @@ impl<'a> HostSession<'a> {
             None => None,
         };
 
+        if self.document().layers.get(trimmed).is_none() {
+            return false;
+        }
+        // P1-16 route consistency: the direct route opens its own undo scope
+        // exactly like the table route, so a plugin-driven layer edit is one
+        // undoable step instead of landing outside history. Refusals above
+        // never touch the scope.
+        let own_scope = self.ensure_xrecord_undo_scope("Modify layer");
         let doc = self.document_mut();
         let Some(existing) = doc.layers.get_mut(trimmed) else {
+            // Checked above; an empty scope is closed to keep the contract.
+            if own_scope {
+                self.app.finish_pending_history(self.tab);
+            }
             return false;
         };
 
@@ -2913,6 +3045,9 @@ impl<'a> HostSession<'a> {
             .invalidate_layer_dependencies(&[trimmed.to_string()]);
         self.app.refresh_layer_panel();
         self.publish_document_view();
+        if own_scope {
+            self.app.finish_pending_history(self.tab);
+        }
         true
     }
 
@@ -3163,7 +3298,8 @@ impl<'a> HostSession<'a> {
     /// its own scope.
     fn ensure_xrecord_undo_scope(&mut self, label: &str) -> bool {
         if self.app.tabs[self.tab].history.pending.is_none() {
-            self.push_undo(label);
+        self.push_undo(label);
+
             true
         } else {
             false
@@ -3262,6 +3398,23 @@ impl<'a> HostSession<'a> {
         name: &str,
         entries: Vec<document::objects::XRecordEntry>,
     ) -> Result<Handle, String> {
+        let handle = self.update_xrecord_quiet(dictionary_path, name, entries)?;
+        self.set_dirty();
+        self.publish_document_view();
+        Ok(handle)
+    }
+
+    /// [`Self::update_xrecord`] without the boundary publish/settle — the
+    /// batch route publishes once for the whole set (P1-17). The undo-scope
+    /// handling matches the visible variant: a mutation inside a plugin-opened
+    /// `push_undo` scope joins it; a scope-less call opens its own and the
+    /// visible wrapper finishes it.
+    fn update_xrecord_quiet(
+        &mut self,
+        dictionary_path: &[&str],
+        name: &str,
+        entries: Vec<document::objects::XRecordEntry>,
+    ) -> Result<Handle, String> {
         use document::objects::ObjectType;
         validated_xrecord_entries(&entries)?;
         let (_, _, handle) = self.xrecord_lookup(dictionary_path, name)?;
@@ -3281,12 +3434,16 @@ impl<'a> HostSession<'a> {
         record.raw_dwg_data = None;
         record.raw_dwg_handle_bits = 0;
         record.raw_dwg_version = None;
-        self.set_dirty();
         // API v13 dirty regions — before the publish that carries them.
         let epoch = self.geometry_epoch();
         self.app.tabs[self.tab].mark_plugin_record_dirty(handle, "NOD".to_string(), epoch);
-        self.publish_document_view();
         if own_scope {
+            // The dirty flag must flip BEFORE the scope closes:
+            // finish_pending_history snapshots `dirty_after` into the undo
+            // entry, and redo replays that — a clean-tab XRecord update that
+            // closes first would record dirty=false and redo silently loses
+            // the change on close (review finding 1).
+            self.set_dirty();
             self.app.finish_pending_history(self.tab);
         }
         Ok(handle)
@@ -3324,6 +3481,78 @@ impl<'a> HostSession<'a> {
             self.app.finish_pending_history(self.tab);
         }
         Ok(removed)
+    }
+
+    /// Create or update the model-space GEODATA object (API v22, additive):
+    /// the CRS through the same path as GEOGRAPHICLOCATION, then the plugin's
+    /// design/reference points and north. Every refusal happens before the
+    /// undo scope is touched.
+    pub fn set_geo_location(
+        &mut self,
+        location: &ocs_plugin_api::host::GeoLocation,
+    ) -> Result<Handle, String> {
+        use document::objects::ObjectType;
+        use document::types::{Vector2, Vector3};
+        let crs = crate::io::crs::CrsDefinition::from_text(&location.coordinate_system)?;
+        crs.apply_to_geodata(&mut document::objects::GeoData::default())?;
+        let values = location
+            .design_point
+            .iter()
+            .chain(&location.reference_point)
+            .chain(&location.north_direction);
+        if !values.into_iter().all(|value| value.is_finite()) {
+            return Err("geographic location values must be finite".to_owned());
+        }
+        let [nx, ny] = location.north_direction;
+        let length = nx.hypot(ny);
+        if length < 1e-12 {
+            return Err("north direction must not be zero".to_owned());
+        }
+        if !self.document().block_records.contains("*Model_Space") {
+            return Err("The drawing has no model-space block record".to_owned());
+        }
+        let own_scope = self.ensure_xrecord_undo_scope("Set Geographic Location");
+        let handle = crate::io::crs::set_document_crs(self.document_mut(), &crs)?;
+        if let Some(ObjectType::GeoData(geo)) = self.document_mut().objects.get_mut(&handle) {
+            let [x, y, z] = location.design_point;
+            geo.design_point = Vector3::new(x, y, z);
+            let [x, y, z] = location.reference_point;
+            geo.reference_point = Vector3::new(x, y, z);
+            geo.north_direction = Vector2::new(nx / length, ny / length);
+        }
+        self.app.tabs[self.tab].scene.refresh_object_data_cache();
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.set_dirty();
+        self.publish_document_view();
+        if own_scope {
+            self.app.finish_pending_history(self.tab);
+        }
+        Ok(handle)
+    }
+
+    /// Remove the model-space GEODATA object and its extension-dictionary
+    /// entry (API v22, additive). `Ok(false)` when there was none.
+    pub fn remove_geo_location(&mut self) -> Result<bool, String> {
+        use document::objects::ObjectType;
+        let Some(handle) = crate::io::crs::model_space_geo_data_handle(self.document()) else {
+            return Ok(false);
+        };
+        let own_scope = self.ensure_xrecord_undo_scope("Remove Geographic Location");
+        let document = self.document_mut();
+        document.objects.remove(&handle);
+        for object in document.objects.values_mut() {
+            if let ObjectType::Dictionary(dictionary) = object {
+                dictionary.entries.retain(|(_, value)| *value != handle);
+            }
+        }
+        self.app.tabs[self.tab].scene.refresh_object_data_cache();
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.set_dirty();
+        self.publish_document_view();
+        if own_scope {
+            self.app.finish_pending_history(self.tab);
+        }
+        Ok(true)
     }
 
     /// List the XRecord names under the dictionary addressed by
@@ -3405,10 +3634,9 @@ impl<'a> HostSession<'a> {
             "designation state was checked before the mutation"
         );
         // The wires carry the click-through stamp baked at tessellation, so a
-        // designation change must rebuild them: bump_geometry clears the
-        // tessellation memos and resident wire sets exactly like an entity
-        // edit would.
-        self.bump_geometry();
+        // designation change must rebuild them incrementally (or rebuild block
+        // caches when the entity belongs to a block definition).
+        self.bump_handles_incremental(&[handle]);
         self.set_dirty();
         self.publish_document_view();
         if own_scope {
@@ -3580,15 +3808,17 @@ impl<'a> HostSession<'a> {
         for handle in &handles {
             // Designation one-by-one inside the SAME scope, with the
             // before-image pending-scoped the way set_reference_only does.
-            let before = self.app.tabs[self.tab].scene.reference_only.is_marked(*handle);
+            let before = self.app.tabs[self.tab]
+                .scene
+                .reference_only
+                .is_marked(*handle);
             self.app
                 .record_reference_designation_before_pending(self.tab, *handle, before);
-            self.app
-                .tabs[self.tab]
+            self.app.tabs[self.tab]
                 .scene
                 .set_reference_only_membership(*handle, true);
         }
-        self.bump_geometry();
+        self.bump_handles_incremental(&handles);
         self.set_dirty();
         self.publish_document_view();
         if own_scope {
@@ -3742,18 +3972,36 @@ impl<'a> HostSession<'a> {
         // plugin kind lands here as a compile-time arm, never as a guess.
         let (entities, _carriers) = match &instance.design {
             ocs_plugin_api::host::PluginDisplayDescriptor::ParametricChain(chain) => {
-                crate::parametric::build_display_entities(chain, instance.tolerance).map_err(
-                    |e| format!("instance of class {:?}: {e}", instance.class_id),
-                )?
+                crate::parametric::build_display_entities(chain, instance.tolerance)
+                    .map_err(|e| format!("instance of class {:?}: {e}", instance.class_id))?
             }
         };
         if entities.is_empty() {
             // Zero-geometry designs record nothing, like zero-length chains.
             return Ok(Vec::new());
         }
+        // P1-11 preflight: every staged entity's layer is checked BEFORE any
+        // insertion, so a locked layer refuses the whole instance instead of
+        // leaving entities without their identity stamp (the old behavior
+        // staged first and stamped after — a refusal mid-way left a
+        // partially-staged instance no re-stage could complete).
+        if let Some(entity) = entities
+            .iter()
+            .find(|entity| self.new_entity_layer_locked(entity))
+        {
+            return Err(format!(
+                "instance of class {:?} targets locked layer {:?}; refusing the whole instance",
+                instance.class_id,
+                entity.common().layer
+            ));
+        }
         let own_scope = self.ensure_xrecord_undo_scope("Stage plugin class instance");
         let handles = self.add_entities(entities);
-        for handle in &handles {
+        // All-or-nothing stamping: after the preflight a stamp refusal can
+        // only mean an unexpected condition — the staged entities are erased
+        // again so no half-staged instance survives (P1-11).
+        let mut stamp_failed: Option<usize> = None;
+        for (index, handle) in handles.iter().enumerate() {
             // Identity stamp: the class key as the XDATA application on every
             // staged entity (write_record registers the APPID so the stamp
             // survives the file), carrying the schema version and the record
@@ -3761,24 +4009,59 @@ impl<'a> HostSession<'a> {
             let mut stamp = ocs_plugin_api::host::document::xdata::ExtendedDataRecord::new(
                 instance.class_id.clone(),
             );
-            stamp.add_value(ocs_plugin_api::host::document::xdata::XDataValue::Integer32(
-                instance.schema_version as i32,
-            ));
+            stamp.add_value(
+                ocs_plugin_api::host::document::xdata::XDataValue::Integer32(
+                    instance.schema_version as i32,
+                ),
+            );
             if !instance.design_record.is_empty() {
                 stamp.add_value(ocs_plugin_api::host::document::xdata::XDataValue::String(
                     instance.design_record.clone(),
                 ));
             }
-            self.write_record(*handle, stamp);
+            if instance.selectable_custom {
+                // Flags have a fixed third slot, even without record linkage.
+                if instance.design_record.is_empty() {
+                    stamp.add_value(ocs_plugin_api::host::document::xdata::XDataValue::String(
+                        String::new(),
+                    ));
+                }
+                stamp.add_value(ocs_plugin_api::host::document::xdata::XDataValue::Integer32(1));
+            }
+            if !self.write_record_quiet(*handle, stamp) {
+                stamp_failed = Some(index);
+                break;
+            }
             // Designation inside the SAME scope, the before-image
             // pending-scoped the way set_reference_only does.
-            let before = self.app.tabs[self.tab].scene.reference_only.is_marked(*handle);
+            let before = self.app.tabs[self.tab]
+                .scene
+                .reference_only
+                .is_marked(*handle);
             self.app
                 .record_reference_designation_before_pending(self.tab, *handle, before);
-            self.app
-                .tabs[self.tab]
+            self.app.tabs[self.tab]
                 .scene
-                .set_reference_only_membership(*handle, true);
+                .set_reference_only_membership(*handle, !instance.selectable_custom);
+        }
+        if let Some(index) = stamp_failed {
+            self.app.tabs[self.tab]
+                .scene
+                .erase_entities_plugin(&handles);
+            self.app.sync_registered_layers(self.tab);
+            self.bump_geometry();
+            self.set_dirty();
+            self.publish_document_view();
+            // Close the staging scope before the error so follow-up plugin
+            // writes cannot silently merge into it (review finding 8).
+            if own_scope {
+                self.app.finish_pending_history(self.tab);
+            }
+            return Err(format!(
+                "stamping the staged instance of class {:?} failed at entity {:?}; the whole \
+                 staged instance was rolled back",
+                instance.class_id, handles[index]
+            ));
         }
         self.bump_geometry();
         self.set_dirty();
@@ -3874,13 +4157,21 @@ impl<'a> HostSession<'a> {
         &mut self,
         updates: &[ocs_plugin_api::host::XRecordUpdate],
     ) -> Result<Vec<Result<Handle, String>>, String> {
-        Ok(updates
+        // P1-17: the batch publishes ONCE for the whole set instead of once
+        // per record — a 100-record batch no longer fans out into 100
+        // publication passes.
+        let results: Vec<Result<Handle, String>> = updates
             .iter()
             .map(|update| {
                 let path: Vec<&str> = update.dictionary_path.iter().map(|s| s.as_str()).collect();
-                self.update_xrecord(&path, &update.name, update.entries.clone())
+                self.update_xrecord_quiet(&path, &update.name, update.entries.clone())
             })
-            .collect())
+            .collect();
+        if results.iter().any(|result| result.is_ok()) {
+            self.set_dirty();
+            self.publish_document_view();
+        }
+        Ok(results)
     }
 
     /// List a dictionary's XRecords WITH their entries in one call (API v13):
@@ -3963,6 +4254,17 @@ impl<'a> HostSession<'a> {
     ) -> Vec<bool> {
         let known = crate::plugin::grip_points::visibility(&self.app.disabled_plugins)(plugin_id);
         if !known {
+            if plugin_id.is_empty() {
+                // The boot-window registration storm fires before the handshake
+                // pins the process's manifest id (the empty-attribution class —
+                // HOST-FIXES-TODO #1). The plugin genuinely registered nothing
+                // in its own name, so the refusals that would follow name a
+                // plugin that never spoke: SILENCE is the honest noise law the
+                // user ordered (2026-11-13). Replay-after-handshake stays the
+                // #1 fix's direction; until then these requests simply do not
+                // exist for the user.
+                return vec![false; panels.len()];
+            }
             for panel in panels {
                 self.push_error(&format!(
                     "quad panel {id:?} refused: plugin {plugin_id:?} is not a loaded, alive \
@@ -4336,24 +4638,43 @@ fn parse_parameter_value(
 }
 
 /// True when block `outer` (transitively) contains an insert of `target`.
-fn block_nests(doc: &Document, outer: &str, target: &str, depth: usize) -> bool {
-    if depth > 64 {
-        return true;
+fn block_nests(doc: &Document, outer: &str, target: &str, _depth: usize) -> bool {
+    // Visited-set traversal (P1-13): the depth-capped recursion re-explored
+    // shared sub-blocks once per referencing instance, so a document with N
+    // shared instances of one block multiplied the whole subtree N times —
+    // exponential on deep, heavily-shared block trees. Every block is now
+    // visited at most once per top-level check (linear in the block count);
+    // the depth cap stays as a belt-and-braces guard with its old
+    // conservative `true`.
+    fn walk(
+        doc: &Document,
+        outer: &str,
+        target: &str,
+        visited: &mut std::collections::HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        if !visited.insert(outer.to_ascii_uppercase()) {
+            return false;
+        }
+        let Some(record) = doc.block_records.get(outer) else {
+            return false;
+        };
+        record
+            .entity_handles
+            .iter()
+            .filter_map(|h| doc.get_entity(*h))
+            .any(|entity| match entity {
+                EntityType::Insert(insert) => {
+                    insert.block_name.eq_ignore_ascii_case(target)
+                        || walk(doc, &insert.block_name, target, visited, depth + 1)
+                }
+                _ => false,
+            })
     }
-    let Some(record) = doc.block_records.get(outer) else {
-        return false;
-    };
-    record
-        .entity_handles
-        .iter()
-        .filter_map(|h| doc.get_entity(*h))
-        .any(|entity| match entity {
-            EntityType::Insert(insert) => {
-                insert.block_name.eq_ignore_ascii_case(target)
-                    || block_nests(doc, &insert.block_name, target, depth + 1)
-            }
-            _ => false,
-        })
+    walk(doc, outer, target, &mut std::collections::HashSet::new(), 0)
 }
 
 /// A layer name AutoCAD would accept: 1-255 characters, none of `<>/\":;?*|=\``.
@@ -4525,6 +4846,38 @@ fn resolve_linetype(doc: &mut document::Document, name: &str) -> Option<String> 
     })
 }
 
+/// The registered panel `panel_id` names: its id, or loosely its title or
+/// command.
+fn resolve_toggle_panel_id(app: &OpenCADStudio, panel_id: &str) -> Option<String> {
+    if app.plugin_panel_ids.contains_key(panel_id) {
+        return Some(panel_id.to_string());
+    }
+    let lower = panel_id.to_lowercase();
+    let stripped = lower.replace([' ', '_', '-'], "");
+    app.plugin_panel_ids
+        .keys()
+        .find(|key| {
+            key.to_lowercase() == lower
+                || key.replace([' ', '_', '-'], "").to_lowercase() == stripped
+        })
+        .cloned()
+        .or_else(|| {
+            app.plugin_panels
+                .iter()
+                .find(|(key, state)| {
+                    key.to_lowercase() == lower
+                        || key.replace([' ', '_', '-'], "").to_lowercase() == stripped
+                        || state.def.title.to_lowercase() == lower
+                        || state.def.title.replace([' ', '_', '-'], "").to_lowercase() == stripped
+                        || state.def.command.as_ref().is_some_and(|command| {
+                            command.to_lowercase() == lower
+                                || command.replace([' ', '_', '-'], "").to_lowercase() == stripped
+                        })
+                })
+                .map(|(key, _)| key.clone())
+        })
+}
+
 /// The stable contract a plugin's `dispatch` sees. Each method forwards to the
 /// inherent `HostSession` method of the same name (inherent methods take
 /// resolution priority, so this is plain delegation, not recursion). The
@@ -4592,10 +4945,7 @@ impl HostApi for HostSession<'_> {
     fn end_undo_group(&mut self) {
         self.end_undo_group()
     }
-    fn query_entities(
-        &mut self,
-        query: &str,
-    ) -> Result<ocs_plugin_api::host::EntityPage, String> {
+    fn query_entities(&mut self, query: &str) -> Result<ocs_plugin_api::host::EntityPage, String> {
         self.query_entities(query)
     }
     fn set_dirty(&mut self) {
@@ -4615,7 +4965,7 @@ impl HostApi for HostSession<'_> {
         self.app.tabs[self.tab].active_cmd =
             Some(Box::new(PluginInteractiveAdapter { inner: command }));
         if let Some(def) = dialog {
-            self.app.open_plugin_dialog(def);
+            self.app.open_plugin_dialog_on_tab(self.tab, def, None);
         }
     }
     fn plugin_state_any(&self, plugin_id: &str) -> Option<&(dyn Any + Send + Sync)> {
@@ -4727,6 +5077,15 @@ impl HostApi for HostSession<'_> {
     fn list_xrecords(&self, dictionary_path: &[&str]) -> Result<Vec<String>, String> {
         self.list_xrecords(dictionary_path)
     }
+    fn set_geo_location(
+        &mut self,
+        location: &ocs_plugin_api::host::GeoLocation,
+    ) -> Result<Handle, String> {
+        self.set_geo_location(location)
+    }
+    fn remove_geo_location(&mut self) -> Result<bool, String> {
+        self.remove_geo_location()
+    }
     fn set_reference_only(&mut self, handle: Handle, reference_only: bool) -> Result<(), String> {
         self.set_reference_only(handle, reference_only)
     }
@@ -4743,7 +5102,10 @@ impl HostApi for HostSession<'_> {
     ) -> Result<(), String> {
         self.set_plugin_grips(plugin_id, grips)
     }
-    fn entities_batch(&self, handles: &[Handle]) -> Result<Vec<Option<document::EntityType>>, String> {
+    fn entities_batch(
+        &self,
+        handles: &[Handle],
+    ) -> Result<Vec<Option<document::EntityType>>, String> {
         self.entities_batch(handles)
     }
     fn constraint_create(
@@ -4809,8 +5171,20 @@ impl HostApi for HostSession<'_> {
         self.plugin_class_instance_properties(handle)
     }
 
-    fn show_dialog(&mut self, dialog: ocs_plugin_api::dialog::DialogDef) -> ocs_plugin_api::dialog::DialogResponse {
-        self.app.open_plugin_dialog(dialog);
+    fn show_dialog(
+        &mut self,
+        dialog: ocs_plugin_api::dialog::DialogDef,
+    ) -> ocs_plugin_api::dialog::DialogResponse {
+        self.app.open_plugin_dialog_on_tab(self.tab, dialog, None);
+        ocs_plugin_api::dialog::DialogResponse::Cancelled
+    }
+    fn show_dialog_for_plugin(
+        &mut self,
+        plugin_id: &str,
+        dialog: ocs_plugin_api::dialog::DialogDef,
+    ) -> ocs_plugin_api::dialog::DialogResponse {
+        self.app
+            .open_plugin_dialog_on_tab(self.tab, dialog, Some(plugin_id.to_string()));
         ocs_plugin_api::dialog::DialogResponse::Cancelled
     }
     fn register_panel(&mut self, panel: ocs_plugin_api::dialog::PanelDef) -> bool {
@@ -4827,7 +5201,9 @@ impl HostApi for HostSession<'_> {
 
         let panel_enum = crate::ui::dock::PanelId::Plugin(num);
         if self.app.dock.location(panel_enum).is_none() {
-            self.app.dock.dock(panel_enum, crate::app::config::DockSide::Right, usize::MAX);
+            self.app
+                .dock
+                .dock(panel_enum, crate::app::config::DockSide::Right, usize::MAX);
         }
         if let Some(w) = panel.width {
             let mut panel_settings = self.app.dock.settings(panel_enum);
@@ -4837,6 +5213,16 @@ impl HostApi for HostSession<'_> {
 
         let state = crate::ui::window::plugin_panel::PluginPanelState::from_def(panel);
         self.app.plugin_panels.insert(id.clone(), state);
+
+        // Pallet-menu listing is capped per edge so a plugin cannot widen
+        // the palette beyond a bounded length (see docs/plugin-pallet-menu.md).
+        if self.app.plugin_panels.len() > PLUGIN_PALLET_MENU_MAX_ROWS {
+            eprintln!(
+                "[plugin] {id}: registered beyond the {}-row pallet-menu cap; \
+                 the edge (+) menu lists the first {} plugin panels only",
+                PLUGIN_PALLET_MENU_MAX_ROWS, PLUGIN_PALLET_MENU_MAX_ROWS
+            );
+        }
 
         // Keep command line autocomplete updated with dynamic panel commands
         if let Some(ref c) = cmd_opt {
@@ -4862,37 +5248,38 @@ impl HostApi for HostSession<'_> {
             return true;
         }
         let lower = panel_id.to_lowercase();
-        if let Some((_, panel)) = self.app.plugin_panels.iter_mut().find(|(k, _)| k.to_lowercase() == lower) {
+        if let Some((_, panel)) = self
+            .app
+            .plugin_panels
+            .iter_mut()
+            .find(|(k, _)| k.to_lowercase() == lower)
+        {
             panel.update_values(values);
             return true;
+        }
+        if let Some(state) = &mut self.app.plugin_dialog_state {
+            if panel_id.is_empty()
+                || state.def.title == panel_id
+                || state.def.title.eq_ignore_ascii_case(panel_id)
+            {
+                state.update_values(values);
+                return true;
+            }
         }
         false
     }
     fn toggle_panel(&mut self, panel_id: &str, show: Option<bool>) -> bool {
-        let matched_id = if self.app.plugin_panel_ids.contains_key(panel_id) {
-            Some(panel_id.to_string())
-        } else {
-            let lower = panel_id.to_lowercase();
-            let stripped = lower.replace([' ', '_', '-'], "");
-            self.app.plugin_panel_ids.keys().find(|k| {
-                k.to_lowercase() == lower || k.replace([' ', '_', '-'], "").to_lowercase() == stripped
-            }).cloned().or_else(|| {
-                self.app.plugin_panels.iter().find(|(k, state)| {
-                    k.to_lowercase() == lower
-                        || k.replace([' ', '_', '-'], "").to_lowercase() == stripped
-                        || state.def.title.to_lowercase() == lower
-                        || state.def.title.replace([' ', '_', '-'], "").to_lowercase() == stripped
-                        || state.def.command.as_ref().is_some_and(|c| {
-                            c.to_lowercase() == lower || c.replace([' ', '_', '-'], "").to_lowercase() == stripped
-                        })
-                }).map(|(k, _)| k.clone())
-            })
-        };
+        let matched_id = resolve_toggle_panel_id(self.app, panel_id);
 
         if let Some(ref id) = matched_id {
             if let Some(&num) = self.app.plugin_panel_ids.get(id) {
                 let panel_enum = crate::ui::dock::PanelId::Plugin(num);
-                let is_currently_open = self.app.plugin_panels.get(id).map(|p| p.visible).unwrap_or(false);
+                let is_currently_open = self
+                    .app
+                    .plugin_panels
+                    .get(id)
+                    .map(|p| p.visible)
+                    .unwrap_or(false);
 
                 let new_visible = if let Some(s) = show {
                     s
@@ -4906,7 +5293,11 @@ impl HostApi for HostSession<'_> {
 
                 if new_visible {
                     if self.app.dock.location(panel_enum).is_none() {
-                        self.app.dock.dock(panel_enum, crate::app::config::DockSide::Right, usize::MAX);
+                        self.app.dock.dock(
+                            panel_enum,
+                            crate::app::config::DockSide::Right,
+                            usize::MAX,
+                        );
                     }
                     self.app.dock_reveal(panel_enum);
                 } else {
@@ -4916,8 +5307,116 @@ impl HostApi for HostSession<'_> {
             }
         }
         false
-
     }
+
+    fn register_panel_for_plugin(
+        &mut self,
+        plugin_id: &str,
+        panel: ocs_plugin_api::dialog::PanelDef,
+    ) -> bool {
+        if plugin_id.is_empty() || panel.id.trim().is_empty() {
+            return false;
+        }
+        let panel_id = panel.id.clone();
+        if let Some(existing) = self.app.plugin_panels.get(&panel_id) {
+            if existing.owner_plugin_id.as_deref() != Some(plugin_id) {
+                return false;
+            }
+            if existing.def == panel {
+                // Re-registering an unchanged form is idempotent: do not
+                // discard values, collapsed sections or focus mid-edit.
+                return true;
+            }
+        }
+        if !self.register_panel(panel) {
+            return false;
+        }
+        if let Some(state) = self.app.plugin_panels.get_mut(&panel_id) {
+            state.owner_plugin_id = Some(plugin_id.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn update_panel_for_plugin(
+        &mut self,
+        plugin_id: &str,
+        panel_id: &str,
+        values: std::collections::HashMap<String, ocs_plugin_api::dialog::DialogValue>,
+    ) -> bool {
+        if let Some(panel_id) = self.owned_panel_id(plugin_id, panel_id) {
+            return self.update_panel(&panel_id, values);
+        }
+        // A modal dialog the plugin opened is updated in place; it is never
+        // routed through `update_panel`, whose side-panel lookup by name
+        // could reach another plugin's panel with the same title.
+        if let Some(state) = &mut self.app.plugin_dialog_state {
+            if state.plugin_id.as_deref() == Some(plugin_id)
+                && (panel_id.is_empty() || state.def.title.eq_ignore_ascii_case(panel_id))
+            {
+                state.update_values(values);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn toggle_panel_for_plugin(
+        &mut self,
+        plugin_id: &str,
+        panel_id: &str,
+        show: Option<bool>,
+    ) -> bool {
+        let Some(panel_id) = self.owned_panel_id(plugin_id, panel_id) else {
+            return false;
+        };
+        self.toggle_panel(&panel_id, show)
+    }
+
+    fn panel_snapshot(
+        &self,
+        panel_id: &str,
+    ) -> Result<ocs_plugin_api::dialog::PanelSnapshot, String> {
+        let Some(resolved) = resolve_toggle_panel_id(self.app, panel_id) else {
+            return Err(format!("panel {panel_id:?} is not registered"));
+        };
+        let panel = self
+            .app
+            .plugin_panels
+            .get(&resolved)
+            .ok_or_else(|| format!("panel {panel_id:?} is not registered"))?;
+        // A direct HostApi command is already executing in a document-bound
+        // command context. Unlike the IPC entry point, there is no second
+        // transport identity to authenticate here; the caller's command is
+        // the capability. The snapshot still carries the registered owner
+        // and the actual session tab for the plugin's own target checks.
+        Ok(panel.snapshot(self.tab_id()))
+    }
+
+    fn panel_snapshot_for_plugin(
+        &self,
+        plugin_id: &str,
+        panel_id: &str,
+    ) -> Result<ocs_plugin_api::dialog::PanelSnapshot, String> {
+        let Some(resolved) = resolve_toggle_panel_id(self.app, panel_id) else {
+            return Err(format!("panel {panel_id:?} is not registered"));
+        };
+        let panel = self
+            .app
+            .plugin_panels
+            .get(&resolved)
+            .ok_or_else(|| format!("panel {panel_id:?} is not registered"))?;
+        if panel.owner_plugin_id.as_deref() != Some(plugin_id) {
+            return Err(format!(
+                "panel {panel_id:?} is not owned by plugin {plugin_id:?}"
+            ));
+        }
+        // HostSession is created by the normal, document-bound command
+        // dispatcher. The tab is attached here, never supplied by the form.
+        Ok(panel.snapshot(self.tab_id()))
+    }
+
     fn register_quad_panels(
         &mut self,
         plugin_id: &str,
@@ -5076,7 +5575,7 @@ impl crate::command::CadCommand for PluginInteractiveAdapter {
     }
     fn on_point(&mut self, pt: glam::DVec3) -> crate::command::CmdResult {
         crate::plugin::guard("InteractiveCommand::on_point", || {
-            self.inner.on_point([pt.x as f64, pt.y as f64, pt.z as f64])
+            self.inner.on_point([pt.x, pt.y, pt.z])
         })
         .map(plugin_step_to_result)
         .unwrap_or(crate::command::CmdResult::Cancel)
@@ -5094,8 +5593,7 @@ impl crate::command::CadCommand for PluginInteractiveAdapter {
     }
     fn on_entity_pick(&mut self, handle: Handle, pt: glam::DVec3) -> crate::command::CmdResult {
         crate::plugin::guard("InteractiveCommand::on_object_pick", || {
-            self.inner
-                .on_object_pick(handle, [pt.x as f64, pt.y as f64, pt.z as f64])
+            self.inner.on_object_pick(handle, [pt.x, pt.y, pt.z])
         })
         .map(plugin_step_to_result)
         .unwrap_or(crate::command::CmdResult::Cancel)
@@ -5105,8 +5603,7 @@ impl crate::command::CadCommand for PluginInteractiveAdapter {
         pt: glam::DVec3,
     ) -> Vec<crate::scene::model::wire_model::WireModel> {
         let raw_wires = crate::plugin::guard("InteractiveCommand::on_cursor_move", || {
-            self.inner
-                .on_cursor_move([pt.x as f64, pt.y as f64, pt.z as f64])
+            self.inner.on_cursor_move([pt.x, pt.y, pt.z])
         })
         .unwrap_or_default();
         convert_preview_wires(raw_wires)
@@ -5131,26 +5628,46 @@ impl crate::command::CadCommand for PluginInteractiveAdapter {
         .unwrap_or(crate::command::CmdResult::Cancel)
     }
     fn selection_rejects_locked_layers(&self) -> bool {
-        crate::plugin::guard("InteractiveCommand::selection_rejects_locked_layers", || {
-            self.inner.selection_rejects_locked_layers()
-        })
+        crate::plugin::guard(
+            "InteractiveCommand::selection_rejects_locked_layers",
+            || self.inner.selection_rejects_locked_layers(),
+        )
         .unwrap_or(false)
     }
     fn entity_pick_highlights_hover(&self) -> bool {
         self.needs_entity_pick() || self.is_selection_gathering()
     }
     fn modal_dialog(&self) -> Option<ocs_plugin_api::dialog::DialogDef> {
-        crate::plugin::guard("InteractiveCommand::modal_dialog", || self.inner.modal_dialog())
-            .unwrap_or(None)
+        crate::plugin::guard("InteractiveCommand::modal_dialog", || {
+            self.inner.modal_dialog()
+        })
+        .unwrap_or(None)
     }
-    fn on_dialog_response(&mut self, response: ocs_plugin_api::dialog::DialogResponse) -> crate::command::CmdResult {
+    fn on_dialog_response(
+        &mut self,
+        response: ocs_plugin_api::dialog::DialogResponse,
+    ) -> crate::command::CmdResult {
         crate::plugin::guard("InteractiveCommand::on_dialog_response", || {
             self.inner.on_dialog_response(response)
         })
         .map(plugin_step_to_result)
         .unwrap_or(crate::command::CmdResult::Cancel)
     }
-    fn take_pending_panel_updates(&mut self) -> Vec<(String, std::collections::HashMap<String, ocs_plugin_api::dialog::DialogValue>)> {
+    fn on_dialog_action(
+        &mut self,
+        event: ocs_plugin_api::dialog::DialogEvent,
+    ) -> ocs_plugin_api::dialog::DialogActionResponse {
+        crate::plugin::guard("InteractiveCommand::on_dialog_action", || {
+            self.inner.on_dialog_action(event)
+        })
+        .unwrap_or(ocs_plugin_api::dialog::DialogActionResponse::None)
+    }
+    fn take_pending_panel_updates(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::collections::HashMap<String, ocs_plugin_api::dialog::DialogValue>,
+    )> {
         crate::plugin::guard("InteractiveCommand::take_pending_panel_updates", || {
             self.inner.take_pending_panel_updates()
         })
@@ -5182,7 +5699,8 @@ impl PluginProcessInteractiveAdapter {
         let needs_entity_pick = process.needs_entity_pick(command_id).ok();
         let is_selection_gathering = process.is_selection_gathering(command_id).ok();
         let accepts_drag_selection = process.accepts_drag_selection(command_id).ok();
-        let selection_rejects_locked_layers = process.selection_rejects_locked_layers(command_id).ok();
+        let selection_rejects_locked_layers =
+            process.selection_rejects_locked_layers(command_id).ok();
         Self {
             process,
             command_id,
@@ -5200,7 +5718,10 @@ impl PluginProcessInteractiveAdapter {
         self.needs_entity_pick = self.process.needs_entity_pick(self.command_id).ok();
         self.is_selection_gathering = self.process.is_selection_gathering(self.command_id).ok();
         self.accepts_drag_selection = self.process.accepts_drag_selection(self.command_id).ok();
-        self.selection_rejects_locked_layers = self.process.selection_rejects_locked_layers(self.command_id).ok();
+        self.selection_rejects_locked_layers = self
+            .process
+            .selection_rejects_locked_layers(self.command_id)
+            .ok();
     }
 
     fn cancel(&mut self) {
@@ -5318,7 +5839,7 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
     ) -> Vec<crate::scene::model::wire_model::WireModel> {
         let raw_wires = self
             .process
-            .on_cursor_move(self.command_id, [pt.x as f64, pt.y as f64, pt.z as f64])
+            .on_cursor_move(self.command_id, [pt.x, pt.y, pt.z])
             .unwrap_or_default();
         convert_preview_wires(raw_wires)
     }
@@ -5332,7 +5853,10 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
         use ocs_plugin_api::ipc::protocol::InteractiveEvent;
         let result = self
             .process
-            .interactive_event(self.command_id, InteractiveEvent::SelectionComplete(handles))
+            .interactive_event(
+                self.command_id,
+                InteractiveEvent::SelectionComplete(handles),
+            )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
         if matches!(
@@ -5356,9 +5880,25 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
         self.selection_rejects_locked_layers.unwrap_or(false)
     }
     fn modal_dialog(&self) -> Option<ocs_plugin_api::dialog::DialogDef> {
-        self.process.get_modal_dialog(self.command_id).ok().flatten()
+        self.process
+            .get_modal_dialog(self.command_id)
+            .ok()
+            .flatten()
     }
-    fn on_dialog_response(&mut self, response: ocs_plugin_api::dialog::DialogResponse) -> crate::command::CmdResult {
+    fn on_dialog_action(
+        &mut self,
+        event: ocs_plugin_api::dialog::DialogEvent,
+    ) -> ocs_plugin_api::dialog::DialogActionResponse {
+        // A runner without `DialogAction` answers with an error; the host
+        // then falls back to the panel-action notification.
+        self.process
+            .dialog_action(self.command_id, event)
+            .unwrap_or(ocs_plugin_api::dialog::DialogActionResponse::None)
+    }
+    fn on_dialog_response(
+        &mut self,
+        response: ocs_plugin_api::dialog::DialogResponse,
+    ) -> crate::command::CmdResult {
         use ocs_plugin_api::ipc::protocol::InteractiveEvent;
         let result = self
             .process
@@ -5378,6 +5918,12 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             self.refresh();
         }
         result
+    }
+    fn owner_plugin_id(&self) -> Option<&str> {
+        Some(self.process.id())
+    }
+    fn plugin_command_id(&self) -> Option<u64> {
+        Some(self.command_id)
     }
 }
 
@@ -5488,6 +6034,176 @@ mod tests {
     use document::xdata::XDataValue;
     use ocs_plugin_api::host::DocumentReader;
 
+    /// Plugins get the service's rules: an attribute counts as a use, and a
+    /// rename reaches it, as they do on the command line.
+    #[test]
+    fn linetype_operations_follow_the_shared_rules() {
+        use ocs_plugin_api::host::TableOperation as Op;
+        let create = |name: &str, pattern: &[f64]| Op::LinetypeCreate {
+            name: name.to_owned(),
+            description: String::new(),
+            pattern: pattern.to_vec(),
+        };
+        let rename = |from: &str, to: &str| Op::LinetypeRename {
+            from: from.to_owned(),
+            to: to.to_owned(),
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+
+        assert!(host
+            .linetype_operation(create("Gap First", &[-1.0, 1.0]))
+            .is_err());
+        assert!(host
+            .linetype_operation(create("Comma,Name", &[1.0, -1.0]))
+            .is_err());
+        assert!(
+            host.linetype_operation(create("dashed", &[1.0, -1.0]))
+                .is_err(),
+            "a standard name is taken"
+        );
+        let created = host
+            .linetype_operation(create("Posts", &[12.0, -3.0, 2.0, -3.0]))
+            .unwrap();
+        let stored = host.document().line_types.get("Posts").unwrap();
+        assert_eq!(stored.handle, created);
+        assert_eq!(stored.pattern_length, 20.0);
+
+        assert!(
+            host.linetype_operation(rename("Posts", "POSTS")).is_err(),
+            "a plugin still cannot change only the case"
+        );
+
+        let mut attribute = document::entities::AttributeEntity::new("TAG".into(), "VALUE".into());
+        attribute.common.linetype = "Posts".into();
+        let mut insert = document::entities::Insert::new("HOLDER", document::Vector3::ZERO);
+        insert.attributes.push(attribute);
+        let insert = host
+            .document_mut()
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
+        let delete = |name: &str| Op::LinetypeDelete {
+            name: name.to_owned(),
+        };
+        let refusal = host.linetype_operation(delete("Posts")).unwrap_err();
+        assert!(refusal.contains("PURGE"), "{refusal}");
+
+        let renamed = host.linetype_operation(rename("Posts", "Rails")).unwrap();
+        assert_eq!(renamed, created, "the handle survives");
+        let Some(EntityType::Insert(insert)) = host.document().get_entity(insert) else {
+            panic!("the insert is gone");
+        };
+        assert_eq!(insert.attributes[0].common.linetype, "Rails");
+    }
+
+    /// A layout a plugin creates, renames or deletes shows in the layout tab
+    /// bar at once, as one made from the tab bar does.
+    #[test]
+    fn plugin_layout_changes_reach_the_layout_tab_bar() {
+        use ocs_plugin_api::host::TableOperation as Op;
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let tabs = |app: &OpenCADStudio| app.tabs[0].scene.cached_layout_names().to_vec();
+        let before = tabs(&app);
+        assert!(!before.iter().any(|n| n == "Plugin Sheet"));
+
+        let mut host = HostSession::new(&mut app, 0);
+        host.layout_operation(Op::LayoutCreate {
+            name: "Plugin Sheet".to_owned(),
+        })
+        .unwrap();
+        drop(host);
+        assert!(
+            tabs(&app).iter().any(|n| n == "Plugin Sheet"),
+            "the new layout is missing from the tab bar: {:?}",
+            tabs(&app)
+        );
+
+        let mut host = HostSession::new(&mut app, 0);
+        host.layout_operation(Op::LayoutRename {
+            from: "Plugin Sheet".to_owned(),
+            to: "Renamed Sheet".to_owned(),
+        })
+        .unwrap();
+        drop(host);
+        let names = tabs(&app);
+        assert!(names.iter().any(|n| n == "Renamed Sheet"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "Plugin Sheet"), "{names:?}");
+
+        let mut host = HostSession::new(&mut app, 0);
+        host.layout_operation(Op::LayoutDelete {
+            name: "Renamed Sheet".to_owned(),
+        })
+        .unwrap();
+        drop(host);
+        assert_eq!(tabs(&app), before);
+    }
+
+    /// A plugin puts the paper-space layout tabs in a new order in one undo
+    /// step, and a list that is not exactly the paper-space layouts is refused.
+    #[test]
+    fn plugin_sets_the_layout_tab_order_in_one_undo_step() {
+        use ocs_plugin_api::host::TableOperation as Op;
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let tabs = |app: &OpenCADStudio| app.tabs[0].scene.cached_layout_names().to_vec();
+        let mut host = HostSession::new(&mut app, 0);
+        for name in ["Sheet A", "Sheet B"] {
+            host.layout_operation(Op::LayoutCreate {
+                name: name.to_owned(),
+            })
+            .unwrap();
+        }
+        drop(host);
+        let before = tabs(&app);
+        let paper: Vec<String> = before.iter().skip(1).cloned().collect();
+        assert!(paper.len() >= 3, "{before:?}");
+        let mut wanted = paper.clone();
+        wanted.reverse();
+
+        let order = |names: &[&str]| Op::LayoutSetTabOrder {
+            names: names.iter().map(|n| (*n).to_owned()).collect(),
+        };
+        let mut host = HostSession::new(&mut app, 0);
+        let first = paper[0].as_str();
+        assert!(
+            host.table_operation(order(&[first])).is_err(),
+            "a layout left out"
+        );
+        assert!(
+            host.table_operation(order(&[first, first])).is_err(),
+            "a layout listed twice"
+        );
+        let mut with_model: Vec<&str> = paper.iter().map(String::as_str).collect();
+        with_model.push("Model");
+        assert!(
+            host.table_operation(order(&with_model)).is_err(),
+            "Model listed"
+        );
+        drop(host);
+        assert_eq!(tabs(&app), before, "a refused order changes nothing");
+
+        app.finish_pending_history(0);
+        let undo_before = app.tabs[0].history.undo_stack.len();
+        let mut host = HostSession::new(&mut app, 0);
+        let lower: Vec<String> = wanted.iter().map(|n| n.to_lowercase()).collect();
+        let lower: Vec<&str> = lower.iter().map(String::as_str).collect();
+        host.table_operation(order(&lower)).unwrap();
+        drop(host);
+        app.finish_pending_history(0);
+        let after = tabs(&app);
+        assert_eq!(after[0], "Model");
+        assert_eq!(after[1..], wanted[..], "the tab bar shows the new order");
+        assert_eq!(
+            app.tabs[0].history.undo_stack.len(),
+            undo_before + 1,
+            "one undo step"
+        );
+        app.undo_steps(1);
+        assert_eq!(tabs(&app), before, "one undo restores the old order");
+    }
+
     #[test]
     fn selection_query_is_live_and_replacement_is_validated() {
         let mut app = OpenCADStudio::new_for_test();
@@ -5521,7 +6237,8 @@ mod tests {
             record.block_entity_handle = block_handle;
             record.block_end_handle = block_end_handle;
             host.document_mut().block_records.add(record).unwrap();
-            let mut block = document::entities::Block::new("TAGBLOCK", document::types::Vector3::ZERO);
+            let mut block =
+                document::entities::Block::new("TAGBLOCK", document::types::Vector3::ZERO);
             block.common.handle = block_handle;
             block.common.owner_handle = record_handle;
             host.document_mut()
@@ -5704,11 +6421,13 @@ mod tests {
 
         // Create seeds the namespace: the dictionary chain is auto-created and
         // reading returns the entries verbatim.
-        let alpha = host.create_xrecord(&["PLUGIN"], "alpha", entries()).unwrap();
+        let alpha = host
+            .create_xrecord(&["PLUGIN"], "alpha", entries())
+            .unwrap();
         assert!(!alpha.is_null());
         assert_eq!(host.read_xrecord(&["PLUGIN"], "alpha").unwrap(), entries());
         // Dictionary lookup is case-insensitive, both for the path …
-assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
+        assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         // â€¦ and re-creating an existing name is refused without any change.
         assert!(host
             .create_xrecord(&["plugin"], "ALPHA", entries())
@@ -6106,6 +6825,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             &plugin_path,
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .expect("spawn staged Python plugin");
         assert_eq!(process.id(), "opencad.python");
@@ -6172,7 +6892,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0),
             "rejected batch changed the line"
         );
-        let dwg_bytes = document::DwgWriter::write_to_vec(host.document()).expect("write edited DWG");
+        let dwg_bytes =
+            document::DwgWriter::write_to_vec(host.document()).expect("write edited DWG");
         let dwg_doc = document::DwgReader::from_stream(std::io::Cursor::new(dwg_bytes))
             .read()
             .expect("reopen edited DWG");
@@ -6237,6 +6958,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .expect("spawn staged Python plugin");
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -6437,6 +7159,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .expect("spawn staged Python plugin");
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -6643,8 +7366,10 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         host.document_mut()
             .add_entity(EntityType::BlockEnd(block_end))
             .unwrap();
-        let insert =
-            document::entities::Insert::new("TAGBLOCK", document::types::Vector3::new(10.0, 0.0, 0.0));
+        let insert = document::entities::Insert::new(
+            "TAGBLOCK",
+            document::types::Vector3::new(10.0, 0.0, 0.0),
+        );
         let insert_handle = host
             .document_mut()
             .add_entity(EntityType::Insert(insert))
@@ -6654,6 +7379,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .expect("spawn staged Python plugin");
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -6938,6 +7664,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -7139,6 +7866,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -7370,6 +8098,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -7560,43 +8289,45 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         // DWG R2010+ derives text_height/text_width/hookline_enabled instead of
         // storing them (document writes them for R13-R2007/R13-R14 only), so
         // only DXF must round-trip those three.
-        let assert_saved =
-            |document: &Document, is_dxf: bool| {
-                let Some(EntityType::Leader(leader)) = document.get_entity(leader_handle) else {
-                    panic!("Leader missing after reopen");
-                };
-                assert_eq!(leader.vertices.len(), 4);
-                assert_eq!(leader.annotation_handle, text_handle);
-                assert!(!leader.arrow_enabled);
-                // The script sets a true colour. DXF's LEADER group 77 holds an ACI
-                // index only, so it cannot carry one, and the DWG writer does not
-                // store `override_color` at all (BLOCKER, document): it reopens as
-                // ByLayer in both formats.
-                assert_eq!(leader.override_color, document::types::Color::ByLayer,
-                "document now persists a true-colour Leader.override_color; drop the blocker");
-                assert_eq!(
-                    leader.annotation_offset,
-                    document::types::Vector3::new(1.0, 2.0, 0.0)
-                );
-                assert_eq!(leader.dimension_style, "Standard");
-                if is_dxf {
-                    assert!((leader.text_height - 4.0).abs() < 1e-12);
-                    assert!(leader.hookline_enabled);
-                } else {
-                    assert_eq!(
-                        leader.text_height, 2.5,
-                        "DWG R2010+ does not store text_height"
-                    );
-                    assert!(
-                        !leader.hookline_enabled,
-                        "DWG R2010+ does not store hookline_enabled"
-                    );
-                }
-                assert!(matches!(
-                    document.get_entity(text_handle),
-                    Some(EntityType::Text(_))
-                ));
+        let assert_saved = |document: &Document, is_dxf: bool| {
+            let Some(EntityType::Leader(leader)) = document.get_entity(leader_handle) else {
+                panic!("Leader missing after reopen");
             };
+            assert_eq!(leader.vertices.len(), 4);
+            assert_eq!(leader.annotation_handle, text_handle);
+            assert!(!leader.arrow_enabled);
+            // The script sets a true colour. DXF's LEADER group 77 holds an ACI
+            // index only, so it cannot carry one, and the DWG writer does not
+            // store `override_color` at all (BLOCKER, document): it reopens as
+            // ByLayer in both formats.
+            assert_eq!(
+                leader.override_color,
+                document::types::Color::ByLayer,
+                "document now persists a true-colour Leader.override_color; drop the blocker"
+            );
+            assert_eq!(
+                leader.annotation_offset,
+                document::types::Vector3::new(1.0, 2.0, 0.0)
+            );
+            assert_eq!(leader.dimension_style, "Standard");
+            if is_dxf {
+                assert!((leader.text_height - 4.0).abs() < 1e-12);
+                assert!(leader.hookline_enabled);
+            } else {
+                assert_eq!(
+                    leader.text_height, 2.5,
+                    "DWG R2010+ does not store text_height"
+                );
+                assert!(
+                    !leader.hookline_enabled,
+                    "DWG R2010+ does not store hookline_enabled"
+                );
+            }
+            assert!(matches!(
+                document.get_entity(text_handle),
+                Some(EntityType::Text(_))
+            ));
+        };
         let reopened_dwg = crate::io::load_bytes(
             "leader.dwg",
             document::DwgWriter::write_to_vec(host.document()).unwrap(),
@@ -7712,6 +8443,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -7772,20 +8504,19 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         assert!(created_mline.vertices.iter().all(|vertex| {
             (vertex.direction.x - 1.0).abs() < 1e-9 && (vertex.miter.y.abs() - 1.0).abs() < 1e-9
         }));
-        let assert_lines =
-            |entity: &EntityType, document: &Document, expected_vertices: usize| {
-                let EntityType::MLine(mline) = entity else {
-                    panic!("expected MLine")
-                };
-                assert_eq!(mline.vertices.len(), expected_vertices);
-                let lines = crate::entities::mline::mline_lines(mline, document);
-                assert!(lines.len() >= 2, "expected styled element lines");
-                assert!(lines
-                    .iter()
-                    .flat_map(|line| &line.points)
-                    .flatten()
-                    .all(|v| v.is_finite()));
+        let assert_lines = |entity: &EntityType, document: &Document, expected_vertices: usize| {
+            let EntityType::MLine(mline) = entity else {
+                panic!("expected MLine")
             };
+            assert_eq!(mline.vertices.len(), expected_vertices);
+            let lines = crate::entities::mline::mline_lines(mline, document);
+            assert!(lines.len() >= 2, "expected styled element lines");
+            assert!(lines
+                .iter()
+                .flat_map(|line| &line.points)
+                .flatten()
+                .all(|v| v.is_finite()));
+        };
         assert_lines(&created, host.document(), 2);
 
         let script = std::env::temp_dir().join(format!("ocs_mline_edit_{}.py", std::process::id()));
@@ -8001,6 +8732,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -8340,6 +9072,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -8608,6 +9341,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -8871,6 +9605,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -8938,7 +9673,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             record.block_entity_handle = block_handle;
             record.block_end_handle = end_handle;
             host.document_mut().block_records.add(record).unwrap();
-            let mut block = document::entities::Block::new("AUDITBLK", document::types::Vector3::ZERO);
+            let mut block =
+                document::entities::Block::new("AUDITBLK", document::types::Vector3::ZERO);
             block.common.handle = block_handle;
             block.common.owner_handle = record_handle;
             host.document_mut()
@@ -10215,8 +10951,10 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             expect_created: "PART_NO|Part number|PN-001 ins1.0,2.0 al3.0,4.0 h2.5 r0.25 wf1.25 ob0.10 Center/Top f1010 fl12 tg2 lock1",
             expect_edited: "PART_NO|Serial|PN-002 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
             expect_reedited: "PART_NO|Serial|PN-003 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
-            expect_edited_dxf: "",
-            expect_reedited_dxf: "",
+            // Reading a DXF derives a justified attribute's insertion point
+            // from its alignment point (#2728).
+            expect_edited_dxf: "PART_NO|Serial|PN-002 ins-11.0,-5.4 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
+            expect_reedited_dxf: "PART_NO|Serial|PN-003 ins-11.0,-5.4 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
             expect_edited_dwg: "",
             expect_reedited_dwg: "",
         });
@@ -10261,6 +10999,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -10349,11 +11088,11 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             is_kind: |entity| matches!(entity, EntityType::Ole2Frame(_)),
             digest: |entity| match entity {
                 EntityType::Ole2Frame(v) => {
-                    let picture = match document::entities::extract_presentation(&v.encoded_payload())
-                    {
-                        Some(document::entities::OlePresentation::Raster(bytes)) => bytes.len(),
-                        _ => 0,
-                    };
+                    let picture =
+                        match document::entities::extract_presentation(&v.encoded_payload()) {
+                            Some(document::entities::OlePresentation::Raster(bytes)) => bytes.len(),
+                            _ => 0,
+                        };
                     format!(
                         "ul{:.1},{:.1} lr{:.1},{:.1} lock{} picture{}",
                         v.upper_left_corner.x,
@@ -10415,11 +11154,13 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         let handle = doc.add_entity(EntityType::Solid3D(solid.clone())).unwrap();
 
         // Round trip both formats and compare payloads.
-        let dwg =
-            crate::io::load_bytes("s.dwg", document::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
-        let dxf =
-            crate::io::load_bytes("s.dxf", document::DxfWriter::new(&doc).write_to_vec().unwrap())
-                .unwrap();
+        let dwg = crate::io::load_bytes("s.dwg", document::DwgWriter::write_to_vec(&doc).unwrap())
+            .unwrap();
+        let dxf = crate::io::load_bytes(
+            "s.dxf",
+            document::DxfWriter::new(&doc).write_to_vec().unwrap(),
+        )
+        .unwrap();
         for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
             let Some(EntityType::Solid3D(back)) = reopened.get_entity(handle) else {
                 panic!("{label} lost the solid")
@@ -10508,11 +11249,13 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             lifted.as_ref().map(sm::volume)
         );
         let bh = doc.add_entity(EntityType::Body(body_entity)).unwrap();
-        let dwg =
-            crate::io::load_bytes("b.dwg", document::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
-        let dxf =
-            crate::io::load_bytes("b.dxf", document::DxfWriter::new(&doc).write_to_vec().unwrap())
-                .unwrap();
+        let dwg = crate::io::load_bytes("b.dwg", document::DwgWriter::write_to_vec(&doc).unwrap())
+            .unwrap();
+        let dxf = crate::io::load_bytes(
+            "b.dxf",
+            document::DxfWriter::new(&doc).write_to_vec().unwrap(),
+        )
+        .unwrap();
         for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
             match reopened.get_entity(bh) {
                 Some(EntityType::Body(back)) => eprintln!(
@@ -10615,6 +11358,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -10911,6 +11655,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -10995,6 +11740,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -11277,6 +12023,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -11321,9 +12068,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             }
             other => panic!("no surface or solid {handle:?}: {other:?}"),
         };
-        let extent_in = |document: &Document, handle: Handle| {
-            sm::extent(&body_of(document, handle)).unwrap()
-        };
+        let extent_in =
+            |document: &Document, handle: Handle| sm::extent(&body_of(document, handle)).unwrap();
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
         let kind_in = |document: &Document, handle: Handle| match document.get_entity(handle) {
             Some(EntityType::Surface(s)) => s.kind,
@@ -11674,6 +12420,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -11702,9 +12449,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
         };
         let volume_in =
             |document: &Document, handle: Handle| sm::volume(&body_in(document, handle));
-        let extent_in = |document: &Document, handle: Handle| {
-            sm::extent(&body_in(document, handle)).unwrap()
-        };
+        let extent_in =
+            |document: &Document, handle: Handle| sm::extent(&body_in(document, handle)).unwrap();
         let close = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
 
         // C: all three operations on two overlapping boxes, keeping the
@@ -11996,6 +12742,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -12098,6 +12845,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -12189,6 +12937,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -12330,6 +13079,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dispatch = |host: &mut HostSession<'_>, command: &str| {
@@ -12469,7 +13219,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             );
             if linked {
                 let h = doc.allocate_handle();
-                let mut def = document::objects::ImageDefinition::with_dimensions(path.clone(), 8, 4);
+                let mut def =
+                    document::objects::ImageDefinition::with_dimensions(path.clone(), 8, 4);
                 def.handle = h;
                 def.is_loaded = true;
                 doc.objects
@@ -12480,8 +13231,11 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             for (label, document) in [
                 (
                     "DWG",
-                    crate::io::load_bytes("i.dwg", document::DwgWriter::write_to_vec(&doc).unwrap())
-                        .unwrap(),
+                    crate::io::load_bytes(
+                        "i.dwg",
+                        document::DwgWriter::write_to_vec(&doc).unwrap(),
+                    )
+                    .unwrap(),
                 ),
                 (
                     "DXF",
@@ -12501,7 +13255,9 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
                 let reactors = document
                     .objects
                     .values()
-                    .filter(|o| matches!(o, document::objects::ObjectType::ImageDefinitionReactor(_)))
+                    .filter(|o| {
+                        matches!(o, document::objects::ObjectType::ImageDefinitionReactor(_))
+                    })
                     .count();
                 let dicts = document.objects.values().filter(|o| matches!(o, document::objects::ObjectType::Dictionary(d) if d.entries.iter().any(|(k, _)| k.contains("IMAGE")))).count();
                 match entity {
@@ -12529,6 +13285,7 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -12571,8 +13328,8 @@ assert_eq!(host.read_xrecord(&["plugin"], "alpha").unwrap(), entries());
             r#"
 L.create('Walls', color=1, lineweight=50, description='load bearing', transparency=30)
 L.create('Grid', color=(10, 200, 30), linetype='Continuous', off=True, plottable=False)
-L.modify('Walls', color=5, locked=True)
 doc.create_entity('Line', start=P(0, 0, 0), end=P(1, 0, 0), layer='Walls')
+L.modify('Walls', color=5, locked=True)
 L.rename('Walls', 'Structure')
 check('dup', lambda: L.create('structure'))
 check('badname', lambda: L.create('a<b'))
@@ -12733,6 +13490,7 @@ L.delete('Structure', erase_objects=True)
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -12968,6 +13726,7 @@ S.delete('Heading')
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -13232,6 +13991,7 @@ B.delete('Widget2')
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -13434,6 +14194,7 @@ check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Gh
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -13703,6 +14464,7 @@ LT.delete('Temp')
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let dir = std::env::temp_dir();
@@ -14108,6 +14870,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let script = std::env::temp_dir().join(format!("ocs_nested_{}.py", std::process::id()));
@@ -14348,6 +15111,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             std::path::Path::new(&plugin_path),
             &mut host,
             crate::plugin::v4_support::notification_handler(),
+            None,
         )
         .unwrap();
         let script = dir.join(format!("ocs_link_{}.py", std::process::id()));
@@ -14490,6 +15254,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                     std::path::Path::new(&plugin_path),
                     &mut host,
                     crate::plugin::v4_support::notification_handler(),
+                    None,
                 )
                 .expect("spawn staged Python plugin"),
             )
@@ -14635,6 +15400,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                     std::path::Path::new(&plugin_path),
                     &mut host,
                     crate::plugin::v4_support::notification_handler(),
+                    None,
                 )
                 .expect("spawn staged Python plugin"),
             )
@@ -14877,8 +15643,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let handle;
         {
             let mut host = HostSession::new(&mut app, 0);
-            let insert =
-                document::entities::Insert::new("DOOR", document::types::Vector3::new(1.0, 2.0, 0.0));
+            let insert = document::entities::Insert::new(
+                "DOOR",
+                document::types::Vector3::new(1.0, 2.0, 0.0),
+            );
             handle = host.add_entity(EntityType::Insert(insert));
             let mut changed = host.document().get_entity(handle).unwrap().clone();
             if let EntityType::Insert(insert) = &mut changed {
@@ -15651,7 +16419,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         fn on_point(&mut self, pt: [f64; 3]) -> ocs_plugin_api::host::CommandStep {
             use ocs_plugin_api::host::CommandStep;
             if self.got_first {
-                let p = document::entities::Point::at(document::types::Vector3::new(pt[0], pt[1], pt[2]));
+                let p = document::entities::Point::at(document::types::Vector3::new(
+                    pt[0], pt[1], pt[2],
+                ));
                 CommandStep::CommitAndEnd(document::EntityType::Point(p))
             } else {
                 self.got_first = true;
@@ -15851,7 +16621,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             _handle: document::Handle,
             pt: [f64; 3],
         ) -> ocs_plugin_api::host::CommandStep {
-            let p = document::entities::Point::at(document::types::Vector3::new(pt[0], pt[1], pt[2]));
+            let p =
+                document::entities::Point::at(document::types::Vector3::new(pt[0], pt[1], pt[2]));
             ocs_plugin_api::host::CommandStep::CommitAndEnd(document::EntityType::Point(p))
         }
     }
@@ -16055,7 +16826,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
 
         // Verify DYNAMIC_PLUGIN_LINES does not exist initially
-        assert!(!app.tabs[0].scene.document.layers.contains("DYNAMIC_PLUGIN_LINES"));
+        assert!(!app.tabs[0]
+            .scene
+            .document
+            .layers
+            .contains("DYNAMIC_PLUGIN_LINES"));
         assert!(!app
             .ribbon
             .layer_infos
@@ -16072,7 +16847,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         }
 
         // Verify layer is created in document AND refreshed in ribbon + layer panel
-        assert!(app.tabs[0].scene.document.layers.contains("DYNAMIC_PLUGIN_LINES"));
+        assert!(app.tabs[0]
+            .scene
+            .document
+            .layers
+            .contains("DYNAMIC_PLUGIN_LINES"));
         assert!(
             app.ribbon
                 .layer_infos
@@ -16336,8 +17115,6 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
 
     #[test]
     fn quad_panels_register_replace_per_owner_and_reject_foreign() {
-        use ocs_plugin_api::host::HostApi;
-
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         // The sink marks the plugin loaded+alive for the visibility predicate
@@ -16369,10 +17146,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
 
             // Same owner: per-panel replace keeps the owner's slot (the new
             // declaration's item count wins).
-            let results = host.register_quad_panels(
-                "PLUGIN",
-                &[quad_panel("qtest.align", &["flip", "other"])],
-            );
+            let results = host
+                .register_quad_panels("PLUGIN", &[quad_panel("qtest.align", &["flip", "other"])]);
             assert_eq!(results, vec![true]);
             drop(host);
             let feed = crate::app::plugin_host::plugin_quad_panels(&app.disabled_plugins);
@@ -16387,10 +17162,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
 
             // A foreign owner cannot replace another plugin's panel id.
             let mut host = HostSession::new(&mut app, 0);
-            let results = host.register_quad_panels(
-                "PLUGIN_RIVAL",
-                &[quad_panel("qtest.align", &["x"])],
-            );
+            let results =
+                host.register_quad_panels("PLUGIN_RIVAL", &[quad_panel("qtest.align", &["x"])]);
             assert_eq!(results, vec![false]);
 
             // Unregister: only the owner's ids are removed (the ownership
@@ -16423,7 +17196,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // The §4 conversion: a good svg keeps its bytes in the UI model; an
         // oversized one degrades to the glyph tile without refusing the
         // panel; a declared glyph passes through.
-        let good = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>".as_bytes().to_vec();
+        let good = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+            .as_bytes()
+            .to_vec();
         let oversized = vec![b'x'; crate::plugin::quad::MAX_QUAD_ICON_BYTES + 1];
         let def = ocs_plugin_api::dialog::QuadPanelDef::new("qtest.icons", "Icons")
             .with_item(QuadItemDef {
@@ -16466,12 +17241,16 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // The sink marks the plugin loaded+alive for the visibility predicate
         // (the register tests' idiom): with the removed synthesis this is
         // exactly the case that used to grow an auto tab.
-        crate::plugin::grip_points::install_in_process_sink("PLUGIN", |_host, _event| {
+        // An id of its own: the quad store is process-wide, and other tests
+        // register panels for "PLUGIN" while this one runs.
+        crate::plugin::grip_points::install_in_process_sink("PLUGIN_NO_QUAD", |_host, _event| {
             ocs_plugin_api::host::CustomGripResponse::default()
         });
         let feed = crate::app::plugin_host::plugin_quad_panels(&app.disabled_plugins);
         assert_eq!(
-            feed.iter().filter(|panel| panel.id.ends_with(":auto")).count(),
+            feed.iter()
+                .filter(|panel| panel.id.ends_with(":auto"))
+                .count(),
             0,
             "no auto tab is synthesized for a plain-command plugin"
         );
@@ -16480,7 +17259,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             0,
             "no registration, no contribution: the feed stays empty"
         );
-        crate::plugin::grip_points::remove_in_process_sink("PLUGIN");
+        crate::plugin::grip_points::remove_in_process_sink("PLUGIN_NO_QUAD");
     }
 
     // ── API v14: plugin class objects ──────────────────────────────────────
@@ -16516,7 +17295,60 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             tolerance: 1e-3,
             layer: "PLUGIN_PROFILE".to_string(),
             design_record: "PLUGIN_ALIGN_DISPLAY".to_string(),
+            selectable_custom: false,
         }
+    }
+
+    #[test]
+    fn boot_time_declaration_is_attributed_to_the_declared_package_id() {
+        // HOST-FIXES-TODO 1: the spawn bootstrap registers entity classes and
+        // quad panels while GetManifest is still in flight — the registry
+        // entry does not exist yet, and the manifest window used to serve
+        // with an empty identity ("plugin \"\" is not a loaded, alive
+        // plugin"). The declaration law now treats the IN-FLIGHT BOOT as the
+        // live, authenticated transport: the package's declared id rides the
+        // connection before the manifest and the manifest must confirm it,
+        // while the empty identity still refuses.
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        crate::plugin::external::with_fresh_installed_manager(|| {
+            // An empty identity is never attributable, boot window or not.
+            let empty_err = host
+                .register_plugin_class("", &traverse_class())
+                .unwrap_err();
+            assert!(
+                empty_err.contains("not a loaded, alive plugin"),
+                "got: {empty_err}"
+            );
+
+            // The declared package id in its boot window passes the law.
+            crate::plugin::external::with_manager(|m| m.begin_boot("opencad.example"));
+            assert!(
+                host.register_plugin_class("opencad.example", &traverse_class())
+                    .is_ok()
+            );
+
+            // After the boot window closes (and without a registry entry at
+            // that id) the law refuses again: a different class key under the
+            // same owner must not register.
+            crate::plugin::external::with_manager(|m| m.end_boot("opencad.example"));
+            let mut unrelated = traverse_class();
+            unrelated.class_id = "OTHER_KEY".to_string();
+            let closed_err = host
+                .register_plugin_class("opencad.example", &unrelated)
+                .unwrap_err();
+            assert!(
+                closed_err.contains("not a loaded, alive plugin"),
+                "got: {closed_err}"
+            );
+
+            // The empty identity law survives the whole exercise.
+            let still_empty = host
+                .register_plugin_class("", &traverse_class())
+                .unwrap_err();
+            assert!(still_empty.contains("not a loaded, alive plugin"));
+        });
     }
 
     #[test]
@@ -16524,12 +17356,21 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
-        let not_owner = host.register_plugin_class("ghost", &traverse_class()).unwrap_err();
-        assert!(not_owner.contains("not a loaded, alive plugin"), "got: {not_owner}");
+        let not_owner = host
+            .register_plugin_class("ghost", &traverse_class())
+            .unwrap_err();
+        assert!(
+            not_owner.contains("not a loaded, alive plugin"),
+            "got: {not_owner}"
+        );
         install_class_owner();
         // Register, then re-register identical: idempotent, still one entry.
-        assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
-        assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+        assert!(host
+            .register_plugin_class("PLUGIN", &traverse_class())
+            .is_ok());
+        assert!(host
+            .register_plugin_class("PLUGIN", &traverse_class())
+            .is_ok());
         assert_eq!(host.app.tabs[0].plugin_classes.total(), 1);
         // A different schema refuses without touching the live class.
         let mut bumped = traverse_class();
@@ -16537,7 +17378,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let err = host.register_plugin_class("PLUGIN", &bumped).unwrap_err();
         assert!(err.contains("different schema"), "got: {err}");
         assert_eq!(
-            host.app.tabs[0].plugin_classes.find("PLUGIN", "PLUGIN_ALIGN_DISPLAY").expect("live entry").schema_version,
+            host.app.tabs[0]
+                .plugin_classes
+                .find("PLUGIN", "PLUGIN_ALIGN_DISPLAY")
+                .expect("live entry")
+                .schema_version,
             4
         );
         // Malformed declarations refuse: empty identity, unnamed grip
@@ -16549,11 +17394,12 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         unnamed.grip_schema[0].param_name = String::new();
         assert!(host.register_plugin_class("PLUGIN", &unnamed).is_err());
         let mut dup = traverse_class();
-        dup.grip_schema.push(ocs_plugin_api::host::PluginGripSchemaEntry {
-            grip_id: 1,
-            param_name: "other".to_string(),
-            drives: None,
-        });
+        dup.grip_schema
+            .push(ocs_plugin_api::host::PluginGripSchemaEntry {
+                grip_id: 1,
+                param_name: "other".to_string(),
+                drives: None,
+            });
         assert!(host.register_plugin_class("PLUGIN", &dup).is_err());
         assert_eq!(host.app.tabs[0].plugin_classes.total(), 1);
     }
@@ -16568,7 +17414,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         install_class_owner();
         {
             let mut host = HostSession::new(&mut app, 0);
-            assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+            assert!(host
+                .register_plugin_class("PLUGIN", &traverse_class())
+                .is_ok());
         }
         // Session B: a DIFFERENT HostSession over the same tab (the IPC
         // server's per-request reality) stages the instance.
@@ -16578,6 +17426,63 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             .expect("the class outlives its declaring session");
         assert!(!handles.is_empty());
         assert!(host.app.tabs[0].scene.is_reference_only(handles[0]));
+        assert!(!host.app.tabs[0].scene.native_edit_disabled(handles[0]));
+        let stamp = host
+            .read_record(handles[0], "PLUGIN_ALIGN_DISPLAY")
+            .expect("legacy owner stamp");
+        assert_eq!(stamp.values.len(), 2, "unflagged staging is unchanged");
+    }
+
+    #[test]
+    fn selectable_custom_instances_are_selectable_but_native_edit_disabled() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        install_class_owner();
+        let mut host = HostSession::new(&mut app, 0);
+        assert!(host
+            .register_plugin_class("PLUGIN", &traverse_class())
+            .is_ok());
+        let mut instance = traverse_instance();
+        instance.selectable_custom = true;
+        instance.design_record.clear();
+        let handles = host
+            .stage_plugin_class_instance("PLUGIN", &instance)
+            .expect("the selectable custom instance stages");
+        assert!(!handles.is_empty());
+        for &handle in &handles {
+            assert!(!host.app.tabs[0].scene.is_reference_only(handle));
+            assert!(host.app.tabs[0].scene.native_edit_disabled(handle));
+            let stamp = host
+                .read_record(handle, "PLUGIN_ALIGN_DISPLAY")
+                .expect("selectable custom owner stamp");
+            assert_eq!(stamp.values.len(), 3);
+            assert!(matches!(
+                &stamp.values[1],
+                document::xdata::XDataValue::String(value) if value.is_empty()
+            ));
+            assert!(matches!(
+                stamp.values[2],
+                document::xdata::XDataValue::Integer32(1)
+            ));
+            assert!(host.entity_grips(handle).expect("grip read").is_empty());
+
+            let original = host.document().get_entity(handle).unwrap().clone();
+            assert!(!host.app.tabs[0].scene.update_entity(original.clone()));
+            host.app.tabs[0].scene.erase_entities(&[handle]);
+            assert!(host.document().get_entity(handle).is_some());
+        }
+
+        let handle = handles[0];
+        host.app.tabs[0].scene.select_entity(handle, true);
+        assert!(host.app.tabs[0].scene.selected.contains(&handle));
+        assert!(host.app.property_target_handles(0).is_empty());
+        let original = host.document().get_entity(handle).unwrap().clone();
+        assert!(
+            host.update_entity(original),
+            "plugin updates remain allowed"
+        );
+        assert!(host.remove_entity(handle), "plugin erases remain allowed");
+        assert!(host.document().get_entity(handle).is_none());
     }
 
     #[test]
@@ -16586,7 +17491,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         install_class_owner();
         let mut host = HostSession::new(&mut app, 0);
-        assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+        assert!(host
+            .register_plugin_class("PLUGIN", &traverse_class())
+            .is_ok());
         // Another alive plugin sees the class but cannot stage it.
         crate::plugin::grip_points::install_in_process_sink("PLUGIN_RIVAL", |_host, _event| {
             ocs_plugin_api::host::CustomGripResponse::default()
@@ -16608,7 +17515,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let handles;
         {
             let mut host = HostSession::new(&mut app, 0);
-            assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+            assert!(host
+                .register_plugin_class("PLUGIN", &traverse_class())
+                .is_ok());
             handles = host
                 .stage_plugin_class_instance("PLUGIN", &instance)
                 .expect("the class instance stages");
@@ -16654,7 +17563,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // The stamp's file-level law: the identity stamp (the XDATA record
         // under the auto-registered APPID) and the staged display set
         // survive BOTH file formats with empty loss rows; the stamp values
-        // (schema version + record linkage) stay byte-identical.
+        // (schema version + record linkage + selectable-custom flags) stay
+        // byte-identical.
         use document::{Dwg, Dxf, Format};
 
         let mut app = OpenCADStudio::new_for_test();
@@ -16663,10 +17573,14 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let handles;
         {
             let mut host = HostSession::new(&mut app, 0);
-            assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+            assert!(host
+                .register_plugin_class("PLUGIN", &traverse_class())
+                .is_ok());
+            let mut instance = traverse_instance();
+            instance.selectable_custom = true;
             handles = host
-                .stage_plugin_class_instance("PLUGIN", &traverse_instance())
-                .expect("the class instance stages");
+                .stage_plugin_class_instance("PLUGIN", &instance)
+                .expect("the selectable custom class instance stages");
         }
         let read_stamp = |document: &document::Document, handle: document::Handle| {
             let entity = document
@@ -16684,11 +17598,17 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             format: &F,
             document: &document::Document,
             handles: &[document::Handle],
-            stamp: &dyn Fn(&document::Document, document::Handle) -> Vec<document::xdata::XDataValue>,
+            stamp: &dyn Fn(
+                &document::Document,
+                document::Handle,
+            ) -> Vec<document::xdata::XDataValue>,
             name: &str,
         ) {
             let (bytes, losses) = format.write(document).unwrap();
-            assert!(losses.is_empty(), "{name} write must not lose anything: {losses:?}");
+            assert!(
+                losses.is_empty(),
+                "{name} write must not lose anything: {losses:?}"
+            );
             let (back, read_losses) = format.read(&bytes).unwrap();
             assert!(
                 read_losses.is_empty(),
@@ -16701,10 +17621,28 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                     expected,
                     "{name}: the class stamp must be byte-identical"
                 );
+                assert!(
+                    crate::plugin::entity_labels::native_edit_disabled(
+                        back.get_entity(*handle).expect("flagged entity survives"),
+                    ),
+                    "{name}: the selectable-custom flag survives"
+                );
             }
         }
-        round_trip(&Dxf, &app.tabs[0].scene.document, &handles, &read_stamp, "DXF");
-        round_trip(&Dwg, &app.tabs[0].scene.document, &handles, &read_stamp, "DWG");
+        round_trip(
+            &Dxf,
+            &app.tabs[0].scene.document,
+            &handles,
+            &read_stamp,
+            "DXF",
+        );
+        round_trip(
+            &Dwg,
+            &app.tabs[0].scene.document,
+            &handles,
+            &read_stamp,
+            "DWG",
+        );
     }
 
     #[test]
@@ -16713,7 +17651,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         install_class_owner();
         let mut host = HostSession::new(&mut app, 0);
-        assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+        assert!(host
+            .register_plugin_class("PLUGIN", &traverse_class())
+            .is_ok());
         let epoch_before = host.app.tabs[0].scene.geometry_epoch;
         // Unregistered class.
         let mut ghost = traverse_instance();
@@ -16722,7 +17662,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         // Schema version mismatch.
         let mut mismatch = traverse_instance();
         mismatch.schema_version = 5;
-        assert!(host.stage_plugin_class_instance("PLUGIN", &mismatch).is_err());
+        assert!(host
+            .stage_plugin_class_instance("PLUGIN", &mismatch)
+            .is_err());
         // Broken design parameter (the chain audit refuses at the contract).
         let mut broken = traverse_instance();
         let ocs_plugin_api::host::PluginDisplayDescriptor::ParametricChain(chain) =
@@ -16731,7 +17673,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         broken.tolerance = 1e-3;
         assert!(host.stage_plugin_class_instance("PLUGIN", &broken).is_err());
         // Broken tolerance.
-        assert!(host.stage_plugin_class_instance("PLUGIN", &traverse_instance_for(0.0)).is_err());
+        assert!(host
+            .stage_plugin_class_instance("PLUGIN", &traverse_instance_for(0.0))
+            .is_err());
         assert_eq!(host.document().entities().count(), 0);
         assert_eq!(host.app.tabs[0].scene.geometry_epoch, epoch_before);
     }
@@ -16760,7 +17704,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             assert!(host.sample_parametric(&chain, 141.0).unwrap().is_none());
             assert_eq!(host.app.tabs[0].scene.geometry_epoch, epoch_before);
         }
-        assert_eq!(app.tabs[0].history.undo_stack.len(), 0, "the sample records nothing");
+        assert_eq!(
+            app.tabs[0].history.undo_stack.len(),
+            0,
+            "the sample records nothing"
+        );
     }
 
     #[test]
@@ -16769,20 +17717,22 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         let chain = staging_profile_chain();
         let mut hard_corner = chain.clone();
-        hard_corner.segments.push(ocs_plugin_api::host::ParametricSegment {
-            def: ocs_plugin_api::host::CurveSegmentDef {
-                length: 20.0,
-                ramp: ocs_plugin_api::host::Ramp::Polynomial {
-                    degree: 0,
-                    coeffs: [0.25, 0.0, 0.0, 0.0],
+        hard_corner
+            .segments
+            .push(ocs_plugin_api::host::ParametricSegment {
+                def: ocs_plugin_api::host::CurveSegmentDef {
+                    length: 20.0,
+                    ramp: ocs_plugin_api::host::Ramp::Polynomial {
+                        degree: 0,
+                        coeffs: [0.25, 0.0, 0.0, 0.0],
+                    },
+                    cross_slope: None,
                 },
-                cross_slope: None,
-            },
-            // The first segment ends at (80, 104) with gradient 0.1: the
-            // point seam is welded, but the 0.25 gradient is a hard corner.
-            start_point: [80.0, 104.0],
-            start_direction: 0.25f64.atan(),
-        });
+                // The first segment ends at (80, 104) with gradient 0.1: the
+                // point seam is welded, but the 0.25 gradient is a hard corner.
+                start_point: [80.0, 104.0],
+                start_direction: 0.25f64.atan(),
+            });
 
         let host = HostSession::new(&mut app, 0);
         let epoch_before = host.app.tabs[0].scene.geometry_epoch;
@@ -16823,7 +17773,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             let mut host = HostSession::new(&mut app, 0);
             host.push_undo("PLUGIN: refresh alignment display");
             let _ = host.stage_parametric_chain("plan", &plan, 1e-3).unwrap();
-            let _ = host.stage_parametric_chain("profile", &profile, 1e-3).unwrap();
+            let _ = host
+                .stage_parametric_chain("profile", &profile, 1e-3)
+                .unwrap();
         }
         app.finish_pending_history(0);
         assert_eq!(
@@ -16902,7 +17854,9 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         let handles;
         {
             let mut host = HostSession::new(&mut app, 0);
-            assert!(host.register_plugin_class("PLUGIN", &traverse_class()).is_ok());
+            assert!(host
+                .register_plugin_class("PLUGIN", &traverse_class())
+                .is_ok());
             let mut instance = traverse_instance();
             instance.design = ocs_plugin_api::host::PluginDisplayDescriptor::ParametricChain(
                 crest_profile_chain(),
@@ -16911,16 +17865,27 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             handles = host
                 .stage_plugin_class_instance("PLUGIN", &instance)
                 .expect("the crest instance stages");
-            assert_eq!(handles.len(), 3, "three exact carriers (line, spline, line)");
+            assert_eq!(
+                handles.len(),
+                3,
+                "three exact carriers (line, spline, line)"
+            );
             let EntityType::Spline(spline) = host.document().get_entity(handles[1]).expect("live")
             else {
                 panic!("the crest stages a degree-2 spline");
             };
             assert_eq!(spline.degree, 2);
-            assert!((spline.control_points[2].y - 8.0).abs() < 1e-9, "the declared crest height");
+            assert!(
+                (spline.control_points[2].y - 8.0).abs() < 1e-9,
+                "the declared crest height"
+            );
         }
         app.finish_pending_history(0);
-        assert_eq!(app.tabs[0].history.undo_stack.len(), 1, "staging stays one step");
+        assert_eq!(
+            app.tabs[0].history.undo_stack.len(),
+            1,
+            "staging stays one step"
+        );
 
         {
             let mut host = HostSession::new(&mut app, 0);
@@ -16942,7 +17907,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                 .sample_parametric(&front, 300.0)
                 .expect("the front samples")
                 .expect("the joint sits at the front chain's end");
-            assert!((joint.point[1] - 11.0).abs() < 1e-9, "the crest moved to 11.0");
+            assert!(
+                (joint.point[1] - 11.0).abs() < 1e-9,
+                "the crest moved to 11.0"
+            );
             let joint_gradient = joint.direction[1] / joint.direction[0];
             edited.segments[2].start_point = joint.point;
             edited.segments[2].start_direction = joint_gradient.atan();
@@ -16955,10 +17923,17 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
 
             // Re-derive the edited design's entity set: same carriers, same
             // count, in the same order (the staging builds per segment).
-            let (new_entities, carriers) =
-                crate::parametric::build_display_entities(&edited, 1e-3).expect("the edited design derives");
-            assert_eq!(new_entities.len(), handles.len(), "the edited set is count-stable");
-            assert!(matches!(carriers[1], crate::parametric::StagedCarrier::Exact));
+            let (new_entities, carriers) = crate::parametric::build_display_entities(&edited, 1e-3)
+                .expect("the edited design derives");
+            assert_eq!(
+                new_entities.len(),
+                handles.len(),
+                "the edited set is count-stable"
+            );
+            assert!(matches!(
+                carriers[1],
+                crate::parametric::StagedCarrier::Exact
+            ));
             let EntityType::Spline(fresh) = &new_entities[1] else {
                 panic!("the edited crest still carries the exact spline carrier");
             };
@@ -17004,20 +17979,26 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         );
 
         {
-            let mut host = HostSession::new(&mut app, 0);
+            let host = HostSession::new(&mut app, 0);
             assert_eq!(
                 host.document().entities().count(),
                 3,
                 "the restage updates the display set in place"
             );
             // The changed carrier vertices are the document's state now...
-            let EntityType::Spline(spline) =
-                host.document().get_entity(handles[1]).expect("the spline keeps its handle")
+            let EntityType::Spline(spline) = host
+                .document()
+                .get_entity(handles[1])
+                .expect("the spline keeps its handle")
             else {
                 panic!("the carrier keeps its kind over the restage");
             };
-            assert!((spline.control_points[2].y - 11.0).abs() < 1e-9, "the edited crest rides");
-            let EntityType::Line(tail) = host.document().get_entity(handles[2]).expect("live") else {
+            assert!(
+                (spline.control_points[2].y - 11.0).abs() < 1e-9,
+                "the edited crest rides"
+            );
+            let EntityType::Line(tail) = host.document().get_entity(handles[2]).expect("live")
+            else {
                 panic!("the tail keeps its kind");
             };
             assert!(
@@ -17031,18 +18012,30 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                     host.app.tabs[0].scene.is_reference_only(*handle),
                     "the designated display set stays reference-only"
                 );
-                let stamped = host.read_record(*handle, "PLUGIN_ALIGN_DISPLAY").expect("the stamp");
-                assert_eq!(stamped.values.len(), 2, "the identity stamp survives the restage");
+                let stamped = host
+                    .read_record(*handle, "PLUGIN_ALIGN_DISPLAY")
+                    .expect("the stamp");
+                assert_eq!(
+                    stamped.values.len(),
+                    2,
+                    "the identity stamp survives the restage"
+                );
             }
         }
 
         // ONE undo step round-trips the original display set.
         app.undo_steps(1);
         {
-            let mut host = HostSession::new(&mut app, 0);
-            assert_eq!(host.document().entities().count(), 3, "nothing added or removed");
-            let EntityType::Spline(spline) =
-                host.document().get_entity(handles[1]).expect("the spline keeps its handle")
+            let host = HostSession::new(&mut app, 0);
+            assert_eq!(
+                host.document().entities().count(),
+                3,
+                "nothing added or removed"
+            );
+            let EntityType::Spline(spline) = host
+                .document()
+                .get_entity(handles[1])
+                .expect("the spline keeps its handle")
             else {
                 panic!("the carrier keeps its kind over the undo");
             };
@@ -17127,7 +18120,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         }
         app.finish_pending_history(0);
         let undo_before = app.tabs[0].history.undo_stack.len();
-        assert_eq!(undo_before, 2, "staging + record seeding compose as two steps");
+        assert_eq!(
+            undo_before, 2,
+            "staging + record seeding compose as two steps"
+        );
         {
             let mut host = HostSession::new(&mut app, 0);
             host.update_plugin_class_instance_parameter(handles[0], "peak_gradient", "0.09")
@@ -17156,7 +18152,10 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
                 .expect("the record");
             assert_eq!(entries.len(), 6);
             assert_eq!(format!("{:?}", entries[3].value), "Int32(3)");
-            assert_eq!(format!("{:?}", entries[5].value), "String(\"per alignment sheet\")");
+            assert_eq!(
+                format!("{:?}", entries[5].value),
+                "String(\"per alignment sheet\")"
+            );
 
             // REFUSALS: unknown name, read-only row, unparseable and
             // non-finite values — each before any change, each recording
@@ -17194,7 +18193,11 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             let entries_after = host
                 .read_xrecord(&["PLUGIN"], "PLUGIN_ALIGN_DISPLAY")
                 .expect("the record");
-            assert_eq!(entries_after.len(), entries.len(), "refusals changed nothing");
+            assert_eq!(
+                entries_after.len(),
+                entries.len(),
+                "refusals changed nothing"
+            );
             for (before, after) in entries.iter().zip(entries_after.iter()) {
                 assert_eq!(before.code, after.code, "refusals changed nothing");
                 assert_eq!(format!("{:?}", before.value), format!("{:?}", after.value));
@@ -17253,9 +18256,7 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             let section = panel
                 .sections
                 .iter()
-                .find(|section| {
-                    section.title == crate::t!("Plugin class parameters").into_owned()
-                })
+                .find(|section| section.title == crate::t!("Plugin class parameters").into_owned())
                 .expect("the stamped selection rides its class's rows");
             assert_eq!(section.props.len(), 2, "the source line + the declared row");
             assert_eq!(section.props[0].label, "Source");
@@ -17307,21 +18308,389 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         plain.tabs[0].is_start = false;
         {
             let mut host = HostSession::new(&mut plain, 0);
-            let unstamped = host
-                .add_entity(EntityType::Point(Point::at(document::types::Vector3::new(
-                    1.0, 1.0, 0.0,
-                ))));
+            let unstamped = host.add_entity(EntityType::Point(Point::at(
+                document::types::Vector3::new(1.0, 1.0, 0.0),
+            )));
             plain.tabs[0].scene.selected.insert(unstamped);
         }
         plain.refresh_properties();
         assert!(
-            plain
-                .tabs[0]
+            plain.tabs[0]
                 .properties
                 .sections
                 .iter()
                 .all(|section| section.title != crate::t!("Plugin class parameters").into_owned()),
             "an unstamped selection rides no class rows"
         );
+    }
+
+    fn api16_text_panel() -> ocs_plugin_api::dialog::PanelDef {
+        use ocs_plugin_api::dialog::{DialogControl, PanelDef};
+
+        PanelDef::new("panel", "Panel")
+            .with_control(DialogControl::Text {
+                id: "length".into(),
+                label: "Length".into(),
+                default: "1.0".into(),
+            })
+            .with_control(DialogControl::Button {
+                id: "submit".into(),
+                label: "Submit".into(),
+                action: Some("PANEL_SUBMIT".into()),
+                align_h: None,
+                width: None,
+            })
+    }
+
+    fn api16_number_panel() -> ocs_plugin_api::dialog::PanelDef {
+        let mut panel = api16_text_panel();
+        panel.controls[0] = ocs_plugin_api::dialog::DialogControl::Number {
+            id: "length".into(),
+            label: "Length".into(),
+            default: 1.0,
+            min: None,
+            max: None,
+            step: None,
+        };
+        panel
+    }
+
+    #[test]
+    fn api16_panel_registration_is_idempotent_and_owner_authenticated() {
+        use ocs_plugin_api::dialog::DialogValue;
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let tab_id = app.tabs[0].id;
+        let mut host = HostSession::new(&mut app, 0);
+
+        assert!(host.register_panel_for_plugin("OWNER", api16_text_panel()));
+        assert!(host.update_panel_for_plugin(
+            "OWNER",
+            "panel",
+            std::collections::HashMap::from([(
+                "length".to_string(),
+                DialogValue::Text("2.5".to_string()),
+            )]),
+        ));
+        assert!(
+            host.register_panel_for_plugin("OWNER", api16_text_panel()),
+            "unchanged re-registration must not reset the live draft"
+        );
+        let before = host.app.plugin_panels["panel"].clone();
+
+        let mut foreign_panel = api16_text_panel();
+        foreign_panel.title = "Foreign replacement".into();
+        assert!(!host.register_panel_for_plugin("OTHER", foreign_panel));
+        assert!(!host.update_panel_for_plugin(
+            "OTHER",
+            "panel",
+            std::collections::HashMap::from([(
+                "length".to_string(),
+                DialogValue::Text("99.0".to_string()),
+            )]),
+        ));
+        assert!(!host.toggle_panel_for_plugin("OTHER", "panel", Some(true)));
+        assert!(host.panel_snapshot_for_plugin("OTHER", "panel").is_err());
+        assert_eq!(host.app.plugin_panels.get("panel"), Some(&before));
+
+        let snapshot = host.panel_snapshot_for_plugin("OWNER", "panel").unwrap();
+        assert_eq!(snapshot.plugin_id, "OWNER");
+        assert_eq!(snapshot.panel_id, "panel");
+        assert_eq!(snapshot.tab_id, tab_id);
+        assert_eq!(snapshot.values.len(), 1);
+        assert_eq!(
+            snapshot.values.get("length"),
+            Some(&DialogValue::Text("2.5".to_string()))
+        );
+        assert_eq!(snapshot.raw_text.len(), 1);
+        assert_eq!(
+            snapshot.raw_text.get("length").map(String::as_str),
+            Some("2.5")
+        );
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let direct = host
+            .panel_snapshot("PANEL")
+            .expect("ordinary HostApi command read-back works");
+        assert_eq!(direct.tab_id, tab_id);
+        assert_eq!(direct.values.get("length"), snapshot.values.get("length"));
+        assert!(!host.app.plugin_panels["panel"].visible);
+        assert_eq!(host.app.plugin_panels.get("panel"), Some(&before));
+    }
+
+    #[test]
+    fn api16_panel_snapshot_uses_the_real_session_tab_without_document_writes() {
+        use ocs_plugin_api::dialog::DialogValue;
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let first_tab_id = app.tabs[0].id;
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(host.register_panel_for_plugin("OWNER", api16_text_panel()));
+        }
+        let second_tab_id = app.push_test_document();
+        assert_eq!(second_tab_id, app.tabs[1].id);
+        assert_ne!(first_tab_id, second_tab_id);
+        assert_eq!(app.active_tab, 0);
+
+        let first_document = app.tabs[0].scene.document.clone();
+        let second_document = app.tabs[1].scene.document.clone();
+        let first = HostSession::new(&mut app, 0)
+            .panel_snapshot_for_plugin("OWNER", "panel")
+            .unwrap();
+        let second = HostSession::new(&mut app, 1)
+            .panel_snapshot_for_plugin("OWNER", "panel")
+            .unwrap();
+
+        assert_eq!(first.tab_id, first_tab_id);
+        assert_eq!(second.tab_id, second_tab_id);
+        assert_ne!(first.tab_id, second.tab_id);
+        for snapshot in [&first, &second] {
+            assert_eq!(snapshot.plugin_id, "OWNER");
+            assert_eq!(snapshot.panel_id, "panel");
+            assert_eq!(snapshot.values.len(), 1);
+            assert_eq!(
+                snapshot.values.get("length"),
+                Some(&DialogValue::Text("1.0".to_string()))
+            );
+            assert_eq!(snapshot.raw_text.len(), 1);
+            assert_eq!(
+                snapshot.raw_text.get("length").map(String::as_str),
+                Some("1.0")
+            );
+            assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        }
+        assert_eq!(app.tabs[0].scene.document, first_document);
+        assert_eq!(app.tabs[1].scene.document, second_document);
+        assert_eq!(app.active_tab, 0);
+        assert!(app.tabs[0].history.pending.is_none());
+        assert!(app.tabs[1].history.pending.is_none());
+    }
+
+    #[test]
+    fn api16_panel_snapshot_rejects_malformed_and_missing_panels_without_writes() {
+        use ocs_plugin_api::dialog::DialogValue;
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let document_before = app.tabs[0].scene.document.clone();
+        let undo_before = app.tabs[0].history.undo_stack.len();
+        let mut host = HostSession::new(&mut app, 0);
+        assert!(host.register_panel_for_plugin("OWNER", api16_number_panel()));
+        assert!(host.update_panel_for_plugin(
+            "OWNER",
+            "panel",
+            std::collections::HashMap::from([(
+                "length".to_string(),
+                DialogValue::Text("-".to_string()),
+            )]),
+        ));
+        let snapshot = host.panel_snapshot_for_plugin("OWNER", "panel").unwrap();
+
+        assert_eq!(
+            snapshot.raw_text.get("length").map(String::as_str),
+            Some("-")
+        );
+        assert!(!snapshot.values.contains_key("length"));
+        assert!(
+            snapshot.errors.iter().any(|error| {
+                error.contains("invalid finite number")
+                    && error.contains("'length'")
+                    && error.contains("'-'")
+            }),
+            "{:?}",
+            snapshot.errors
+        );
+
+        let error = host
+            .panel_snapshot_for_plugin("OWNER", "missing")
+            .unwrap_err();
+        assert!(error.contains("not registered"), "{error}");
+        assert_eq!(host.document(), &document_before);
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo_before);
+        assert!(host.app.tabs[0].history.pending.is_none());
+    }
+
+    #[test]
+    fn api17_panel_reset_preserves_owner_and_aliases_remain_authenticated() {
+        use crate::app::Message;
+        use ocs_plugin_api::dialog::DialogValue;
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(host.register_panel_for_plugin("OWNER", api16_text_panel()));
+            assert!(host.update_panel_for_plugin(
+                "OWNER",
+                "panel",
+                std::collections::HashMap::from([(
+                    "length".to_string(),
+                    DialogValue::Text("2.5".to_string()),
+                )]),
+            ));
+        }
+
+        // The built-in reset path must retain the authenticated owner and
+        // restore the declaration's defaults, not brick subsequent access.
+        let _ = app.update(Message::PluginPanelButtonClick(
+            "panel".to_string(),
+            "reset".to_string(),
+            Some("reset".to_string()),
+        ));
+        let mut host = HostSession::new(&mut app, 0);
+        let snapshot = host
+            .panel_snapshot_for_plugin("OWNER", "panel")
+            .expect("owner remains able to read after reset");
+        assert_eq!(
+            snapshot.values.get("length"),
+            Some(&DialogValue::Text("1.0".into()))
+        );
+        assert!(host.register_panel_for_plugin("OWNER", api16_text_panel()));
+        assert!(host.update_panel_for_plugin(
+            "OWNER",
+            "PANEL",
+            std::collections::HashMap::from([(
+                "length".to_string(),
+                DialogValue::Text("3.0".to_string()),
+            )]),
+        ));
+        assert!(host.toggle_panel_for_plugin("OWNER", "Panel", Some(true)));
+        assert!(!host.update_panel_for_plugin("OTHER", "panel", std::collections::HashMap::new(),));
+        assert!(host.panel_snapshot_for_plugin("OTHER", "Panel").is_err());
+    }
+
+    #[test]
+    fn api17_explicit_plugin_panel_reopens_in_clean_screen_without_document_writes() {
+        use ocs_plugin_api::dialog::{DialogControl, PanelDef};
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        app.clean_screen = true;
+        let mut host = HostSession::new(&mut app, 0);
+        for id in ["cvifc.ifc_h_properties", "cvifc.ifc_v_properties"] {
+            let panel = PanelDef::new(id, "IFC Alignment Segment")
+                .with_command(format!(
+                    "CVI_IFC_{}_PANEL",
+                    if id.ends_with("h_properties") { "H" } else { "V" }
+                ))
+                .with_control(DialogControl::Text {
+                    id: "source_record".into(),
+                    label: "Source record".into(),
+                    default: "Alignment-Axis-h-seg-001".into(),
+                })
+                .with_control(DialogControl::Button {
+                    id: "apply".into(),
+                    label: "Apply".into(),
+                    action: Some("CVI_IFC_PANEL_APPLY".into()),
+                    align_h: None,
+                    width: None,
+                });
+            assert!(host.register_panel_for_plugin("opencad.civil_ifc", panel));
+        }
+        let panel_id = crate::ui::dock::PanelId::Plugin(1);
+        let other_id = crate::ui::dock::PanelId::Plugin(2);
+        assert!(!host.app.dock_panel_visible(panel_id));
+        assert!(host.toggle_panel_for_plugin(
+            "opencad.civil_ifc",
+            "cvifc.ifc_h_properties",
+            Some(true),
+        ));
+        assert!(host.app.dock_panel_visible(panel_id));
+        assert!(
+            matches!(
+                host.app.dock.location(panel_id),
+                Some((crate::app::config::DockSide::Right, _))
+            ),
+            "an explicit show places a new panel into the default dock"
+        );
+        assert!(host.app.dock_panel_on_screen(panel_id));
+        assert!(!host.app.dock_panel_visible(other_id));
+        assert!(host.app.plugin_panels["cvifc.ifc_h_properties"].visible);
+        assert!(!host.app.plugin_panels["cvifc.ifc_v_properties"].visible);
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), 0);
+        assert!(host.app.tabs[0].history.pending.is_none());
+    }
+
+    #[test]
+    fn plugin_panels_toggle_like_graphic_attributes_including_clean_screen() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        app.clean_screen = true;
+        let graphic_id = crate::ui::dock::PanelId::GraphicAttributes;
+        assert!(!app.dock_panel_visible(graphic_id));
+        let _ = app.update(crate::app::Message::ToggleGraphicAttributes);
+        assert!(app.show_graphic_attributes);
+        assert!(!app.dock_panel_visible(graphic_id));
+        let _ = app.update(crate::app::Message::ToggleGraphicAttributes);
+        assert!(!app.show_graphic_attributes);
+        assert!(!app.dock_panel_visible(graphic_id));
+        let _ = app.update(crate::app::Message::ToggleGraphicAttributes);
+        assert!(app.show_graphic_attributes);
+        assert!(!app.dock_panel_visible(graphic_id));
+
+        let mut host = HostSession::new(&mut app, 0);
+        let panel_id = crate::ui::dock::PanelId::Plugin(1);
+        assert!(host.register_panel_for_plugin("opencad.civil_ifc", api16_text_panel()));
+        // Like Graphic Attributes, the panel stays hidden in Clean Screen;
+        // opening it still binds its values without a document edit.
+        app.clean_screen = false;
+        let mut host = HostSession::new(&mut app, 0);
+        assert!(!host.app.dock_panel_visible(panel_id));
+        assert!(host.toggle_panel_for_plugin("opencad.civil_ifc", "panel", None));
+        assert!(host.app.dock_panel_visible(panel_id));
+        assert!(host.app.dock_panel_on_screen(panel_id));
+        assert!(host.toggle_panel_for_plugin("opencad.civil_ifc", "panel", None));
+        assert!(!host.app.dock_panel_visible(panel_id));
+        assert!(!host.app.plugin_panels["panel"].visible);
+        assert!(host.toggle_panel_for_plugin("opencad.civil_ifc", "panel", None));
+        assert!(host.app.dock_panel_visible(panel_id));
+        assert!(host.app.plugin_panels["panel"].visible);
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), 0);
+        assert!(host.app.tabs[0].history.pending.is_none());
+    }
+
+    #[test]
+    fn api17_update_panel_for_plugin_allows_owned_modal_dialog() {
+        use ocs_plugin_api::dialog::{DialogControl, DialogDef, DialogValue};
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let dlg = DialogDef::new("Test Dialog")
+            .with_control(DialogControl::Text {
+                id: "field1".into(),
+                label: "Field 1".into(),
+                default: "initial".into(),
+            });
+        app.open_plugin_dialog_on_tab(0, dlg, Some("MY_PLUGIN".to_string()));
+
+        let mut host = HostSession::new(&mut app, 0);
+
+        // Foreign plugin cannot update the dialog
+        assert!(!host.update_panel_for_plugin(
+            "OTHER_PLUGIN",
+            "Test Dialog",
+            std::collections::HashMap::from([("field1".into(), DialogValue::Text("hacked".into()))]),
+        ));
+
+        // Owner plugin can update by title
+        assert!(host.update_panel_for_plugin(
+            "MY_PLUGIN",
+            "Test Dialog",
+            std::collections::HashMap::from([("field1".into(), DialogValue::Text("updated".into()))]),
+        ));
+        let field1 = |host: &HostSession| {
+            host.app.plugin_dialog_state.as_ref().unwrap().text_values.get("field1").cloned()
+        };
+        assert_eq!(field1(&host).as_deref(), Some("updated"));
+
+        // Owner plugin can also update with empty panel_id (active dialog convention)
+        assert!(host.update_panel_for_plugin(
+            "MY_PLUGIN",
+            "",
+            std::collections::HashMap::from([("field1".into(), DialogValue::Text("empty_id_update".into()))]),
+        ));
+        assert_eq!(field1(&host).as_deref(), Some("empty_id_update"));
     }
 }

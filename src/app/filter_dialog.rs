@@ -739,7 +739,6 @@ impl OpenCADStudio {
             | FilterMsg::SaveAsCommit
             | FilterMsg::DeleteSaved
             | FilterMsg::SaveLayerFilter
-            | FilterMsg::LayerParent(_)
             | FilterMsg::ShowLayers
             | FilterMsg::PickObject
             | FilterMsg::FromLayer(_)
@@ -810,8 +809,9 @@ impl OpenCADStudio {
                 .into_iter()
                 .map(|(name, filter)| serde_json::json!({ "name": name, "filter": filter }))
                 .collect();
-        let text = serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "filters": filters }))
-            .unwrap_or_default();
+        let text =
+            serde_json::to_string_pretty(&serde_json::json!({ "version": 1, "filters": filters }))
+                .unwrap_or_default();
         match std::fs::write(path, text) {
             Ok(()) => self
                 .command_line
@@ -2084,7 +2084,7 @@ mod view {
         text(s.into())
             .size(11)
             .style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(theme.palette().background.base.text.scale_alpha(0.7)),
+                color: Some(crate::ui::style::readable::muted_text(theme)),
             })
     }
 
@@ -2131,7 +2131,7 @@ mod view {
                 text_color: if on {
                     palette.primary.base.color
                 } else {
-                    palette.background.base.text.scale_alpha(0.7)
+                    crate::ui::style::readable::muted_text(theme)
                 },
                 border: Border {
                     color: if on {
@@ -2726,7 +2726,7 @@ mod view {
                 ))
                 .size(11)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().background.base.text.scale_alpha(0.65)),
+                    color: Some(crate::ui::style::readable::hint_text(theme)),
                 }),
             );
         } else {
@@ -2747,7 +2747,7 @@ mod view {
                 ))
                 .size(11)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().background.base.text.scale_alpha(0.65)),
+                    color: Some(crate::ui::style::readable::hint_text(theme)),
                 }),
             );
         }

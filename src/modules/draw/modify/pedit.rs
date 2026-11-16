@@ -874,7 +874,8 @@ impl CadCommand for PeditCommand {
                         "D" | "DESMOOTH" => Some(CmdResult::PeditOp {
                             handle,
                             op: PeditOp::SetMeshSmooth {
-                                smooth: document::entities::polygon_mesh::SurfaceSmoothType::NoSmooth,
+                                smooth:
+                                    document::entities::polygon_mesh::SurfaceSmoothType::NoSmooth,
                                 m_density: self.mesh_smooth_density.0,
                                 n_density: self.mesh_smooth_density.1,
                             },
@@ -1374,11 +1375,12 @@ pub fn apply_pedit(entity: &mut EntityType, op: &PeditOp) -> bool {
                 if (bits & flag.bits() != 0) == *enabled {
                     return false;
                 }
-                polyline.flags = document::entities::polyline::PolylineFlags::from_bits(if *enabled {
-                    bits | flag.bits()
-                } else {
-                    bits & !flag.bits()
-                });
+                polyline.flags =
+                    document::entities::polyline::PolylineFlags::from_bits(if *enabled {
+                        bits | flag.bits()
+                    } else {
+                        bits & !flag.bits()
+                    });
                 true
             }
             _ => false,
@@ -1475,7 +1477,8 @@ pub fn apply_pedit(entity: &mut EntityType, op: &PeditOp) -> bool {
             EntityType::PolygonMesh(mesh) => {
                 let mut changed = mesh.smooth_type != *smooth;
                 mesh.smooth_type = *smooth;
-                if mesh.smooth_type != document::entities::polygon_mesh::SurfaceSmoothType::NoSmooth {
+                if mesh.smooth_type != document::entities::polygon_mesh::SurfaceSmoothType::NoSmooth
+                {
                     let m_density = (*m_density).clamp(2, 200);
                     let n_density = (*n_density).clamp(2, 200);
                     if mesh.m_smooth_density != m_density {
@@ -1526,7 +1529,7 @@ pub fn convert_to_polyline(entity: &EntityType) -> Option<EntityType> {
             let start = [l.start.x, l.start.y, l.start.z];
             let end = [l.end.x, l.end.y, l.end.z];
             let elevation = DVec3::from_array(start).dot(DVec3::new(normal.x, normal.y, normal.z));
-            let plane = crate::entities::curve::ocs_plane(normal.clone(), elevation);
+            let plane = crate::entities::curve::ocs_plane(normal, elevation);
             let tolerance = kernel::space::coplanarity_tolerance(&[start, end]);
             if !plane.contains(end, tolerance) {
                 return None;
@@ -1729,7 +1732,9 @@ pub(crate) fn fit_entity(entity: &EntityType, overrides: &[(usize, f64)]) -> Opt
 /// The vertices the user placed: curve-fit knees (flag 1) and spline samples
 /// (flag 8) are generated, and a spline frame vertex (flag 16) is a defining
 /// vertex once the fit is taken off.
-fn defining_vertices(polyline: &document::entities::Polyline2D) -> Vec<document::entities::Vertex2D> {
+fn defining_vertices(
+    polyline: &document::entities::Polyline2D,
+) -> Vec<document::entities::Vertex2D> {
     use document::entities::VertexFlags;
     polyline
         .vertices
@@ -1777,10 +1782,7 @@ pub(crate) fn spline_fit_polyline2d(
         return false;
     }
     let closed = polyline.flags.is_closed();
-    let control: Vec<[f64; 2]> = frame
-        .iter()
-        .map(|v| [v.location.x, v.location.y])
-        .collect();
+    let control: Vec<[f64; 2]> = frame.iter().map(|v| [v.location.x, v.location.y]).collect();
     let (curve, spans) = if closed {
         let mut wrapped = control.clone();
         wrapped.extend(control.iter().take(degree).copied());
@@ -2262,7 +2264,7 @@ pub fn join_selection_extend(
                 let indices = if start { [1, 0] } else { [n - 2, n - 1] };
                 (
                     indices.map(|i| [p.vertices[i].location.x, p.vertices[i].location.y]),
-                    p.normal.clone(),
+                    p.normal,
                     p.elevation,
                 )
             }
@@ -2275,7 +2277,7 @@ pub fn join_selection_extend(
                 let indices = if start { [1, 0] } else { [n - 2, n - 1] };
                 (
                     indices.map(|i| [p.vertices[i].location.x, p.vertices[i].location.y]),
-                    p.normal.clone(),
+                    p.normal,
                     p.elevation,
                 )
             }
@@ -2287,8 +2289,8 @@ pub fn join_selection_extend(
     fn move_endpoint(entity: &mut EntityType, start: bool, point: [f64; 3]) -> Option<()> {
         match entity {
             EntityType::LwPolyline(p) => {
-                let local = crate::entities::curve::ocs_plane(p.normal.clone(), p.elevation)
-                    .project(point)?;
+                let local =
+                    crate::entities::curve::ocs_plane(p.normal, p.elevation).project(point)?;
                 let index = if start {
                     0
                 } else {
@@ -2297,8 +2299,8 @@ pub fn join_selection_extend(
                 p.vertices[index].location = Vector2::new(local[0], local[1]);
             }
             EntityType::Polyline2D(p) => {
-                let local = crate::entities::curve::ocs_plane(p.normal.clone(), p.elevation)
-                    .project(point)?;
+                let local =
+                    crate::entities::curve::ocs_plane(p.normal, p.elevation).project(point)?;
                 let index = if start {
                     0
                 } else {
@@ -2362,11 +2364,11 @@ pub fn join_selection_extend(
                         line.end = Vector3::new(b_points[1][0], b_points[1][1], b_points[1][2]);
                         match &a {
                             EntityType::LwPolyline(p) => {
-                                line.normal = p.normal.clone();
+                                line.normal = p.normal;
                                 line.thickness = p.thickness;
                             }
                             EntityType::Polyline2D(p) => {
-                                line.normal = p.normal.clone();
+                                line.normal = p.normal;
                                 line.thickness = p.thickness;
                             }
                             _ => continue,

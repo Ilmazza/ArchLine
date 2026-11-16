@@ -114,10 +114,7 @@ pub fn source_with_layers(path: &str, hidden: &[String]) -> String {
     if all.is_empty() {
         return path.to_string();
     }
-    let off: Vec<&PdfLayer> = all
-        .iter()
-        .filter(|l| hidden.iter().any(|h| *h == l.name))
-        .collect();
+    let off: Vec<&PdfLayer> = all.iter().filter(|l| hidden.contains(&l.name)).collect();
     if off.is_empty() && all.iter().all(|l| l.on_by_default) {
         return path.to_string();
     }
@@ -272,7 +269,9 @@ pub fn hidden_layers(u: &document::entities::Underlay) -> Vec<String> {
         .filter(|r| r.application_name.eq_ignore_ascii_case(LAYER_OVERRIDE_APP))
         .flat_map(|r| r.values.iter())
         .filter_map(|v| match v {
-            document::xdata::XDataValue::String(s) if s != DGN_OVERRIDE_PLACEHOLDER => Some(s.clone()),
+            document::xdata::XDataValue::String(s) if s != DGN_OVERRIDE_PLACEHOLDER => {
+                Some(s.clone())
+            }
             _ => None,
         })
         .collect()

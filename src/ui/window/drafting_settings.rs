@@ -130,7 +130,7 @@ fn group<'a>(
             text(title.into())
                 .size(11)
                 .style(|theme: &Theme| text::Style {
-                    color: Some(theme.palette().background.strongest.text.scale_alpha(0.75)),
+                    color: Some(crate::ui::style::readable::muted_text(theme)),
                 }),
             body.into(),
         ]
@@ -306,7 +306,8 @@ pub fn view_window<'a>(
                     Message::DraftingSettingsToggleIsometric,
                 ),
                 iso_planes,
-                text(crate::t!("F5 cycles Left, Top, and Right.")).size(10.5),
+                text(crate::t!("F5 cycles Left, Top, and Right."))
+                    .size(crate::ui::style::text::UI_SMALL),
                 Space::new().height(4),
                 row![
                     text(crate::t!(
@@ -437,9 +438,9 @@ pub fn view_window<'a>(
                 text(crate::t!(
                     "Polar Tracking guides cursor movement along specified angles. Ortho mode constrains movement to orthogonal axes."
                 ))
-                .size(10.5)
+                .size(crate::ui::style::text::UI_SMALL)
                 .style(|theme: &Theme| text::Style {
-                    color: Some(theme.palette().background.strongest.text.scale_alpha(0.7)),
+                    color: Some(crate::ui::style::readable::muted_text(theme)),
                 }),
             ]
             .spacing(6),
@@ -470,11 +471,11 @@ pub fn view_window<'a>(
         );
 
         let action_buttons = row![
-            button(text(crate::t!("Select All")).size(10.5))
+            button(text(crate::t!("Select All")).size(crate::ui::style::text::UI_SMALL))
                 .on_press(Message::DraftingSettingsSnapSelectAll)
                 .style(button::secondary)
                 .padding([4, 10]),
-            button(text(crate::t!("Clear All")).size(10.5))
+            button(text(crate::t!("Clear All")).size(crate::ui::style::text::UI_SMALL))
                 .on_press(Message::DraftingSettingsSnapClearAll)
                 .style(button::secondary)
                 .padding([4, 10]),
@@ -501,7 +502,7 @@ pub fn view_window<'a>(
 
         // Two columns of snap modes:
         let total = ALL_SNAP_MODES.len();
-        let mid = (total + 1) / 2;
+        let mid = total.div_ceil(2);
         let (first_half, second_half) = ALL_SNAP_MODES.split_at(mid);
 
         let mut col1 = column![].spacing(6).width(Fill);

@@ -4,11 +4,11 @@
 //! anonymous block holding the source objects (read). The action's value
 //! parameters (Items, ItemSpacing, Rows, …) define where the items go.
 
-use document::EntityType;
 use document::objects::{
     AssocAction, AssocArrayActionBody, AssocDependency, AssocEvalValue, AssocValueParam,
     AssociativeData, ObjectType,
 };
+use document::EntityType;
 use document::{Document, Handle};
 use glam::{DMat4, DVec3};
 
@@ -405,7 +405,8 @@ pub fn path_items(params: &[AssocValueParam], path: &EntityType) -> Vec<([i32; 3
     if !length.is_finite() || length <= 0.0 {
         return Vec::new();
     }
-    let at = |distance: f64| DVec3::from_array(curve.point_at_distance(distance.clamp(0.0, length)));
+    let at =
+        |distance: f64| DVec3::from_array(curve.point_at_distance(distance.clamp(0.0, length)));
     let count = get("Items", 1.0).clamp(1.0, 100_000.0) as i32;
     let (rows, levels) = (
         get("Rows", 1.0).clamp(1.0, 1000.0) as i32,
@@ -600,15 +601,24 @@ pub fn update(
         .collect();
 
     // Items erased or moved on their own keep that across the rebuild.
-    let edited: rustc_hash::FxHashMap<[i32; 3], (i32, Option<[f64; 16]>)> = body(document, array.body)
-        .map(|body| {
-            body.items
-                .iter()
-                .filter(|item| item.flags & (ITEM_ERASED | ITEM_RELATIVE) != 0)
-                .map(|item| (item.location, (item.flags & (ITEM_ERASED | ITEM_RELATIVE), item.relative_transform)))
-                .collect()
-        })
-        .unwrap_or_default();
+    let edited: rustc_hash::FxHashMap<[i32; 3], (i32, Option<[f64; 16]>)> =
+        body(document, array.body)
+            .map(|body| {
+                body.items
+                    .iter()
+                    .filter(|item| item.flags & (ITEM_ERASED | ITEM_RELATIVE) != 0)
+                    .map(|item| {
+                        (
+                            item.location,
+                            (
+                                item.flags & (ITEM_ERASED | ITEM_RELATIVE),
+                                item.relative_transform,
+                            ),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
     let document = &mut scene.document;
     for handle in &old_items {
@@ -631,7 +641,11 @@ pub fn update(
                 } else {
                     document::types::Vector3::new(position.x, position.y, position.z)
                 },
-                transform: if turned { placement.transpose().to_cols_array() } else { [0.0; 16] },
+                transform: if turned {
+                    placement.transpose().to_cols_array()
+                } else {
+                    [0.0; 16]
+                },
                 relative_transform: relative,
                 ..Default::default()
             });
@@ -820,7 +834,9 @@ fn set_item_state(
             AssociativeData::ArrayModifyActionBody(modify) => Some(&mut modify.body),
             _ => None,
         };
-        if let Some(item) = body.and_then(|body| body.items.iter_mut().find(|item| item.location == location)) {
+        if let Some(item) =
+            body.and_then(|body| body.items.iter_mut().find(|item| item.location == location))
+        {
             item.flags = flags;
             item.relative_transform = relative;
         }
@@ -1422,15 +1438,17 @@ pub fn create(
             let first = placements[0].1;
             let turn = first.x_axis.y.atan2(first.x_axis.x);
             vec![
-                crate::command::EntityTransform::Translate(-first.w_axis.truncate()),
-                crate::command::EntityTransform::Rotate {
+                crate::entities::transform::EntityTransform::Translate(-first.w_axis.truncate()),
+                crate::entities::transform::EntityTransform::Rotate {
                     center: DVec3::ZERO,
                     axis: DVec3::Z,
                     angle_rad: -turn,
                 },
             ]
         }
-        _ => vec![crate::command::EntityTransform::Translate(-source_point)],
+        _ => vec![crate::entities::transform::EntityTransform::Translate(
+            -source_point,
+        )],
     };
     for entity in &mut entities {
         for transform in &to_block {
@@ -1449,6 +1467,24 @@ pub fn create(
     // The copies must not keep the sources' extension dictionaries.
     if let Some(record) = scene.document.block_records.get(&source_name) {
         let copies = record.entity_handles.clone();
+        // A table in the block evaluates fields of its own: the sources,
+        // which own the fields its cells name, are erased below.
+        for (source, copy) in originals.iter().zip(&copies) {
+            let fields = match scene.document.get_entity(*source) {
+                Some(EntityType::Table(table)) => {
+                    super::table_fields::table_fields(&scene.document, table)
+                }
+                _ => Vec::new(),
+            };
+            if !fields.is_empty() {
+                super::table_fields::adopt_table_fields(
+                    &mut scene.document,
+                    *copy,
+                    *source,
+                    &fields,
+                );
+            }
+        }
         scene.own_copied_xdicts(originals, copies);
     }
 
@@ -2087,10 +2123,12 @@ pub(crate) fn clone_array_for_copy(
         Some(ObjectType::Associative(object)) => match &mut object.data {
             AssociativeData::Network(network) => {
                 network.network_action_index += 1;
-                network.actions.push(document::objects::AssocActionDependency {
-                    is_owned: true,
-                    dependency: new_action,
-                });
+                network
+                    .actions
+                    .push(document::objects::AssocActionDependency {
+                        is_owned: true,
+                        dependency: new_action,
+                    });
                 Some(network.network_action_index)
             }
             _ => None,
@@ -2230,9 +2268,9 @@ mod tests {
         let source = scene.add_entity(document::EntityType::Circle(
             document::entities::Circle::from_coords(0.0, 0.0, 0.0, 2.0),
         ));
-        let path = scene.add_entity(document::EntityType::Line(document::entities::Line::from_coords(
-            0.0, 0.0, 0.0, 100.0, 0.0, 0.0,
-        )));
+        let path = scene.add_entity(document::EntityType::Line(
+            document::entities::Line::from_coords(0.0, 0.0, 0.0, 100.0, 0.0, 0.0),
+        ));
         let spec = AssocArraySpec::Path {
             path,
             items: 5,
@@ -2243,7 +2281,7 @@ mod tests {
         let insert = create_from_spec(&mut scene, &[source], DVec3::ZERO, &spec).unwrap();
         scene.transform_entities(
             &[path, insert],
-            &crate::command::EntityTransform::Translate(DVec3::new(0.0, 20.0, 0.0)),
+            &crate::entities::transform::EntityTransform::Translate(DVec3::new(0.0, 20.0, 0.0)),
         );
 
         let document = &scene.document;
@@ -2568,7 +2606,7 @@ mod xdict_tests {
 #[cfg(test)]
 mod copy_tests {
     use super::*;
-    use crate::command::EntityTransform;
+    use crate::entities::transform::EntityTransform;
     use document::entities::{Circle, Line};
 
     fn circle(scene: &mut crate::scene::Scene) -> Handle {
@@ -2779,14 +2817,22 @@ mod copy_tests {
         let corner = nearest_item(&scene.document, &array, DVec3::ZERO).unwrap();
         let next = nearest_item(&scene.document, &array, DVec3::new(20.0, 0.0, 0.0)).unwrap();
         edit_item(&mut scene, &array, corner, ItemEdit::Erase).unwrap();
-        edit_item(&mut scene, &array, next, ItemEdit::Move(DVec3::new(0.0, 5.0, 0.0))).unwrap();
+        edit_item(
+            &mut scene,
+            &array,
+            next,
+            ItemEdit::Move(DVec3::new(0.0, 5.0, 0.0)),
+        )
+        .unwrap();
         let edited = world_items(&scene.document, insert);
         assert_eq!(edited.len(), 5);
         assert!(!edited.contains(&(0, 0)) && edited.contains(&(20_000, 5_000)));
         // The edits are stored with the array, so they come back from DWG.
         let bytes = document::DwgWriter::write_to_vec(&scene.document).unwrap();
         let mut reopened = crate::scene::Scene::new();
-        reopened.document = document::DwgReader::from_stream(std::io::Cursor::new(bytes)).read().unwrap();
+        reopened.document = document::DwgReader::from_stream(std::io::Cursor::new(bytes))
+            .read()
+            .unwrap();
         let again = array_of_insert(&reopened.document, insert).unwrap();
         update(&mut reopened, &again, &[]).unwrap();
         assert_eq!(world_items(&reopened.document, insert), edited);

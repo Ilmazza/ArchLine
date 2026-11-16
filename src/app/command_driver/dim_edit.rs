@@ -69,7 +69,10 @@ impl OpenCADStudio {
                 .document
                 .get_entity(dimension)
                 .and_then(crate::entities::dimension::as_dimension),
-            Some(document::entities::Dimension::Linear(_) | document::entities::Dimension::Aligned(_))
+            Some(
+                document::entities::Dimension::Linear(_)
+                    | document::entities::Dimension::Aligned(_)
+            )
         );
         if !valid {
             self.command_line.push_error(
@@ -217,16 +220,35 @@ fn wire_segments(
 fn segment_intersection_xy(
     first: (glam::DVec3, glam::DVec3),
     second: (glam::DVec3, glam::DVec3),
+    half_gap: f64,
 ) -> Option<(glam::DVec3, glam::DVec3)> {
     let gap = kernel::space::segment_break_gap_xy(
         [first.0.to_array(), first.1.to_array()],
         [second.0.to_array(), second.1.to_array()],
-        0.25,
+        half_gap,
     )?;
     Some((
         glam::DVec3::from_array(gap[0]),
         glam::DVec3::from_array(gap[1]),
     ))
+}
+
+/// The gap an automatic break cuts in `dimension`: its style's break size,
+/// scaled like the rest of the dimension.
+fn dimension_break_size(document: &document::Document, dimension: Handle) -> f64 {
+    let Some(document::EntityType::Dimension(dim)) = document.get_entity(dimension) else {
+        return 0.5;
+    };
+    let name = &dim.base().style_name;
+    let Some(style) = document
+        .dim_styles
+        .iter()
+        .find(|style| style.name.eq_ignore_ascii_case(name))
+    else {
+        return 0.5;
+    };
+    let scale = if style.dimscale > 0.0 { style.dimscale } else { 1.0 };
+    crate::scene::creation_style::dim_style_extras(document, style.handle).break_size * scale
 }
 
 fn break_object_handle(document: &document::Document, dimension: Handle) -> Option<Handle> {
@@ -356,6 +378,7 @@ fn break_reference(
         first_point: document::types::Vector3::new(first.x, first.y, first.z),
         second_point: document::types::Vector3::new(second.x, second.y, second.z),
         trailing_version: 0,
+        ..Default::default()
     }
 }
 
@@ -414,6 +437,7 @@ fn apply_dimbreak(
 
     let mut pending = Vec::new();
     for dimension in &dimensions {
+        let half_gap = dimension_break_size(&scene.document, *dimension) * 0.5;
         let existing: Vec<_> = break_object_handle(&scene.document, *dimension)
             .and_then(|handle| scene.document.objects.get(&handle))
             .and_then(|object| match object {
@@ -446,7 +470,7 @@ fn apply_dimbreak(
                 for dim_segment in &dimension_segments {
                     for crossing_segment in &crossing_segments {
                         if let Some(points) =
-                            segment_intersection_xy(*dim_segment, *crossing_segment)
+                            segment_intersection_xy(*dim_segment, *crossing_segment, half_gap)
                         {
                             let center = (points.0 + points.1) * 0.5;
                             if intersections.iter().all(
@@ -531,7 +555,10 @@ pub(super) fn overlapping_dimensions(scene: &crate::scene::Scene, new: Handle) -
     let Some((low, high)) = span(new) else {
         return Vec::new();
     };
-    let owner = scene.document.get_entity(new).map(|e| e.common().owner_handle);
+    let owner = scene
+        .document
+        .get_entity(new)
+        .map(|e| e.common().owner_handle);
     let line = across(definition);
     let tolerance = (high - low).abs().max(1.0) * 1.0e-9;
     scene
@@ -540,7 +567,11 @@ pub(super) fn overlapping_dimensions(scene: &crate::scene::Scene, new: Handle) -
         .map(|entity| entity.common().handle)
         .filter(|&handle| handle != new)
         .filter(|&handle| {
-            scene.document.get_entity(handle).map(|e| e.common().owner_handle) == owner
+            scene
+                .document
+                .get_entity(handle)
+                .map(|e| e.common().owner_handle)
+                == owner
         })
         .filter(|&handle| {
             let Some((other_axis, _, other_definition)) = spacing_axis(scene, handle) else {
@@ -720,7 +751,11 @@ fn spacing_axis(
         Dimension::Linear(d) => Some((
             [d.rotation.cos(), d.rotation.sin(), 0.0],
             [d.base.normal.x, d.base.normal.y, d.base.normal.z],
-            [d.definition_point.x, d.definition_point.y, d.definition_point.z],
+            [
+                d.definition_point.x,
+                d.definition_point.y,
+                d.definition_point.z,
+            ],
         )),
         Dimension::Aligned(d) => Some((
             [
@@ -729,7 +764,11 @@ fn spacing_axis(
                 d.second_point.z - d.first_point.z,
             ],
             [d.base.normal.x, d.base.normal.y, d.base.normal.z],
-            [d.definition_point.x, d.definition_point.y, d.definition_point.z],
+            [
+                d.definition_point.x,
+                d.definition_point.y,
+                d.definition_point.z,
+            ],
         )),
         _ => None,
     }

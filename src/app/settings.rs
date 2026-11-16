@@ -297,14 +297,14 @@ where
     Ok(clamp_quad_hover_delay_ms(raw.max(0) as u64))
 }
 
-/// Hold a ZOOMFACTOR inside the range the application can store, wherever it
-/// arrives from — the slider, the Options field, or a configuration file
-/// written by hand or by an older build.
-/// Interface scale in percent, kept to the range the Options slider offers.
+/// Interface scale in percent, kept to the range the Options list offers.
 pub fn clamp_ui_scale(percent: u16) -> u16 {
     percent.clamp(75, 200)
 }
 
+/// Hold a ZOOMFACTOR inside the range the application can store, wherever it
+/// arrives from — the slider, the Options field, or a configuration file
+/// written by hand or by an older build.
 pub fn clamp_zoom_factor(v: i32) -> i32 {
     v.clamp(ZOOM_FACTOR_MIN, ZOOM_FACTOR_MAX)
 }
@@ -887,7 +887,10 @@ pub struct UserSettings {
     /// QUADWIDTH: columns the expanded quad lays out (2..=12, default 6).
     /// The reader is the tolerant one above: a hand-written out-of-range
     /// number loads clamped instead of failing the whole config parse.
-    #[serde(default = "default_quad_width", deserialize_with = "deserialize_quad_width")]
+    #[serde(
+        default = "default_quad_width",
+        deserialize_with = "deserialize_quad_width"
+    )]
     pub quad_width: u8,
     /// QUADCOMMANDLAUNCH: a right-click over an entity without entering the
     /// quad launches the entity's default command directly.
@@ -896,7 +899,10 @@ pub struct UserSettings {
     /// appears, in milliseconds (0..=2000; 0 = immediately). The reader is
     /// the tolerant one above: a negative or oversized hand-written number
     /// loads clamped instead of failing the whole config parse.
-    #[serde(default = "default_quad_hover_delay_ms", deserialize_with = "deserialize_quad_hover_delay_ms")]
+    #[serde(
+        default = "default_quad_hover_delay_ms",
+        deserialize_with = "deserialize_quad_hover_delay_ms"
+    )]
     pub quad_hover_delay_ms: u64,
     /// GRIPOBJLIMIT: past this many selected objects, no grips are drawn at
     /// all. 0 means no limit. The drawing header carries no slot for it.
@@ -924,6 +930,9 @@ pub struct UserSettings {
     pub wblock_object_mode: u8,
     /// FIELDDISPLAY: fields show on a gray background.
     pub field_display: bool,
+    /// The annotation scale is asked for before a session's first annotative
+    /// text ("Don't ask again" turns it off).
+    pub annotation_scale_prompt: bool,
     /// HYPERLINKOPTIONS: the hyperlink cursor, tooltip and shortcut menu.
     pub hyperlink_options: bool,
     /// XDWGFADECTL: how much referenced drawings fade (-90..=90; negative is off).
@@ -937,6 +946,11 @@ pub struct UserSettings {
     /// GROUPDISPLAYMODE: a picked group shows member grips (0), a centre
     /// grip (1) or a centre grip and a box (2).
     pub group_display_mode: i16,
+    /// SELECTIONANNODISPLAY: a selected annotative object shows its other
+    /// scale representations dimmed (1) or not (0).
+    pub selection_anno_display: i16,
+    /// ANNOMONITOR: the annotation monitor (-2 to 2).
+    pub anno_monitor: i16,
     /// LOGFILEMODE: the command line is also written to a log file.
     pub log_file_mode: bool,
     /// LOGFILEPATH: the folder log files go to; empty for the default.
@@ -989,6 +1003,8 @@ pub struct UserSettings {
     pub show_viewcube: bool,
     /// Show the UCS icon (UCSICON).
     pub show_ucs_icon: bool,
+    /// Show the viewport controls in the drawing's corner (VPCONTROL).
+    pub show_viewport_controls: bool,
     /// Draw the UCS icon at the origin rather than in the corner
     /// (UCSICON ORigin / NOorigin).
     pub ucs_icon_at_origin: bool,
@@ -1046,6 +1062,9 @@ pub struct UserSettings {
     /// Drawing new tabs start from (QNEW template); empty = a blank drawing.
     #[serde(default)]
     pub qnew_template: String,
+    /// Preserve source paths, group resources by type, or keep every file flat.
+    #[serde(default)]
+    pub transmittal_layout: crate::io::transmit::TransmittalLayout,
     /// App version whose donation prompt has been displayed.
     pub donation_prompt_version: String,
     /// The graphics verdict (`GpuStatus::identity()`) whose warning popup the
@@ -1478,6 +1497,7 @@ impl Default for UserSettings {
             options_tab: crate::ui::window::options::OptionsTab::General,
             show_viewcube: true,
             show_ucs_icon: true,
+            show_viewport_controls: true,
             ucs_icon_at_origin: true,
             selection_cycling: false,
             osnap_z: false,
@@ -1508,19 +1528,22 @@ impl Default for UserSettings {
             block_open_in_editor: false,
             wblock_object_mode: 0,
             field_display: true,
+            annotation_scale_prompt: true,
             hyperlink_options: true,
             xref_fade: 50,
             file_dia: true,
             ole_hide: 0,
             ole_quality: 3,
             group_display_mode: 2,
+            selection_anno_display: 1,
+            anno_monitor: -2,
             log_file_mode: false,
             log_file_path: String::new(),
             save_file_path: String::new(),
             offset_gap_type: 0,
             trim_extend_quick: true,
             match_mode: crate::entities::match_props::MatchOpts::DEFAULT_MODE,
-            measuregeom_quick: true,
+            measuregeom_quick: false,
             revcloud_create_mode: 1,
             revcloud_arc_variance: true,
             revcloud_grips: true,
@@ -1549,6 +1572,7 @@ impl Default for UserSettings {
             font_source_url: String::new(),
             font_substitutions: Default::default(),
             qnew_template: String::new(),
+            transmittal_layout: crate::io::transmit::TransmittalLayout::Structured,
             donation_prompt_version: String::new(),
             gpu_warning_silenced: String::new(),
             disabled_plugins: Vec::new(),
@@ -1846,8 +1870,7 @@ mod tests {
 
         // Absent keys keep the in-code defaults (struct-level serde
         // default untouched).
-        let minimal: UserSettings =
-            serde_json::from_str(r#"{"pick_add": true}"#).unwrap();
+        let minimal: UserSettings = serde_json::from_str(r#"{"pick_add": true}"#).unwrap();
         assert_eq!(minimal.quad_width, 6);
         assert_eq!(minimal.quad_hover_delay_ms, 300);
     }
@@ -1859,6 +1882,28 @@ mod tests {
         assert_eq!(clamp_quad_hover_delay_ms(0), 0);
         assert_eq!(clamp_quad_hover_delay_ms(300), 300);
         assert_eq!(clamp_quad_hover_delay_ms(9999), 2000);
+    }
+
+    #[test]
+    fn transmittal_layout_defaults_and_round_trips() {
+        use crate::io::transmit::TransmittalLayout;
+
+        let old: UserSettings = serde_json::from_str(r#"{"pick_add": true}"#).unwrap();
+        assert_eq!(old.transmittal_layout, TransmittalLayout::Structured);
+        for (layout, encoded) in [
+            (TransmittalLayout::Preserve, "\"preserve\""),
+            (TransmittalLayout::Structured, "\"structured\""),
+            (TransmittalLayout::Flat, "\"flat\""),
+        ] {
+            assert_eq!(serde_json::to_string(&layout).unwrap(), encoded);
+            let settings = UserSettings {
+                transmittal_layout: layout,
+                ..UserSettings::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            let back: UserSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.transmittal_layout, layout);
+        }
     }
 
     #[test]

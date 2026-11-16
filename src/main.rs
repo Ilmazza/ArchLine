@@ -4,6 +4,12 @@
 // attached so eprintln! / panics stay visible while developing.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// The Windows system heap is slow for the millions of small allocations a
+// large drawing makes (wire models, index entries), above all when freeing.
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use OpenCADStudio::app;
 #[cfg(target_arch = "wasm32")]
 use OpenCADStudio::sys;
@@ -116,7 +122,11 @@ fn main() -> iced::Result {
 
         // Unattended script runs need no window, so no GPU either.
         if let Some(script) = args.batch.as_ref().or(args.each.as_ref()) {
-            let files = if args.each.is_some() { &args.files[..] } else { &[] };
+            let files = if args.each.is_some() {
+                &args.files[..]
+            } else {
+                &[]
+            };
             std::process::exit(app::run_batch(script, files, args.read_only));
         }
 

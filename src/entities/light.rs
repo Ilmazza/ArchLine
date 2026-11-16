@@ -13,11 +13,11 @@ use crate::t;
 use document::entities::Light;
 use document::EntityType;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_angle_prop, edit_prop as edit, ro_prop, square_grip,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -221,17 +221,17 @@ impl Grippable for Light {
         match (grip_id, apply) {
             // Grip 0 — light source: moves the whole light (aim preserved).
             (0, GripApply::Translate(d)) => {
-                self.position.x += d.x as f64;
-                self.position.y += d.y as f64;
-                self.position.z += d.z as f64;
-                self.target.x += d.x as f64;
-                self.target.y += d.y as f64;
-                self.target.z += d.z as f64;
+                self.position.x += d.x;
+                self.position.y += d.y;
+                self.position.z += d.z;
+                self.target.x += d.x;
+                self.target.y += d.y;
+                self.target.z += d.z;
             }
             (0, GripApply::Absolute(p)) => {
-                let dx = p.x as f64 - self.position.x;
-                let dy = p.y as f64 - self.position.y;
-                let dz = p.z as f64 - self.position.z;
+                let dx = p.x - self.position.x;
+                let dy = p.y - self.position.y;
+                let dz = p.z - self.position.z;
                 self.position.x += dx;
                 self.position.y += dy;
                 self.position.z += dz;
@@ -241,14 +241,14 @@ impl Grippable for Light {
             }
             // Grip 1 — spot target: re-aims the light.
             (1, GripApply::Translate(d)) => {
-                self.target.x += d.x as f64;
-                self.target.y += d.y as f64;
-                self.target.z += d.z as f64;
+                self.target.x += d.x;
+                self.target.y += d.y;
+                self.target.z += d.z;
             }
             (1, GripApply::Absolute(p)) => {
-                self.target.x = p.x as f64;
-                self.target.y = p.y as f64;
-                self.target.z = p.z as f64;
+                self.target.x = p.x;
+                self.target.y = p.y;
+                self.target.z = p.z;
             }
             _ => {}
         }

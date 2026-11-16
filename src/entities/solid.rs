@@ -3,9 +3,9 @@
 use crate::t;
 use document::entities::Solid;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{edit_prop as edit, square_grip};
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::SnapHint;
@@ -209,10 +209,11 @@ impl RenderConvertible for Solid {
                 .iter()
                 .map(|(start, end)| ((dvec3(*start) + dvec3(*end)) * 0.5, SnapHint::Midpoint)),
         );
-        let pick_tris = geometry
-            .extruded
-            .then(|| geometry.fill_tris.clone())
-            .unwrap_or_default();
+        let pick_tris = if geometry.extruded {
+            geometry.fill_tris.clone()
+        } else {
+            Default::default()
+        };
 
         Some(RenderEntity {
             pick_tris,

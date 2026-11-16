@@ -8,7 +8,7 @@
 // is needed — we shift the coordinates by (offset_x, offset_y) to place the
 // drawing origin at the paper origin.
 
-use crate::io::plot_style::PlotStyleTable;
+use crate::io::plot_style::{PlotStyleTable, PlotStyleTableExt};
 use crate::scene::model::hatch_model::HatchModel;
 use crate::scene::model::hatch_model::HatchPattern;
 use crate::scene::model::wire_model::SearchableTextRun;
@@ -51,21 +51,46 @@ const SCREEN_DOT_MM: f32 = 25.4 / 96.0;
 
 // ── Public entry point ────────────────────────────────────────────────────
 
-/// Export one page to a PDF file.
+/// Export one page to a PDF file without geospatial metadata. This is also the
+/// printer/preview path, even if the page carries an optional GeoPDF frame.
 pub fn export_pdf(page: &PdfPageInput, path: &Path) -> Result<(), String> {
     export_pdf_pages(std::slice::from_ref(page), path, None)
 }
 
-/// Export several independently sized pages into one PDF file.
+/// Export one page as a plot file, including its explicitly opted-in GeoPDF
+/// frame when present.
+pub fn export_plot_pdf(page: &PdfPageInput, path: &Path) -> Result<(), String> {
+    export_plot_pdf_pages(std::slice::from_ref(page), path, None)
+}
+
+/// Export several independently sized pages into one PDF file without geospatial metadata.
 pub fn export_pdf_pages(
     pages: &[PdfPageInput],
     path: &Path,
     plot_style: Option<&PlotStyleTable>,
 ) -> Result<(), String> {
+    export_pdf_pages_impl(pages, path, plot_style, false)
+}
+
+/// Export plot-file pages, preserving each page's independent GeoPDF opt-in.
+pub fn export_plot_pdf_pages(
+    pages: &[PdfPageInput],
+    path: &Path,
+    plot_style: Option<&PlotStyleTable>,
+) -> Result<(), String> {
+    export_pdf_pages_impl(pages, path, plot_style, true)
+}
+
+fn export_pdf_pages_impl(
+    pages: &[PdfPageInput],
+    path: &Path,
+    plot_style: Option<&PlotStyleTable>,
+    include_geopdf: bool,
+) -> Result<(), String> {
     if pages.is_empty() {
         return Err("No pages were selected.".into());
     }
-    let bytes = render_pdf_bytes(pages, plot_style)?;
+    let bytes = render_pdf_bytes_impl(pages, plot_style, include_geopdf)?;
     persist_pdf(path, &bytes)
 }
 
@@ -92,7 +117,7 @@ fn write_pdf_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("Failed to write PDF data: {error}"));
     }
-    if let Err(error) = super::replace_save_file(&temp_path, path) {
+    if let Err(error) = super::replace_save_file(&temp_path, path, false) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("Failed to replace PDF file: {error}"));
     }
@@ -149,7 +174,7 @@ fn emit_image(
     if image.width == 0 || image.height == 0 || expected_byte_count != Some(image.pixels.len()) {
         return Err("Cannot plot bitmap: dimensions do not match its RGBA pixels.".into());
     }
-    if image.verts.len() < 3 || image.verts.len() % 3 != 0 {
+    if image.verts.len() < 3 || !image.verts.len().is_multiple_of(3) {
         return Err("Cannot plot bitmap: incomplete triangle geometry.".into());
     }
     if options.transparency && image.opacity <= 0.0 {
@@ -429,10 +454,28 @@ pub async fn pick_plot_path_async(stem: String, svg: bool) -> Option<std::path::
 
 // ── PDF builder ───────────────────────────────────────────────────────────
 
-/// Render pages to complete PDF bytes (export, preview and printing share it).
+/// Render pages to complete PDF bytes without geospatial metadata. Preview and
+/// ordinary printing deliberately use this path even for an opted-in page.
 pub(crate) fn render_pdf_bytes(
     pages: &[PdfPageInput],
     plot_style: Option<&PlotStyleTable>,
+) -> Result<Vec<u8>, String> {
+    render_pdf_bytes_impl(pages, plot_style, false)
+}
+
+/// Render plot-file bytes, honoring each page's explicit GeoPDF opt-in.
+#[cfg(test)]
+pub(crate) fn render_plot_pdf_bytes(
+    pages: &[PdfPageInput],
+    plot_style: Option<&PlotStyleTable>,
+) -> Result<Vec<u8>, String> {
+    render_pdf_bytes_impl(pages, plot_style, true)
+}
+
+fn render_pdf_bytes_impl(
+    pages: &[PdfPageInput],
+    plot_style: Option<&PlotStyleTable>,
+    include_geopdf: bool,
 ) -> Result<Vec<u8>, String> {
     let mut doc = PdfDocument::new("Open CAD Studio Export");
     // Subset-embed one TrueType font per used system family before any page
@@ -465,11 +508,28 @@ pub(crate) fn render_pdf_bytes(
     // for a CAD sheet — went out uncompressed: a 16-sheet set weighed 280 MB.
     // Serialise through lopdf ourselves and Flate-compress the streams.
     let mut lo = printpdf::to_lopdf_doc(&doc, &PdfSaveOptions::default(), &mut warnings);
-    lo.compress();
-    let mut bytes = Vec::new();
-    lo.save_to(&mut bytes)
-        .map_err(|error| format!("PDF serialisation failed: {error}"))?;
-    Ok(bytes)
+    // printpdf writes page boxes rounded to whole points (an A3 sheet came
+    // out 1191 x 842 instead of 1190.55 x 841.89); write the exact size.
+    for (page, id) in pages.iter().zip(lo.get_pages().into_values()) {
+        let size = [page.paper_w, page.paper_h].map(|mm| (mm * 72.0 / 25.4) as f32);
+        let Some(dict) = lo.get_object_mut(id).ok().and_then(|o| o.as_dict_mut().ok()) else {
+            continue;
+        };
+        for key in [&b"MediaBox"[..], b"TrimBox", b"CropBox"] {
+            if let Some(rect) = dict.get_mut(key).ok().and_then(|o| o.as_array_mut().ok()) {
+                if rect.len() == 4 {
+                    rect[2] = size[0].into();
+                    rect[3] = size[1].into();
+                }
+            }
+        }
+    }
+    let precise = if include_geopdf {
+        crate::io::geopdf_export::apply_metadata(&mut lo, pages)?
+    } else {
+        Vec::new()
+    };
+    crate::io::geopdf_export::save_document(&mut lo, &precise)
 }
 
 fn append_pdf_page(
@@ -499,19 +559,17 @@ fn append_pdf_page(
         images,
         group_splits,
         entity_layers,
+        entity_plot_styles,
     } = &page.content;
-    let layer_of = |name: &str| {
-        crate::scene::Scene::handle_from_wire_name(name)
-            .and_then(|handle| entity_layers.get(&handle))
-            .map(String::as_str)
-    };
     let (paper_w, paper_h) = (page.paper_w as f32, page.paper_h as f32);
     let (ox, oy) = (page.offset_x, page.offset_y);
     let (rotation_deg, scale, clip) = (page.rotation_deg, page.scale, page.clip);
     let plot_style = page.plot_style.as_ref().or(fallback_plot_style);
     let options = page.options;
-    let line_step = vector_step(options);
+    let line_step = vector_step(options, scale);
     let mut ops: Vec<Op> = Vec::new();
+    let mut named_styles: std::collections::HashMap<String, Option<PlotStyleTable>> =
+        std::collections::HashMap::new();
 
     // White page background.
     ops.push(Op::SetFillColor {
@@ -723,10 +781,31 @@ fn append_pdf_page(
             }
             let layer = match &item {
                 DrawItem::WireFill(wire) | DrawItem::Wire(wire) | DrawItem::Text(wire) => {
-                    layer_of(&wire.name)
+                    super::plot::wire_layer(&wire.wire, entity_layers)
                 }
-                DrawItem::Hatch(hatch) => layer_of(&hatch.name),
+                DrawItem::Hatch(hatch) => super::plot::hatch_layer(hatch, entity_layers),
                 DrawItem::Image(_) => None,
+            };
+            // A named (STB) table plots each entity with its own object style.
+            let item_name = match &item {
+                DrawItem::WireFill(wire) | DrawItem::Wire(wire) | DrawItem::Text(wire) => {
+                    Some(wire.name.as_str())
+                }
+                DrawItem::Hatch(hatch) => Some(hatch.name.as_str()),
+                DrawItem::Image(_) => None,
+            };
+            let object_style = item_name
+                .and_then(crate::scene::Scene::handle_from_wire_name)
+                .and_then(|handle| entity_plot_styles.get(&handle));
+            let plot_style = match (plot_style, object_style) {
+                (Some(table), Some(style)) if table.is_stb => {
+                    if !named_styles.contains_key(style) {
+                        let narrowed = crate::io::plot_style::with_object_style(table, style);
+                        named_styles.insert(style.clone(), narrowed);
+                    }
+                    named_styles[style].as_ref().or(Some(table))
+                }
+                (table, _) => table,
             };
             if layer != open_layer {
                 if open_layer.is_some() {
@@ -871,16 +950,16 @@ fn append_pdf_page(
             let mut join = None;
             if let Some(ctb) = plot_style {
                 if wire.aci > 0 {
-                    if let Some([cr, cg, cb]) = ctb.resolve_color(wire.aci) {
+                    if let Some([cr, cg, cb]) = ctb.resolve_style_color(wire.aci) {
                         r = cr;
                         g = cg;
                         b = cb;
                         color_overridden = true;
                     }
                     lw_override = ctb
-                        .resolve_lineweight(wire.aci)
+                        .resolve_style_lineweight(wire.aci)
                         .map(|mm| (mm * MM_TO_PT).max(0.1));
-                    screening = ctb.resolve_screening(wire.aci);
+                    screening = ctb.resolve_style_screening(wire.aci);
                     if let Some(entry) = ctb.aci_entries.get(wire.aci as usize) {
                         cap = match entry.end_style {
                             0 => Some(LineCapStyle::Butt),
@@ -1051,6 +1130,19 @@ fn append_pdf_page(
             // along northing — which is exactly the distortion the plot showed while
             // low-coordinate drawings came out clean. The result is a sheet-mm value
             // in single digits, so f32 is lossless from here.
+            // A circle or arc is drawn as its curve, not as chords.
+            if let Some(spans) = crate::io::plot::wire_arc_beziers(wire, page_h) {
+                let mm = |p: glam::DVec2, bezier: bool| LinePoint {
+                    p: Point::new(Mm((p.x + ox) as f32), Mm((p.y + oy) as f32)),
+                    bezier,
+                };
+                let mut curve = vec![mm(spans[0][0], false)];
+                for [_, c1, c2, end] in spans {
+                    curve.extend([mm(c1, true), mm(c2, true), mm(end, false)]);
+                }
+                flush_line(&mut ops, &curve, None, line_step);
+                continue;
+            }
             let mut segment: Vec<LinePoint> = Vec::new();
             let dot_radius = (wire.name == "viewport_hatch_pattern")
                 .then_some(Pt(SCREEN_DOT_MM * MM_TO_PT / (2.0 * scale.max(1e-6))));
@@ -1263,7 +1355,9 @@ pub(crate) fn dash_ranges(
     pattern_length: f32,
     pattern: &[f32; 8],
 ) -> Vec<[f32; 2]> {
-    use crate::scene::pipeline::wire_gpu::{aligned_end_dash, closed_dash_solid, closed_dash_stretch};
+    use crate::scene::pipeline::wire_gpu::{
+        aligned_end_dash, closed_dash_solid, closed_dash_stretch,
+    };
     if run_total < 0.0 {
         let length = -run_total;
         if closed_dash_solid(length, pattern_length) {
@@ -1389,9 +1483,15 @@ fn visible_station_ranges(
     ranges
 }
 
-/// One vector DPI step in points, for `PlotOptions::vector_dpi`.
-fn vector_step(options: PdfPlotOptions) -> Option<f32> {
-    options.vector_dpi.filter(|&dpi| dpi > 0).map(|dpi| 72.0 / dpi as f32)
+/// One vector DPI step in the pre-CTM coordinate space, for
+/// `PlotOptions::vector_dpi`. The geometry is drawn under a CTM that scales it
+/// by the plot `scale`, so the grid is divided by it to land on 1/dpi inch of
+/// paper; without that a large plot scale quantised far coarser than asked.
+fn vector_step(options: PdfPlotOptions, scale: f32) -> Option<f32> {
+    options
+        .vector_dpi
+        .filter(|&dpi| dpi > 0)
+        .map(|dpi| 72.0 / dpi as f32 / scale.max(1e-6))
 }
 
 fn flush_line(ops: &mut Vec<Op>, pts: &[LinePoint], dot_radius: Option<Pt>, step: Option<f32>) {
@@ -1407,7 +1507,10 @@ fn flush_line(ops: &mut Vec<Op>, pts: &[LinePoint], dot_radius: Option<Pt>, step
                 point.p.y.0 = snap(point.p.y.0);
                 // Bezier control points keep their slot so curves stay whole.
                 if out.last().is_none_or(|last| {
-                    point.bezier || last.bezier || last.p.x.0 != point.p.x.0 || last.p.y.0 != point.p.y.0
+                    point.bezier
+                        || last.bezier
+                        || last.p.x.0 != point.p.x.0
+                        || last.p.y.0 != point.p.y.0
                 }) {
                     out.push(point);
                 }
@@ -1525,8 +1628,10 @@ fn emit_wire_fills(
                 }
                 boundary.push(boundary[0]);
                 let hatch = HatchModel {
+                    entity: None,
+                    effective_layer: wire.effective_layer.clone(),
                     pattern_origin: None,
-                    render_instance: wire.render_instance.clone(),
+                    render_instance: wire.render_instance,
                     world_origin: [0.0, 0.0],
                     boundary: std::sync::Arc::new(boundary),
                     boundary_wcs: None,
@@ -1578,11 +1683,11 @@ fn emit_wire_fills(
             let mut color_overridden = false;
             if let Some(table) = plot_style {
                 if wire.aci > 0 {
-                    if let Some(color) = table.resolve_color(wire.aci) {
+                    if let Some(color) = table.resolve_style_color(wire.aci) {
                         [r, g, b] = color;
                         color_overridden = true;
                     }
-                    screening = table.resolve_screening(wire.aci);
+                    screening = table.resolve_style_screening(wire.aci);
                 }
             }
             if !color_overridden {
@@ -1708,15 +1813,15 @@ fn emit_hatch(
     if !is_wipeout {
         if let Some(table) = plot_style {
             if hatch.aci > 0 {
-                if let Some([cr, cg, cb]) = table.resolve_color(hatch.aci) {
+                if let Some([cr, cg, cb]) = table.resolve_style_color(hatch.aci) {
                     r = cr;
                     g = cg;
                     b = cb;
                     color_overridden = true;
                 }
-                screening = table.resolve_screening(hatch.aci);
+                screening = table.resolve_style_screening(hatch.aci);
                 lw_override = table
-                    .resolve_lineweight(hatch.aci)
+                    .resolve_style_lineweight(hatch.aci)
                     .map(|mm| (mm * MM_TO_PT).max(0.1));
             }
         }
@@ -1850,7 +1955,7 @@ fn emit_hatch(
                 },
             ];
             let dot_radius = Pt(SCREEN_DOT_MM * MM_TO_PT / (2.0 * scale.max(1e-6)));
-            flush_line(ops, &points, Some(dot_radius), vector_step(options));
+            flush_line(ops, &points, Some(dot_radius), vector_step(options, scale));
         }
         return;
     }
@@ -1980,8 +2085,8 @@ fn emit_searchable_text(
         let mut screening = 1.0;
         if let Some(ctb) = plot_style {
             if wire.aci > 0 {
-                ctb_color = ctb.resolve_color(wire.aci);
-                screening = ctb.resolve_screening(wire.aci);
+                ctb_color = ctb.resolve_style_color(wire.aci);
+                screening = ctb.resolve_style_screening(wire.aci);
             }
         }
         for run in &wire.searchable_text {
@@ -2328,7 +2433,7 @@ fn emit_text(
     plot_style: Option<&PlotStyleTable>,
     options: PdfPlotOptions,
 ) -> bool {
-    use crate::scene::text::sdf_atlas;
+    use crate::scene::text::glyph_to_world;
 
     if wires.iter().all(|w| w.text_verts.is_empty()) {
         return false;
@@ -2337,7 +2442,7 @@ fn emit_text(
     let Some(snapshot) = fonts.glyph_table() else {
         return false;
     };
-    let (table, solid_key) = (&snapshot.0, snapshot.1);
+    let (table, solid_key) = (&snapshot.table, snapshot.solid_key);
 
     // `Op::SetLineDashPattern` is persistent graphics state and the wire pass
     // above only re-emits it on change, so whatever the last wire needed is
@@ -2365,11 +2470,11 @@ fn emit_text(
         let mut screening = 1.0;
         if let Some(ctb) = plot_style {
             if wire.aci > 0 {
-                ctb_color = ctb.resolve_color(wire.aci);
+                ctb_color = ctb.resolve_style_color(wire.aci);
                 lw_override = options
                     .object_lineweights
                     .then(|| {
-                        ctb.resolve_lineweight(wire.aci).map(|mm| {
+                        ctb.resolve_style_lineweight(wire.aci).map(|mm| {
                             let divisor = if options.scale_lineweights {
                                 1.0
                             } else {
@@ -2379,14 +2484,10 @@ fn emit_text(
                         })
                     })
                     .flatten();
-                screening = ctb.resolve_screening(wire.aci);
+                screening = ctb.resolve_style_screening(wire.aci);
             }
         }
-        let mut gi = 0;
-        while gi + 6 <= verts.len() {
-            let quad = &verts[gi..gi + 6];
-            gi += 6;
-
+        for quad in verts.as_chunks::<6>().0 {
             let a = quad[0].color[3];
             if a < 0.01 {
                 continue;
@@ -2399,32 +2500,25 @@ fn emit_text(
             });
             let [r, g, b] = plotted_color(rgb, a, screening, options);
 
-            // Quad corners in world XY: verts run [bl, br, tr, bl, tr, tl].
-            let bl = glyph_world_xy(&quad[0]);
-            let br = glyph_world_xy(&quad[1]);
-            let tr = glyph_world_xy(&quad[2]);
-            let tl = glyph_world_xy(&quad[5]);
-            // `tl` carries uv = (uv_min.x, uv_min.y) — the atlas tile key.
-            let key = sdf_atlas::uv_key([quad[5].uv[0], quad[5].uv[1]]);
+            // Quad corners in world XY; `tl` carries uv = (uv_min.x, uv_min.y)
+            // — the atlas tile key.
+            let key = glyph_to_world::quad_uv_key(quad);
 
             // Cancel the offset in f64, then narrow: the sheet-mm result is a
             // small number even when the world coordinate is UTM-scale.
             let point = |wx: f64, wy: f64| Point::new(Mm((wx + ox) as f32), Mm((wy + oy) as f32));
 
             if let Some(ge) = table.get(&key) {
-                // Affine basis of the quad: plane_min → bl, +x → br, +y → tl.
-                // The glyph-space maths is small and stays f32; only the lift into
-                // world coordinates needs f64.
-                let (pmin, pmax) = (ge.plane_min, ge.plane_max);
-                let (sx, sy) = (pmax[0] - pmin[0], pmax[1] - pmin[1]);
-                if sx.abs() < 1e-9 || sy.abs() < 1e-9 {
+                // Affine basis of the quad: plane_min → bl, +x → br, +y → tl,
+                // shared with the SVG outline path. `None` on a degenerate
+                // plane measure, which draws nothing.
+                let Some(basis) = glyph_to_world::QuadBasis::of(quad, ge) else {
                     continue;
-                }
+                };
+                let (bl, br, tl) = (basis.bl, basis.br, basis.tl);
+                let (pmin, plane) = (basis.plane_min, basis.plane_size());
                 let map = |p: [f32; 2]| -> Point {
-                    let u = ((p[0] - pmin[0]) / sx) as f64;
-                    let v = ((p[1] - pmin[1]) / sy) as f64;
-                    let wx = bl[0] + u * (br[0] - bl[0]) + v * (tl[0] - bl[0]);
-                    let wy = bl[1] + u * (br[1] - bl[1]) + v * (tl[1] - bl[1]);
+                    let [wx, wy] = basis.world(&p);
                     point(wx, wy)
                 };
 
@@ -2443,8 +2537,7 @@ fn emit_text(
                     // export at hundreds of MB and crawl in viewers.
                     if let Some(source) = ge.source.as_ref().filter(|_| embed) {
                         if let Some(font) = fonts.font_for(source, ge.ch) {
-                            let matrix =
-                                glyph_text_matrix(source, pmin, [sx, sy], bl, br, tl, ox, oy);
+                            let matrix = glyph_text_matrix(source, pmin, plane, bl, br, tl, ox, oy);
                             push_glyph_text(ops, font, source.gid, ge.ch, matrix);
                             continue;
                         }
@@ -2489,12 +2582,11 @@ fn emit_text(
                             ctb_pen
                         }
                     } else {
-                        let glyph_unit_mm = (((tl[0] - bl[0]).powi(2) + (tl[1] - bl[1]).powi(2))
-                            .sqrt()
-                            / sy.abs() as f64) as f32;
                         // The pen is in page user space (under the plot CTM),
                         // so the 0.1 pt physical floor is divided by the scale.
-                        (2.0 * sdf_atlas::stroke_pen_half_units(ge.bold) * glyph_unit_mm * MM_TO_PT)
+                        (glyph_to_world::nominal_pen_world_mm(ge.bold, basis.glyph_unit_mm() as f32)
+                            as f32
+                            * MM_TO_PT)
                             .max(0.1 / scale.max(1e-6))
                     };
                     ops.push(Op::SetOutlineThickness { pt: Pt(pen) });
@@ -2519,6 +2611,7 @@ fn emit_text(
             } else if key == solid_key {
                 // Decoration bar (underline / overline / strike): the quad is a
                 // solid-texel rectangle — fill it directly from its corners.
+                let corner = |index: usize| glyph_world_xy(&quad[index]);
                 ops.push(Op::SetFillColor {
                     col: Color::Rgb(Rgb {
                         r,
@@ -2530,7 +2623,7 @@ fn emit_text(
                 ops.push(Op::DrawPolygon {
                     polygon: Polygon {
                         rings: vec![PolygonRing {
-                            points: [bl, br, tr, tl]
+                            points: [corner(0), corner(1), corner(2), corner(5)]
                                 .iter()
                                 .map(|&c| LinePoint {
                                     p: point(c[0], c[1]),
@@ -2550,11 +2643,10 @@ fn emit_text(
 
 // ── Embedded TrueType text ─────────────────────────────────────────────────
 
-/// The atlas export table plus its solid-tile key.
-type GlyphTable = std::sync::Arc<(
-    std::collections::HashMap<u64, crate::scene::text::sdf_atlas::GlyphExport>,
-    u64,
-)>;
+/// The atlas export snapshot, shared with the SVG outline path — the quad
+/// maths (uv key, plane mapping, glyph units, nominal pen) lives in
+/// [`crate::scene::text::glyph_to_world`].
+type GlyphTable = std::sync::Arc<crate::scene::text::glyph_to_world::GlyphSnapshot>;
 
 /// The TrueType faces a PDF export draws text with, and the glyphs each uses.
 ///
@@ -2586,13 +2678,10 @@ struct EmbeddedFont {
 impl TextFonts {
     /// The atlas' glyph export table (and solid-tile key), built on first use.
     fn glyph_table(&mut self) -> Option<GlyphTable> {
-        use crate::scene::text::sdf_atlas;
+        use crate::scene::text::glyph_to_world::GlyphSnapshot;
         if self.glyphs.is_none() {
-            let atlas = sdf_atlas::text_atlas().lock().ok()?;
-            self.glyphs = Some(std::sync::Arc::new((
-                atlas.export_table(),
-                sdf_atlas::uv_key(atlas.solid_uv()),
-            )));
+            let atlas = crate::scene::text::sdf_atlas::text_atlas().lock().ok()?;
+            self.glyphs = Some(std::sync::Arc::new(GlyphSnapshot::from_atlas(&atlas)));
         }
         self.glyphs.clone()
     }
@@ -2764,7 +2853,7 @@ fn renumber_glyphs(
 fn glyph_text_matrix(
     source: &crate::scene::text::ttf_glyph::GlyphSource,
     pmin: [f32; 2],
-    size: [f32; 2],
+    size: [f64; 2],
     bl: [f64; 2],
     br: [f64; 2],
     tl: [f64; 2],
@@ -2848,6 +2937,18 @@ pub(crate) fn pdf_stream_text(bytes: &[u8]) -> String {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     #[test]
+    fn vector_step_is_one_dpi_step_on_paper_at_any_plot_scale() {
+        let mut options = super::PdfPlotOptions::default();
+        assert_eq!(super::vector_step(options, 1.0), None);
+        options.vector_dpi = Some(600);
+        for scale in [0.01_f32, 1.0, 10.0, 1000.0] {
+            let step = super::vector_step(options, scale).unwrap();
+            // Under the CTM the step grows by `scale`: it must stay 1/600 in.
+            assert!((step * scale - 72.0 / 600.0).abs() < 1e-5, "scale {scale}");
+        }
+    }
+
+    #[test]
     fn dash_ranges_align_a_run_on_its_end_dashes() {
         let mut pattern = [0.0; 8];
         pattern[0] = 20.0;
@@ -2900,8 +3001,8 @@ mod tests {
         );
     }
 
-    use crate::io::plot_style::PlotStyleTableExt as _;
     use super::*;
+    use crate::io::plot_style::PlotStyleTableExt as _;
 
     #[test]
     fn only_colour_7_adapts_to_the_white_sheet() {
@@ -2926,7 +3027,200 @@ mod tests {
             clip: None,
             options: PdfPlotOptions::default(),
             plot_style: None,
+            geopdf: None,
         }
+    }
+
+    fn geopdf_test_page(rotation_deg: i32) -> PdfPageInput {
+        let mut page = test_page(Vec::new());
+        let origin = [-742_925.271_389_167_2, -1_043_020.310_123_933_5];
+        page.paper_w = 200.0;
+        page.paper_h = 100.0;
+        page.offset_x = -origin[0];
+        page.offset_y = -origin[1];
+        page.scale = 2.0;
+        page.rotation_deg = rotation_deg;
+        let crs = crate::io::crs::CrsDefinition::from_epsg(5514).unwrap();
+        page.geopdf = Some(
+            crate::io::geopdf_export::GeoPdfFrame::for_window(
+                &crs,
+                Some(1000.0),
+                (origin[0], origin[1], origin[0] + 20.0, origin[1] + 10.0),
+            )
+            .unwrap(),
+        );
+        page
+    }
+
+    #[test]
+    fn geopdf_plot_export_is_opt_in_precise_and_excluded_from_plain_rendering() {
+        let page = geopdf_test_page(0);
+        let plain = render_pdf_bytes(std::slice::from_ref(&page), None).unwrap();
+        assert!(plain.starts_with(b"%PDF-1.3"));
+        assert!(!plain.windows(b"/VP".len()).any(|window| window == b"/VP"));
+
+        let bytes = render_plot_pdf_bytes(std::slice::from_ref(&page), None).unwrap();
+        assert!(bytes.starts_with(b"%PDF-2.0"));
+        assert!(bytes
+            .windows(b"\nxref\n".len())
+            .any(|window| window == b"\nxref\n"));
+        let text = String::from_utf8_lossy(&bytes);
+        for expected in ["/VP", "/GEOGCS", "/PROJCS", "4156", "5514"] {
+            assert!(text.contains(expected), "missing {expected}");
+        }
+        let frame = page.geopdf.as_ref().unwrap();
+        let precise = format!("{} {}", frame.gpts[0][0], frame.gpts[0][1]);
+        assert!(text.contains(&precise), "GPTS lost f64 tokens: {precise}");
+
+        let pdf = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(bytes)).unwrap();
+        assert_eq!(pdf.pages().len(), 1);
+        assert!(pdf.pages()[0].raw().contains_key(b"VP"));
+        let crs = crate::io::crs::CrsDefinition::from_epsg(5514).unwrap();
+        let placement = crate::io::geopdf::placement_for_pdf_page(&pdf, 0, &crs, 1000.0)
+            .expect("exported page must round-trip through the underlay reader");
+        let origin = [-742_925.271_389_167_2, -1_043_020.310_123_933_5];
+        for (actual, expected) in placement.insertion.into_iter().zip(origin) {
+            assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+        }
+        assert!((placement.x_scale - 12.7).abs() < 1e-5);
+        assert!((placement.y_scale - 12.7).abs() < 1e-5);
+        assert!(placement.rotation.abs() < 1e-9);
+    }
+
+    #[test]
+    fn geopdf_opt_in_is_per_page_and_supports_upside_down_frames() {
+        let geo = geopdf_test_page(180);
+        let plain = test_page(Vec::new());
+        let bytes = render_plot_pdf_bytes(&[geo, plain], None).unwrap();
+        let pdf = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(bytes)).unwrap();
+        assert_eq!(pdf.pages().len(), 2);
+        assert!(pdf.pages()[0].raw().contains_key(b"VP"));
+        assert!(!pdf.pages()[1].raw().contains_key(b"VP"));
+        let crs = crate::io::crs::CrsDefinition::from_epsg(5514).unwrap();
+        let placement = crate::io::geopdf::placement_for_pdf_page(&pdf, 0, &crs, 1000.0)
+            .expect("180-degree GeoPDF frame");
+        assert!((placement.rotation.abs() - std::f64::consts::PI).abs() < 1e-8);
+        assert!((placement.x_scale - 12.7).abs() < 1e-5);
+        assert!((placement.y_scale - 12.7).abs() < 1e-5);
+    }
+
+    // The precise GPTS/bounds rewrite lengthens objects after lopdf has
+    // written the file, so it rebuilds the classic xref table by hand. Readers
+    // such as hayro repair a broken table silently, so check the table itself:
+    // startxref finds it, every entry has the 20-byte form the PDF specification
+    // requires (`nnnnnnnnnn ggggg n \n`, as lopdf writes it), every in-use
+    // offset lands on its own `N G obj`, and the entry count matches the
+    // trailer's /Size.
+    #[test]
+    fn geopdf_precision_rewrite_keeps_a_valid_classic_xref_table() {
+        fn number(bytes: &[u8]) -> usize {
+            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            std::str::from_utf8(&bytes[..digits])
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let bytes = render_plot_pdf_bytes(&[geopdf_test_page(0)], None).unwrap();
+        assert!(
+            bytes.ends_with(b"%%EOF\n"),
+            "file ends with the EOF marker line"
+        );
+
+        let marker = bytes
+            .windows(b"startxref\n".len())
+            .rposition(|window| window == b"startxref\n")
+            .expect("startxref");
+        let xref = number(&bytes[marker + b"startxref\n".len()..]);
+        assert!(
+            bytes[xref..].starts_with(b"xref\n"),
+            "startxref points at the table"
+        );
+
+        let trailer = xref
+            + bytes[xref..]
+                .windows(b"trailer".len())
+                .position(|window| window == b"trailer")
+                .expect("trailer");
+        let table = std::str::from_utf8(&bytes[xref + b"xref\n".len()..trailer]).unwrap();
+        let mut lines = table.split_terminator('\n');
+        let mut entries = 0;
+        let mut in_use = 0;
+        while let Some(header) = lines.next() {
+            let (start, count) = header.split_once(' ').expect("subsection header");
+            let (start, count): (usize, usize) = (start.parse().unwrap(), count.parse().unwrap());
+            for number_in_section in start..start + count {
+                let entry = lines.next().expect("entry line");
+                // 19 bytes plus the '\n' split off: the last field is followed by a space.
+                assert!(entry.len() == 19 && entry.ends_with(' '), "entry {entry:?}");
+                let fields: Vec<&str> = entry.trim_end().split(' ').collect();
+                assert_eq!(fields.len(), 3, "entry {entry:?}");
+                assert!(fields[0].len() == 10 && fields[0].bytes().all(|b| b.is_ascii_digit()));
+                assert!(fields[1].len() == 5 && fields[1].bytes().all(|b| b.is_ascii_digit()));
+                let generation: u16 = fields[1].parse().unwrap();
+                match fields[2] {
+                    "n" => {
+                        let offset: usize = fields[0].parse().unwrap();
+                        let header = format!("{number_in_section} {generation} obj");
+                        assert!(
+                            bytes[offset..].starts_with(header.as_bytes()),
+                            "xref entry for object {number_in_section} points at {:?}",
+                            String::from_utf8_lossy(&bytes[offset..(offset + 20).min(bytes.len())])
+                        );
+                        in_use += 1;
+                    }
+                    "f" => assert!(number_in_section != 0 || generation == 65535),
+                    kind => panic!("entry kind {kind:?}"),
+                }
+                entries += 1;
+            }
+        }
+        assert!(in_use > 1, "the table lists the document's objects");
+
+        let size_at = trailer
+            + bytes[trailer..]
+                .windows(b"/Size ".len())
+                .position(|window| window == b"/Size ")
+                .expect("/Size in the trailer");
+        assert_eq!(entries, number(&bytes[size_at + b"/Size ".len()..]));
+    }
+
+    #[test]
+    fn invalid_geopdf_page_transforms_are_export_errors() {
+        for case in 0..3 {
+            let mut page = geopdf_test_page(0);
+            match case {
+                0 => page.scale = 0.0,
+                1 => page.paper_w = f64::NAN,
+                _ => page.rotation_deg = 45,
+            }
+            assert!(render_plot_pdf_bytes(std::slice::from_ref(&page), None).is_err());
+        }
+    }
+
+    #[test]
+    fn optional_content_uses_per_occurrence_layers_before_handle_fallback() {
+        let wire = |layer: &str, depth| {
+            let mut wire = WireModel::solid(
+                "126".into(),
+                vec![[10.0, 20.0, 0.0], [30.0, 40.0, 0.0]],
+                WireModel::WHITE,
+                false,
+            );
+            wire.effective_layer = Some(std::sync::Arc::from(layer));
+            PlotWire {
+                wire,
+                draw_depth: depth,
+            }
+        };
+        let mut page = test_page(vec![wire("FIRST_LAYER", 0.4), wire("SECOND_LAYER", 0.5)]);
+        page.content.entity_layers = std::collections::HashMap::from([(
+            crate::scene::Scene::handle_from_wire_name("126").expect("handle parses"),
+            "OUTER_INSERT".to_string(),
+        )]);
+        let text = pdf_stream_text(&render_pdf_bytes(&[page], None).unwrap());
+        assert!(text.contains("FIRST_LAYER"), "{text}");
+        assert!(text.contains("SECOND_LAYER"), "{text}");
+        assert!(!text.contains("OUTER_INSERT"), "{text}");
     }
 
     #[test]
@@ -3068,10 +3362,19 @@ mod tests {
             page
         };
         let on = pdf_stream_text(&render_pdf_bytes(&[make_page(true)], None).unwrap());
-        assert!(on.contains("/ca 0.5") || on.contains("/CA 0.5"), "alpha state missing");
-        assert!(on.contains("1 0 0 RG"), "colour must not be blended towards white");
+        assert!(
+            on.contains("/ca 0.5") || on.contains("/CA 0.5"),
+            "alpha state missing"
+        );
+        assert!(
+            on.contains("1 0 0 RG"),
+            "colour must not be blended towards white"
+        );
         let off = pdf_stream_text(&render_pdf_bytes(&[make_page(false)], None).unwrap());
-        assert!(!off.contains("/ca ") && !off.contains("/CA "), "no alpha without transparency");
+        assert!(
+            !off.contains("/ca ") && !off.contains("/CA "),
+            "no alpha without transparency"
+        );
         assert!(off.contains("1 0 0 RG"), "opaque red without transparency");
     }
 
@@ -3145,6 +3448,84 @@ mod tests {
         widths.sort_by(|a, b| a.partial_cmp(b).unwrap());
         widths.dedup_by(|a, b| (*a - *b).abs() < 0.01);
         widths
+    }
+
+    #[test]
+    fn named_style_table_recolors_wires_through_normal() {
+        // An STB table applies its `Normal` object style to everything that
+        // does not name a style explicitly: objects carry no plot-style
+        // handle in this build, so Normal is the honoured style.
+        let make_page = || {
+            let mut wire = PlotWire {
+                wire: WireModel::solid(
+                    "test".into(),
+                    vec![[0.0, 0.0, 0.0], [50.0, 50.0, 0.0]],
+                    [1.0, 0.0, 0.0, 1.0],
+                    false,
+                ),
+                draw_depth: 0.0,
+            };
+            wire.wire.aci = 1;
+            test_page(vec![wire])
+        };
+        let mut named = PlotStyleTable::identity("Mono.stb");
+        named.is_stb = true;
+        let mut normal = crate::io::plot_style::PlotStyleEntry::default();
+        normal.name = "Normal".to_string();
+        normal.color = Some([0, 0, 0]);
+        normal.color_policy = 0;
+        normal.screening = 100;
+        named.named_entries.insert("Normal".to_string(), normal);
+        let styled = pdf_stream_text(&render_pdf_bytes(&[make_page()], Some(&named)).unwrap());
+        assert!(
+            !styled.contains("1 0 0 rg") && !styled.contains("1 0 0 RG"),
+            "STB Normal (black) must recolor the wire"
+        );
+    }
+
+    #[test]
+    fn stb_plots_each_entity_with_its_own_named_style() {
+        // Two red wires: entity 10 takes the "Blue" named style, entity 11
+        // has a style the table lacks and falls back to Normal (green).
+        let entry = |name: &str, rgb: [u8; 3]| {
+            let mut e = crate::io::plot_style::PlotStyleEntry::default();
+            e.name = name.to_string();
+            e.color = Some(rgb);
+            e.screening = 100;
+            e
+        };
+        let mut named = PlotStyleTable::identity("Named.stb");
+        named.is_stb = true;
+        named
+            .named_entries
+            .insert("Normal".to_string(), entry("Normal", [0, 255, 0]));
+        named
+            .named_entries
+            .insert("Blue".to_string(), entry("Blue", [0, 0, 255]));
+        let wire = |handle: &str| {
+            let mut w = PlotWire {
+                wire: WireModel::solid(
+                    handle.into(),
+                    vec![[0.0, 0.0, 0.0], [50.0, 50.0, 0.0]],
+                    [1.0, 0.0, 0.0, 1.0],
+                    false,
+                ),
+                draw_depth: 0.0,
+            };
+            w.wire.aci = 1;
+            w
+        };
+        let mut page = test_page(vec![wire("10"), wire("11")]);
+        page.content.entity_plot_styles = [
+            (document::Handle::new(10), "blue".to_string()),
+            (document::Handle::new(11), "Missing".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let text = pdf_stream_text(&render_pdf_bytes(&[page], Some(&named)).unwrap());
+        assert!(text.contains("0 0 1 RG"), "named style Blue applies: {text}");
+        assert!(text.contains("0 1 0 RG"), "unknown style falls back to Normal");
+        assert!(!text.contains("1 0 0 RG"), "no wire keeps its object colour");
     }
 
     #[test]
@@ -3222,6 +3603,51 @@ mod tests {
                 ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
             },
             draw_depth: 0.0,
+        }
+    }
+
+    // Draw ops `emit_text` produces for one run of glyph vertices.
+    fn glyph_draw_ops(verts: &[crate::scene::pipeline::text_gpu::TextVertex]) -> usize {
+        let wire = WireModel {
+            text_verts: verts.to_vec(),
+            ..WireModel::solid("t".into(), Vec::new(), WireModel::WHITE, false)
+        };
+        let mut ops = Vec::new();
+        emit_text(
+            &mut ops,
+            &mut TextFonts::default(),
+            &[wire],
+            0.0,
+            0.0,
+            1.0,
+            None,
+            PdfPlotOptions::default(),
+        );
+        ops.iter()
+            .filter(|op| matches!(op, Op::DrawLine { .. } | Op::DrawPolygon { .. }))
+            .count()
+    }
+
+    // Each glyph is one 6-vertex quad. Every quad of a stroke-font run is
+    // drawn, the run draws exactly what its quads draw one at a time, and
+    // 1 to 5 stray vertices after the last whole quad are ignored, not drawn
+    // and not a panic.
+    #[test]
+    fn every_glyph_quad_is_drawn_and_a_partial_trailing_quad_is_ignored() {
+        let verts = text_wire("HELLO", [20.0, 20.0, 0.0]).wire.text_verts;
+        assert_eq!(verts.len() % 6, 0);
+        let per_quad: Vec<usize> = verts.chunks(6).map(glyph_draw_ops).collect();
+        assert_eq!(per_quad.len(), 5, "one quad per glyph");
+        assert!(
+            per_quad.iter().all(|&ops| ops > 0),
+            "every glyph draws: {per_quad:?}"
+        );
+        let whole = glyph_draw_ops(&verts);
+        assert_eq!(whole, per_quad.iter().sum::<usize>());
+        for stray in 1..6 {
+            let mut padded = verts.clone();
+            padded.extend_from_slice(&verts[..stray]);
+            assert_eq!(glyph_draw_ops(&padded), whole, "{stray} stray vertices");
         }
     }
 

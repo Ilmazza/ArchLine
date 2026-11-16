@@ -316,6 +316,10 @@ pub enum TableOperation {
         rotation: Option<u16>,
         scale: Option<[f64; 2]>,
     },
+    /// Put the paper-space layout tabs in this order (API v23). `names` lists
+    /// every paper-space layout once, in the new order; `Model` stays first
+    /// and is not listed. One undo step.
+    LayoutSetTabOrder { names: Vec<String> },
 }
 
 /// The style tables `TableOperation` can rename, delete or make current.
@@ -493,6 +497,22 @@ pub enum HostNotification {
         type_keys: Vec<String>,
         pick_point: [f64; 3],
     },
+    /// V22 digest of a tab's active selection, sent INSTEAD OF the legacy
+    /// handle-list selection notifications (`SelectionChangedV4` /
+    /// `SelectionChanged`) to plugins whose exported
+    /// `ocs_plugin_api_version` reports 22 or newer (the host routes
+    /// per plugin, so no variant is duplicated). `revision` increases
+    /// monotonically per tab whenever the selection fingerprint actually
+    /// changes — the same dedup gate the legacy variants use — and `count`
+    /// is the exact selection size, so the notification is O(1) even for
+    /// selections of tens of thousands of entities. A plugin fetches
+    /// handles lazily via [`HostApi::selection`] only when it needs them.
+    /// Discriminant 14.
+    SelectionChangedDigest {
+        tab_id: u64,
+        revision: u64,
+        count: u64,
+    },
     /// Fallback for notification variants added in future minor revisions.
     /// Carries the raw bincode payload so an older peer can ignore it without
     /// failing deserialization.
@@ -567,14 +587,11 @@ impl Serialize for HostNotification {
                 value,
             } => {
                 bytes.push(12);
-                bincode::serialize_into(&mut bytes, panel_id)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, panel_id).map_err(serde::ser::Error::custom)?;
                 bincode::serialize_into(&mut bytes, control_id)
                     .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, action)
-                    .map_err(serde::ser::Error::custom)?;
-                bincode::serialize_into(&mut bytes, value)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, action).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, value).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::QuadAction {
                 panel_id,
@@ -584,8 +601,7 @@ impl Serialize for HostNotification {
                 pick_point,
             } => {
                 bytes.push(13);
-                bincode::serialize_into(&mut bytes, panel_id)
-                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, panel_id).map_err(serde::ser::Error::custom)?;
                 bincode::serialize_into(&mut bytes, control_id)
                     .map_err(serde::ser::Error::custom)?;
                 bincode::serialize_into(&mut bytes, handles).map_err(serde::ser::Error::custom)?;
@@ -593,6 +609,13 @@ impl Serialize for HostNotification {
                     .map_err(serde::ser::Error::custom)?;
                 bincode::serialize_into(&mut bytes, pick_point)
                     .map_err(serde::ser::Error::custom)?;
+            }
+            HostNotification::SelectionChangedDigest { tab_id, revision, count } => {
+                bytes.push(14);
+                bincode::serialize_into(&mut bytes, tab_id).map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, revision)
+                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, count).map_err(serde::ser::Error::custom)?;
             }
             HostNotification::Unknown(raw) => bytes.extend_from_slice(raw),
         }
@@ -656,14 +679,14 @@ impl<'de> Deserialize<'de> for HostNotification {
             }
             12 => {
                 let mut cursor = std::io::Cursor::new(rest);
-                let panel_id: String = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let control_id: String = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let action: String = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let value: Option<crate::dialog::DialogValue> = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
+                let panel_id: String =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let control_id: String =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let action: String =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let value: Option<crate::dialog::DialogValue> =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
                 Ok(HostNotification::PanelAction {
                     panel_id,
                     control_id,
@@ -673,16 +696,16 @@ impl<'de> Deserialize<'de> for HostNotification {
             }
             13 => {
                 let mut cursor = std::io::Cursor::new(rest);
-                let panel_id: String = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let control_id: String = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let handles: Vec<Handle> = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let type_keys: Vec<String> = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
-                let pick_point: [f64; 3] = bincode::deserialize_from(&mut cursor)
-                    .map_err(serde::de::Error::custom)?;
+                let panel_id: String =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let control_id: String =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let handles: Vec<Handle> =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let type_keys: Vec<String> =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
+                let pick_point: [f64; 3] =
+                    bincode::deserialize_from(&mut cursor).map_err(serde::de::Error::custom)?;
                 Ok(HostNotification::QuadAction {
                     panel_id,
                     control_id,
@@ -691,6 +714,11 @@ impl<'de> Deserialize<'de> for HostNotification {
                     pick_point,
                 })
             }
+            14 => bincode::deserialize(rest)
+                .map(|(tab_id, revision, count)| {
+                    HostNotification::SelectionChangedDigest { tab_id, revision, count }
+                })
+                .map_err(serde::de::Error::custom),
             _ => Ok(HostNotification::Unknown(bytes)),
         }
     }
@@ -998,8 +1026,22 @@ pub trait InteractiveCommand: Send {
     }
 
     /// Pending panel updates buffered during interactive command execution (API v7, additive).
-    fn take_pending_panel_updates(&mut self) -> Vec<(String, std::collections::HashMap<String, crate::dialog::DialogValue>)> {
+    fn take_pending_panel_updates(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::collections::HashMap<String, crate::dialog::DialogValue>,
+    )> {
         Vec::new()
+    }
+
+    /// An interaction event (button click, choice select, file picked, etc.)
+    /// occurred inside an open modal dialog.
+    fn on_dialog_action(
+        &mut self,
+        _event: crate::dialog::DialogEvent,
+    ) -> crate::dialog::DialogActionResponse {
+        crate::dialog::DialogActionResponse::None
     }
 }
 
@@ -1158,6 +1200,10 @@ pub struct PluginGrip {
     pub point: [f64; 3],
     #[serde(default)]
     pub axis: Option<[f64; 3]>,
+    /// API v21: constrain every custom-grip event to the original world-XY
+    /// plane. `false` preserves the legacy camera-target-plane behavior.
+    #[serde(default)]
+    pub xy_plane: bool,
     #[serde(default)]
     pub shape: PluginGripShape,
 }
@@ -1983,7 +2029,8 @@ pub trait HostApi {
         false
     }
 
-    /// Update control values in a persistent dockable side panel (API v7, additive).
+    /// Update control values in a persistent dockable side panel or an active
+    /// modal dialog (API v7, additive).
     fn update_panel(
         &mut self,
         _panel_id: &str,
@@ -2040,6 +2087,101 @@ pub trait HostApi {
         _tolerance: f64,
     ) -> Result<(), String> {
         Err("Parametric chain validation is not supported by this host".to_owned())
+    }
+
+    /// Display a declarative modal form dialog associated with a specific
+    /// owning plugin ID. Defaults to [`HostApi::show_dialog`].
+    fn show_dialog_for_plugin(
+        &mut self,
+        _plugin_id: &str,
+        dialog: crate::dialog::DialogDef,
+    ) -> crate::dialog::DialogResponse {
+        self.show_dialog(dialog)
+    }
+
+    /// Read the current form contents of a registered persistent panel (API v18,
+    /// additive).
+    ///
+    /// This is only a read snapshot during ordinary document-bound command dispatch:
+    /// it submits nothing, writes neither UI nor document state, and records no undo
+    /// step. The returned [`crate::dialog::PanelSnapshot`] is UI input, not document
+    /// authority or a document revision. An asynchronous
+    /// [`HostNotification::PanelAction`] is not a write window and carries no write
+    /// authority; it may only ask the plugin to enter ordinary command dispatch.
+    ///
+    /// Before any write based on a snapshot, the plugin must reject every snapshot
+    /// whose `errors` is non-empty, re-read the authoritative document records, and
+    /// validate that the intended target still exists and is suitable. Only then may
+    /// it perform the write under the ordinary undo contract. The default refuses the
+    /// read so hosts without panel read-back support fail closed.
+    fn panel_snapshot(&self, _panel_id: &str) -> Result<crate::dialog::PanelSnapshot, String> {
+        Err("Panel snapshots are not supported by this host".to_owned())
+    }
+
+    // ---- Panel identity (api 18, additive defaults; appended at the ABI tail). ----
+    //
+    // These methods receive identity from the host's authenticated transport,
+    // not from a PanelDef or a caller-chosen command argument. Direct HostApi
+    // implementers retain their legacy registration/update behavior. An IPC
+    // server must call the `_for_plugin` variants with its transport identity.
+    // No asynchronous notification acquires HostApi through these methods.
+
+    /// Register a panel with host-authenticated ownership. The default keeps
+    /// the legacy direct-host behavior; identity-aware hosts override it.
+    fn register_panel_for_plugin(
+        &mut self,
+        _plugin_id: &str,
+        panel: crate::dialog::PanelDef,
+    ) -> bool {
+        self.register_panel(panel)
+    }
+
+    /// Update only a panel owned by the authenticated caller.
+    fn update_panel_for_plugin(
+        &mut self,
+        _plugin_id: &str,
+        panel_id: &str,
+        values: std::collections::HashMap<String, crate::dialog::DialogValue>,
+    ) -> bool {
+        self.update_panel(panel_id, values)
+    }
+
+    /// Toggle only a panel owned by the authenticated caller.
+    fn toggle_panel_for_plugin(
+        &mut self,
+        _plugin_id: &str,
+        panel_id: &str,
+        show: Option<bool>,
+    ) -> bool {
+        self.toggle_panel(panel_id, show)
+    }
+
+    /// Read a panel after the host has authenticated its transport owner.
+    /// The returned tab is the current document-bound session's tab, not a
+    /// caller-provided target. Old hosts fail closed instead of returning an
+    /// unowned or fabricated snapshot.
+    fn panel_snapshot_for_plugin(
+        &self,
+        _plugin_id: &str,
+        _panel_id: &str,
+    ) -> Result<crate::dialog::PanelSnapshot, String> {
+        Err("Authenticated panel snapshots are not supported by this host".to_owned())
+    }
+
+    /// Create or update the drawing's geographic location (API v22,
+    /// additive): the model-space GEODATA object and its
+    /// `ACAD_GEOGRAPHICDATA` extension-dictionary entry, so other CAD
+    /// programs open the drawing georeferenced. Returns the object's handle.
+    /// A refusal (unknown CRS, non-finite point, zero north) changes nothing.
+    /// Undo composition follows [`HostApi::delete_xrecord`].
+    fn set_geo_location(&mut self, _location: &GeoLocation) -> Result<Handle, String> {
+        Err("Geographic location writes are not supported by this host".to_owned())
+    }
+
+    /// Remove the drawing's geographic location (API v22, additive). Returns
+    /// `false` when the drawing had none (no undo step is recorded then).
+    fn remove_geo_location(&mut self) -> Result<bool, String> {
+        Err("Geographic location writes are not supported by this host".to_owned())
     }
 }
 
@@ -2357,6 +2499,15 @@ pub struct PluginClassParameterRow {
     pub value: Option<String>,
 }
 
+fn deserialize_selectable_custom<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // bincode 1 reports UnexpectedEof instead of a missing sequence element
+    // for a v17 payload ending immediately before this trailing field.
+    bool::deserialize(deserializer).or(Ok(false))
+}
+
 /// One staged instance of a registered plugin class (API v14): identity plus
 /// a host-evaluated design descriptor. Records carry the truth; the host
 /// never re-interprets anything the plugin does not declare here.
@@ -2384,6 +2535,13 @@ pub struct PluginClassInstance {
     /// handles-to-records linkage the plugin maintains).
     #[serde(default)]
     pub design_record: String,
+    /// Keep this staged display set selectable for plugin custom grips/panels,
+    /// while suppressing native vertex editing and native property updates.
+    ///
+    /// API v18 additive. Absent v17 payloads decode as `false`, preserving the
+    /// legacy reference-only staging behavior byte-for-byte.
+    #[serde(default, deserialize_with = "deserialize_selectable_custom")]
+    pub selectable_custom: bool,
 }
 
 /// Host-evaluated display descriptor kinds (API v14, additive).
@@ -2413,6 +2571,24 @@ impl PluginDisplayDescriptor {
     }
 }
 
+/// The drawing's geographic location (API v22, additive): what
+/// [`HostApi::set_geo_location`] writes into the model-space GEODATA object.
+///
+/// Drawing units, the up direction and the scale method follow the drawing
+/// (INSUNITS) when the object is first created; an existing object keeps them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeoLocation {
+    /// `EPSG:<code>`, a WKT definition, or a MapGuide XML definition with an
+    /// EPSG alias. Geographic CRSs make the object geographic (type 3),
+    /// projected ones a projected grid (type 2).
+    pub coordinate_system: String,
+    /// The point in drawing coordinates that is placed at `reference_point`.
+    pub design_point: [f64; 3],
+    /// The same point in CRS coordinates (easting/northing, or lon/lat).
+    pub reference_point: [f64; 3],
+    /// North in drawing XY; `[0.0, 1.0]` is drawing +Y.
+    pub north_direction: [f64; 2],
+}
 
 /// One XRecord addressed by dictionary path + name (API v13, additive).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

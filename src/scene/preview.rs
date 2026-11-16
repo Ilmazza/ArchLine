@@ -3,7 +3,7 @@ use super::*;
 use crate::command::{AreaPreviewRegion, AreaPreviewSource};
 use crate::scene::model::hatch_model::HatchPattern;
 
-mod block_parameter;
+pub(super) mod block_parameter;
 
 #[cfg(test)]
 mod transform_tests;
@@ -280,6 +280,8 @@ impl Scene {
             return None;
         }
         let mut model = HatchModel {
+            entity: None,
+            effective_layer: None,
             pattern_origin: None,
             render_instance: None,
             world_origin: origin,
@@ -524,10 +526,7 @@ impl Scene {
         Self::matchprop_glow_with_layers(wires, [(8.0, 0.035), (5.0, 0.065), (2.5, 0.11)])
     }
 
-    fn matchprop_glow_with_layers(
-        wires: &[WireModel],
-        layers: [(f32, f32); 3],
-    ) -> Vec<WireModel> {
+    fn matchprop_glow_with_layers(wires: &[WireModel], layers: [(f32, f32); 3]) -> Vec<WireModel> {
         let mut glow = Vec::with_capacity(wires.len() * 3);
         for wire in wires {
             // Layer translucent, widened copies over the resident entity. Its
@@ -634,9 +633,7 @@ impl Scene {
             let Some(e) = self.document.get_entity(eh) else {
                 continue;
             };
-            if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))
-                || e.common().invisible
-            {
+            if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) || e.common().invisible {
                 continue;
             }
             out.extend(self.tessellate_one(e));
@@ -689,10 +686,7 @@ const INDICATOR_EDGE: [f32; 4] = [235.0 / 255.0, 235.0 / 255.0, 235.0 / 255.0, 1
 impl Scene {
     /// Row and column labels round every selected table, and the picked
     /// range's outline in the table whose cells are picked. Screen only.
-    pub(super) fn table_indicator_overlay(
-        &self,
-        pixel: f64,
-    ) -> (Vec<WireModel>, Vec<HatchModel>) {
+    pub(super) fn table_indicator_overlay(&self, pixel: f64) -> (Vec<WireModel>, Vec<HatchModel>) {
         let mut wires = Vec::new();
         let mut hatches = Vec::new();
         let picked = self.table_cells_handle();
@@ -735,7 +729,11 @@ impl Scene {
                 edges.push(a.to_array());
                 edges.push(b.to_array());
             }
-            let edge_color = if cell_mode { INDICATOR_EDGE } else { self.selection_color };
+            let edge_color = if cell_mode {
+                INDICATOR_EDGE
+            } else {
+                self.selection_color
+            };
             let mut edge_wire = WireModel::solid(name.clone(), edges, edge_color, false);
             edge_wire.plot_visible = false;
             edge_wire.text_verts = Self::indicator_text(&indicator);
@@ -767,6 +765,94 @@ impl Scene {
             }
         }
         (wires, hatches)
+    }
+
+    /// ANNOMONITOR 1: a yellow alert badge with an exclamation bar beside
+    /// the text of every dimension whose association no longer resolves
+    /// (measured: 17 x 11 px, upright, its middle 13 px right of and 14 px
+    /// above the end the text reads to, whatever the text's angle; nothing
+    /// at 0, -1 or -2). Screen size.
+    pub(super) fn anno_monitor_overlay(&self, pixel: f64) -> Vec<HatchModel> {
+        if crate::scene::annotative::anno_monitor() != 1 {
+            return Vec::new();
+        }
+        let block = self.content_render_block_handle();
+        let dimensions: Vec<Handle> = self
+            .document
+            .objects
+            .values()
+            .filter_map(|object| match object {
+                document::objects::ObjectType::Associative(object) => match &object.data {
+                    document::objects::AssociativeData::DimensionAssociation(association) => {
+                        Some(association.dimension)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        for handle in dimensions {
+            let Some(entity) = self.document.get_entity(handle) else {
+                continue;
+            };
+            if entity.common().owner_handle != block || self.entity_temporarily_hidden(handle) {
+                continue;
+            }
+            let broken = self
+                .dimension_association_status(handle)
+                .iter()
+                .any(|(_, status)| {
+                    !matches!(
+                        status,
+                        crate::scene::dimension_assoc::ReferenceStatus::Resolved
+                    )
+                });
+            if !broken {
+                continue;
+            }
+            let Some((middle, width, _, angle)) = crate::entities::dimension::as_dimension(entity)
+                .and_then(|dim| crate::entities::dimension::text_box(dim, &self.document))
+            else {
+                continue;
+            };
+            let end_x = middle.x + angle.cos() * width * 0.5;
+            let end_y = middle.y + angle.sin() * width * 0.5;
+            let left = end_x + 4.5 * pixel;
+            let centre = end_y + 14.0 * pixel;
+            let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+                let z = middle.z as f32;
+                [
+                    glam::Vec3::new(x0 as f32, y0 as f32, z),
+                    glam::Vec3::new(x1 as f32, y0 as f32, z),
+                    glam::Vec3::new(x1 as f32, y1 as f32, z),
+                    glam::Vec3::new(x0 as f32, y1 as f32, z),
+                ]
+            };
+            let badge = rect(left, centre - 5.5 * pixel, left + 17.0 * pixel, centre + 5.5 * pixel);
+            // An exclamation mark: a bar over a dot.
+            let bar = rect(
+                left + 7.0 * pixel,
+                centre - 0.5 * pixel,
+                left + 10.0 * pixel,
+                centre + 4.5 * pixel,
+            );
+            let dot = rect(
+                left + 7.0 * pixel,
+                centre - 3.5 * pixel,
+                left + 10.0 * pixel,
+                centre - 1.5 * pixel,
+            );
+            if let Some(model) = Self::indicator_box(&badge, [0.996, 0.851, 0.004, 1.0]) {
+                out.push(model);
+            }
+            for mark in [bar, dot] {
+                if let Some(model) = Self::indicator_box(&mark, [0.08, 0.08, 0.08, 1.0]) {
+                    out.push(model);
+                }
+            }
+        }
+        out
     }
 
     fn indicator_box(corners: &[glam::Vec3; 4], color: [f32; 4]) -> Option<HatchModel> {

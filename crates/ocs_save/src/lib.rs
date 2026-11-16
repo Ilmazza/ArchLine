@@ -46,7 +46,9 @@ pub fn serialize_document(doc: &Document, ext: &str) -> Result<Vec<u8>, String> 
         } else {
             doc
         };
-        return DxfWriter::new(doc).write_to_vec().map_err(|e| e.to_string());
+        return DxfWriter::new(doc)
+            .write_to_vec()
+            .map_err(|e| e.to_string());
     }
     if let Some(format) = external_format(&ext) {
         return write_external(doc, format, false);
@@ -86,10 +88,19 @@ pub fn external_format_by_label(label: &str) -> Option<&'static (dyn Format + Sy
 
 /// The listed converter for files with extension `ext`, if any.
 pub fn external_format(ext: &str) -> Option<&'static (dyn Format + Sync)> {
-    EXTERNAL_FORMATS
+    EXTERNAL_FORMATS.iter().copied().find(|format| {
+        format
+            .extensions()
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(ext))
+    })
+}
+
+pub fn is_ifccad_extension(ext: &str) -> bool {
+    ifccad::IfccadFormat
+        .extensions()
         .iter()
-        .copied()
-        .find(|format| format.extensions().iter().any(|e| e.eq_ignore_ascii_case(ext)))
+        .any(|candidate| candidate.eq_ignore_ascii_case(ext))
 }
 
 /// Filename gate shared by browser drop and URL opening. Matches the reader's
@@ -109,19 +120,69 @@ pub fn write_external(
     format: &dyn Format,
     allow_loss: bool,
 ) -> Result<Vec<u8>, String> {
-    let (bytes, losses) = format.write(doc).map_err(|e| format!("{}: {e}", format.name()))?;
+    write_external_for_edit(doc, format, allow_loss, None)
+}
+
+pub fn write_external_for_edit(
+    doc: &Document,
+    format: &dyn Format,
+    allow_loss: bool,
+    session: Option<&IfccadSession>,
+) -> Result<Vec<u8>, String> {
+    let extension = format.extensions().first().copied().unwrap_or_default();
+    if let Some(session) = session {
+        session.check_destination(extension)?;
+    }
+    let (bytes, losses) = if let Some(session) = session.filter(|_| is_ifccad_extension(extension))
+    {
+        let result = session.export(doc, false)?;
+        let bytes = document::ifccad::encode_ifccad_document(&result.drawing)
+            .map_err(|error| error.to_string())?;
+        (bytes.bytes().to_vec(), result.losses)
+    } else {
+        format
+            .write(doc)
+            .map_err(|e| format!("{}: {e}", format.name()))?
+    };
     if losses.is_empty() || allow_loss {
         return Ok(bytes);
     }
     let lost: Vec<&str> = losses.iter().map(|loss| loss.message.as_str()).collect();
-    Err(format!("{} cannot carry over: {}", format.name(), lost.join("; ")))
+    Err(format!(
+        "{} cannot carry over: {}",
+        format.name(),
+        lost.join("; ")
+    ))
 }
 
 /// What writing `doc` with `format` would lose, so the user can be asked
 /// before the save.
 pub fn external_losses(doc: &Document, format: &dyn Format) -> Result<Vec<String>, String> {
-    let (_, losses) = format.write(doc).map_err(|e| format!("{}: {e}", format.name()))?;
+    let (_, losses) = format
+        .write(doc)
+        .map_err(|e| format!("{}: {e}", format.name()))?;
     Ok(losses.into_iter().map(|loss| loss.message).collect())
+}
+
+pub fn external_losses_for_edit(
+    doc: &Document,
+    format: &dyn Format,
+    session: Option<&IfccadSession>,
+) -> Result<Vec<String>, String> {
+    let Some(session) = session else {
+        return external_losses(doc, format);
+    };
+    let extension = format.extensions().first().copied().unwrap_or_default();
+    session.check_destination(extension)?;
+    if !is_ifccad_extension(extension) {
+        return external_losses(doc, format);
+    }
+    let outcome = session.export(doc, true)?;
+    Ok(outcome
+        .losses
+        .into_iter()
+        .map(|loss| loss.message)
+        .collect())
 }
 
 /// Diagnostic code for something a converter could not carry over on read.
@@ -138,6 +199,10 @@ pub fn read_external(format: &dyn Format, bytes: &[u8]) -> Result<ReadOutcome, S
             format!("{}: {error}", format.name())
         }
     })?;
+    Ok(external_read_outcome(document, losses))
+}
+
+fn external_read_outcome(document: Document, losses: Vec<document::Loss>) -> ReadOutcome {
     let output_entities = document.entities().count();
     let output_objects = document.objects.len();
     // The open path refuses a read that decoded no records; an empty
@@ -158,8 +223,10 @@ pub fn read_external(format: &dyn Format, bytes: &[u8]) -> Result<ReadOutcome, S
         diagnostic.record_handle = loss.handle.map(|handle| handle.value());
         push_read_diagnostic(&mut stats.diagnostics, diagnostic);
     }
-    Ok(ReadOutcome::new(document, stats))
+    ReadOutcome::new(document, stats)
 }
+
+pub use ifccad::{read_ifccad_for_edit, IfccadSession};
 
 // ── Runtime-field sidecar ──────────────────────────────────────────────────
 
@@ -324,7 +391,12 @@ mod tests {
     #[test]
     fn ifccad_names_pass_the_shared_web_open_filter() {
         for name in [
-            "plan.ifccad", "PLAN.IFCCAD", "plan.ifcx", "PLAN.IFCX", "plan.dwg", "PLAN.DXF",
+            "plan.ifccad",
+            "PLAN.IFCCAD",
+            "plan.ifcx",
+            "PLAN.IFCX",
+            "plan.dwg",
+            "PLAN.DXF",
         ] {
             assert!(is_drawing_name(name), "{name}");
         }
@@ -335,7 +407,13 @@ mod tests {
 
     #[test]
     fn ifccad_extension_aliases_roundtrip_through_the_production_reader() {
-        let source = sample_document();
+        // Only a line: the sample's named plot-style handle is a reported
+        // IFCCAD loss, and this test is about the extension aliases.
+        let mut source = Document::new();
+        let mut line = Line::new();
+        line.end = Vector3::new(10.0, 0.0, 0.0);
+        line.common.handle = source.allocate_handle();
+        let _ = source.add_entity(EntityType::Line(line));
         for extension in ["ifccad", "IFCCAD", "ifcx", "IFCX"] {
             let format = external_format(extension).expect("native drawing extension");
             let bytes = serialize_document(&source, extension).unwrap();

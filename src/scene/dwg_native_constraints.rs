@@ -1742,38 +1742,42 @@ fn group_requires_preservation(document: &Document, group: &Assoc2dConstraintGro
     // dynamic block's constraint parameter rather than a dimension, and
     // single edges of one polyline each held by a dependency of its own.
     let mut curves = Vec::new();
-    let unmodelled = group.actions.iter().any(|handle| match document.objects.get(handle) {
-        Some(ObjectType::Associative(AssociativeObject { data, .. })) => match data {
-            AssociativeData::Dependency(dependency) => {
-                document.objects.contains_key(&dependency.dependent_on)
-            }
-            AssociativeData::GeomDependency(geometry) => {
-                let curve = geometry.dependency.dependent_on;
-                let repeated = curves.contains(&curve);
-                curves.push(curve);
-                repeated
-            }
+    let unmodelled = group
+        .actions
+        .iter()
+        .any(|handle| match document.objects.get(handle) {
+            Some(ObjectType::Associative(AssociativeObject { data, .. })) => match data {
+                AssociativeData::Dependency(dependency) => {
+                    document.objects.contains_key(&dependency.dependent_on)
+                }
+                AssociativeData::GeomDependency(geometry) => {
+                    let curve = geometry.dependency.dependent_on;
+                    let repeated = curves.contains(&curve);
+                    curves.push(curve);
+                    repeated
+                }
+                _ => false,
+            },
             _ => false,
-        },
-        _ => false,
-    });
-    unmodelled || group.nodes.iter().any(|node| {
-        if matches!(node.data, AssocConstraintNodeData::RigidSet { .. }) {
-            return true;
-        }
-        if let Some(dependency) = geometry_dependency(&node.data) {
-            if dependency_entity(document, dependency, &node.data).is_none() {
+        });
+    unmodelled
+        || group.nodes.iter().any(|node| {
+            if matches!(node.data, AssocConstraintNodeData::RigidSet { .. }) {
                 return true;
             }
-        }
-        let class_name = node.class_name.to_ascii_uppercase();
-        class_name.ends_with("CONSTRAINT")
-            && constraint_kind(node).is_none()
-            && !matches!(
-                class_name.as_str(),
-                "ACEQUALCURVATURECONSTRAINT" | "ACEQUALHELPPARAMETERCONSTRAINT"
-            )
-    })
+            if let Some(dependency) = geometry_dependency(&node.data) {
+                if dependency_entity(document, dependency, &node.data).is_none() {
+                    return true;
+                }
+            }
+            let class_name = node.class_name.to_ascii_uppercase();
+            class_name.ends_with("CONSTRAINT")
+                && constraint_kind(node).is_none()
+                && !matches!(
+                    class_name.as_str(),
+                    "ACEQUALCURVATURECONSTRAINT" | "ACEQUALHELPPARAMETERCONSTRAINT"
+                )
+        })
 }
 
 fn work_plane_vector(work_plane: &[Vector3; 3], local: Vector3) -> Option<Vector3> {
@@ -2115,7 +2119,7 @@ fn rigid_set_references(
         let Some(reference) = refs.get(geometry_id).copied() else {
             continue;
         };
-        if !entities.iter().any(|existing| *existing == reference) {
+        if !entities.contains(&reference) {
             entities.push(reference);
         }
         let Some(entity) = document.get_entity(reference.entity) else {
@@ -2169,21 +2173,28 @@ pub(super) fn native_constraint_set(
     let mut set = ParametricConstraintSet::new(scope);
     if matches!(scope, ParametricScope::Block(_)) {
         if let Some(network) = native_scope_network_handle(document, owner) {
-            let mut variables: Vec<_> = document.objects.iter().filter_map(|(handle, object)| {
-                match object {
-                    ObjectType::Associative(AssociativeObject { data: AssociativeData::Variable(variable), .. })
-                        if variable.action.owning_network == network => Some((*handle, variable)),
+            let mut variables: Vec<_> = document
+                .objects
+                .iter()
+                .filter_map(|(handle, object)| match object {
+                    ObjectType::Associative(AssociativeObject {
+                        data: AssociativeData::Variable(variable),
+                        ..
+                    }) if variable.action.owning_network == network => Some((*handle, variable)),
                     _ => None,
-                }
-            }).collect();
+                })
+                .collect();
             variables.sort_by_key(|(handle, _)| *handle);
             for (_, variable) in variables {
                 let source = if variable.expression.trim().is_empty() {
                     numeric_value(&variable.value).map(|value| value.to_string())
-                } else { Some(variable.expression.clone()) };
+                } else {
+                    Some(variable.expression.clone())
+                };
                 if let Some(source) = source {
                     if set.local_parameters.set(&variable.name, &source).is_ok() {
-                        set.local_parameters.set_description(&variable.name, &variable.description);
+                        set.local_parameters
+                            .set_description(&variable.name, &variable.description);
                     }
                 }
             }
@@ -2474,8 +2485,10 @@ pub(super) fn native_constraint_set(
             }
         }
     }
-    (!set.constraints.is_empty() || !set.retained_standard_groups.is_empty()
-        || !set.local_parameters.is_empty()).then_some(set)
+    (!set.constraints.is_empty()
+        || !set.retained_standard_groups.is_empty()
+        || !set.local_parameters.is_empty())
+    .then_some(set)
 }
 
 fn sync_retained_group_constraints(document: &mut Document, set: &ParametricConstraintSet) {
@@ -2605,7 +2618,7 @@ fn detach_preserved_scope(
 
     let mut variable_handles = Vec::new();
     // The named variables the kept actions read keep their handles.
-    for (_, object) in &document.objects {
+    for object in document.objects.values() {
         let ObjectType::Associative(AssociativeObject {
             owner,
             data: AssociativeData::ValueDependency(value),
@@ -2657,14 +2670,22 @@ fn detach_preserved_scope(
         index += 1;
         for object in document.objects.values() {
             let ObjectType::Associative(AssociativeObject {
-                owner, data: AssociativeData::ValueDependency(value), ..
-            }) = object else { continue };
-            if *owner != variable { continue; }
+                owner,
+                data: AssociativeData::ValueDependency(value),
+                ..
+            }) = object
+            else {
+                continue;
+            };
+            if *owner != variable {
+                continue;
+            }
             let handle = value.dependency.dependent_on;
             if matches!(document.objects.get(&handle), Some(ObjectType::Associative(AssociativeObject {
                 data: AssociativeData::Variable(value), ..
             })) if value.action.owning_network == network_handle)
-                && !variable_handles.contains(&handle) {
+                && !variable_handles.contains(&handle)
+            {
                 variable_handles.push(handle);
             }
         }
@@ -2739,10 +2760,10 @@ fn pending_swept_surfaces(document: &Document) -> Vec<(Handle, Handle, Handle)> 
             (!carried.contains(&surface)
                 && document
                     .get_entity(profile)
-                    .is_some_and(|e| sweep_model::assoc_source_supported(e))
+                    .is_some_and(sweep_model::assoc_source_supported)
                 && document
                     .get_entity(path)
-                    .is_some_and(|e| sweep_model::assoc_source_supported(e)))
+                    .is_some_and(sweep_model::assoc_source_supported))
             .then_some((surface, profile, path))
         })
         .collect::<Vec<_>>();
@@ -2771,7 +2792,7 @@ fn pending_source_surfaces(
                 && sources.handles().iter().all(|handle| {
                     document
                         .get_entity(*handle)
-                        .is_some_and(|e| sweep_model::assoc_source_supported(e))
+                        .is_some_and(sweep_model::assoc_source_supported)
                 }))
             .then_some((surface, sources))
         })
@@ -3028,7 +3049,9 @@ fn source_reads(
         document,
         source,
         "ACAD_STEPID",
-        Some(vec![document::xdata::XDataValue::Integer32(ids.first()? - 1)]),
+        Some(vec![document::xdata::XDataValue::Integer32(
+            ids.first()? - 1,
+        )]),
     );
     let curves = loops.into_iter().flatten().collect::<Vec<_>>();
     let pairs = curves
@@ -3881,10 +3904,11 @@ fn materialize_scope(
         let Some(entity_nodes) = entities.get(entity_handle) else {
             continue;
         };
-        if entity_nodes.geometry_node_id == 0 {
-            if entity_nodes.segments.is_empty() && entity_nodes.axes.is_empty() {
-                continue;
-            }
+        if entity_nodes.geometry_node_id == 0
+            && entity_nodes.segments.is_empty()
+            && entity_nodes.axes.is_empty()
+        {
+            continue;
         }
         let dep_handle = allocator.geom_dependency(group_handle?, *entity_handle, index as i32 + 1);
         geometry_dependencies.push(dep_handle);
@@ -4100,7 +4124,9 @@ impl Scene {
                 data: AssociativeData::Network(network), ..
             })) if network.action.owning_network.is_null())
         }).collect();
-        if scopes.is_empty() { return Ok(()); }
+        if scopes.is_empty() {
+            return Ok(());
+        }
         scopes.sort();
         let dictionary = ensure_global_network_dictionary(document);
         let root = match document.objects.get(&dictionary) {
@@ -4108,9 +4134,13 @@ impl Scene {
             _ => unreachable!(),
         };
         let root = if let Some(root) = root {
-            if !matches!(document.objects.get(&root), Some(ObjectType::Associative(AssociativeObject {
-                data: AssociativeData::Network(_), ..
-            }))) {
+            if !matches!(
+                document.objects.get(&root),
+                Some(ObjectType::Associative(AssociativeObject {
+                    data: AssociativeData::Network(_),
+                    ..
+                }))
+            ) {
                 return Err("The drawing's associative root network is invalid.".into());
             }
             root
@@ -4121,24 +4151,42 @@ impl Scene {
             object.owner = dictionary;
             object.reactors.push(dictionary);
             object.data = AssociativeData::Network(AssocNetwork {
-                action: AssocAction { class_version: 2, ..Default::default() },
+                action: AssocAction {
+                    class_version: 2,
+                    ..Default::default()
+                },
                 ..Default::default()
             });
-            document.objects.insert(root, ObjectType::Associative(object));
+            document
+                .objects
+                .insert(root, ObjectType::Associative(object));
             set_dictionary_entry(document, dictionary, NETWORK_DICTIONARY_KEY, root);
             root
         };
         for scope in scopes {
             let Some(ObjectType::Associative(AssociativeObject {
-                data: AssociativeData::Network(network), ..
-            })) = document.objects.get_mut(&root) else { unreachable!() };
-            network.network_action_index = network.network_action_index.checked_add(1)
+                data: AssociativeData::Network(network),
+                ..
+            })) = document.objects.get_mut(&root)
+            else {
+                unreachable!()
+            };
+            network.network_action_index = network
+                .network_action_index
+                .checked_add(1)
                 .ok_or("The drawing's associative action index is exhausted.")?;
             let index = network.network_action_index;
-            network.actions.push(AssocActionDependency { is_owned: false, dependency: scope });
+            network.actions.push(AssocActionDependency {
+                is_owned: false,
+                dependency: scope,
+            });
             let Some(ObjectType::Associative(AssociativeObject {
-                data: AssociativeData::Network(network), ..
-            })) = document.objects.get_mut(&scope) else { unreachable!() };
+                data: AssociativeData::Network(network),
+                ..
+            })) = document.objects.get_mut(&scope)
+            else {
+                unreachable!()
+            };
             network.action.owning_network = root;
             network.action.action_index = index;
         }
@@ -5059,9 +5107,9 @@ mod tests {
         let mut block = BlockRecord::new("fixture");
         block.handle = scene.document.allocate_handle();
         scene.document.block_records.add(block).unwrap();
-        let point = scene.add_entity(EntityType::Point(document::entities::Point::at(Vector3::new(
-            1.0, 2.0, 0.0,
-        ))));
+        let point = scene.add_entity(EntityType::Point(document::entities::Point::at(
+            Vector3::new(1.0, 2.0, 0.0),
+        )));
         let insert = scene.add_entity(EntityType::Insert(Insert::new(
             "fixture",
             Vector3::new(3.0, 4.0, 0.0),

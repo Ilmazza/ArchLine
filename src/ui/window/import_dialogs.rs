@@ -4,7 +4,9 @@
 //! Import (the objects of a .3ds file to bring in, their layers and what a
 //! mesh with several materials becomes).
 
-use iced::widget::{button, column, container, image, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    button, column, container, image, pick_list, row, scrollable, text, text_input, Space,
+};
 use iced::{Background, Border, Element, Fill, Length, Theme};
 
 use crate::app::Message;
@@ -34,6 +36,8 @@ pub enum ImportDialogMsg {
     DgnPrefix(bool),
     DgnSub(bool),
     DgnExplode(bool),
+    /// V7 text decode page chosen by label from the code-page picker.
+    DgnCodePage(String),
     DgnReferences(crate::modules::insert::dgn_import::ReferenceMode),
     DgnExisting(crate::modules::insert::dgn_import::ExistingReference),
     DgnMappingTab(usize),
@@ -130,7 +134,13 @@ pub const FORMATS: [ImportFormat; 22] = [
     format("NX", "*.prt", &["prt"], 1, Support::No),
     format("Parasolid Binary", "*.x_b", &["x_b"], 1, Support::No),
     format("Parasolid Text", "*.x_t", &["x_t"], 1, Support::No),
-    format("Pro/ENGINEER", "*.prt*; *.asm*", &["prt", "asm"], 1, Support::No),
+    format(
+        "Pro/ENGINEER",
+        "*.prt*; *.asm*",
+        &["prt", "asm"],
+        1,
+        Support::No,
+    ),
     format("Pro/ENGINEER Granite", "*.g", &["g"], 1, Support::No),
     format("Pro/ENGINEER Neutral", "*.neu*", &["neu"], 1, Support::No),
     format("Rhino", "*.3dm", &["3dm"], 1, Support::No),
@@ -141,7 +151,13 @@ pub const FORMATS: [ImportFormat; 22] = [
         1,
         Support::No,
     ),
-    format("STEP", "*.ste; *.stp; *.step", &["ste", "stp", "step"], 1, Support::Yes),
+    format(
+        "STEP",
+        "*.ste; *.stp; *.step",
+        &["ste", "stp", "step"],
+        1,
+        Support::Yes,
+    ),
     format("All Files", "*.*", &["*"], 2, Support::ByExtension),
 ];
 
@@ -162,6 +178,10 @@ pub struct DgnImportState {
     pub prefix_duplicates: bool,
     pub sub_units: bool,
     pub explode_text_nodes: bool,
+    /// V7 files only: the Windows code page the file's single-byte text
+    /// decodes from (e.g. 1250 for Czech/Slovak MicroStation). `None` is the
+    /// default Windows-1252.
+    pub code_page: Option<u16>,
     pub references: crate::modules::insert::dgn_import::ReferenceMode,
     pub existing_reference: crate::modules::insert::dgn_import::ExistingReference,
     /// Master and sub unit names.
@@ -246,7 +266,7 @@ fn badge<'a>(support: Support) -> Element<'a, Message> {
     };
     let color = move |theme: &Theme| match tone {
         0 => theme.palette().success.base.color,
-        _ => theme.palette().background.base.text.scale_alpha(0.55),
+        _ => crate::ui::style::readable::muted_text(theme),
     };
     container(
         text(label)
@@ -297,7 +317,11 @@ fn tile_style(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Styl
 }
 
 /// Help, Cancel and the named action (inactive while `ok` is `None`).
-fn footer<'a>(help: &'static str, action: std::borrow::Cow<'static, str>, ok: Option<Message>) -> Element<'a, Message> {
+fn footer<'a>(
+    help: &'static str,
+    action: std::borrow::Cow<'static, str>,
+    ok: Option<Message>,
+) -> Element<'a, Message> {
     row![
         button(text("?").size(12))
             .on_press(msg(ImportDialogMsg::Help(help)))
@@ -372,9 +396,13 @@ pub fn view_import_file<'a>(
         file = file.push(chips);
     }
     if let Some(error) = &state.error {
-        file = file.push(text(error.clone()).size(11).style(|theme: &Theme| text::Style {
-            color: Some(theme.palette().danger.base.color),
-        }));
+        file = file.push(
+            text(error.clone())
+                .size(11)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme.palette().danger.base.color),
+                }),
+        );
     }
 
     let search = state.search.trim().to_lowercase();
@@ -464,9 +492,7 @@ pub fn view_import_file<'a>(
                 None => String::new(),
             })
             .size(11)
-            .style(|_: &Theme| text::Style {
-                color: Some(AMBER),
-            }),
+            .style(|_: &Theme| text::Style { color: Some(AMBER) }),
         ]
         .spacing(8),
     );
@@ -525,7 +551,12 @@ pub fn view_tds_import<'a>(
                     },
                     ..Default::default()
                 }),
-            text(crate::tr!("import-3ds", "summary", objects = (state.objects.len().saturating_sub(1) as i64), materials = (state.materials as i64)))
+            text(crate::tr!(
+                "import-3ds",
+                "summary",
+                objects = (state.objects.len().saturating_sub(1) as i64),
+                materials = (state.materials as i64)
+            ))
             .size(11)
             .style(muted_style)
             .width(Fill),
@@ -543,17 +574,33 @@ pub fn view_tds_import<'a>(
 
     let kinds = ["", "Mesh", "Light", "Camera", "Global"];
     let mut filters = row![].spacing(4).align_y(iced::Center);
-    for (k, label) in [crate::tr!("import-3ds", "all"), crate::tr!("import-3ds", "mesh"), crate::tr!("import-3ds", "light"), crate::tr!("import-3ds", "camera"), crate::tr!("import-3ds", "general")]
-        .into_iter()
-        .enumerate()
+    for (k, label) in [
+        crate::tr!("import-3ds", "all"),
+        crate::tr!("import-3ds", "mesh"),
+        crate::tr!("import-3ds", "light"),
+        crate::tr!("import-3ds", "camera"),
+        crate::tr!("import-3ds", "general"),
+    ]
+    .into_iter()
+    .enumerate()
     {
-        filters = filters.push(chip(label, state.filter == k, msg(ImportDialogMsg::TdsFilter(k))));
+        filters = filters.push(chip(
+            label,
+            state.filter == k,
+            msg(ImportDialogMsg::TdsFilter(k)),
+        ));
     }
     let search = state.search.trim().to_lowercase();
     let mut rows = column![row![
         Space::new().width(Length::Fixed(22.0)),
-        text(crate::tr!("import-3ds", "name")).size(11).style(muted_style).width(Fill),
-        text(crate::tr!("import-3ds", "type")).size(11).style(muted_style).width(Length::Fixed(150.0)),
+        text(crate::tr!("import-3ds", "name"))
+            .size(11)
+            .style(muted_style)
+            .width(Fill),
+        text(crate::tr!("import-3ds", "type"))
+            .size(11)
+            .style(muted_style)
+            .width(Length::Fixed(150.0)),
     ]]
     .spacing(2);
     for (k, (name, kind, materials)) in state.objects.iter().enumerate() {
@@ -564,11 +611,19 @@ pub fn view_tds_import<'a>(
         if !search.is_empty() && !name.to_lowercase().contains(&search) {
             continue;
         }
-        let shown_name = if global { crate::tr!("import-3ds", "global") } else { name.clone() };
+        let shown_name = if global {
+            crate::tr!("import-3ds", "global")
+        } else {
+            name.clone()
+        };
         let shown_kind = if global {
             String::new()
         } else if *kind == "Mesh" {
-            format!("{} · {}", tds_kind(kind), crate::tr!("import-3ds", "materials", n = (*materials as i64)))
+            format!(
+                "{} · {}",
+                tds_kind(kind),
+                crate::tr!("import-3ds", "materials", n = (*materials as i64))
+            )
         } else {
             tds_kind(kind)
         };
@@ -579,7 +634,10 @@ pub fn view_tds_import<'a>(
                     .on_toggle(move |v| msg(ImportDialogMsg::TdsCheck(k, v)))
                     .size(14),
                 text(shown_name).size(12).width(Fill),
-                text(shown_kind).size(11).style(muted_style).width(Length::Fixed(150.0)),
+                text(shown_kind)
+                    .size(11)
+                    .style(muted_style)
+                    .width(Length::Fixed(150.0)),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -628,13 +686,20 @@ pub fn view_tds_import<'a>(
         crate::tr!("import-3ds", "layers"),
         column![
             stacked(
-                [crate::tr!("import-3ds", "by-object"), crate::tr!("import-3ds", "by-material"), crate::tr!("import-3ds", "by-color"), crate::tr!("import-3ds", "single")]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(k, label)| (label, state.layers == k, msg(ImportDialogMsg::TdsLayers(k))))
-                    .collect()
+                [
+                    crate::tr!("import-3ds", "by-object"),
+                    crate::tr!("import-3ds", "by-material"),
+                    crate::tr!("import-3ds", "by-color"),
+                    crate::tr!("import-3ds", "single")
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(k, label)| (label, state.layers == k, msg(ImportDialogMsg::TdsLayers(k))))
+                .collect()
             ),
-            text(layer_notes[state.layers.min(3)].clone()).size(11).style(muted_style),
+            text(layer_notes[state.layers.min(3)].clone())
+                .size(11)
+                .style(muted_style),
         ]
         .spacing(8),
     );
@@ -664,10 +729,18 @@ pub fn view_tds_import<'a>(
     .spacing(6)
     .align_y(iced::Center);
     if !any {
-        actions = actions.push(text(crate::tr!("import-3ds", "reason")).size(11).style(muted_style));
+        actions = actions.push(
+            text(crate::tr!("import-3ds", "reason"))
+                .size(11)
+                .style(muted_style),
+        );
     }
     actions = actions
-        .push(dialog_button(crate::tr!("import-3ds", "cancel"), Message::CloseModal, false))
+        .push(dialog_button(
+            crate::tr!("import-3ds", "cancel"),
+            Message::CloseModal,
+            false,
+        ))
         .push(dialog_button_styled_opt(
             crate::tr!("import-3ds", "import"),
             any.then(|| msg(ImportDialogMsg::TdsOk)),
@@ -677,7 +750,9 @@ pub fn view_tds_import<'a>(
         top,
         row![
             container(objects).width(Length::FillPortion(3)),
-            column![layers, multi].spacing(10).width(Length::FillPortion(2)),
+            column![layers, multi]
+                .spacing(10)
+                .width(Length::FillPortion(2)),
         ]
         .spacing(10),
         actions,
@@ -710,39 +785,50 @@ pub fn view_tds_material<'a>(
     let Some((name, materials)) = state.queue.first() else {
         return Space::new().into();
     };
-    let badge = container(crate::ui::icons::themed_primary(crate::ui::icons::MESH, 18.0))
-        .width(34)
-        .height(34)
-        .center_x(34)
-        .center_y(34)
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(
-                theme.palette().primary.base.color.scale_alpha(0.13),
-            )),
-            border: Border {
-                radius: 17.0.into(),
-                ..Default::default()
-            },
+    let badge = container(crate::ui::icons::themed_primary(
+        crate::ui::icons::MESH,
+        18.0,
+    ))
+    .width(34)
+    .height(34)
+    .center_x(34)
+    .center_y(34)
+    .style(|theme: &Theme| container::Style {
+        background: Some(Background::Color(
+            theme.palette().primary.base.color.scale_alpha(0.13),
+        )),
+        border: Border {
+            radius: 17.0.into(),
             ..Default::default()
-        });
-    let mut chips = row![text(crate::tr!("import-3ds", "materials", n = (materials.len() as i64)))
-        .size(11)
-        .style(muted_style)]
+        },
+        ..Default::default()
+    });
+    let mut chips = row![text(crate::tr!(
+        "import-3ds",
+        "materials",
+        n = (materials.len() as i64)
+    ))
+    .size(11)
+    .style(muted_style)]
     .spacing(6)
     .align_y(iced::Center);
     for (material, color) in materials {
         chips = chips.push(
-            container(row![material_swatch(*color), text(material.as_str()).size(11)].spacing(4).align_y(iced::Center))
-                .padding([1, 7])
-                .style(|theme: &Theme| container::Style {
-                    background: Some(Background::Color(theme.palette().background.base.color)),
-                    border: Border {
-                        width: 1.0,
-                        radius: 9.0.into(),
-                        color: theme.palette().background.strong.color,
-                    },
-                    ..Default::default()
-                }),
+            container(
+                row![material_swatch(*color), text(material.as_str()).size(11)]
+                    .spacing(4)
+                    .align_y(iced::Center),
+            )
+            .padding([1, 7])
+            .style(|theme: &Theme| container::Style {
+                background: Some(Background::Color(theme.palette().background.base.color)),
+                border: Border {
+                    width: 1.0,
+                    radius: 9.0.into(),
+                    color: theme.palette().background.strong.color,
+                },
+                ..Default::default()
+            }),
         );
     }
     let object = container(
@@ -768,12 +854,17 @@ pub fn view_tds_material<'a>(
     let chosen = state.material.checked_sub(1).and_then(|k| materials.get(k));
     let head_label = |entry: Option<&(String, Option<[u8; 3]>)>| -> Element<'a, Message> {
         match entry {
-            Some((material, color)) => row![material_swatch(*color), text(material.clone()).size(12)]
-                .spacing(6)
-                .align_y(iced::Center)
-                .into(),
+            Some((material, color)) => {
+                row![material_swatch(*color), text(material.clone()).size(12)]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into()
+            }
             None if choosing => text(crate::tr!("import-3ds-alert", "none")).size(12).into(),
-            None => text(crate::tr!("import-3ds-alert", "none")).size(12).style(muted_style).into(),
+            None => text(crate::tr!("import-3ds-alert", "none"))
+                .size(12)
+                .style(muted_style)
+                .into(),
         }
     };
     let head = button(
@@ -794,14 +885,16 @@ pub fn view_tds_material<'a>(
             list = list.push(
                 button(head_label(k.checked_sub(1).and_then(|j| materials.get(j))))
                     .on_press(msg(ImportDialogMsg::TdsMatPick(k)))
-                    .style(crate::ui::color_select::list_row_style)
+                    .style(crate::ui::kit::dropdown_row_style)
                     .padding([4, 8])
                     .width(Fill),
             );
         }
         iced_aw::DropDown::new(
             head,
-            container(list).style(crate::ui::color_select::popup_panel_style).padding(2),
+            container(list)
+                .style(crate::ui::kit::menu::frame_style)
+                .padding(2),
             true,
         )
         .alignment(iced_aw::drop_down::Alignment::Bottom)
@@ -827,7 +920,11 @@ pub fn view_tds_material<'a>(
                 ]
                 .into_iter()
                 .enumerate()
-                .map(|(k, label)| (label, state.choice == k, Some(msg(ImportDialogMsg::TdsMatChoice(k)))))
+                .map(|(k, label)| (
+                    label,
+                    state.choice == k,
+                    Some(msg(ImportDialogMsg::TdsMatChoice(k)))
+                ))
                 .collect()
             ),
             row![
@@ -856,7 +953,11 @@ pub fn view_tds_material<'a>(
     .padding([4, 10]);
     let mut remaining = column![row![remember]].spacing(8);
     if !state.remember {
-        remaining = remaining.push(text(crate::tr!("import-3ds-alert", "remember-note")).size(11).style(muted_style));
+        remaining = remaining.push(
+            text(crate::tr!("import-3ds-alert", "remember-note"))
+                .size(11)
+                .style(muted_style),
+        );
     }
     column![
         object,
@@ -876,12 +977,11 @@ pub fn view_tds_material<'a>(
 
 /// The round amber warning mark the warning windows lead with.
 pub(crate) fn warning_badge<'a>() -> Element<'a, Message> {
-    container(
-        iced::widget::svg(crate::ui::icons::themed_handle(crate::ui::icons::WARNING))
-            .width(18.0)
-            .height(18.0)
-            .style(|_: &Theme, _| iced::widget::svg::Style { color: Some(AMBER) }),
-    )
+    container(crate::ui::icons::tinted(
+        crate::ui::icons::WARNING,
+        18.0,
+        |_: &Theme| AMBER,
+    ))
     .width(34)
     .height(34)
     .center_x(34)
@@ -899,7 +999,10 @@ pub(crate) fn warning_badge<'a>() -> Element<'a, Message> {
 
 /// A texture map a 3D Studio import did not find: the file and the material
 /// that comes in without it.
-pub fn view_tds_map<'a>(map: &'a (String, String), sizing: crate::ui::modal::ModalSizing) -> Element<'a, Message> {
+pub fn view_tds_map<'a>(
+    map: &'a (String, String),
+    sizing: crate::ui::modal::ModalSizing,
+) -> Element<'a, Message> {
     let (file, material) = map;
     let badge = warning_badge();
     let chip = container(
@@ -924,14 +1027,20 @@ pub fn view_tds_map<'a>(map: &'a (String, String), sizing: crate::ui::modal::Mod
         row![
             badge,
             column![
-                text(crate::tr!("import-3ds-map", "heading")).size(13).font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..iced::Font::DEFAULT
-                }),
+                text(crate::tr!("import-3ds-map", "heading"))
+                    .size(13)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    }),
                 chip,
-                text(crate::tr!("import-3ds-map", "note", material = material.as_str()))
-                    .size(11)
-                    .style(muted_style),
+                text(crate::tr!(
+                    "import-3ds-map",
+                    "note",
+                    material = material.as_str()
+                ))
+                .size(11)
+                .style(muted_style),
             ]
             .spacing(8),
         ]
@@ -1065,6 +1174,26 @@ pub fn view_dgn_import<'a>(
             format!(" · {}", t!(word.as_str()))
         }
     };
+    let code_page_card: Element<'_, Message> = if state.version == "V7" {
+        card(
+            t!("V7 text code page").into_owned(),
+            row![pick_list(
+                Some(crate::modules::insert::dgn_import::code_page_label(
+                    state.code_page
+                )),
+                crate::modules::insert::dgn_import::code_page_choices(),
+                |label: &String| label.clone(),
+            )
+            .on_select(|label| msg(ImportDialogMsg::DgnCodePage(label)))
+            .text_size(11)
+            .padding([4, 8])
+            .width(Fill),]
+            .spacing(8),
+        )
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
     let units = card(
         t!("Units").into_owned(),
         column![
@@ -1144,7 +1273,10 @@ pub fn view_dgn_import<'a>(
     for (dgn, dwg) in &state.mapping[state.mapping_tab.min(3)] {
         table = table.push(row![
             text(dgn.clone()).size(11).width(Fill),
-            text("\u{2192}").size(11).style(muted_style).width(Length::Fixed(24.0)),
+            text("\u{2192}")
+                .size(11)
+                .style(muted_style)
+                .width(Length::Fixed(24.0)),
             text(dwg.clone()).size(11).width(Fill),
         ]);
     }
@@ -1156,7 +1288,9 @@ pub fn view_dgn_import<'a>(
                 true,
                 msg(ImportDialogMsg::DgnMappingTab(state.mapping_tab))
             )],
-            text(t!("Standard mapping setup.")).size(11).style(muted_style),
+            text(t!("Standard mapping setup."))
+                .size(11)
+                .style(muted_style),
             segmented(
                 tabs.iter()
                     .enumerate()
@@ -1170,25 +1304,99 @@ pub fn view_dgn_import<'a>(
                     .collect()
             ),
             scrollable(table).height(Length::Fixed(250.0)),
-            text(t!("The preview shows the selected setup's effect on this file."))
-                .size(11)
-                .style(muted_style),
+            text(t!(
+                "The preview shows the selected setup's effect on this file."
+            ))
+            .size(11)
+            .style(muted_style),
         ]
         .spacing(8),
     );
+    let intrinsic = sizing.width == crate::ui::modal::ModalSizing::INTRINSIC.width;
+    let body = row![
+        scrollable(column![model, target, units, code_page_card, references].spacing(10))
+            .width(Length::FillPortion(3)),
+        container(mapping).width(Length::FillPortion(2)),
+    ]
+    .spacing(10)
+    // The measurement pass takes the dialog's natural height; the laid-out
+    // pass then pins the footer and lets the cards scroll through whatever
+    // height the window leaves, so the Ok/Cancel labels are never clipped.
+    .height(if intrinsic {
+        Length::Fixed(540.0)
+    } else {
+        Length::Fill
+    });
     column![
         top,
-        row![
-            column![model, target, units, references]
-                .spacing(10)
-                .width(Length::FillPortion(3)),
-            container(mapping).width(Length::FillPortion(2)),
-        ]
-        .spacing(10),
+        body,
         footer("dgn", t!("Import"), Some(msg(ImportDialogMsg::DgnOk))),
     ]
     .spacing(10)
     .padding([10, 12])
     .width(sizing.width)
     .into()
+}
+
+#[cfg(test)]
+mod dgn_dialog_view_tests {
+    use super::*;
+    use iced::advanced::widget::{self, Operation};
+
+    /// A generated DGN Import dialog must keep its Ok/Cancel bar visible at
+    /// the dialog's capped height and at clamped window heights: the body
+    /// scrolls instead of cliping the footer, whatever the window leaves.
+    #[test]
+    fn ok_and_cancel_stay_visible_at_the_dialog_height_cap() {
+        let state = DgnImportState {
+            path: "/tmp/no-such-ocs-drawing.dgn".into(),
+            version: "V7",
+            models: vec![crate::ui::window::pdf_dialogs::PageThumb {
+                label: "Default".into(),
+                image: None,
+            }],
+            model: 0,
+            current_drawing: false,
+            prefix_duplicates: false,
+            sub_units: false,
+            explode_text_nodes: false,
+            code_page: Some(1250),
+            references: crate::modules::insert::dgn_import::ReferenceMode::Translate,
+            existing_reference: crate::modules::insert::dgn_import::ExistingReference::Prompt,
+            units: ("m".into(), "mm".into()),
+            mapping_tab: 0,
+            mapping: Default::default(),
+        };
+        let _lock = crate::headless_ui_lock();
+        let mut renderer = iced::futures::executor::block_on(
+            <iced::Renderer as iced_test::core::renderer::Headless>::new(
+                iced_test::core::renderer::Settings::default(),
+                std::env::var("ICED_TEST_BACKEND").ok().as_deref(),
+            ),
+        )
+        .expect("headless renderer");
+        // 680 is the dialog's cap; smaller heights are the window clamping
+        // the modal below it (the reported blank footer buttons).
+        for window_height in [680.0, 620.0, 580.0] {
+            let mut ui = iced_test::runtime::user_interface::UserInterface::build(
+                view_dgn_import(&state, crate::ui::modal::ModalSizing::FILL),
+                iced::Size::new(900.0, window_height),
+                iced_test::runtime::user_interface::Cache::default(),
+                &mut renderer,
+            );
+            for label in ["Import", "Cancel"] {
+                let mut find = iced_test::Selector::find(label);
+                ui.operate(&renderer, &mut widget::operation::black_box(&mut find));
+                let bounds = match widget::Operation::finish(&find) {
+                    widget::operation::Outcome::Some(Some(target)) => target.visible_bounds(),
+                    _ => panic!("{label} button is not in the rendered dialog"),
+                };
+                assert!(
+                    matches!(bounds, Some(iced::Rectangle { y, height, .. })
+                        if height >= 14.0 && y >= 0.0 && y + height <= window_height + 1.0),
+                    "at window height {window_height}: {label} button renders {bounds:?}"
+                );
+            }
+        }
+    }
 }

@@ -40,7 +40,10 @@ impl OpenCADStudio {
         let pending = self.begin_undo(i, label, 1, delta_safe);
         let is_associative_dimension = matches!(
             crate::entities::dimension::as_dimension(&entity),
-            Some(document::entities::Dimension::Linear(_) | document::entities::Dimension::Aligned(_))
+            Some(
+                document::entities::Dimension::Linear(_)
+                    | document::entities::Dimension::Aligned(_)
+            )
         );
         let association_enabled = self.tabs[i].scene.document.header.dimension_associativity == 2;
         let committed = if preserve_commit_layer {
@@ -256,7 +259,10 @@ impl OpenCADStudio {
         let pending = self.begin_undo(i, label, 1, delta_safe);
         let is_associative_dimension = matches!(
             crate::entities::dimension::as_dimension(&entity),
-            Some(document::entities::Dimension::Linear(_) | document::entities::Dimension::Aligned(_))
+            Some(
+                document::entities::Dimension::Linear(_)
+                    | document::entities::Dimension::Aligned(_)
+            )
         );
         let association_enabled = self.tabs[i].scene.document.header.dimension_associativity == 2;
         let committed = if preserve_commit_layer {
@@ -507,7 +513,10 @@ impl OpenCADStudio {
 
     pub(super) fn handle_commit_dimensions_and_exit(
         &mut self,
-        dimensions: Vec<(document::EntityType, crate::command::DimensionAssociationInput)>,
+        dimensions: Vec<(
+            document::EntityType,
+            crate::command::DimensionAssociationInput,
+        )>,
     ) {
         let i = self.active_tab;
         let association_mode = self.tabs[i].scene.document.header.dimension_associativity;
@@ -854,11 +863,11 @@ impl OpenCADStudio {
     /// A hatch whose settings reorder it is undone with its sort table: the
     /// draw order lives in an object, outside the entity delta.
     fn hatch_undo_delta_safe(&self, i: usize) -> bool {
-        !self.tabs[i]
+        self.tabs[i]
             .active_cmd
             .as_ref()
             .and_then(|command| command.hatch_settings())
-            .is_some_and(|settings| settings.draw_order != 0)
+            .is_none_or(|settings| settings.draw_order == 0)
     }
 
     /// The layer a hatch of the running command goes on (the Hatch panel's,
@@ -866,7 +875,10 @@ impl OpenCADStudio {
     fn hatch_commit_layer(
         &self,
         i: usize,
-    ) -> (String, Option<crate::modules::draw::draw::hatch::HatchSettings>) {
+    ) -> (
+        String,
+        Option<crate::modules::draw::draw::hatch::HatchSettings>,
+    ) {
         let settings = self.tabs[i]
             .active_cmd
             .as_ref()
@@ -952,10 +964,11 @@ impl OpenCADStudio {
             return;
         }
         if let Some(color) = &settings.color {
-            hatch.common.color = color.clone();
+            hatch.common.color = *color;
         }
         if let Some(percent) = settings.transparency {
-            hatch.common.transparency = document::types::Transparency::from_percent(percent as f64);
+            hatch.common.transparency =
+                document::types::Transparency::from_percent(f64::from(percent) / 100.0);
         }
         if let Some(background) = &settings.background {
             crate::entities::hatch::set_background_color(&mut hatch, background);
@@ -964,7 +977,9 @@ impl OpenCADStudio {
             hatch.pattern_type = document::entities::HatchPatternType::UserDefined;
             hatch.is_double = double;
         }
-        self.tabs[i].scene.update_entity(document::EntityType::Hatch(hatch));
+        self.tabs[i]
+            .scene
+            .update_entity(document::EntityType::Hatch(hatch));
     }
 
     pub(super) fn handle_commit_hatch(&mut self, hatch: crate::scene::HatchModel) {
@@ -1097,7 +1112,9 @@ impl OpenCADStudio {
         let label = self.history_label_from_active_cmd(i, "HATCH");
         let pending = self.begin_undo(i, label, 1, self.hatch_undo_delta_safe(i));
         let (layer, hatch_options) = self.hatch_commit_layer(i);
-        let new_handle = self.tabs[i].scene.add_hatch(hatch, Some(&layer), entity_style);
+        let new_handle = self.tabs[i]
+            .scene
+            .add_hatch(hatch, Some(&layer), entity_style);
         self.apply_hatch_commit_options(i, new_handle, hatch_options.as_ref());
         self.tabs[i].dirty = true;
         if let Some(pd) = pending {
@@ -1126,10 +1143,9 @@ impl OpenCADStudio {
         let pending = self.begin_undo(i, label, hatches.len(), self.hatch_undo_delta_safe(i));
         let (layer, hatch_options) = self.hatch_commit_layer(i);
         for hatch in hatches {
-            let new_handle =
-                self.tabs[i]
-                    .scene
-                    .add_hatch(hatch, Some(&layer), entity_style.clone());
+            let new_handle = self.tabs[i]
+                .scene
+                .add_hatch(hatch, Some(&layer), entity_style);
             self.apply_hatch_commit_options(i, new_handle, hatch_options.as_ref());
             if !new_handle.is_null() {
                 self.tabs[i].scene.select_entity(new_handle, true);
@@ -1283,6 +1299,12 @@ impl OpenCADStudio {
                 }
             }
         }
+        {
+            let tab = &mut self.tabs[i];
+            if let Some(cmd) = tab.active_cmd.as_mut() {
+                cmd.attreq_set_document(&tab.scene.document);
+            }
+        }
         // Collect the full AttributeDefinitions owned by this block
         // record so each created attribute keeps its geometry (#255).
         let mut attdefs: Vec<document::entities::AttributeDefinition> = {
@@ -1291,7 +1313,8 @@ impl OpenCADStudio {
                 br.entity_handles
                     .iter()
                     .filter_map(|&h| {
-                        if let Some(document::EntityType::AttributeDefinition(ad)) = doc.get_entity(h)
+                        if let Some(document::EntityType::AttributeDefinition(ad)) =
+                            doc.get_entity(h)
                         {
                             Some(ad.clone())
                         } else {
@@ -1316,6 +1339,20 @@ impl OpenCADStudio {
                 .active_cmd
                 .as_mut()
                 .and_then(|c| c.attreq_take_insert());
+            // A leader's block content ends its command like any other leader.
+            if let Some(entity) = entity
+                .as_ref()
+                .filter(|entity| !matches!(entity, document::EntityType::Insert(_)))
+            {
+                return Some(self.apply_cmd_result(CmdResult::CommitAndExit(entity.clone())));
+            }
+            if entity.is_none() {
+                // The command goes on (a leader's arrowhead is still to come).
+                let prompt = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt());
+                if let Some(p) = prompt {
+                    self.command_line.push_info(&p);
+                }
+            }
             if let Some(entity) = entity {
                 let insert_name = match &entity {
                     document::EntityType::Insert(ins) => Some(ins.block_name.clone()),
@@ -1397,6 +1434,13 @@ impl OpenCADStudio {
             if asks {
                 self.open_insert_attr_dialog(&block_name, &askable);
                 return None;
+            }
+            if let Some(heading) = self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .and_then(|c| c.prompt_heading())
+            {
+                self.command_line.push_info(&heading);
             }
             let prompt = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt());
             if let Some(p) = prompt {
@@ -1518,5 +1562,55 @@ impl OpenCADStudio {
         if let Some(p) = prompt {
             self.command_line.push_info(&p);
         }
+    }
+}
+
+#[cfg(test)]
+mod hatch_transparency_tests {
+    use crate::app::OpenCADStudio;
+    use crate::command::StepInput;
+    use document::types::{Transparency, Vector2};
+    use glam::DVec3;
+
+    /// The Hatch panel's transparency is a percent (0–90). A new hatch made
+    /// with 50 on the panel is half transparent; before, every non-zero
+    /// percent was taken as a 0..1 fraction and the hatch came out fully
+    /// transparent (invisible).
+    #[test]
+    fn a_new_hatch_takes_the_panel_transparency_percent() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let mut square = document::entities::LwPolyline::from_points(vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(10.0, 0.0),
+            Vector2::new(10.0, 10.0),
+            Vector2::new(0.0, 10.0),
+        ]);
+        square.is_closed = true;
+        let _ = app.tabs[i]
+            .scene
+            .add_entity(document::EntityType::LwPolyline(square));
+
+        let _ = app.dispatch_command("HATCH");
+        let command = app.tabs[i].active_cmd.as_mut().expect("HATCH runs");
+        let mut settings = command.hatch_settings().expect("HATCH has panel settings");
+        settings.transparency = Some(50);
+        command.set_hatch_settings(settings);
+        let _ = app.feed_command(StepInput::Point(DVec3::new(5.0, 5.0, 0.0)));
+        if app.tabs[i].active_cmd.is_some() {
+            let _ = app.feed_command(StepInput::Enter);
+        }
+
+        let hatch = app.tabs[i]
+            .scene
+            .document
+            .entities()
+            .find_map(|entity| match entity {
+                document::EntityType::Hatch(hatch) => Some(hatch.clone()),
+                _ => None,
+            })
+            .expect("HATCH made a hatch");
+        assert_eq!(hatch.common.transparency, Transparency::from_percent(0.5));
     }
 }

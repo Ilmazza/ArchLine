@@ -119,6 +119,12 @@ pub struct AngularDimensionCommand {
     quadrant_lock: Option<(f64, f64)>,
 }
 
+impl Default for AngularDimensionCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AngularDimensionCommand {
     pub fn new() -> Self {
         Self {
@@ -232,7 +238,9 @@ impl AngularDimensionCommand {
     }
 
     fn commit(&self, dimension: Dimension) -> CmdResult {
-        let entity = self.plane.place_entity(EntityType::Dimension(Box::new(dimension)));
+        let entity = self
+            .plane
+            .place_entity(EntityType::Dimension(Box::new(dimension)));
         CmdResult::CommitDimension {
             entity,
             association: DimensionAssociationInput::Explicit(self.source_refs.clone()),
@@ -339,6 +347,11 @@ impl CadCommand for AngularDimensionCommand {
 
     fn name(&self) -> &'static str {
         "DIMANGULAR"
+    }
+
+    /// A dimension's point prompts refuse unusable input this way (measured).
+    fn point_rejection(&self) -> Option<String> {
+        Some(t!("Invalid point input.").into_owned())
     }
 
     fn prompt(&self) -> String {
@@ -861,6 +874,40 @@ impl CadCommand for AngularDimensionCommand {
     }
 }
 
+/// What MEASUREGEOM's Angle reads from a picked object: a line (or a
+/// straight polyline segment), an arc (or an arc segment) with its sweep in
+/// degrees, or a circle.
+pub(crate) enum PickedShape {
+    Line { direction: DVec3 },
+    Arc { sweep: f64 },
+    Circle { center: DVec3 },
+}
+
+/// The line, arc or circle under `click`, as DIMANGULAR picks it.
+pub(crate) fn picked_shape(entity: &EntityType, click: DVec3) -> Option<PickedShape> {
+    Some(match picked_curve(entity, click)? {
+        PickedCurve::Line { start, end, .. } => PickedShape::Line {
+            direction: (end - start).normalize(),
+        },
+        PickedCurve::Arc {
+            center,
+            first,
+            second,
+            normal,
+            ..
+        } => {
+            // Counter-clockwise about the normal from the start to the end.
+            let (a, b) = (first - center, second - center);
+            let mut sweep = a.cross(b).dot(normal).atan2(a.dot(b)).to_degrees();
+            if sweep <= 0.0 {
+                sweep += 360.0;
+            }
+            PickedShape::Arc { sweep }
+        }
+        PickedCurve::Circle { center, .. } => PickedShape::Circle { center },
+    })
+}
+
 fn picked_curve(entity: &EntityType, click: DVec3) -> Option<PickedCurve> {
     let point = |value: Vector3| DVec3::new(value.x, value.y, value.z);
     let normal = |value: Vector3| DVec3::new(value.x, value.y, value.z);
@@ -1041,6 +1088,14 @@ fn polyline_segment(
         });
     }
     let center = BulgeArc::from_bulge(first, second, bulge)?.center;
+    // An arc runs counter-clockwise from its first point to its second; a
+    // clockwise segment (negative bulge) runs the other way along the
+    // polyline, so its ends swap.
+    let (first_world, second_world, refs) = if bulge < 0.0 {
+        (second_world, first_world, [refs[1], refs[0]])
+    } else {
+        (first_world, second_world, refs)
+    };
     Some(PickedCurve::Arc {
         center: to_world(center),
         first: first_world,

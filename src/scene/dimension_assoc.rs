@@ -1850,7 +1850,9 @@ impl Scene {
             self.record_undo_object_before(owner, Some(before));
         }
         if let Some(ObjectType::Dictionary(dictionary)) = self.document.objects.get_mut(&owner) {
-            dictionary.entries.retain(|(_, handle)| *handle != association);
+            dictionary
+                .entries
+                .retain(|(_, handle)| *handle != association);
         }
         self.document.objects.remove(&association);
         let holders: Vec<Handle> = self
@@ -1865,7 +1867,10 @@ impl Scene {
                 self.record_undo_before(handle, before);
             }
             if let Some(entity) = self.document.get_entity_mut(handle) {
-                entity.common_mut().reactors.retain(|reactor| *reactor != association);
+                entity
+                    .common_mut()
+                    .reactors
+                    .retain(|reactor| *reactor != association);
             }
         }
         self.invalidate_dependency_index();
@@ -2025,7 +2030,10 @@ impl Scene {
                     (2, arc.end_point_wcs()),
                 ]);
             }
-            T::Line { index, object: handle } => {
+            T::Line {
+                index,
+                object: handle,
+            } => {
                 let Some(EntityType::Line(line)) = object(*handle) else {
                     return false;
                 };
@@ -3004,21 +3012,26 @@ pub(crate) fn drop_stray_dimension_reactors(document: &mut document::Document) -
     if associations.is_empty() {
         return 0;
     }
-    let mut dropped = 0;
-    let handles: Vec<Handle> = document
+    let keep = |handle: Handle, reactor: &Handle| match associations.get(reactor) {
+        Some((dimension, geometry)) => *dimension == handle || geometry.contains(&handle),
+        None => true,
+    };
+    // Mutable access drops an entity's verbatim record, so only entities
+    // that actually lose a reactor are touched.
+    let stray: Vec<Handle> = document
         .entities()
-        .map(|entity| entity.common().handle)
+        .map(|entity| entity.common())
+        .filter(|common| !common.reactors.iter().all(|r| keep(common.handle, r)))
+        .map(|common| common.handle)
         .collect();
-    for handle in handles {
+    let mut dropped = 0;
+    for handle in stray {
         let Some(entity) = document.get_entity_mut(handle) else {
             continue;
         };
         let reactors = &mut entity.common_mut().reactors;
         let before = reactors.len();
-        reactors.retain(|reactor| match associations.get(reactor) {
-            Some((dimension, geometry)) => *dimension == handle || geometry.contains(&handle),
-            None => true,
-        });
+        reactors.retain(|reactor| keep(handle, reactor));
         dropped += before - reactors.len();
     }
     dropped

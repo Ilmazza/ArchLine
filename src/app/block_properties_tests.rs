@@ -67,11 +67,7 @@ fn block_properties_allow_exploding_refuses_the_explode_command() {
     app.tabs[i].scene.selected.insert(insert);
     let _ = app.dispatch_command("EXPLODE");
     assert!(
-        app.tabs[i]
-            .scene
-            .document
-            .get_entity(insert)
-            .is_some(),
+        app.tabs[i].scene.document.get_entity(insert).is_some(),
         "EXPLODE disassembled a definition the row says cannot be exploded"
     );
 }
@@ -111,11 +107,7 @@ fn block_properties_allow_exploding_survives_the_saved_file() {
         app.tabs[i].scene.selected.insert(reloaded);
         let _ = app.dispatch_command("EXPLODE");
         assert!(
-            app.tabs[i]
-                .scene
-                .document
-                .get_entity(reloaded)
-                .is_some(),
+            app.tabs[i].scene.document.get_entity(reloaded).is_some(),
             "{ext}: EXPLODE disassembled a definition reloaded as not explodable"
         );
     }
@@ -151,11 +143,7 @@ fn block_properties_allow_exploding_refuses_explode_on_a_parametric_block() {
     app.tabs[i].scene.selected.insert(insert);
     let _ = app.dispatch_command("EXPLODE");
     assert!(
-        app.tabs[i]
-            .scene
-            .document
-            .get_entity(insert)
-            .is_some(),
+        app.tabs[i].scene.document.get_entity(insert).is_some(),
         "EXPLODE disassembled a parametric definition the row says cannot be exploded"
     );
 }
@@ -932,7 +920,10 @@ fn open_dynamic_value_list_swallows_escape_enter_and_the_arrows() {
             "{msg:?} must not reach the command line or the viewport"
         );
     }
-    assert!(app.tabs[app.active_tab].properties.open_block_picker.is_some());
+    assert!(app.tabs[app.active_tab]
+        .properties
+        .open_block_picker
+        .is_some());
     assert!(app
         .intercept_property_list_key(&Message::PropBlockPickerToggle {
             key: block_parameter_key(),
@@ -943,7 +934,10 @@ fn open_dynamic_value_list_swallows_escape_enter_and_the_arrows() {
 
 #[test]
 fn escape_closes_the_dynamic_value_list_and_keeps_the_selection() {
-    for escape in [Message::CommandEscape, Message::ShortcutPressed("ESCAPE".into())] {
+    for escape in [
+        Message::CommandEscape,
+        Message::ShortcutPressed("ESCAPE".into()),
+    ] {
         let mut app = fixture();
         let handle = select_editor_line(&mut app);
         open_dynamic_value_list(&mut app);
@@ -964,6 +958,41 @@ fn enter_does_not_reach_the_command_line_while_the_list_is_open() {
     // Submitting would close the history and run the typed command.
     assert!(app.command_line.history_open);
     assert_eq!(app.command_line.input, "LINE");
+}
+
+/// A printable key while a property list is open names a row in that list and
+/// must not start a command at the command line. With no list open the same
+/// key still types.
+#[test]
+fn a_printable_key_belongs_to_the_open_list() {
+    for open in [
+        |app: &mut OpenCADStudio| {
+            let _ = open_dynamic_value_list(app);
+        },
+        |app: &mut OpenCADStudio| {
+            let _ = app.update(Message::PropChoiceToggle {
+                field: "bedit_units",
+                quick: false,
+            });
+            assert!(app.tabs[app.active_tab].properties.open_choice.is_some());
+        },
+    ] {
+        let mut app = fixture();
+        open(&mut app);
+        let before = app.command_line.input.clone();
+        let _ = app.update(Message::CommandAppendChar("M".into()));
+        assert_eq!(
+            app.command_line.input, before,
+            "a printable key belongs to the open list"
+        );
+        let _ = app.update(Message::CommandEscape);
+        let _ = app.update(Message::CommandAppendChar("M".into()));
+        assert_eq!(
+            app.command_line.input,
+            format!("{before}M"),
+            "with no list open the key still types"
+        );
+    }
 }
 
 /// A flag naming a row that is not on the panel is dropped by the rebuild
@@ -1118,10 +1147,12 @@ fn a_parameter_value_written_through_the_control_surface_moves_the_reference() {
         record
             .entity_handles
             .iter()
-            .filter_map(|handle| match app.tabs[i].scene.document.get_entity(*handle) {
-                Some(EntityType::Line(line)) => Some((line.start, line.end)),
-                _ => None,
-            })
+            .filter_map(
+                |handle| match app.tabs[i].scene.document.get_entity(*handle) {
+                    Some(EntityType::Line(line)) => Some((line.start, line.end)),
+                    _ => None,
+                },
+            )
             .collect()
     };
     assert_eq!(

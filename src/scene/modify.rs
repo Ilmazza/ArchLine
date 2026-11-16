@@ -1,12 +1,14 @@
 // Auto-split from scene/mod.rs. Pure text-move; behaviour unchanged.
 use super::*;
 
-/// Orientation fields of a text-like entity, captured so a mirror can keep the
-/// glyphs right-reading when MIRRTEXT (`header.mirror_text`) is off.
+/// What a mirror needs to keep a text-like entity right-reading when MIRRTEXT
+/// (`header.mirror_text`) is off: its stored angles and the size of its box
+/// along and across the baseline.
 struct TextOrient {
     rotation: f64,
     oblique: f64,
-    x_scale: f64,
+    width: f64,
+    height: f64,
 }
 
 pub(crate) fn inverse_affine(
@@ -47,52 +49,250 @@ pub(crate) fn inverse_affine(
     }))
 }
 
-/// Snapshot the orientation of a text / mtext / shape entity, or `None` for any
-/// other kind.
-fn capture_text_orient(e: &EntityType) -> Option<TextOrient> {
+/// The pen advance of one line of text in `style`.
+fn single_line_width(
+    document: &document::Document,
+    value: &str,
+    style: &str,
+    height: f64,
+    width_factor: f64,
+) -> f64 {
+    let font = crate::entities::text_support::resolve_text_style(style, document);
+    let width_factor = if width_factor.abs() > 1e-9 {
+        width_factor.abs()
+    } else {
+        font.width_factor.abs() as f64
+    };
+    let text = crate::entities::text_support::resolve_dxf_special_chars(value);
+    crate::entities::text_support::text_local_bounds(
+        &font.font_name,
+        &text,
+        height as f32,
+        width_factor as f32,
+        0.0,
+    )
+    .map(|bounds| bounds.advance as f64)
+    .unwrap_or_else(|| height * width_factor * text.chars().count() as f64 * 0.6)
+}
+
+/// Snapshot the orientation of a text, attribute or mtext, or `None` for any
+/// other kind. Shapes are not text: MIRRTEXT leaves them mirrored.
+fn capture_text_orient(e: &EntityType, document: &document::Document) -> Option<TextOrient> {
     match e {
         EntityType::Text(t) => Some(TextOrient {
             rotation: t.rotation,
             oblique: t.oblique_angle,
-            x_scale: 0.0,
+            width: single_line_width(document, &t.value, &t.style, t.height, t.width_factor),
+            height: t.height,
+        }),
+        EntityType::AttributeDefinition(a) => Some(TextOrient {
+            rotation: a.rotation,
+            oblique: a.oblique_angle,
+            width: single_line_width(
+                document,
+                &a.default_value,
+                &a.text_style,
+                a.height,
+                a.width_factor,
+            ),
+            height: a.height,
+        }),
+        EntityType::AttributeEntity(a) => Some(TextOrient {
+            rotation: a.rotation,
+            oblique: a.oblique_angle,
+            width: single_line_width(document, &a.value, &a.text_style, a.height, a.width_factor),
+            height: a.height,
         }),
         EntityType::MText(m) => Some(TextOrient {
             rotation: m.rotation,
             oblique: 0.0,
-            x_scale: 0.0,
-        }),
-        EntityType::Shape(s) => Some(TextOrient {
-            rotation: s.rotation,
-            oblique: s.oblique_angle,
-            x_scale: s.relative_x_scale,
+            width: 0.0,
+            height: 0.0,
         }),
         _ => None,
     }
 }
 
-/// Restores readable text orientation after a mirror.
-fn restore_text_orient(e: &mut EntityType, o: &TextOrient) {
+/// Whether text running at `angle` reads the right way up: from -90°
+/// (exclusive) to 90° (inclusive).
+fn reads_upright(angle: f64) -> bool {
+    let (sin, cos) = angle.sin_cos();
+    cos > 1e-9 || (cos.abs() <= 1e-9 && sin > 0.0)
+}
+
+/// Fractions of the text box a justification sits at, along (`u`) and across
+/// (`v`) the baseline. Bottom is taken as the baseline.
+fn justification_fractions(horizontal: i16, vertical: i16) -> (f64, f64) {
+    // Group 72 / 73 values: Left 0, Center 1, Right 2, Aligned 3, Middle 4,
+    // Fit 5; Baseline 0, Bottom 1, Middle 2, Top 3.
+    match horizontal {
+        4 => (0.5, 0.5),
+        _ => (
+            match horizontal {
+                1 => 0.5,
+                2 | 3 | 5 => 1.0,
+                _ => 0.0,
+            },
+            match vertical {
+                2 => 0.5,
+                3 => 1.0,
+                _ => 0.0,
+            },
+        ),
+    }
+}
+
+/// Make a mirrored single-line text right-reading in the box the mirror left
+/// it: `rotation` is the reflected baseline, `insertion` / `alignment` the
+/// reflected points. The text turns half a turn against the reflected baseline
+/// when that reads upright (the start moves to the far end), else keeps the
+/// reflected baseline and moves across it to the other side of its box.
+fn readable_single_line(
+    rotation: &mut f64,
+    insertion: &mut document::types::Vector3,
+    alignment: &mut document::types::Vector3,
+    (horizontal, vertical): (i16, i16),
+    o: &TextOrient,
+) {
+    let (u, v) = justification_fractions(horizontal, vertical);
+    let aligned = matches!(horizontal, 3 | 5);
+    let width = if aligned {
+        (alignment.x - insertion.x).hypot(alignment.y - insertion.y)
+    } else {
+        o.width
+    };
+    let turned = *rotation + std::f64::consts::PI;
+    let shift = |fraction: f64, size: f64, angle: f64| {
+        let d = (1.0 - 2.0 * fraction) * size;
+        (angle.cos() * d, angle.sin() * d)
+    };
+    let (ins, al) = if reads_upright(turned) {
+        *rotation = turned.rem_euclid(std::f64::consts::TAU);
+        (shift(0.0, width, turned), shift(u, width, turned))
+    } else {
+        let across = *rotation + std::f64::consts::FRAC_PI_2;
+        (shift(0.0, o.height, across), shift(v, o.height, across))
+    };
+    insertion.x -= ins.0;
+    insertion.y -= ins.1;
+    alignment.x -= al.0;
+    alignment.y -= al.1;
+}
+
+/// Restores readable text orientation after a mirror (MIRRTEXT off).
+fn restore_text_orient(e: &mut EntityType, o: &TextOrient, t: &EntityTransform) {
+    let in_plane = |normal: &document::types::Vector3| {
+        matches!(t, EntityTransform::Mirror { working_normal, .. }
+            if working_normal.normalize_or(glam::DVec3::Z).abs_diff_eq(glam::DVec3::Z, 1e-10))
+            && normal.x.abs() < 1e-9
+            && normal.y.abs() < 1e-9
+            && normal.z > 0.0
+    };
     match e {
         EntityType::Text(t) => {
-            t.rotation = o.rotation;
             t.oblique_angle = o.oblique;
-            use document::entities::TextHorizontalAlignment as HA;
-            t.horizontal_alignment = match t.horizontal_alignment {
-                HA::Left => HA::Right,
-                HA::Right => HA::Left,
-                other => other,
-            };
-            crate::entities::text::sync_text_alignment_point(t);
+            if !in_plane(&t.normal) {
+                t.rotation = o.rotation;
+                return;
+            }
+            let mut alignment = t.alignment_point.unwrap_or(t.insertion_point);
+            let justification = (
+                t.horizontal_alignment as i16,
+                t.vertical_alignment as i16,
+            );
+            readable_single_line(
+                &mut t.rotation,
+                &mut t.insertion_point,
+                &mut alignment,
+                justification,
+                o,
+            );
+            if t.alignment_point.is_some() {
+                t.alignment_point = Some(alignment);
+            }
+        }
+        EntityType::AttributeDefinition(a) => {
+            a.oblique_angle = o.oblique;
+            if !in_plane(&a.normal) {
+                a.rotation = o.rotation;
+                return;
+            }
+            let justification = (
+                a.horizontal_alignment.to_value(),
+                a.vertical_alignment.to_value(),
+            );
+            readable_single_line(
+                &mut a.rotation,
+                &mut a.insertion_point,
+                &mut a.alignment_point,
+                justification,
+                o,
+            );
+        }
+        EntityType::AttributeEntity(a) => {
+            a.oblique_angle = o.oblique;
+            if !in_plane(&a.normal) {
+                a.rotation = o.rotation;
+                return;
+            }
+            let justification = (
+                a.horizontal_alignment.to_value(),
+                a.vertical_alignment.to_value(),
+            );
+            readable_single_line(
+                &mut a.rotation,
+                &mut a.insertion_point,
+                &mut a.alignment_point,
+                justification,
+                o,
+            );
         }
         EntityType::MText(m) => {
-            m.rotation = o.rotation;
-        }
-        EntityType::Shape(s) => {
-            s.rotation = o.rotation;
-            s.oblique_angle = o.oblique;
-            s.relative_x_scale = o.x_scale;
+            if !in_plane(&m.normal) {
+                m.rotation = o.rotation;
+                return;
+            }
+            use document::entities::AttachmentPoint as AP;
+            let turned = m.rotation + std::f64::consts::PI;
+            m.dwg_x_direction = None;
+            if reads_upright(turned) {
+                m.rotation = turned.rem_euclid(std::f64::consts::TAU);
+                m.attachment_point = match m.attachment_point {
+                    AP::TopLeft => AP::TopRight,
+                    AP::TopRight => AP::TopLeft,
+                    AP::MiddleLeft => AP::MiddleRight,
+                    AP::MiddleRight => AP::MiddleLeft,
+                    AP::BottomLeft => AP::BottomRight,
+                    AP::BottomRight => AP::BottomLeft,
+                    other => other,
+                };
+            } else {
+                m.attachment_point = match m.attachment_point {
+                    AP::TopLeft => AP::BottomLeft,
+                    AP::TopCenter => AP::BottomCenter,
+                    AP::TopRight => AP::BottomRight,
+                    AP::BottomLeft => AP::TopLeft,
+                    AP::BottomCenter => AP::TopCenter,
+                    AP::BottomRight => AP::TopRight,
+                    other => other,
+                };
+            }
         }
         _ => {}
+    }
+}
+
+/// MIRRTEXT off: a leader with text runs the way its text now reads, half a
+/// turn from its reflected direction when the text turned that way.
+fn readable_leader_direction(e: &mut EntityType) {
+    if let EntityType::Leader(l) = e {
+        if l.annotation_handle.is_null() {
+            return;
+        }
+        let d = l.horizontal_direction;
+        if reads_upright((-d.y).atan2(-d.x)) {
+            l.horizontal_direction = document::types::Vector3::new(-d.x, -d.y, -d.z);
+        }
     }
 }
 
@@ -103,23 +303,54 @@ fn restore_text_orient(e: &mut EntityType, o: &TextOrient) {
 /// keeps a double mirror an involution. Only single-line TEXT carries group 71;
 /// MTEXT / Shape keep the reflected rotation (readable-but-rotated), which is
 /// standard-conforming.
+/// The backward glyphs are the mirror image, slant included, so the oblique
+/// angle the reflected baseline negated comes back.
 fn mirror_true_text_flags(e: &mut EntityType) {
-    if let EntityType::Text(t) = e {
-        t.generation_flags ^= 0x2;
-        t.rotation = (t.rotation + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
-    }
+    let (flags, rotation, oblique) = match e {
+        EntityType::Text(t) => (
+            &mut t.generation_flags,
+            &mut t.rotation,
+            &mut t.oblique_angle,
+        ),
+        EntityType::AttributeDefinition(a) => (
+            &mut a.text_generation_flags,
+            &mut a.rotation,
+            &mut a.oblique_angle,
+        ),
+        EntityType::AttributeEntity(a) => (
+            &mut a.text_generation_flags,
+            &mut a.rotation,
+            &mut a.oblique_angle,
+        ),
+        _ => return,
+    };
+    *flags ^= 0x2;
+    *rotation = (*rotation + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
+    *oblique = -*oblique;
 }
 
 /// Transform one entity of a dimension's `*D` block. Its text reads the
 /// right way after a mirror, whatever MIRRTEXT says.
-fn transform_dimension_part(entity: &mut EntityType, t: &EntityTransform) {
-    let orient = matches!(t, EntityTransform::Mirror { .. })
-        .then(|| capture_text_orient(entity))
-        .flatten();
+fn transform_dimension_part(
+    entity: &mut EntityType,
+    orient: Option<TextOrient>,
+    t: &EntityTransform,
+) {
     view::dispatch::apply_transform(entity, t);
     if let Some(orient) = orient {
-        restore_text_orient(entity, &orient);
+        restore_text_orient(entity, &orient, t);
     }
+}
+
+/// The orientation a dimension part's mirror restores.
+fn dimension_part_orient(
+    entity: &EntityType,
+    document: &document::Document,
+    t: &EntityTransform,
+) -> Option<TextOrient> {
+    matches!(t, EntityTransform::Mirror { .. })
+        .then(|| capture_text_orient(entity, document))
+        .flatten()
 }
 
 impl Scene {
@@ -206,9 +437,9 @@ impl Scene {
     pub fn transform_entities(&mut self, handles: &[Handle], t: &EntityTransform) {
         // Never transform objects on a locked layer (defense-in-depth: the pick
         // path already excludes them, but programmatic callers may not).
-        let handles: Vec<Handle> = handles
-            .iter()
-            .copied()
+        let handles: Vec<Handle> = self
+            .without_sheet_viewports(handles)
+            .into_iter()
             .filter(|&h| !self.is_layer_locked(h))
             .collect();
         let handles = &handles[..];
@@ -313,7 +544,7 @@ impl Scene {
         if preserve_text_orientation {
             for &h in handles {
                 if let Some(entity) = self.document.get_entity(h) {
-                    if let Some(o) = capture_text_orient(entity) {
+                    if let Some(o) = capture_text_orient(entity, &self.document) {
                         text_orient_backup.push((h, o));
                     }
                 }
@@ -362,18 +593,73 @@ impl Scene {
             .flatten()
             .collect();
         let mut refresh_solid_handles = Vec::new();
+        let mut scaled_table_handles = Vec::new();
         for &h in handles {
+            if self.is_recording_undo() {
+                let context_objects = self
+                    .document
+                    .get_entity(h)
+                    .map(|entity| {
+                        crate::scene::annotative::annotation_context_objects_for_entity(
+                            &self.document,
+                            entity,
+                        )
+                    })
+                    .unwrap_or_default();
+                for (handle, object) in context_objects {
+                    self.record_undo_object_before(handle, Some(object));
+                }
+            }
+            let insert_attributes_before = self.document.get_entity(h).and_then(|entity| {
+                let EntityType::Insert(insert) = entity else {
+                    return None;
+                };
+                insert
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.common.xdictionary_handle.is_some())
+                    .then(|| insert.attributes.clone())
+            });
             // Delta-undo: capture the pre-transform image before mutating.
             if self.is_recording_undo() {
                 let before = self.document.get_entity_arc(h);
                 self.record_undo_before(h, before);
             }
+            let scaled_table = match self.document.get_entity(h) {
+                Some(EntityType::Table(table)) => {
+                    crate::entities::table::scaling::prepare(table, &self.document, t)
+                }
+                _ => None,
+            };
+            if scaled_table.is_some() {
+                scaled_table_handles.push(h);
+            }
+            if scaled_table.is_some() && self.is_recording_undo() {
+                if let Some(EntityType::Table(table)) = self.document.get_entity(h) {
+                    let members =
+                        crate::entities::table::scaling::picture_members(table, &self.document);
+                    for member in members {
+                        let before = self.document.get_entity_arc(member);
+                        self.record_undo_before(member, before);
+                    }
+                }
+            }
             if let Some(entity) = self.document.get_entity_mut(h) {
+                if let (EntityType::Table(table), Some(prepared)) = (&mut *entity, scaled_table) {
+                    **table = prepared;
+                }
                 view::dispatch::apply_transform(entity, t);
                 render_graph::clear_dim_picture_placement(entity);
                 if mirror_true {
                     mirror_true_text_flags(entity);
                 }
+            }
+            if let Some(attributes) = insert_attributes_before {
+                crate::scene::annotative::transform_insert_attribute_contexts(
+                    &mut self.document,
+                    &attributes,
+                    t,
+                );
             }
             // Only the reference goes: the old picture stays a block of its
             // own, which an undo points back to, and is not saved again.
@@ -408,7 +694,8 @@ impl Scene {
                     Some(EntityType::Solid(s)) => Some(Self::solid_hatch_model(s, existing_color)),
                     _ => None,
                 };
-                if let Some(model) = new_model {
+                if let Some(mut model) = new_model {
+                    model.entity = Some(h);
                     self.hatches.insert(h, model);
                 }
             }
@@ -432,16 +719,19 @@ impl Scene {
         if preserve_text_orientation {
             for (h, o) in text_orient_backup {
                 if let Some(entity) = self.document.get_entity_mut(h) {
-                    restore_text_orient(entity, &o);
+                    restore_text_orient(entity, &o, t);
+                }
+            }
+            let unique: rustc_hash::FxHashSet<Handle> = handles.iter().copied().collect();
+            for h in unique {
+                if let Some(entity) = self.document.get_entity_mut(h) {
+                    readable_leader_direction(entity);
                 }
             }
         }
         for &h in handles {
-            let others =
-                crate::scene::annotative::transform_annotation_contexts(&mut self.document, h, t);
-            if self.sync_displayed_annotation_context(h) || others {
-                self.poison_undo_recording();
-            }
+            crate::scene::annotative::transform_annotation_contexts(&mut self.document, h, t);
+            self.sync_displayed_annotation_context(h);
         }
         // Move the baked dimension-block sub-entities too (collected above).
         // These are entities not named in the reported change set, so a delta
@@ -451,11 +741,15 @@ impl Scene {
                 let before = self.document.get_entity_arc(*h);
                 self.record_undo_before(*h, before);
             }
+            let orient = self
+                .document
+                .get_entity(*h)
+                .and_then(|entity| dimension_part_orient(entity, &self.document, t));
             if let Some(entity) = self.document.get_entity_mut(*h) {
                 if let Some(placement) = placement {
                     view::dispatch::apply_transform(entity, placement);
                 }
-                transform_dimension_part(entity, t);
+                transform_dimension_part(entity, orient, t);
             }
         }
         // The moved `*D` contents are a block definition the block cache holds;
@@ -477,6 +771,19 @@ impl Scene {
             &transformed_refs,
             &retained_originals,
         );
+        if self.is_recording_undo() {
+            for handle in scaled_table_handles {
+                if let Some(EntityType::Table(table)) = self.document.get_entity(handle) {
+                    let members =
+                        crate::entities::table::scaling::picture_members(table, &self.document);
+                    for member in members {
+                        // First-touch recording keeps any old member's before
+                        // image; newly allocated picture entities undo to None.
+                        self.record_undo_before(member, None);
+                    }
+                }
+            }
+        }
         self.refresh_meshes_for_handles(&refresh_solid_handles);
     }
 
@@ -626,11 +933,38 @@ impl Scene {
                 let before = self.document.get_entity_arc(handle);
                 self.record_undo_before(handle, before);
             }
-            if let Some(EntityType::Insert(reference)) = self.document.get_entity_mut(handle) {
-                for attribute in &mut reference.attributes {
-                    document::Entity::apply_transform(attribute, &attribute_transform);
+            let attributes_before =
+                if let Some(EntityType::Insert(reference)) = self.document.get_entity_mut(handle) {
+                    let before = reference.attributes.clone();
+                    for attribute in &mut reference.attributes {
+                        document::Entity::apply_transform(attribute, &attribute_transform);
+                    }
+                    changed.push(handle);
+                    Some(before)
+                } else {
+                    None
+                };
+            if let Some(before) = attributes_before {
+                if self.is_recording_undo() {
+                    let context_objects = self
+                        .document
+                        .get_entity(handle)
+                        .map(|entity| {
+                            crate::scene::annotative::annotation_context_objects_for_entity(
+                                &self.document,
+                                entity,
+                            )
+                        })
+                        .unwrap_or_default();
+                    for (object_handle, object) in context_objects {
+                        self.record_undo_object_before(object_handle, Some(object));
+                    }
                 }
-                changed.push(handle);
+                crate::scene::annotative::transform_insert_attribute_contexts(
+                    &mut self.document,
+                    &before,
+                    &EntityTransform::Affine(attribute_transform),
+                );
             }
         }
 
@@ -681,8 +1015,15 @@ impl Scene {
             EntityType::Table(table) => {
                 // A table exclusively owns its anonymous picture block. The
                 // codec also resolves by name, so detach both references.
+                // A table drawn from its cells (no handle, the name kept)
+                // keeps the name as that mark: the scene gives the copy a
+                // block of its own and goes on drawing it from its cells.
+                let from_cells =
+                    table.block_record_handle.is_none() && !table.block_name.is_empty();
                 table.block_record_handle = None;
-                table.block_name.clear();
+                if !from_cells {
+                    table.block_name.clear();
+                }
             }
             EntityType::Insert(ins) => {
                 for att in ins.attributes.iter_mut() {
@@ -1142,7 +1483,8 @@ impl Scene {
         self.document.add_entity(EntityType::Block(block)).ok()?;
         for sub in subs {
             let mut sub = sub.clone();
-            transform_dimension_part(&mut sub, t);
+            let orient = dimension_part_orient(&sub, &self.document, t);
+            transform_dimension_part(&mut sub, orient, t);
             Self::reset_clone_subhandles(&mut self.document, &mut sub);
             sub.common_mut().handle = Handle::NULL;
             sub.common_mut().owner_handle = br_handle;
@@ -1169,7 +1511,8 @@ impl Scene {
     }
 
     pub fn copy_entities(&mut self, handles: &[Handle], t: &EntityTransform) -> Vec<Handle> {
-        let copy_handles = self.handles_expanded_for_leader_annotations(handles);
+        let handles = self.without_sheet_viewports(handles);
+        let copy_handles = self.handles_expanded_for_leader_annotations(&handles);
 
         // Objects on a locked layer can be selected but not copied.
         let clones: Vec<(Handle, EntityType, Vec<Handle>, Option<Handle>)> = copy_handles
@@ -1227,16 +1570,30 @@ impl Scene {
         let (cross, owner_of) = self.prepare_xdict_copies(&roots);
         let mut created_objects = Vec::new();
         for (src_handle, mut entity, annotation_scales, src_xdict) in clones {
+            let source_attributes = match &entity {
+                EntityType::Insert(insert) => insert.attributes.clone(),
+                _ => Vec::new(),
+            };
             let text_orient = if preserve_text_orientation {
-                capture_text_orient(&entity)
+                capture_text_orient(&entity, &self.document)
             } else {
                 None
             };
             let picture_placement = render_graph::dim_picture_placement(&entity);
+            if let EntityType::Table(table) = &mut entity {
+                if let Some(prepared) =
+                    crate::entities::table::scaling::prepare(table, &self.document, t)
+                {
+                    **table = prepared;
+                }
+            }
             view::dispatch::apply_transform(&mut entity, t);
             render_graph::clear_dim_picture_placement(&mut entity);
             if let Some(o) = &text_orient {
-                restore_text_orient(&mut entity, o);
+                restore_text_orient(&mut entity, o, t);
+            }
+            if preserve_text_orientation {
+                readable_leader_direction(&mut entity);
             }
             if mirror_true {
                 mirror_true_text_flags(&mut entity);
@@ -1285,6 +1642,21 @@ impl Scene {
             let h = self.document.add_entity(entity).unwrap_or(Handle::NULL);
             if !h.is_null() {
                 Self::adopt_attributes(&mut self.document, h);
+                // A copied table evaluates its own fields, not the source's.
+                let fields = match self.document.get_entity(src_handle) {
+                    Some(EntityType::Table(table)) => {
+                        super::table_fields::table_fields(&self.document, table)
+                    }
+                    _ => Vec::new(),
+                };
+                if !fields.is_empty() {
+                    super::table_fields::adopt_table_fields(
+                        &mut self.document,
+                        h,
+                        src_handle,
+                        &fields,
+                    );
+                }
                 // Deep-clone the extension-dictionary tree so edits on the
                 // copy never touch the source. A dangling or missing root
                 // leaves the copy without one — never shared.
@@ -1306,6 +1678,7 @@ impl Scene {
                         self.poison_undo_recording();
                     }
                 }
+                let mut copied_context_sources = Vec::new();
                 for (k, src_attribute, src_root) in attribute_xdicts {
                     let Some(new_attribute) = (match self.document.get_entity(h) {
                         Some(EntityType::Insert(ins)) => {
@@ -1329,7 +1702,19 @@ impl Scene {
                     if let Some(EntityType::Insert(ins)) = self.document.get_entity_mut(h) {
                         ins.attributes[k].common.xdictionary_handle = Some(new_root);
                     }
+                    if let Some(source) = source_attributes.get(k) {
+                        let mut source = source.clone();
+                        source.common.xdictionary_handle = Some(new_root);
+                        copied_context_sources.push(source);
+                    }
                     self.poison_undo_recording();
+                }
+                if !copied_context_sources.is_empty() {
+                    crate::scene::annotative::transform_insert_attribute_contexts(
+                        &mut self.document,
+                        &copied_context_sources,
+                        t,
+                    );
                 }
                 if !annotation_scales.is_empty() {
                     for scale_handle in annotation_scales {
@@ -1361,7 +1746,8 @@ impl Scene {
                     }
                     _ => None,
                 };
-                if let Some(model) = new_model {
+                if let Some(mut model) = new_model {
+                    model.entity = Some(h);
                     self.hatches.insert(h, model);
                 }
                 // Images draw from a derived model, not the wire frame; without
@@ -1689,15 +2075,15 @@ impl Scene {
 
         match (self.document.get_entity(handle)?, operation) {
             (EntityType::Surface(_), SolidHistoryOperation::Extrusion(value)) => {
-                kernel::acis::rebuild_extrusion_with_mode(value, true).ok()
+                ocs_acis::rebuild_extrusion_with_mode(value, true).ok()
             }
             (EntityType::Surface(_), SolidHistoryOperation::Loft(_)) => {
-                kernel::acis::rebuild_body(operation).ok()
+                ocs_acis::rebuild_body(operation).ok()
             }
             (EntityType::Solid3D(_), _) => {
                 let mut tree = self.document.solid_history_tree(handle)?;
                 tree.find_mut(operation.base()?.node_id())?.operation = operation.clone();
-                kernel::acis::rebuild_history_tree(&tree).ok()
+                ocs_acis::rebuild_history_tree(&tree).ok()
             }
             _ => None,
         }
@@ -1770,7 +2156,7 @@ impl Scene {
             if !changed {
                 continue;
             }
-            let Ok(body) = kernel::acis::rebuild_sweep_with_mode(&record, true) else {
+            let Ok(body) = ocs_acis::rebuild_sweep_with_mode(&record, true) else {
                 continue;
             };
             let Some(document) = crate::scene::convert::acis_export::solid_to_sat(&body) else {
@@ -1786,7 +2172,8 @@ impl Scene {
                 .map(std::sync::Arc::new);
             self.record_undo_before(handle, before);
             if let Some(EntityType::Surface(surface)) = self.document.get_entity_mut(handle) {
-                surface.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
+                surface.acis_data =
+                    document::entities::AcisData::from_sat(&document.to_sat_string());
                 if let document::entities::SurfaceData::Swept { options, .. } =
                     &mut surface.surface_data
                 {
@@ -1865,7 +2252,8 @@ impl Scene {
                 .map(std::sync::Arc::new);
             self.record_undo_before(handle, before);
             if let Some(EntityType::Surface(surface)) = self.document.get_entity_mut(handle) {
-                surface.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
+                surface.acis_data =
+                    document::entities::AcisData::from_sat(&document.to_sat_string());
                 surface.surface_data = fresh.surface_data;
                 surface.point_of_reference = fresh.point_of_reference;
             }
@@ -1916,7 +2304,10 @@ impl Scene {
             let source = |handle: Handle| self.document.get_entity(handle).cloned();
             // The surface made again: a history step, or a body with its data.
             let made: Option<
-                Result<SolidHistoryOperation, (kernel::brep::Body, document::entities::SurfaceData)>,
+                Result<
+                    SolidHistoryOperation,
+                    (kernel::brep::Body, document::entities::SurfaceData),
+                >,
             > = match &sources {
                 SurfaceSources::Extrude {
                     profile,
@@ -2333,7 +2724,8 @@ impl Scene {
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data =
+                    document::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
                     if matches!(&data, document::entities::SurfaceData::Extruded { .. }) {
                         entity.kind = document::entities::SurfaceKind::Extruded;
@@ -2375,7 +2767,8 @@ impl Scene {
         match self.document.get_entity_mut(handle) {
             Some(EntityType::Solid3D(entity)) => entity.set_sat_document(&document),
             Some(EntityType::Surface(entity)) => {
-                entity.acis_data = document::entities::AcisData::from_sat(&document.to_sat_string());
+                entity.acis_data =
+                    document::entities::AcisData::from_sat(&document.to_sat_string());
                 if let Some(data) = surface_data {
                     if matches!(&data, document::entities::SurfaceData::Extruded { .. }) {
                         entity.kind = document::entities::SurfaceKind::Extruded;
@@ -2695,7 +3088,7 @@ impl Scene {
         let document::objects::SolidHistoryOperation::Sweep(record) = &operation else {
             return None;
         };
-        kernel::acis::sweep_history_refusal(record)
+        ocs_acis::sweep_history_refusal(record)
             .map(crate::scene::model::sweep_model::sweep_refusal_code)
     }
 
@@ -2704,7 +3097,7 @@ impl Scene {
         handle: Handle,
         field: &str,
         value: &str,
-        plane: crate::command::WorkingPlane,
+        plane: crate::entities::transform::WorkingPlane,
     ) -> Option<bool> {
         let axis = match field {
             "s3d_px" | "rgn_px" | "bdy_px" | "srf_px" => 0,
@@ -2794,19 +3187,68 @@ impl Scene {
         }
         if grip_id == GROUP_GRIP_ID {
             if let GripApply::Translate(delta) = apply {
-                self.transform_entities(&[handle], &crate::command::EntityTransform::Translate(delta));
+                self.transform_entities(
+                    &[handle],
+                    &crate::entities::transform::EntityTransform::Translate(delta),
+                );
             }
             return;
         }
-        // An attribute grip sits on the displayed (annotation-scaled)
-        // attribute; the stored one is unscaled.
-        let apply = match self.document.get_entity(handle) {
-            Some(EntityType::Insert(insert)) => crate::entities::insert::unscale_attribute_grip(
-                insert,
-                self.annotation_scale,
-                grip_id,
-                apply,
-            ),
+        let whole_insert_before = (grip_id == 0)
+            .then(|| self.document.get_entity(handle))
+            .flatten()
+            .and_then(|entity| match entity {
+                EntityType::Insert(insert) => Some((
+                    document::types::Matrix3::arbitrary_axis(insert.normal) * insert.insert_point,
+                    insert.attributes.clone(),
+                )),
+                _ => None,
+            });
+        // An INSERT-owned attribute may be painted from an annotation context
+        // rather than from its base fields. Move both representations by the
+        // displayed grip's delta so the text follows during the live preview.
+        let context_move = self.document.get_entity(handle).and_then(|entity| {
+            let EntityType::Insert(insert) = entity else {
+                return None;
+            };
+            let attribute = insert.attributes.get(grip_id.checked_sub(1)?)?.clone();
+            if attribute.flags.constant
+                || attribute.lock_position
+                || attribute.flags.locked_position
+            {
+                return None;
+            }
+            let mut displayed = attribute.clone();
+            crate::scene::annotative::place_attribute_for_annotation_scale(
+                &self.document,
+                &mut displayed,
+                self.displayed_annotation_scale_handle(),
+            )
+            .then(|| {
+                let delta = match &apply {
+                    GripApply::Absolute(target) => {
+                        *target
+                            - glam::DVec3::new(
+                                displayed.insertion_point.x,
+                                displayed.insertion_point.y,
+                                displayed.insertion_point.z,
+                            )
+                    }
+                    GripApply::Translate(delta) => *delta,
+                };
+                (attribute, delta)
+            })
+        });
+        let apply = match (self.document.get_entity(handle), &context_move) {
+            (_, Some((_, delta))) => GripApply::Translate(*delta),
+            (Some(EntityType::Insert(insert)), None) => {
+                crate::entities::insert::unscale_attribute_grip(
+                    insert,
+                    self.annotation_scale,
+                    grip_id,
+                    apply,
+                )
+            }
             _ => apply,
         };
         if self.apply_solid_history_grip(handle, grip_id, apply.clone()) {
@@ -2844,6 +3286,28 @@ impl Scene {
         if let Some(entity) = self.document.get_entity_mut(handle) {
             view::dispatch::apply_grip(entity, grip_id, apply);
         }
+        if let Some((attribute, delta)) = context_move {
+            crate::scene::annotative::translate_insert_attribute_contexts(
+                &mut self.document,
+                &attribute,
+                delta,
+            );
+        }
+        if let (Some((old_world, attributes)), Some(EntityType::Insert(insert))) =
+            (whole_insert_before, self.document.get_entity(handle))
+        {
+            let new_world =
+                document::types::Matrix3::arbitrary_axis(insert.normal) * insert.insert_point;
+            let delta = new_world - old_world;
+            let delta = glam::DVec3::new(delta.x, delta.y, delta.z);
+            for attribute in &attributes {
+                crate::scene::annotative::translate_insert_attribute_contexts(
+                    &mut self.document,
+                    attribute,
+                    delta,
+                );
+            }
+        }
         self.sync_diameter_association_angle(handle);
         if let Some((annotation_handle, old_landing)) = leader_landing_before {
             let new_landing = self.document.get_entity(handle).and_then(|entity| {
@@ -2868,7 +3332,7 @@ impl Scene {
                     if let Some(annotation) = self.document.get_entity_mut(annotation_handle) {
                         view::dispatch::apply_transform(
                             annotation,
-                            &crate::command::EntityTransform::Translate(delta),
+                            &crate::entities::transform::EntityTransform::Translate(delta),
                         );
                     }
 
@@ -2957,6 +3421,49 @@ impl Scene {
             self.bump_entities(&hatch_changes);
         }
     }
+
+    /// A Properties edit of INSERT Position moves the inline ATTRIB fields in
+    /// `apply_geom_prop`; move their per-scale drawing positions by that same
+    /// world-space displacement before the resident wires are rebuilt.
+    pub(crate) fn carry_insert_attribute_contexts_after_position_edit(
+        &mut self,
+        handle: Handle,
+        before: &document::entities::Insert,
+    ) {
+        let Some(EntityType::Insert(after)) = self.document.get_entity(handle) else {
+            return;
+        };
+        let old_world =
+            document::types::Matrix3::arbitrary_axis(before.normal) * before.insert_point;
+        let new_world = document::types::Matrix3::arbitrary_axis(after.normal) * after.insert_point;
+        let movement = new_world - old_world;
+        let delta = glam::DVec3::new(movement.x, movement.y, movement.z);
+        if delta.length_squared() <= 1.0e-24 {
+            return;
+        }
+        if self.is_recording_undo() {
+            let context_objects = self
+                .document
+                .get_entity(handle)
+                .map(|entity| {
+                    crate::scene::annotative::annotation_context_objects_for_entity(
+                        &self.document,
+                        entity,
+                    )
+                })
+                .unwrap_or_default();
+            for (object_handle, object) in context_objects {
+                self.record_undo_object_before(object_handle, Some(object));
+            }
+        }
+        for attribute in &before.attributes {
+            crate::scene::annotative::translate_insert_attribute_contexts(
+                &mut self.document,
+                attribute,
+                delta,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2966,7 +3473,10 @@ mod leader_annotation_reactor_tests {
     fn add_pair(scene: &mut Scene) -> (Handle, Handle) {
         let leader = scene.add_entity(EntityType::Leader(document::entities::Leader::default()));
         let annotation = scene.add_entity(EntityType::MText(Box::new(
-            document::entities::MText::with_value("note", document::types::Vector3::new(10.0, 5.0, 0.0)),
+            document::entities::MText::with_value(
+                "note",
+                document::types::Vector3::new(10.0, 5.0, 0.0),
+            ),
         )));
         (leader, annotation)
     }
@@ -3237,7 +3747,7 @@ mod define_transformed_block_xdict_tests {
         let name = scene
             .define_transformed_block(
                 &subs,
-                &crate::command::EntityTransform::Translate(glam::DVec3::ZERO),
+                &crate::entities::transform::EntityTransform::Translate(glam::DVec3::ZERO),
             )
             .expect("clone block must be created");
         let record = scene.document.block_records.get(&name).unwrap();
@@ -3281,7 +3791,7 @@ mod define_transformed_block_xdict_tests {
         let name = scene
             .define_transformed_block(
                 &subs,
-                &crate::command::EntityTransform::Translate(glam::DVec3::ZERO),
+                &crate::entities::transform::EntityTransform::Translate(glam::DVec3::ZERO),
             )
             .expect("clone block must be created");
         assert!(
@@ -3376,7 +3886,7 @@ mod add_entity_clone_xdict_tests {
 #[cfg(test)]
 mod copy_entities_xdict_tests {
     use super::*;
-    use crate::command::EntityTransform;
+    use crate::entities::transform::EntityTransform;
     use document::objects::{
         Dictionary, ObjectType, ProxyObjectReference, ProxyReferenceKind, XRecord, XRecordValue,
     };
@@ -4116,7 +4626,7 @@ mod copy_entities_xdict_tests {
 #[cfg(test)]
 mod copy_entities_subhandle_tests {
     use super::*;
-    use crate::command::EntityTransform;
+    use crate::entities::transform::EntityTransform;
     use document::entities::{
         AttributeEntity, Insert, PolyfaceFace, PolyfaceMesh, PolyfaceVertex, PolygonMeshEntity,
         PolygonMeshVertex,
@@ -4192,8 +4702,10 @@ mod copy_entities_subhandle_tests {
         .map(|e| doc.add_entity(e).unwrap())
         .collect();
 
-        let copies =
-            scene.copy_entities(&sources, &EntityTransform::Translate(DVec3::new(100.0, 0.0, 0.0)));
+        let copies = scene.copy_entities(
+            &sources,
+            &EntityTransform::Translate(DVec3::new(100.0, 0.0, 0.0)),
+        );
         assert_eq!(copies.len(), sources.len());
 
         let mut seen = std::collections::HashSet::new();
@@ -4202,7 +4714,10 @@ mod copy_entities_subhandle_tests {
             assert!(!subs.is_empty());
             for s in subs {
                 assert!(!s.is_null(), "sub-handle of {h:?} must be set");
-                assert!(seen.insert(s), "sub-handle {s:?} is shared between entities");
+                assert!(
+                    seen.insert(s),
+                    "sub-handle {s:?} is shared between entities"
+                );
             }
         }
     }
@@ -4213,9 +4728,15 @@ mod copy_entities_subhandle_tests {
     fn copied_polyfaces_keep_their_vertices_through_a_dwg_roundtrip() {
         let mut scene = Scene::new();
         let mesh = loaded_polyface(&mut scene.document);
-        let src = scene.document.add_entity(EntityType::PolyfaceMesh(mesh)).unwrap();
+        let src = scene
+            .document
+            .add_entity(EntityType::PolyfaceMesh(mesh))
+            .unwrap();
         for dx in [100.0, 200.0] {
-            scene.copy_entities(&[src], &EntityTransform::Translate(DVec3::new(dx, 0.0, 0.0)));
+            scene.copy_entities(
+                &[src],
+                &EntityTransform::Translate(DVec3::new(dx, 0.0, 0.0)),
+            );
         }
 
         let bytes = document::DwgWriter::write_to_vec(&scene.document).unwrap();
@@ -4241,7 +4762,7 @@ mod copy_entities_subhandle_tests {
 #[cfg(test)]
 mod copy_viewport_clip_tests {
     use super::*;
-    use crate::command::EntityTransform;
+    use crate::entities::transform::EntityTransform;
     use document::entities::{LwPolyline, Viewport};
     use glam::DVec3;
 
@@ -4297,7 +4818,7 @@ mod copy_viewport_clip_tests {
 #[cfg(test)]
 mod copy_field_tests {
     use super::*;
-    use crate::command::EntityTransform;
+    use crate::entities::transform::EntityTransform;
     use document::objects::{Dictionary, Field, ObjectType};
     use glam::DVec3;
 
@@ -4384,7 +4905,9 @@ mod copy_field_tests {
         let mut scene = Scene::new();
         let src = scene
             .document
-            .add_entity(EntityType::MText(Box::new(document::entities::MText::new())))
+            .add_entity(EntityType::MText(
+                Box::new(document::entities::MText::new()),
+            ))
             .unwrap();
         let (root, text, child) = add_field_tree(&mut scene.document, src);
         scene
@@ -4412,15 +4935,18 @@ mod copy_field_tests {
     #[test]
     fn copied_insert_attribute_gets_its_own_field_tree() {
         let mut scene = Scene::new();
-        let mut insert = document::entities::Insert::new(
-            "TITLE".to_string(),
-            document::types::Vector3::ZERO,
-        );
-        insert.attributes.push(document::entities::AttributeEntity::new(
-            "CLIENT".to_string(),
-            "ACME".to_string(),
-        ));
-        let src = scene.document.add_entity(EntityType::Insert(insert)).unwrap();
+        let mut insert =
+            document::entities::Insert::new("TITLE".to_string(), document::types::Vector3::ZERO);
+        insert
+            .attributes
+            .push(document::entities::AttributeEntity::new(
+                "CLIENT".to_string(),
+                "ACME".to_string(),
+            ));
+        let src = scene
+            .document
+            .add_entity(EntityType::Insert(insert))
+            .unwrap();
         let src_attribute = match scene.document.get_entity(src) {
             Some(EntityType::Insert(ins)) => ins.attributes[0].common.handle,
             _ => unreachable!(),
@@ -4441,7 +4967,10 @@ mod copy_field_tests {
             other => panic!("expected the copied insert, got {other:?}"),
         };
         let copy_root = copy_root.expect("copied attribute has an extension dictionary");
-        assert_ne!(copy_root, root, "copied attribute shares the source's dictionary");
+        assert_ne!(
+            copy_root, root,
+            "copied attribute shares the source's dictionary"
+        );
         match scene.document.objects.get(&copy_root) {
             Some(ObjectType::Dictionary(d)) => assert_eq!(d.owner, copy_attribute),
             other => panic!("expected a dictionary, got {other:?}"),
@@ -4456,7 +4985,8 @@ mod copy_field_tests {
 
 #[cfg(test)]
 mod table_picture_ownership_tests {
-    use crate::command::{CadCommand, CmdResult, EntityTransform};
+    use crate::command::{CadCommand, CmdResult};
+    use crate::entities::transform::EntityTransform;
     use crate::modules::annotate::table_cmd::TableCellEditCommand;
     use crate::scene::Scene;
     use document::entities::Table;

@@ -91,6 +91,10 @@ fn a_visibility_row_names_the_parameter_and_prints_no_number() {
         !found.description_writable,
         "a visibility row names no parameter component whose text it could write"
     );
+    assert!(
+        !found.order_writable,
+        "a visibility row has no parameter order to write"
+    );
 }
 
 #[test]
@@ -140,6 +144,37 @@ fn the_expression_cell_edits_the_same_number_as_the_value_cell() {
         distance.value, "10.1365",
         "the value cell renders it at the drawing's precision"
     );
+}
+
+#[test]
+fn a_typed_name_is_refused_and_the_used_filter_lists_nothing() {
+    let (mut app, tab, definition) = open(&["BPARAMETER POLAR 0,0 10,0 5,2"], &[]);
+    let before = manager::rows(&app.tabs[tab].scene.document, definition);
+    answer(&mut app, "Angle1", Cell::Expression, "Distance1");
+    assert_eq!(
+        app.command_line.last_error.as_deref(),
+        Some("Specify a finite numeric parameter value."),
+        "the cell keeps a number, so text is refused rather than stored"
+    );
+    assert_eq!(
+        manager::rows(&app.tabs[tab].scene.document, definition),
+        before,
+        "nothing a name types reaches the definition"
+    );
+    let listed = manager::displayed(&before, manager::FilterMode::UsedInExpressions, "*", "");
+    assert!(
+        listed.is_empty(),
+        "with every expression a literal, the used-in-expressions filter keeps no row"
+    );
+    assert_eq!(
+        manager::footer(
+            manager::FilterMode::UsedInExpressions,
+            before.len(),
+            listed.len()
+        ),
+        "All Used in Expressions: 0 of 2 parameters displayed"
+    );
+    let _ = app.dispatch_command("BEDIT_DISCARD");
 }
 
 #[test]
@@ -383,6 +418,134 @@ fn a_description_undone_under_the_open_field_is_not_written_back() {
     );
 }
 
+/// The order column ranks a parameter, not a row: both rows of a polar
+/// parameter print the rank typed on either of them, and the list keeps its
+/// alphabetical order because the rank is not a display position yet.
+#[test]
+fn an_order_ranks_the_whole_parameter() {
+    let (mut app, tab, definition) = open(
+        &[
+            "BPARAMETER POLAR 0,0 10,0 5,2",
+            "BPARAMETER LINEAR 0,0 3,4 6,6",
+        ],
+        &[],
+    );
+    answer(&mut app, "Distance1", Cell::Order, "2");
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "2",
+        "the typed rank is what the definition keeps"
+    );
+    assert_eq!(
+        printed(&app, tab, definition, "Angle1").order,
+        "2",
+        "the other row of the same parameter prints the same rank"
+    );
+    assert_eq!(
+        printed(&app, tab, definition, "Distance2").order,
+        "",
+        "a rank given to one parameter leaves the other unranked"
+    );
+    let rows = manager::rows(&app.tabs[tab].scene.document, definition);
+    assert_eq!(
+        rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+        ["Angle1", "Distance1", "Distance2"],
+        "the rank does not reorder the listed rows"
+    );
+}
+
+#[test]
+fn an_emptied_order_cell_clears_the_rank() {
+    let (mut app, tab, definition) = open(&["BPARAMETER LINEAR 0,0 10,0 6,6"], &[]);
+    answer(&mut app, "Distance1", Cell::Order, "3");
+    answer(&mut app, "Distance1", Cell::Order, "");
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "",
+        "an emptied cell clears the rank"
+    );
+    let _ = app.update(Message::Undo);
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "3",
+        "and one undo step brings it back"
+    );
+}
+
+#[test]
+fn an_untouched_order_waits_for_its_own_field() {
+    let (mut app, tab, definition) = open(&["BPARAMETER LINEAR 0,0 10,0 6,6"], &[]);
+    answer(&mut app, "Distance1", Cell::Order, "3");
+    let _ = app.update(Message::ParametersManagerEdit(
+        "Distance1".to_owned(),
+        Cell::Order,
+    ));
+    let _ = app.update(Message::ParametersManagerFocus(None));
+    assert!(
+        app.tabs[tab].parameters_panel.editing.is_some(),
+        "a field that has not been typed into stays open with the rank it shows"
+    );
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "3",
+        "and writes nothing while it stays open"
+    );
+    let _ = app.update(Message::ParametersManagerInput(String::new()));
+    let _ = app.update(Message::ParametersManagerFocus(None));
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "",
+        "an emptied order is a rank to clear, so moving the click away commits it"
+    );
+}
+
+#[test]
+fn a_non_integer_order_is_refused_and_writes_nothing() {
+    let (mut app, tab, definition) = open(&["BPARAMETER LINEAR 0,0 10,0 6,6"], &[]);
+    answer(&mut app, "Distance1", Cell::Order, "1.5");
+    assert_eq!(
+        app.command_line.last_error.as_deref(),
+        Some("Specify a whole-number parameter order."),
+        "the refusal says what the cell takes"
+    );
+    assert!(
+        app.tabs[tab].parameters_panel.editing.is_some(),
+        "the field stays open with the text to correct"
+    );
+    assert_eq!(
+        printed(&app, tab, definition, "Distance1").order,
+        "",
+        "and nothing is written"
+    );
+}
+
+/// The rank lives beside the parameter object in the drawing, so closing the
+/// session and reading the file back lists the same order column.
+#[test]
+fn the_order_survives_a_dxf_round_trip() {
+    let (mut app, tab, definition) = open(&["BPARAMETER LINEAR 0,0 10,0 6,6"], &[]);
+    answer(&mut app, "Distance1", Cell::Order, "3");
+    let path =
+        std::env::temp_dir().join(format!("ocs_parameters_order_{}.dxf", std::process::id()));
+    crate::io::save(&app.tabs[tab].scene.document, &path).expect("save the drawing");
+    let reopened = crate::io::load_file(&path).expect("reopen the drawing");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        row(&manager::rows(&reopened, definition), "Distance1").order,
+        "3",
+        "the rank is kept in the file, not only in the open session"
+    );
+    let parameter = crate::scene::block_actions::all_parameters(&reopened, definition)[0].handle;
+    assert!(
+        matches!(
+            reopened.objects.get(&parameter),
+            Some(document::objects::ObjectType::DynamicBlock(object))
+                if object.xdictionary_handle.is_some()
+        ),
+        "the parameter names the dictionary that holds its rank, so another reader finds it"
+    );
+}
+
 #[test]
 fn a_polar_parameters_two_rows_keep_their_own_descriptions() {
     let (mut app, tab, definition) = open(&["BPARAMETER POLAR 0,0 10,0 5,2"], &[]);
@@ -428,6 +591,54 @@ fn an_attribute_row_opens_no_description_field() {
         manager::rows(&app.tabs[tab].scene.document, definition),
         before,
         "and nothing is written"
+    );
+}
+
+#[test]
+fn an_attribute_row_opens_no_order_field() {
+    let (mut app, tab, definition) = open(&["BPARAMETER LINEAR 0,0 10,0 6,6"], &["TAG1"]);
+    let before = manager::rows(&app.tabs[tab].scene.document, definition);
+    assert!(
+        !row(&before, "TAG1").order_writable,
+        "an attribute row has no parameter rank to keep"
+    );
+    assert!(
+        row(&before, "Distance1").order_writable,
+        "a parameter row keeps a rank"
+    );
+    answer(&mut app, "TAG1", Cell::Order, "2");
+    assert!(
+        app.tabs[tab].parameters_panel.editing.is_none(),
+        "an attribute's row opens no order field"
+    );
+    assert_eq!(
+        manager::rows(&app.tabs[tab].scene.document, definition),
+        before,
+        "and nothing is written"
+    );
+}
+
+/// A point's axes print a position rather than a number the manager writes, but
+/// the parameter itself still takes a rank, so its order cell opens.
+#[test]
+fn a_point_row_opens_its_order_field() {
+    let (mut app, tab, definition) = open(&["BPARAMETER POINT 0,0 5,5"], &[]);
+    let name = manager::rows(&app.tabs[tab].scene.document, definition)
+        .into_iter()
+        .find(|row| row.type_name == "Point")
+        .expect("the placed point parameter gets a row")
+        .name;
+    let _ = app.update(Message::ParametersManagerEdit(name.clone(), Cell::Order));
+    assert!(
+        app.tabs[tab].parameters_panel.editing.is_some(),
+        "the point row opens an order field even though its numeric cells stay printed"
+    );
+    let _ = app.update(Message::ParametersManagerInput("1".to_owned()));
+    let _ = app.update(Message::ParametersManagerCommit);
+    assert_eq!(
+        printed(&app, tab, definition, &name).order,
+        "1",
+        "and the typed rank is kept"
     );
 }
 
@@ -821,11 +1032,24 @@ fn the_filter_and_search_narrow_the_rows_and_the_footer_counts_them() {
         3,
         "Angle1, Distance1 and TAG1 end in 1"
     );
-    assert_eq!(manager::displayed(&rows, manager::FilterMode::All, "Distance*", "").len(), 2);
-    assert_eq!(manager::displayed(&rows, manager::FilterMode::All, "*", "angle").len(), 1);
-    assert_eq!(manager::displayed(&rows, manager::FilterMode::All, "Angle*", "distance").len(), 0);
     assert_eq!(
-        manager::footer(manager::FilterMode::All, rows.len(), manager::displayed(&rows, manager::FilterMode::All, "Angle*", "").len()),
+        manager::displayed(&rows, manager::FilterMode::All, "Distance*", "").len(),
+        2
+    );
+    assert_eq!(
+        manager::displayed(&rows, manager::FilterMode::All, "*", "angle").len(),
+        1
+    );
+    assert_eq!(
+        manager::displayed(&rows, manager::FilterMode::All, "Angle*", "distance").len(),
+        0
+    );
+    assert_eq!(
+        manager::footer(
+            manager::FilterMode::All,
+            rows.len(),
+            manager::displayed(&rows, manager::FilterMode::All, "Angle*", "").len()
+        ),
         "All: 1 of 4 parameters displayed"
     );
 }
@@ -1364,6 +1588,10 @@ fn the_header_menu_opens_and_an_entry_toggles_its_column_and_closes_the_menu() {
         !app.tabs[tab].parameters_panel.header_menu,
         "the menu starts closed"
     );
+    assert!(
+        !app.tabs[tab].parameters_panel.columns[Column::Type.index()],
+        "Type starts hidden, as the recorded menu leaves it"
+    );
     let _ = app.update(Message::ParametersManagerHeaderMenu);
     assert!(
         app.tabs[tab].parameters_panel.header_menu,
@@ -1371,8 +1599,8 @@ fn the_header_menu_opens_and_an_entry_toggles_its_column_and_closes_the_menu() {
     );
     let _ = app.update(Message::ParametersManagerColumn(Column::Type));
     assert!(
-        !app.tabs[tab].parameters_panel.columns[Column::Type.index()],
-        "choosing Type hides that column"
+        app.tabs[tab].parameters_panel.columns[Column::Type.index()],
+        "choosing Type shows that column"
     );
     assert!(
         !app.tabs[tab].parameters_panel.header_menu,
@@ -1380,8 +1608,30 @@ fn the_header_menu_opens_and_an_entry_toggles_its_column_and_closes_the_menu() {
     );
     let _ = app.update(Message::ParametersManagerColumn(Column::Type));
     assert!(
-        app.tabs[tab].parameters_panel.columns[Column::Type.index()],
-        "choosing it again brings the column back"
+        !app.tabs[tab].parameters_panel.columns[Column::Type.index()],
+        "choosing it again hides the column"
+    );
+    let _ = app.dispatch_command("BEDIT_DISCARD");
+}
+
+#[test]
+fn closing_the_manager_keeps_the_columns_that_were_shown() {
+    use crate::ui::window::parameters_manager::Column;
+    let (mut app, tab, _definition) = open(&["BPARAMETER POLAR 0,0 10,0 5,2"], &[]);
+    let _ = app.update(Message::ParametersManagerColumn(Column::Description));
+    assert!(
+        app.tabs[tab].parameters_panel.columns[Column::Description.index()],
+        "Description can be turned on"
+    );
+    let _ = app.dispatch_command("PARAMETERSCLOSE");
+    let _ = app.dispatch_command("BPARAMETERS");
+    assert!(
+        app.tabs[tab].parameters_panel.columns[Column::Description.index()],
+        "and the pane that opens again still shows it"
+    );
+    assert!(
+        !app.tabs[tab].parameters_panel.columns[Column::Type.index()],
+        "while Type stays hidden"
     );
     let _ = app.dispatch_command("BEDIT_DISCARD");
 }
@@ -1398,7 +1648,12 @@ fn the_two_fields_narrow_the_list_and_the_count_follows() {
     let count = |app: &OpenCADStudio| {
         let panel = &app.tabs[tab].parameters_panel;
         let rows = manager::rows(&app.tabs[tab].scene.document, definition);
-        let shown = manager::displayed(&rows, manager::FilterMode::All, &panel.filter, &panel.search);
+        let shown = manager::displayed(
+            &rows,
+            manager::FilterMode::All,
+            &panel.filter,
+            &panel.search,
+        );
         manager::footer(manager::FilterMode::All, rows.len(), shown.len())
     };
     assert_eq!(
@@ -1578,7 +1833,8 @@ fn manager_edit_refreshes_ordered_actions_and_transported_parameters_with_undo()
         let scaled =
             actions::create(doc, definition, Kind::Scale, parent, &[member], DVec3::ZERO).unwrap();
         actions::create(doc, definition, Kind::Move, child, &[member], DVec3::ZERO).unwrap();
-        let document::objects::ObjectType::DynamicBlock(object) = doc.objects.get_mut(&moved).unwrap()
+        let document::objects::ObjectType::DynamicBlock(object) =
+            doc.objects.get_mut(&moved).unwrap()
         else {
             panic!()
         };
@@ -1703,7 +1959,8 @@ fn evaluation_graph(document: &document::Document) -> document::Handle {
 /// Leave the graph naming one node twice: every parameter it held is still
 /// named, and no authoring read will edit it.
 fn duplicate_a_node(document: &mut document::Document, graph: document::Handle) -> bool {
-    let Some(document::objects::ObjectType::DynamicBlock(object)) = document.objects.get_mut(&graph)
+    let Some(document::objects::ObjectType::DynamicBlock(object)) =
+        document.objects.get_mut(&graph)
     else {
         return false;
     };

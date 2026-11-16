@@ -125,6 +125,15 @@ pub enum HostRequest {
     GetModalDialog {
         command_id: u64,
     },
+    /// V19 (additive): an event (choice change, button, toggle, table row)
+    /// inside the interactive command's open modal dialog. The runner answers
+    /// with [`HostResponse::DialogAction`] carrying the command's
+    /// `on_dialog_action` result, so out-of-process plugins can replace,
+    /// submit or close their dialog like in-process ones.
+    DialogAction {
+        command_id: u64,
+        event: crate::dialog::DialogEvent,
+    },
 }
 
 /// Responses the plugin runner sends back for `HostRequest`.
@@ -142,6 +151,8 @@ pub enum HostResponse {
     /// preview wire set that replaces its previous live preview.
     CustomGrip(CustomGripResponse),
     ModalDialog(Option<crate::dialog::DialogDef>),
+    /// V19 (additive): answer to [`HostRequest::DialogAction`].
+    DialogAction(crate::dialog::DialogActionResponse),
 }
 
 /// Requests the plugin runner sends to the host.
@@ -382,6 +393,16 @@ pub enum PluginRequest {
         chain: crate::host::ParametricChain,
         tolerance: f64,
     },
+    /// Additive: read the current state of an owned dock panel.
+    PanelSnapshot {
+        panel_id: String,
+    },
+    /// V22 (additive): create or update the model-space GEODATA object.
+    SetGeoLocation {
+        location: crate::host::GeoLocation,
+    },
+    /// V22 (additive): remove the model-space GEODATA object.
+    RemoveGeoLocation,
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -456,9 +477,7 @@ pub enum PluginResponse {
     StagePluginClassInstanceResult(Result<Vec<Handle>, String>),
     /// V14 (additive): a class instance's declared parameter rows (the
     /// read half of the session's properties pair).
-    PluginClassInstancePropertiesResult(
-        Result<Vec<crate::host::PluginClassParameterRow>, String>,
-    ),
+    PluginClassInstancePropertiesResult(Result<Vec<crate::host::PluginClassParameterRow>, String>),
     DialogResult(crate::dialog::DialogResponse),
     PanelRegistered(bool),
     PanelUpdated(bool),
@@ -474,6 +493,12 @@ pub enum PluginResponse {
     },
     /// Additive: outcome of pure parametric-chain validation.
     ValidateParametricChainResult(Result<(), String>),
+    /// Additive: current state of an owned dock panel.
+    PanelSnapshot(Result<crate::dialog::PanelSnapshot, String>),
+    /// V22 (additive): the GEODATA handle written by `SetGeoLocation`.
+    GeoLocationSet(Result<crate::host::Handle, String>),
+    /// V22 (additive): whether `RemoveGeoLocation` removed an object.
+    GeoLocationRemoved(Result<bool, String>),
 }
 
 /// Messages sent from the host to the plugin runner.
@@ -528,6 +553,125 @@ impl OwnedPluginManifest {
     pub fn api_version(&self) -> ApiVersion {
         ApiVersion {
             major: self.api_version,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discriminant_of<T: Serialize>(value: &T) -> u32 {
+        let bytes = bincode::serialize(value).expect("serialize");
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+
+    #[test]
+    fn plugin_request_v14_to_v16_discriminants_are_preserved() {
+        assert_eq!(
+            discriminant_of(&PluginRequest::ShowDialog(crate::dialog::DialogDef::new("T"))),
+            50
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::RegisterPanel(
+                crate::dialog::PanelDef::new("id", "T")
+            )),
+            51
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::UpdatePanel {
+                panel_id: "id".into(),
+                values: Default::default(),
+            }),
+            52
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::TogglePanel {
+                panel_id: "id".into(),
+                show: None,
+            }),
+            53
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::BeginUndoGroup {
+                label: "group".into(),
+            }),
+            54
+        );
+        assert_eq!(discriminant_of(&PluginRequest::EndUndoGroup), 55);
+        assert_eq!(
+            discriminant_of(&PluginRequest::QueryEntities {
+                query: "{}".into(),
+            }),
+            56
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::RegisterQuadPanels { panels: vec![] }),
+            57
+        );
+        assert_eq!(
+            discriminant_of(&PluginRequest::UnregisterQuadPanels { panel_ids: vec![] }),
+            58
+        );
+        assert_eq!(
+            discriminant_of(&HostRequest::GetModalDialog { command_id: 1 }),
+            14
+        );
+        assert_eq!(
+            discriminant_of(&HostRequest::DialogAction {
+                command_id: 1,
+                event: crate::dialog::DialogEvent {
+                    control_id: String::new(),
+                    action: String::new(),
+                    value: None,
+                    current_values: Default::default(),
+                },
+            }),
+            15
+        );
+    }
+
+    fn discriminant<T: serde::Serialize>(value: &T) -> u32 {
+        let bytes = bincode::serialize(value).expect("serialize IPC variant");
+        u32::from_le_bytes(bytes[..4].try_into().expect("bincode enum discriminant"))
+    }
+
+    #[test]
+    fn panel_snapshot_variants_append_without_shifting_discriminants() {
+        let request = PluginRequest::PanelSnapshot {
+            panel_id: "alignment".to_owned(),
+        };
+        let response = PluginResponse::PanelSnapshot(Err("unsupported".to_owned()));
+
+        assert_eq!(discriminant(&PluginRequest::PushInfo(String::new())), 0);
+        assert_eq!(
+            discriminant(&PluginRequest::ValidateParametricChain {
+                chain: crate::host::ParametricChain {
+                    plane: crate::host::ParametricPlane::Plan,
+                    segments: Vec::new(),
+                    layer: String::new(),
+                },
+                tolerance: 1e-3,
+            }),
+            59
+        );
+        assert_eq!(discriminant(&request), 60);
+        assert_eq!(discriminant(&PluginResponse::Ok), 0);
+        assert_eq!(
+            discriminant(&PluginResponse::ValidateParametricChainResult(Ok(()))),
+            45
+        );
+        assert_eq!(discriminant(&response), 46);
+
+        let bytes = bincode::serialize(&request).expect("serialize panel snapshot request");
+        match bincode::deserialize::<PluginRequest>(&bytes).expect("deserialize request") {
+            PluginRequest::PanelSnapshot { panel_id } => assert_eq!(panel_id, "alignment"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let bytes = bincode::serialize(&response).expect("serialize panel snapshot response");
+        match bincode::deserialize::<PluginResponse>(&bytes).expect("deserialize response") {
+            PluginResponse::PanelSnapshot(Err(error)) => assert_eq!(error, "unsupported"),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 }

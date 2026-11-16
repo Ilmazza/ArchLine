@@ -1,6 +1,6 @@
 // Auto-split from scene/mod.rs. Pure text-move; behaviour unchanged.
-use crate::scene::model::wire_model::DashClosure;
 use super::super::*;
+use crate::scene::model::wire_model::DashClosure;
 
 /// Dim an already-bg-adapted colour toward the background when the entity's
 /// layer is locked, so locked objects read as non-editable (they stay visible
@@ -177,6 +177,22 @@ pub(crate) fn walk_complex_linetype(
             (rotated.as_slice(), true, rotated_band.as_deref())
         }
     };
+    // A polyline's runs are walked one by one, each under the per-run repeat
+    // cap, so the whole path is checked here: past the budget, draw it solid.
+    let total: f64 = path
+        .split(|p| p[0].is_nan())
+        .map(|run| {
+            run.windows(2)
+                .map(|w| {
+                    let d = [w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]];
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    if text::complex_lt::exceeds_repeat_budget(linetype, scale, total) {
+        return None;
+    }
     let mut wires = Vec::new();
     let mut next_run = 0;
     for run in path.split(|p| p[0].is_nan()) {
@@ -324,32 +340,30 @@ fn block_object_style(
     active_viewport: Option<Handle>,
     bg_color: [f32; 4],
 ) -> BlockObjectStyle {
-    let entity = EntityType::Insert(insert.clone());
+    let common = &insert.common;
     let (color, pattern_length, pattern, line_weight_px, aci) =
-        view::render::render_style_for_viewport(document, &entity, active_viewport);
+        view::render::render_style_for_common_viewport(document, common, active_viewport);
     let (pattern_length, pattern) =
-        view::render::insert_pattern_for_children(&insert.common, pattern_length, pattern);
+        view::render::insert_pattern_for_children(common, pattern_length, pattern);
     let mut layer =
-        view::render::layer_render_style_viewport(document, &insert.common.layer, active_viewport);
+        view::render::layer_render_style_viewport(document, &common.layer, active_viewport);
+    let layer_record = document.layers.get(&common.layer);
+    let locked = layer_record.is_some_and(|l| l.is_locked());
     layer.color = view::render::adapt_to_bg(layer.color, bg_color);
-    if view::render::layer_locked(document, &entity) {
+    if locked {
         layer.color = crate::scene::cache::block_cache::fade_toward_bg(layer.color, bg_color);
     }
-    let layer_aci = document
-        .layers
-        .get(&insert.common.layer)
+    let layer_aci = layer_record
         .and_then(|layer| match &layer.color {
             document::types::Color::Index(index) => Some(*index),
             _ => None,
         })
         .unwrap_or(0);
-    let layer_plottable = document
-        .layers
-        .get(&insert.common.layer)
-        .map(|layer| layer.is_plottable)
-        .unwrap_or(true);
-    let color = view::render::adapt_to_bg(color, bg_color);
-    let color = fade_if_locked(document, &entity, color, bg_color);
+    let layer_plottable = layer_record.map(|layer| layer.is_plottable).unwrap_or(true);
+    let mut color = view::render::adapt_to_bg(color, bg_color);
+    if locked {
+        color = crate::scene::cache::block_cache::fade_toward_bg(color, bg_color);
+    }
     BlockObjectStyle {
         color,
         aci,
@@ -380,11 +394,12 @@ pub(crate) fn expand_block_object(
 ) -> ExpandedBlockObject {
     let style = block_object_style(document, insert, active_viewport, bg_color);
     let fallback_depths = rustc_hash::FxHashMap::default();
-    let fallback_cache;
-    let cache = match block_cache {
-        Some(cache) if cache.defn(&insert.block_name).is_some() => cache,
-        _ => {
-            fallback_cache = cache::block_cache::BlockCache::build_for_block(
+    let mut fallback_cache = None;
+    let resolved = block_cache.and_then(|cache| cache.defn(&insert.block_name).map(|d| (cache, d)));
+    let (cache, defn) = match resolved {
+        Some(pair) => pair,
+        None => {
+            let built = cache::block_cache::BlockCache::build_for_block(
                 document,
                 &insert.block_name,
                 anno_scale,
@@ -394,17 +409,22 @@ pub(crate) fn expand_block_object(
                 active_viewport,
                 &fallback_depths,
             );
-            &fallback_cache
+            let cache_ref = fallback_cache.insert(built);
+            let Some(defn) = cache_ref.defn(&insert.block_name) else {
+                return ExpandedBlockObject {
+                    wires: Vec::new(),
+                    style,
+                    is_xref: false,
+                };
+            };
+            (cache_ref as &cache::block_cache::BlockCache, defn)
         }
     };
-    let is_xref = document
-        .block_records
-        .get(&insert.block_name)
-        .map(|record| record.flags.is_xref || record.flags.is_xref_overlay)
-        .unwrap_or(false);
-    let mut wires = cache::block_cache::expand_insert(
+    let is_xref = defn.is_xref;
+    let mut wires = cache::block_cache::expand_insert_with_defn(
         document,
         cache,
+        defn,
         insert,
         owner,
         style.color,
@@ -781,7 +801,12 @@ fn proxy_preview_wires(
             .map_or(e.common().layer.as_str(), |layer| layer.name.as_str())
     };
     let show = |c: [f32; 4]| {
-        fade_if_locked(document, e, view::render::adapt_to_bg(c, bg_color), bg_color)
+        fade_if_locked(
+            document,
+            e,
+            view::render::adapt_to_bg(c, bg_color),
+            bg_color,
+        )
     };
     // (colour, aci, pattern length, pattern, lineweight px) of a style.
     let resolve = |style: &ProxyStyle| -> ([f32; 4], u8, f32, [f32; 8], f32) {
@@ -798,7 +823,9 @@ fn proxy_preview_wires(
                 (show(layer.color), aci)
             }
             ProxyColor::Aci(a) => (
-                show(convert::tess_util::aci_to_rgba(&document::types::Color::Index(a))),
+                show(convert::tess_util::aci_to_rgba(
+                    &document::types::Color::Index(a),
+                )),
                 a,
             ),
             ProxyColor::Rgb(r, g, b) => {
@@ -830,9 +857,7 @@ fn proxy_preview_wires(
                 }),
         };
         let lw_px = match style.lineweight {
-            w if w >= 0 => {
-                view::render::lineweight_to_px(&document::types::LineWeight::Value(w))
-            }
+            w if w >= 0 => view::render::lineweight_to_px(&document::types::LineWeight::Value(w)),
             -1 if style.layer.is_some() => layer.lw_px,
             _ => own.line_weight_px,
         };
@@ -869,21 +894,42 @@ fn proxy_preview_wires(
         let font = t.font.trim();
         let font = font.rsplit_once('.').map_or(font, |(stem, _)| stem);
         let font = if font.is_empty() { "standard" } else { font };
-        let width = if t.width_factor > 0.0 { t.width_factor } else { 1.0 };
+        let width = if t.width_factor > 0.0 {
+            t.width_factor
+        } else {
+            1.0
+        };
+        // Lay out unrotated, shift by the alignment, then turn.
         let (strokes, _) = crate::scene::text::lff::tessellate_text_ex(
             [0.0, 0.0],
             t.height as f32,
-            t.rotation as f32,
+            0.0,
             width as f32,
             t.oblique as f32,
             font,
             &t.text,
         );
+        let (min_x, max_x) = strokes
+            .iter()
+            .flatten()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+        let shift_x = if min_x <= max_x {
+            -(min_x as f64 + t.align[0] * (max_x - min_x) as f64)
+        } else {
+            0.0
+        };
+        let shift_y = -t.align[1] * t.height;
+        let (sin, cos) = t.rotation.sin_cos();
         for stroke in strokes.iter().filter(|s| s.len() >= 2) {
             let run: Vec<[f64; 3]> = stroke
                 .iter()
                 .map(|&[x, y]| {
-                    [t.position[0] + x as f64, t.position[1] + y as f64, t.position[2]]
+                    let (x, y) = (x as f64 + shift_x, y as f64 + shift_y);
+                    [
+                        t.position[0] + x * cos - y * sin,
+                        t.position[1] + x * sin + y * cos,
+                        t.position[2],
+                    ]
                 })
                 .collect();
             push_run(t.style, &run);
@@ -891,14 +937,21 @@ fn proxy_preview_wires(
     }
     let mut fills: BTreeMap<ProxyStyle, Vec<[f64; 3]>> = BTreeMap::new();
     for fill in &dec.fills {
-        fills.entry(fill.style).or_default().extend_from_slice(&fill.tris);
+        fills
+            .entry(fill.style)
+            .or_default()
+            .extend_from_slice(&fill.tris);
     }
     let mut wires: Vec<WireModel> = lines
         .into_iter()
         .filter(|(_, pts)| pts.len() >= 2)
         .map(|(style, pts)| wire(&style, pts, Vec::new()))
         .collect();
-    wires.extend(fills.into_iter().map(|(style, tris)| wire(&style, Vec::new(), tris)));
+    wires.extend(
+        fills
+            .into_iter()
+            .map(|(style, tris)| wire(&style, Vec::new(), tris)),
+    );
     wires
 }
 
@@ -1239,10 +1292,49 @@ fn tessellate_entity_inner(
             document::entities::ExtendedEntityData::Proxy(proxy) => {
                 Some(std::borrow::Cow::Owned(proxy.graphics.data()))
             }
+            // Arch objects the codec names but does not draw (walls, doors,
+            // windows…) still carry the preview their application cached.
+            document::entities::ExtendedEntityData::Arch(_) => e
+                .common()
+                .graphic_data
+                .as_deref()
+                .map(std::borrow::Cow::Borrowed),
             _ => None,
         },
         _ => None,
     };
+    // ── Civil 3D objects ─────────────────────────────────────────────────────
+    //
+    // The display cache Civil 3D saved, when it kept one, is what the object
+    // draws, styles applied; draw it as a proxy below. Otherwise the cache is
+    // a placeholder (the class name and a box) and the object is rebuilt from
+    // its record, styled by its Civil 3D style; a class not decoded draws
+    // nothing.
+    if let EntityType::Extended(entity) = e {
+        if let document::entities::ExtendedEntityData::Arch(data) = &entity.data {
+            if data.civil_kind().is_some() && !proxy_blob.as_deref().is_some_and(civil_drawn_cache) {
+                let Some(dec) = crate::entities::civil::decoded(data, e.common().handle.value(), document) else {
+                    return Vec::new();
+                };
+                let inherited = ProxyInherit {
+                    color: entity_color,
+                    aci,
+                    pattern_length,
+                    pattern,
+                    line_weight_px,
+                };
+                return proxy_preview_wires(
+                    document,
+                    e,
+                    &dec,
+                    inherited,
+                    active_viewport,
+                    bg_color,
+                    sel,
+                );
+            }
+        }
+    }
     if let Some(blob) = proxy_blob {
         let dec = convert::proxy_graphics::decode(blob.as_ref());
         let inherited = ProxyInherit {
@@ -1252,15 +1344,8 @@ fn tessellate_entity_inner(
             pattern,
             line_weight_px,
         };
-        let wires = proxy_preview_wires(
-            document,
-            e,
-            &dec,
-            inherited,
-            active_viewport,
-            bg_color,
-            sel,
-        );
+        let wires =
+            proxy_preview_wires(document, e, &dec, inherited, active_viewport, bg_color, sel);
         if !wires.is_empty() {
             return wires;
         }
@@ -1324,6 +1409,7 @@ fn tessellate_entity_inner(
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            solid_normal: None,
             render_instance: None,
             pick_tris,
             pick_tris_low,
@@ -1579,6 +1665,7 @@ fn tessellate_entity_inner(
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            solid_normal: None,
             render_instance: None,
             pick_tris: Vec::new(),
             pick_tris_low: Vec::new(),
@@ -1834,7 +1921,18 @@ fn tessellate_entity_inner(
                 band.as_deref(),
             ) {
                 for wire in &mut wires {
-                    set_wire_aabb(wire, aabb);
+                    // Each hairline batch has its own extent. The box index
+                    // groups these under the entity for whole-object selection.
+                    let box_hint = if !wire.points.is_empty()
+                        && wire.world_width == 0.0
+                        && wire.taper_widths.is_empty()
+                        && wire.text_verts.is_empty()
+                    {
+                        WireModel::UNBOUNDED_AABB
+                    } else {
+                        aabb
+                    };
+                    set_wire_aabb(wire, box_hint);
                 }
                 // Dashes and gaps don't change where a wide band picks.
                 if let (Some(first), Some(picks)) = (
@@ -1843,6 +1941,8 @@ fn tessellate_entity_inner(
                 ) {
                     first.pick_tris = picks.pick_tris.clone();
                     first.pick_tris_low = picks.pick_tris_low.clone();
+                    let box_hint = first.aabb;
+                    set_wire_aabb(first, box_hint);
                 }
                 return wires;
             }
@@ -1969,16 +2069,16 @@ fn tessellate_entity_inner(
     bases
 }
 
-/// Build the 4 OBB corners (CCW: bl, br, tr, tl) of a Text / MText entity
-/// in its **native frame** — for top-level entities this is world coords,
-/// for block-defn subs it's block-local. No offset/transform applied.
-/// Width is approximated from glyph height × character count (TEXT) or
-/// from `rectangle_width` (MTEXT). Returns `None` for non-text entities.
-///
-/// `mtext_lines_override` lets the caller plug in a wrap-aware line count
-/// (from `text_support::mtext_line_count`). Without it, MText's OBB
-/// height collapses to a single line when the file omits `rectangle_height`,
-/// which makes downstream per-line LOD math degenerate.
+// Build the 4 OBB corners (CCW: bl, br, tr, tl) of a Text / MText entity
+// in its **native frame** — for top-level entities this is world coords,
+// for block-defn subs it's block-local. No offset/transform applied.
+// Width is approximated from glyph height × character count (TEXT) or
+// from `rectangle_width` (MTEXT). Returns `None` for non-text entities.
+//
+// `mtext_lines_override` lets the caller plug in a wrap-aware line count
+// (from `text_support::mtext_line_count`). Without it, MText's OBB
+// height collapses to a single line when the file omits `rectangle_height`,
+// which makes downstream per-line LOD math degenerate.
 
 /// Build a "low-LOD stub" wire for an entity that would otherwise be culled
 /// to nothing — the entity's AABB diagonal as a 2-point segment, plus the
@@ -2017,6 +2117,7 @@ fn lod_stub_wire(
         plot_visible: true,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        solid_normal: None,
         render_instance: None,
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
@@ -2115,6 +2216,7 @@ fn lod_stub_wire_3d(
         plot_visible: true,
         fill_is_3d: false,
         fill_is_2d_solid: false,
+        solid_normal: None,
         render_instance: None,
         pick_tris: Vec::new(),
         pick_tris_low: Vec::new(),
@@ -2260,11 +2362,98 @@ pub(crate) fn entity_bounds(e: &document::EntityType) -> ([f64; 3], [f64; 3]) {
             return (bounds.min, bounds.max);
         }
     }
+    if let document::EntityType::Ellipse(ellipse) = e {
+        if let Some(bounds) = ellipse_bounds(ellipse) {
+            return bounds;
+        }
+    }
     let bounds = e.as_entity().bounding_box();
     (
         [bounds.min.x, bounds.min.y, bounds.min.z],
         [bounds.max.x, bounds.max.y, bounds.max.z],
     )
+}
+
+/// Tight WCS box of an ellipse or elliptical arc: the swept endpoints plus
+/// every axis-extreme parameter inside the sweep. The generic
+/// `bounding_box()` uses the major radius on both axes.
+fn ellipse_bounds(el: &document::entities::Ellipse) -> Option<([f64; 3], [f64; 3])> {
+    let (c, a, n) = (el.center, el.major_axis, el.normal);
+    let r = el.minor_axis_ratio;
+    // A stored normal need not be unit length; the minor axis must be.
+    let len = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+    if !(len > 0.0) {
+        return None;
+    }
+    let n = document::types::Vector3::new(n.x / len, n.y / len, n.z / len);
+    // Minor axis = normal x major, scaled by the ratio.
+    let b = [
+        (n.y * a.z - n.z * a.y) * r,
+        (n.z * a.x - n.x * a.z) * r,
+        (n.x * a.y - n.y * a.x) * r,
+    ];
+    let a = [a.x, a.y, a.z];
+    if !(a.iter().chain(b.iter()).all(|v| v.is_finite())) || a == [0.0; 3] {
+        return None;
+    }
+    let tau = std::f64::consts::TAU;
+    let start = el.start_parameter;
+    let mut sweep = (el.end_parameter - start).rem_euclid(tau);
+    if sweep <= 1e-12 {
+        sweep = tau;
+    }
+    let mut params = vec![start, start + sweep];
+    for k in 0..3 {
+        // d/dt (a cos t + b sin t) = 0  ->  t = atan2(b, a) (+ pi)
+        let t0 = b[k].atan2(a[k]);
+        for t in [t0, t0 + std::f64::consts::PI] {
+            let off = (t - start).rem_euclid(tau);
+            if off <= sweep {
+                params.push(start + off);
+            }
+        }
+    }
+    let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    let cc = [c.x, c.y, c.z];
+    for t in params {
+        let (ct, st) = (t.cos(), t.sin());
+        for k in 0..3 {
+            let v = cc[k] + a[k] * ct + b[k] * st;
+            min[k] = min[k].min(v);
+            max[k] = max[k].max(v);
+        }
+    }
+    Some((min, max))
+}
+
+#[cfg(test)]
+mod ellipse_bounds_tests {
+    use super::*;
+
+    fn ellipse(start: f64, end: f64) -> document::EntityType {
+        let mut el = document::entities::Ellipse::default();
+        el.center = document::types::Vector3::new(0.0, 0.0, 0.0);
+        el.major_axis = document::types::Vector3::new(10.0, 0.0, 0.0);
+        el.normal = document::types::Vector3::new(0.0, 0.0, 1.0);
+        el.minor_axis_ratio = 0.3;
+        el.start_parameter = start;
+        el.end_parameter = end;
+        document::EntityType::Ellipse(el)
+    }
+
+    #[test]
+    fn full_ellipse_uses_minor_axis() {
+        let (min, max) = entity_bounds(&ellipse(0.0, std::f64::consts::TAU));
+        assert!((min[0] + 10.0).abs() < 1e-9 && (max[0] - 10.0).abs() < 1e-9);
+        assert!((min[1] + 3.0).abs() < 1e-9 && (max[1] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quarter_arc_covers_only_its_sweep() {
+        let (min, max) = entity_bounds(&ellipse(0.0, std::f64::consts::FRAC_PI_2));
+        assert!(min[0].abs() < 1e-9 && (max[0] - 10.0).abs() < 1e-9);
+        assert!(min[1].abs() < 1e-9 && (max[1] - 3.0).abs() < 1e-9);
+    }
 }
 
 /// [`entity_bounds`] with the document, for entities whose extent is not
@@ -2345,6 +2534,102 @@ pub(crate) fn is_unindexable_entity(e: &document::EntityType) -> bool {
         e,
         E::Insert(_) | E::Viewport(_) | E::Block(_) | E::BlockEnd(_)
     )
+}
+
+/// Whether a Civil 3D display cache holds what the object draws rather than
+/// a placeholder: a drawn cache opens with its layer, a placeholder with the
+/// class name as text (record 36).
+pub(crate) fn civil_drawn_cache(blob: &[u8]) -> bool {
+    // An 8-byte header, then records of `u32 size, u32 type, payload`.
+    blob.get(12..16).is_some_and(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]) != 36)
+}
+
+#[cfg(test)]
+mod civil_proxy_tests {
+    use super::*;
+    use document::classes::arch::{ArchEntityData, ArchKind};
+    use document::entities::{EntityCommon, ExtendedEntity, ExtendedEntityData, ProxyGraphicRecord, ProxyGraphics};
+
+    fn boxed(dxf_name: &str, placeholder: bool, document: &mut document::Document) -> EntityType {
+        let mut data = Vec::new();
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.4], [0.0, 0.4], [0.0, 0.0]];
+        data.extend_from_slice(&(corners.len() as u32).to_le_bytes());
+        for [x, y] in corners {
+            for v in [x, y, 0.0f64] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let polyline = ProxyGraphicRecord::Unknown { record_type: 6, data };
+        // A placeholder opens with the class name; a drawn cache with its
+        // layer (record 16).
+        let records = if placeholder {
+            let name = document::entities::ProxyUnicodeText {
+                position: document::types::Vector3::new(0.0, 0.0, 0.0),
+                normal: document::types::Vector3::new(0.0, 0.0, 1.0),
+                direction: document::types::Vector3::new(1.0, 0.0, 0.0),
+                height: 0.2,
+                width_factor: 1.0,
+                oblique_angle: 0.0,
+                text: dxf_name.into(),
+            };
+            vec![ProxyGraphicRecord::UnicodeText(name), polyline, ProxyGraphicRecord::FillOff]
+        } else {
+            vec![ProxyGraphicRecord::Unknown { record_type: 16, data: 0u32.to_le_bytes().to_vec() }, polyline]
+        };
+        let mut common = EntityCommon::default();
+        common.handle = document.allocate_handle();
+        common.layer = "0".into();
+        assert!(common.set_proxy_graphics(&ProxyGraphics { records }));
+        EntityType::Extended(Box::new(ExtendedEntity {
+            common,
+            data: ExtendedEntityData::Arch(ArchEntityData {
+                dxf_name: dxf_name.into(),
+                cpp_class_name: String::new(),
+                kind: ArchKind::Other,
+                profiles: Vec::new(),
+                dwg_type_code: 0,
+                dwg_handle_bits: 0,
+                dwg_source_version: None,
+                raw_dwg_data: None,
+                raw_dxf_codes: None,
+                fields: Vec::new(),
+                preview: Vec::new(),
+            }),
+        }))
+    }
+
+    fn wires(document: &document::Document, entity: &EntityType) -> Vec<WireModel> {
+        tessellate_entity(
+            document,
+            &HashSet::default(),
+            None,
+            [0.0, 0.0, 0.0, 1.0],
+            1.0,
+            None,
+            entity,
+            None,
+            None,
+            None,
+            None,
+            &HashSet::default(),
+        )
+    }
+
+    /// A Civil 3D object draws the display cache Civil 3D saved, decoded
+    /// class or not, but never a placeholder cache (class name and box at
+    /// the origin).
+    #[test]
+    fn civil_drawn_cache_is_drawn_and_placeholder_is_not() {
+        let mut document = document::Document::new();
+        for class in ["AECC_PARCEL", "AECC_ALIGNMENT"] {
+            let placeholder = boxed(class, true, &mut document);
+            let drawn = boxed(class, false, &mut document);
+            assert!(wires(&document, &placeholder).is_empty(), "{class}");
+            assert!(wires(&document, &drawn).iter().any(|w| !w.points.is_empty()), "{class}");
+        }
+        let wall = boxed("AEC_WALL", true, &mut document);
+        assert!(wires(&document, &wall).iter().any(|w| !w.points.is_empty()));
+    }
 }
 
 #[cfg(test)]

@@ -168,37 +168,47 @@ impl OpenCADStudio {
             .collect()
     }
 
-    /// `-XREF ?` — the reference table as the reference application prints it.
+    /// `-XREF ?` — the reference table as the reference application prints it,
+    /// with the live status column (Loaded / Unloaded / Not found / …) the
+    /// palette shows.
     fn list_xrefs(&mut self, i: usize, pattern: &str) {
-        let rows: Vec<(String, &'static str, String)> = self.tabs[i]
-            .scene
-            .document
-            .block_records
+        let entries = self.refresh_xref_report(i);
+        let rows: Vec<(String, String, String, String)> = entries
             .iter()
-            .filter(|br| br.flags.is_xref || br.flags.is_xref_overlay)
-            .filter(|br| pattern == "*" || crate::io::xref_model::wildcard_match(&br.name, pattern))
-            .map(|br| {
-                let kind = if br.flags.is_xref_overlay {
-                    "Overlay"
-                } else {
-                    "Attach"
+            .filter(|e| {
+                e.parent_key.is_none() && e.kind == crate::io::xref_model::RefKind::DwgXref
+            })
+            .filter(|e| pattern == "*" || crate::io::xref_model::wildcard_match(&e.name, pattern))
+            .map(|e| {
+                let kind = match e.ref_type {
+                    crate::io::xref_model::RefType::Overlay => "Overlay",
+                    crate::io::xref_model::RefType::Attach => "Attach",
                 };
-                (br.name.clone(), kind, display_path(&br.xref_path))
+                (
+                    e.name.clone(),
+                    kind.to_string(),
+                    crate::ui::window::xref_manager::status_text(e.status).into_owned(),
+                    display_path(&e.saved_path),
+                )
             })
             .collect();
         let out = &mut self.command_line;
         out.push_output("");
-        out.push_output(&format!("{:<34}{:<13}{}", "Xref name", "Xref Type", "Path"));
         out.push_output(&format!(
-            "{:<34}{:<13}{}",
-            "----------------------", "---------", "----------"
+            "{:<34}{:<13}{:<12}{}",
+            "Xref name", "Xref Type", "Status", "Path"
+        ));
+        out.push_output(&format!(
+            "{:<34}{:<13}{:<12}{}",
+            "----------------------", "---------", "--------", "----------"
         ));
         out.push_output("");
-        for (name, kind, path) in &rows {
+        for (name, kind, status, path) in &rows {
             out.push_output(&format!(
-                "{:<34}{:<13}{}",
+                "{:<34}{:<13}{:<12}{}",
                 format!("\"{name}\""),
-                *kind,
+                kind,
+                status,
                 path
             ));
         }
@@ -220,8 +230,9 @@ impl OpenCADStudio {
         let host = self.tabs[i].current_path.clone();
         if let Some(host) = host.as_deref() {
             if crate::modules::insert::xattach::is_self_attach(host, &full, host.parent()) {
-                self.command_line
-                    .push_rejection("Error: Possible circular reference to current drawing. *Invalid*");
+                self.command_line.push_rejection(
+                    "Error: Possible circular reference to current drawing. *Invalid*",
+                );
                 return;
             }
         }
@@ -341,6 +352,10 @@ impl OpenCADStudio {
             self.commit_undo_delta(i, pending);
         }
         self.refresh_xref_manager();
+        // The new reference must appear in the automation report too, not
+        // only in the palette: a status query right after an attach would
+        // otherwise answer with the pre-attach snapshot.
+        self.refresh_xref_report(i);
     }
 
     /// Opens the Attach External Reference dialog for `path`.
@@ -635,8 +650,7 @@ impl OpenCADStudio {
                         .map(f64::to_degrees),
                 };
                 let invalid = (!state.insert_on_screen && placement.insert.is_none())
-                    || (!state.scale_on_screen
-                        && placement.scale.is_none_or(|s| s.iter().any(|v| *v == 0.0)))
+                    || (!state.scale_on_screen && placement.scale.is_none_or(|s| s.contains(&0.0)))
                     || (!state.rotation_on_screen && placement.rotation.is_none());
                 if invalid || state.path.is_empty() {
                     self.command_line

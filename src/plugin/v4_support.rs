@@ -8,11 +8,16 @@ use ocs_plugin_api::process::NotificationHandler;
 use ocs_plugin_api::shm::DocumentViewInfo;
 
 fn mgr() -> std::sync::MutexGuard<'static, HostV4SnapshotManager> {
-    manager().lock().unwrap()
+    // Poisoned-lock tolerance: a publication panic elsewhere must not turn
+    // every later plugin IPC into a panic cascade (`unwrap()` would).
+    manager().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Open (or refresh) the V4 shared document view for `tab_id`.
-pub fn open_document_view_v4(tab_id: u64, doc: &document::Document) -> Option<DocumentViewInfo> {
+pub fn open_document_view_v4(
+    tab_id: u64,
+    doc: &document::Document,
+) -> Result<DocumentViewInfo, String> {
     mgr().open(tab_id, doc)
 }
 
@@ -23,13 +28,23 @@ pub fn close_document_view_v4(tab_id: u64) {
 
 /// Publish the latest document to the V4 shared view for `tab_id` and broadcast
 /// a change notification when successful.
-pub fn publish_document_view_v4(tab_id: u64, doc: &document::Document) {
-    let info = mgr().publish(tab_id, doc);
-    if let Some(info) = info {
-        broadcast(HostNotification::DocumentChangedV4 {
-            tab_id,
-            version: info.version,
-        });
+///
+/// `Ok(())` covers BOTH a real publication and the legitimate no-op (no V4
+/// consumer has opened a snapshot for this tab — nothing to publish, no
+/// notification to send, and the mutation boundary still settles).
+/// `Err` is a real failure the caller must report instead of claiming a
+/// boundary that plugins cannot observe.
+pub fn publish_document_view_v4(tab_id: u64, doc: &document::Document) -> Result<(), String> {
+    match mgr().publish(tab_id, doc) {
+        Ok(Some(info)) => {
+            broadcast(HostNotification::DocumentChangedV4 {
+                tab_id,
+                version: info.version,
+            });
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -46,6 +61,34 @@ pub fn on_tab_closed(tab_id: u64) {
 /// the selection actually changed; see `OpenCADStudio::notify_plugins_selection_changed`.
 pub fn publish_selection_changed_v4(tab_id: u64, handles: Vec<document::Handle>) {
     broadcast(HostNotification::SelectionChangedV4 { tab_id, handles });
+}
+
+/// Broadcast a selection change with per-endpoint API routing (v22): v22+
+/// runners receive the O(1) `SelectionChangedDigest` ({tab_id, revision,
+/// count}); older endpoints keep their exact legacy notification streams
+/// (`SelectionChangedV4`, plus the plain `SelectionChanged` when
+/// `legacy_plain`).
+pub fn publish_selection_changed_versioned(
+    tab_id: u64,
+    handles: Vec<document::Handle>,
+    revision: u64,
+    legacy_plain: bool,
+) {
+    #[cfg(test)]
+    {
+        record_test_dispatch(&HostNotification::SelectionChangedV4 {
+            tab_id,
+            handles: Vec::new(),
+        });
+        if legacy_plain {
+            record_test_dispatch(&HostNotification::SelectionChanged {
+                handles: handles.clone(),
+            });
+        }
+    }
+    crate::plugin::external::with_manager(|mgr| {
+        mgr.broadcast_selection_changed(tab_id, &handles, revision, legacy_plain);
+    });
 }
 
 /// Broadcast the tab-independent `HostNotification::SelectionChanged` to every
@@ -117,6 +160,38 @@ pub fn publish_panel_action(
         action,
         value,
     });
+}
+
+/// Deliver a panel or dialog control interaction to a specific owning plugin
+/// (when `plugin_id` is `Some`), or broadcast it to all plugins when `None`.
+pub fn publish_panel_action_to_plugin(
+    plugin_id: Option<&str>,
+    command_id: Option<u64>,
+    panel_id: String,
+    control_id: String,
+    action: String,
+    value: Option<ocs_plugin_api::dialog::DialogValue>,
+) {
+    match plugin_id {
+        Some(pid) => {
+            let notification = HostNotification::PanelAction {
+                panel_id,
+                control_id,
+                action,
+                value,
+            };
+            #[cfg(test)]
+            record_test_dispatch(&notification);
+            crate::plugin::external::with_manager(|mgr| {
+                if let Some((process, _api_version, alive)) = mgr.grip_endpoint(pid) {
+                    if alive {
+                        let _ = process.notify_plugin(command_id, notification);
+                    }
+                }
+            });
+        }
+        None => publish_panel_action(panel_id, control_id, action, value),
+    }
 }
 
 /// Deliver a quad cursor menu pick to the OWNING plugin only (API v15).
@@ -236,9 +311,7 @@ pub fn drain_channel_ready_acks() {
                     );
                 }
                 ocs_plugin_api::process::AttachOutcome::AlreadyAttached => {
-                    eprintln!(
-                        "[{plugin_id}] ChannelReady duplicate for a live channel; ignored"
-                    );
+                    eprintln!("[{plugin_id}] ChannelReady duplicate for a live channel; ignored");
                 }
                 ocs_plugin_api::process::AttachOutcome::Ambiguous(waiting) => {
                     eprintln!(
@@ -306,7 +379,10 @@ fn record_test_dispatch(notification: &HostNotification) {
             control_id,
             handles,
             ..
-        } => format!("QuadAction({panel_id}.{control_id}, {} handles)", handles.len()),
+        } => format!(
+            "QuadAction({panel_id}.{control_id}, {} handles)",
+            handles.len()
+        ),
         _ => "Other".to_string(),
     };
     TEST_DISPATCH_LOG.with(|log| log.borrow_mut().push(kind));

@@ -85,8 +85,9 @@ const WEB_ALIAS_KEY: &str = "opencadstudio.aliases";
 /// version 11 IO (INSERTOBJ); version 12 DLU (DATALINKUPDATE); version 13 SP
 /// (SPELL); version 14 the multileader set (MLE, LEAD; LE and MLA retargeted,
 /// MLR / MLAL / QL dropped); version 15 TS (TABLESTYLE) and CT (CTABLESTYLE);
-/// version 16 dropped WO (WIPEOUT has no alias).
-const DEFAULT_ALIASES_VERSION: u32 = 16;
+/// version 16 dropped WO (WIPEOUT has no alias); version 17 DDLTYPE
+/// (LINETYPE).
+const DEFAULT_ALIASES_VERSION: u32 = 18;
 
 #[cfg(target_arch = "wasm32")]
 const WEB_ALIAS_VERSION_KEY: &str = "opencadstudio.aliases.version";
@@ -124,6 +125,7 @@ fn introduced_at(version: u32) -> &'static [(&'static str, &'static str)] {
         13 => &[("SP", "SPELL")],
         14 => &[("MLE", "MLEADEREDIT"), ("LEAD", "LEADER")],
         15 => &[("TS", "TABLESTYLE"), ("CT", "CTABLESTYLE")],
+        17 => &[("DDLTYPE", "LINETYPE")],
         _ => &[],
     }
 }
@@ -143,6 +145,7 @@ fn retargeted_at(version: u32) -> &'static [(&'static str, &'static str, &'stati
             ("QL", "QLEADER", ""),
         ],
         16 => &[("WO", "WIPEOUT", "")],
+        18 => &[("T", "TEXT", "MTEXT")],
         _ => &[],
     }
 }
@@ -158,7 +161,10 @@ fn migrate_aliases(stored: &mut FxHashMap<String, String>, from_version: u32) ->
     let mut changed = false;
     for version in from_version + 1..=DEFAULT_ALIASES_VERSION {
         for (alias, old, new) in retargeted_at(version) {
-            if stored.get(*alias).is_some_and(|cmd| cmd.eq_ignore_ascii_case(old)) {
+            if stored
+                .get(*alias)
+                .is_some_and(|cmd| cmd.eq_ignore_ascii_case(old))
+            {
                 if new.is_empty() {
                     stored.remove(*alias);
                 } else {
@@ -226,7 +232,7 @@ pub(super) fn load_aliases() -> FxHashMap<String, String> {
         let Some(path) = alias_file_path() else {
             return default_map();
         };
-        return match std::fs::read_to_string(&path) {
+        match std::fs::read_to_string(&path) {
             Ok(body) => {
                 let mut map = parse_pgp(&body);
                 let seen = alias_version_file_path()
@@ -260,7 +266,7 @@ pub(super) fn load_aliases() -> FxHashMap<String, String> {
                 }
                 default_map()
             }
-        };
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -305,7 +311,7 @@ pub(super) fn save_map(map: &FxHashMap<String, String>) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        return std::fs::write(path, to_pgp(map));
+        std::fs::write(path, to_pgp(map))
     }
 
     #[cfg(target_arch = "wasm32")]

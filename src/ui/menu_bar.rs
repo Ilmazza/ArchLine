@@ -3,7 +3,7 @@
 //! implementation of it.
 
 use crate::app::Message;
-use crate::ui::style::chrome;
+use crate::ui::style::{chrome, kit_metrics as km, text as ui_text};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{self, Widget};
 use iced::advanced::{mouse, overlay, renderer, Shell};
@@ -229,7 +229,7 @@ const MENUS: &[(&str, &[Entry])] = &[
     (
         "Format",
         &[
-            Cmd("Layer...", "LAYER", ""),
+            Cmd("Layer...", "LAYERS", ""),
             Cmd("Layer States Manager...", "LAYERSTATE", ""),
             Cmd("Layer Walk...", "LAYWALK", ""),
             Sub(
@@ -282,11 +282,9 @@ const MENUS: &[(&str, &[Entry])] = &[
             Sub(
                 "Workspaces",
                 &[
-                    Cmd("2D Drafting", "WSCURRENT 2D", ""),
-                    Cmd("3D Modeling", "WSCURRENT 3D", ""),
+                    Cmd("Ribbon", "WSCURRENT RIBBON", ""),
+                    Cmd("Classic", "WSCURRENT CLASSIC", ""),
                     Sep,
-                    Cmd("Save Current As...", "WSSAVE", ""),
-                    Cmd("Workspace Settings...", "WSSETTINGS", ""),
                     Cmd("Customize...", "CUI", ""),
                 ],
             ),
@@ -294,7 +292,7 @@ const MENUS: &[(&str, &[Entry])] = &[
                 "Palettes",
                 &[
                     Cmd("Properties", "PROPERTIES", "Ctrl+1"),
-                    Cmd("Layers", "LAYER", ""),
+                    Cmd("Layers", "LAYERS", ""),
                     Cmd("Design Center", "ADCENTER", "Ctrl+2"),
                     Cmd("Tool Palettes", "TOOLPALETTES", "Ctrl+3"),
                     Cmd("Sheet Set Manager", "SHEETSET", "Ctrl+4"),
@@ -663,22 +661,23 @@ const MENUS: &[(&str, &[Entry])] = &[
             Cmd("Keyboard Shortcuts", "SHORTCUTS", ""),
             Cmd("Send Feedback", "FEEDBACK", ""),
             Sep,
+            Cmd("Check for Updates...", "CHECKFORUPDATES", ""),
             Cmd("About Open CAD Studio", "ABOUT", ""),
         ],
     ),
 ];
 
-const ENTRY_H: f32 = 22.0;
+const ENTRY_H: f32 = km::MENU_ITEM_H;
 const ICON: f32 = crate::ui::style::ribbon_metrics::SMALL_ICON;
 /// A row's label and the shortcut and aliases at its end.
-const LABEL_SIZE: f32 = 12.0;
-const TAIL_SIZE: f32 = 11.0;
+const LABEL_SIZE: f32 = ui_text::UI;
+const TAIL_SIZE: f32 = ui_text::UI;
 /// Gap between a row's parts, its side padding, the least gap before the
 /// shortcut, and the submenu arrow.
 const ROW_SPACING: f32 = 8.0;
-const ROW_PAD: f32 = 8.0;
+const ROW_PAD: f32 = km::MENU_PAD_X;
 const TAIL_GAP: f32 = 8.0;
-const ARROW: f32 = 8.0;
+const ARROW: f32 = km::CARET;
 /// The menus the Start tab keeps: it has no drawing for the others.
 const START_MENUS: [&str; 3] = ["File", "Window", "Help"];
 
@@ -786,7 +785,13 @@ pub fn keyboard_menu(
     let menus = menu_rows(aliases);
     let rows = menus.get(index)?;
     fn item(row: &Row) -> Option<crate::ui::popup::context_menu::MenuItem> {
-        let Row::Cmd { icon, label, tail, on_press } = row else {
+        let Row::Cmd {
+            icon,
+            label,
+            tail,
+            on_press,
+        } = row
+        else {
             return None;
         };
         let line = match on_press.as_deref() {
@@ -1126,24 +1131,9 @@ fn entry_style(theme: &Theme, status: button::Status, submenu: bool) -> button::
     }
 }
 
-/// A line one physical pixel high, with 2 px above and below and 4 px at
-/// the sides: a logical pixel would draw one or two pixels high at a
-/// fractional scale.
+/// The kit menu's separator line.
 fn separator<'a>() -> Element<'a, Message> {
-    container(
-        container(
-            Space::new()
-                .width(Fill)
-                .height(crate::ui::icons::hairline()),
-        )
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(chrome::border(theme))),
-            ..Default::default()
-        }),
-    )
-    .padding([2, 4])
-    .width(Fill)
-    .into()
+    crate::ui::kit::menu::entry(crate::ui::kit::menu::Item::Separator)
 }
 
 /// A menu title on the bar: `tab_text`, and `strong` on a `hover` fill

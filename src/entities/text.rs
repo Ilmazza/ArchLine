@@ -1,6 +1,5 @@
 use document::entities::{Text, TextHorizontalAlignment as HA, TextVerticalAlignment as VA};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, parse_f64,
     ro_prop as ro, square_grip,
@@ -9,6 +8,7 @@ use crate::entities::text_support::{
     resolve_dxf_special_chars, resolve_text_style, text_local_bounds,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{GlyphRun, RenderEntity, RenderObject, TextStroke};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -336,9 +336,7 @@ pub(crate) fn justification_offset(
     let ay = match v {
         _ if matches!(h, HA::Middle) => (b.ink_min[1] + b.ink_max[1]) * 0.5,
         VA::Baseline => 0.0,
-        VA::Bottom => {
-            -height * crate::entities::text_support::descent_ratio(font_name)
-        }
+        VA::Bottom => -height * crate::entities::text_support::descent_ratio(font_name),
         VA::Middle => height * 0.5,
         VA::Top => height,
     };
@@ -584,7 +582,6 @@ fn apply_geom_prop(t: &mut Text, field: &str, value: &str) {
         }
         "align_x" | "align_y" | "align_z" => {
             // Calculated display rows are intentionally not writable.
-            return;
         }
         "height" if v > 0.0 && !matches!(t.horizontal_alignment, HA::Aligned) => t.height = v,
         "rotation" if !matches!(t.horizontal_alignment, HA::Aligned | HA::Fit) => {
@@ -633,8 +630,8 @@ fn apply_transform(t: &mut Text, tr: &EntityTransform) {
         if let Some(ref mut a) = entity.alignment_point {
             crate::scene::view::transform::reflect_xy_point(&mut a.x, &mut a.y, p1, p2);
         }
-        let dx = (p2.x - p1.x) as f64;
-        let dy = (p2.y - p1.y) as f64;
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
         let line_angle = dy.atan2(dx);
         entity.rotation = 2.0 * line_angle - entity.rotation;
         entity.oblique_angle = -entity.oblique_angle;

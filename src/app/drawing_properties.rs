@@ -51,7 +51,12 @@ fn format_editing_time(days: f64) -> String {
     );
     let time = format!("{h}:{m:02}:{s:02}");
     if d > 0 {
-        crate::tr!("dwgprops-dialog", "editing-days", days = d.to_string(), time = time)
+        crate::tr!(
+            "dwgprops-dialog",
+            "editing-days",
+            days = d.to_string(),
+            time = time
+        )
     } else {
         time
     }
@@ -76,11 +81,9 @@ impl OpenCADStudio {
             Some(path) => (
                 path.file_name().map(|n| n.to_string_lossy().into_owned()),
                 path.parent().map(|p| p.display().to_string()),
-                std::fs::metadata(path)
-                    .ok()
-                    .map(|m| {
-                        crate::tr!("dwgprops-dialog", "size-bytes", bytes = m.len().to_string())
-                    }),
+                std::fs::metadata(path).ok().map(|m| {
+                    crate::tr!("dwgprops-dialog", "size-bytes", bytes = m.len().to_string())
+                }),
             ),
             None => (None, None, None),
         };
@@ -197,11 +200,7 @@ impl OpenCADStudio {
         document.summary_info = edited;
         self.tabs[i].dirty = true;
         // Fields showing Title, Author or a custom property read it again.
-        let hosts = crate::entities::field::acvar_hosts(&self.tabs[i].scene.document);
-        if !hosts.is_empty() {
-            self.tabs[i].scene.update_fields(32, Some(&hosts));
-        }
-        self.tabs[i].scene.bump_geometry();
+        self.tabs[i].scene.update_summary_field_hosts();
         Task::none()
     }
 }
@@ -345,7 +344,9 @@ mod tests {
         let i = app.active_tab;
         app.tabs[i].scene.document.summary_info.custom_properties[0].1 = "A".into();
         let doc = &mut app.tabs[i].scene.document;
-        let t = doc.add_entity(EntityType::MText(Box::new(MText::new()))).unwrap();
+        let t = doc
+            .add_entity(EntityType::MText(Box::new(MText::new())))
+            .unwrap();
         crate::entities::field::set_text_field(
             doc,
             t,

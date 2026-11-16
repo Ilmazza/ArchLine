@@ -1,15 +1,15 @@
 use document::entities::{AttachmentPoint, DrawingDirection, MText};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
-    edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, ro_prop as ro,
-    oriented_triangle_grip, square_grip, triangle_grip,
+    edit_angle_prop as edit_angle, edit_prop as edit, num_prop as num_row, oriented_triangle_grip,
+    ro_prop as ro, square_grip, triangle_grip,
 };
 use crate::entities::text_support::{
     clamp_mtext_column_count, layout_mtext, resolve_text_style, GlyphBox, MTextColumns,
     MTextRenderOpts, MTextVAnchor,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -101,9 +101,7 @@ fn display_text(t: &MText, document: &document::Document) -> String {
         if gap == 0 || !after.chars().next().is_some_and(is_rtl_char) {
             continue;
         }
-        let word = after
-            .find(|c: char| c == ' ' || c == '\\')
-            .unwrap_or(after.len());
+        let word = after.find([' ', '\\']).unwrap_or(after.len());
         let moved = format!("{}{}{}", &after[..word], &rest[..gap], &after[word..]);
         out.replace_range(span.end.., &moved);
     }
@@ -289,7 +287,11 @@ pub(crate) fn explode_mtext(t: &MText, document: &document::Document) -> Vec<doc
             }
             let mut text = document::entities::Text::with_value(
                 run.text,
-                document::types::Vector3::new(stroke.origin[0], stroke.origin[1], t.insertion_point.z),
+                document::types::Vector3::new(
+                    stroke.origin[0],
+                    stroke.origin[1],
+                    t.insertion_point.z,
+                ),
             );
             text.common = t.common.clone();
             text.common.handle = document::Handle::NULL;
@@ -406,7 +408,7 @@ fn columns_str(c: &document::entities::MTextColumnData) -> &'static str {
     match c.column_type {
         1 => "Static",
         2 => "Dynamic",
-        _ => "No columns",
+        _ => "None",
     }
 }
 
@@ -415,10 +417,15 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
     // by the line-spacing factor.
     let line_space_distance = t.height * 1.666_666_666_666_667 * t.line_spacing_factor;
     let text_frame_on = (t.background_fill_flags & 0x10) != 0;
-    // Defined width is reported by Properties but is not edited there. Defined
-    // height remains live for static columns or manual-height dynamic columns.
+    // Dynamic columns size the text themselves: their defined width stays
+    // read-only and their height too while it is automatic. Text without
+    // columns edits both (measured).
     let col_type = t.column_data.column_type;
-    let height_editable = col_type == 1 || (col_type == 2 && !t.column_data.auto_height);
+    let width_editable = col_type == 0;
+    // Dynamic columns grey the defined height whatever their height flag
+    // (measured: the default boxed text stores manual height 0 and still
+    // shows it read-only).
+    let height_editable = col_type != 2;
     vec![
         PropSection {
             title: t!("Text").into_owned(),
@@ -510,28 +517,26 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
                             .collect(),
                     },
                 },
+                // Yes / No as the palette shows it; the colour and border
+                // offset stay in the text editor's Background menu.
                 Property {
                     label: t!("Background mask").into_owned(),
                     field: "background_mask",
                     value: PropValue::Choice {
                         selected: if t.background_fill_flags & 0x01 != 0 {
-                            "Fill".into()
-                        } else if t.background_fill_flags & 0x02 != 0 {
-                            "Mask".into()
+                            t!("Yes")
                         } else {
-                            "Off".into()
-                        },
-                        options: ["Off", "Fill", "Mask"]
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
+                            t!("No")
+                        }
+                        .into_owned(),
+                        options: vec![t!("Yes").into_owned(), t!("No").into_owned()],
                     },
                 },
                 num_row(
                     t!("Defined width").as_ref(),
                     "rect_w",
                     t.rectangle_width,
-                    false,
+                    width_editable,
                 ),
                 num_row(
                     t!("Defined height").as_ref(),
@@ -544,7 +549,7 @@ fn properties(t: &MText, text_style_names: &[String]) -> Vec<PropSection> {
                     field: "columns",
                     value: PropValue::Choice {
                         selected: columns_str(&t.column_data).to_string(),
-                        options: ["No columns", "Static", "Dynamic"]
+                        options: ["None", "Static", "Dynamic"]
                             .into_iter()
                             .map(str::to_string)
                             .collect(),
@@ -588,13 +593,26 @@ fn apply_geom_prop(t: &mut MText, field: &str, value: &str) {
             return;
         }
         "background_mask" => {
-            // Clear both fill bits, then set the chosen one. 0x01 = use the
-            // background-fill colour, 0x02 = use the drawing-window colour (mask).
-            t.background_fill_flags &= !0x03;
-            match value {
-                "Fill" => t.background_fill_flags |= 0x01,
-                "Mask" => t.background_fill_flags |= 0x02,
-                _ => {}
+            let on = value == t!("Yes").as_ref() || value.eq_ignore_ascii_case("yes");
+            if !on {
+                t.background_fill_flags &= !0x03;
+            } else if t.background_fill_flags & 0x01 == 0 {
+                // Measured: turning the mask on uses the drawing background
+                // colour (flags 3), a 1.5 border and the grey fill colour.
+                // A text that kept the window's colour with its mask off (2)
+                // keeps its border and colour and only gets the fill bit.
+                let fresh = t.background_fill_flags & 0x02 == 0;
+                t.background_fill_flags |= 0x03;
+                if fresh {
+                    if t.background_scale < 1.0 {
+                        t.background_scale = 1.5;
+                    }
+                    t.background_color = document::types::Color::Rgb {
+                        r: 200,
+                        g: 200,
+                        b: 200,
+                    };
+                }
             }
             return;
         }
@@ -668,6 +686,7 @@ fn apply_geom_prop(t: &mut MText, field: &str, value: &str) {
         "ins_z" => t.insertion_point.z = v,
         "height" if v > 0.0 => t.height = v,
         "rect_h" if v >= 0.0 => t.rectangle_height = (v > 0.0).then_some(v),
+        "rect_w" if v >= 0.0 => t.rectangle_width = v,
         "rotation" => t.rotation = v.to_radians(),
         "line_spacing" if (0.25..=4.0).contains(&v) => t.line_spacing_factor = v,
         // Editing the absolute distance back-solves the line-spacing factor so
@@ -688,22 +707,22 @@ fn apply_geom_prop(t: &mut MText, field: &str, value: &str) {
 fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
     match (grip_id, apply) {
         (0, GripApply::Absolute(p)) => {
-            t.insertion_point.x = p.x as f64;
-            t.insertion_point.y = p.y as f64;
-            t.insertion_point.z = p.z as f64;
+            t.insertion_point.x = p.x;
+            t.insertion_point.y = p.y;
+            t.insertion_point.z = p.z;
         }
         (0, GripApply::Translate(d)) => {
-            t.insertion_point.x += d.x as f64;
-            t.insertion_point.y += d.y as f64;
-            t.insertion_point.z += d.z as f64;
+            t.insertion_point.x += d.x;
+            t.insertion_point.y += d.y;
+            t.insertion_point.z += d.z;
         }
         (1, GripApply::Absolute(p)) => {
             // Project onto the flow axis the grip is drawn on, undoing the
             // attachment-side factor so dragging the grip on either side of
             // the insertion widens the same box.
             let (dir, k) = width_grip_axis(t);
-            let dx = p.x as f64 - t.insertion_point.x;
-            let dy = p.y as f64 - t.insertion_point.y;
+            let dx = p.x - t.insertion_point.x;
+            let dy = p.y - t.insertion_point.y;
             let projected = dx * dir.x + dy * dir.y;
             let width = (projected / k).max(0.01);
             let column_count = clamp_mtext_column_count(t.column_data.column_count);
@@ -720,9 +739,9 @@ fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
             let (sin, cos) = t.rotation.sin_cos();
             let down = glam::DVec3::new(sin, -cos, 0.0);
             let delta = glam::DVec3::new(
-                p.x as f64 - t.insertion_point.x,
-                p.y as f64 - t.insertion_point.y,
-                p.z as f64 - t.insertion_point.z,
+                p.x - t.insertion_point.x,
+                p.y - t.insertion_point.y,
+                p.z - t.insertion_point.z,
             );
             let (_, vertical) = attach_anchors(t);
             let factor = match vertical {
@@ -742,20 +761,12 @@ fn apply_grip(t: &mut MText, grip_id: usize, apply: GripApply) {
         }
         (3, GripApply::Absolute(p)) => {
             let (dir, k) = width_grip_axis(t);
-            let delta = glam::DVec3::new(
-                p.x as f64 - t.insertion_point.x,
-                p.y as f64 - t.insertion_point.y,
-                0.0,
-            );
+            let delta = glam::DVec3::new(p.x - t.insertion_point.x, p.y - t.insertion_point.y, 0.0);
             t.column_data.width = (delta.dot(dir) / k).max(0.01);
         }
         (4, GripApply::Absolute(p)) => {
             let (dir, k) = width_grip_axis(t);
-            let delta = glam::DVec3::new(
-                p.x as f64 - t.insertion_point.x,
-                p.y as f64 - t.insertion_point.y,
-                0.0,
-            );
+            let delta = glam::DVec3::new(p.x - t.insertion_point.x, p.y - t.insertion_point.y, 0.0);
             t.column_data.gutter = (delta.dot(dir) / k - t.column_data.width).max(0.0);
         }
         _ => {}
@@ -770,8 +781,8 @@ fn apply_transform(t: &mut MText, tr: &EntityTransform) {
             p1,
             p2,
         );
-        let dx = (p2.x - p1.x) as f64;
-        let dy = (p2.y - p1.y) as f64;
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
         let line_angle = dy.atan2(dx);
         entity.rotation = 2.0 * line_angle - entity.rotation;
     });
@@ -881,7 +892,6 @@ impl crate::entities::traits::TextContent for document::entities::MText {
     }
 }
 
-
 #[cfg(test)]
 mod inline_bylayer_tests {
     use super::*;
@@ -913,11 +923,13 @@ mod inline_bylayer_tests {
             .filter_map(|s| s.run.as_ref().map(|r| (r.text.clone(), s.color)))
             .collect();
         assert!(
-            runs.iter().any(|(text, c)| text.contains("SCALE") && *c == yellow),
+            runs.iter()
+                .any(|(text, c)| text.contains("SCALE") && *c == yellow),
             "{runs:?}"
         );
         assert!(
-            runs.iter().any(|(text, c)| text.contains("TITLE") && c.is_none()),
+            runs.iter()
+                .any(|(text, c)| text.contains("TITLE") && c.is_none()),
             "{runs:?}"
         );
     }

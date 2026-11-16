@@ -286,6 +286,9 @@ mod tests {
                 rotation: Some(90),
                 scale: Some([1.0, 50.0]),
             },
+            TableOperation::LayoutSetTabOrder {
+                names: vec!["T".into(), "S".into()],
+            },
         ] {
             let bytes = bincode::serialize(&PluginRequest::TableOperation {
                 operation: operation.clone(),
@@ -546,6 +549,7 @@ mod tests {
             tolerance: 1e-3,
             layer: "PLUGIN_PROFILE".to_string(),
             design_record: "PLUGIN_ALIGN_DISPLAY".to_string(),
+            selectable_custom: true,
         };
         let bytes = bincode::serialize(&PluginRequest::StagePluginClassInstance {
             instance: instance.clone(),
@@ -555,34 +559,78 @@ mod tests {
             matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
             PluginRequest::StagePluginClassInstance { instance: got } if got == instance)
         );
-        let bytes = bincode::serialize(&PluginResponse::RegisterPluginClassResult(Ok(())))
-            .unwrap();
-        assert!(
-            matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::RegisterPluginClassResult(Ok(())))
+
+        // v17 bytes end after design_record. The additive bool defaults to
+        // false; an explicitly unflagged v18 instance round-trips normally.
+        #[derive(serde::Serialize)]
+        struct V17PluginClassInstance {
+            class_id: String,
+            schema_version: u32,
+            design: crate::host::PluginDisplayDescriptor,
+            tolerance: f64,
+            layer: String,
+            design_record: String,
+        }
+        let legacy = V17PluginClassInstance {
+            class_id: instance.class_id.clone(),
+            schema_version: instance.schema_version,
+            design: instance.design.clone(),
+            tolerance: instance.tolerance,
+            layer: instance.layer.clone(),
+            design_record: instance.design_record.clone(),
+        };
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+        let decoded: crate::host::PluginClassInstance =
+            bincode::deserialize(&legacy_bytes).unwrap();
+        assert!(!decoded.selectable_custom);
+        let mut unflagged = instance.clone();
+        unflagged.selectable_custom = false;
+        let unflagged_bytes = bincode::serialize(&unflagged).unwrap();
+        assert_eq!(unflagged_bytes.len(), legacy_bytes.len() + 1);
+        assert_eq!(
+            bincode::deserialize::<crate::host::PluginClassInstance>(&unflagged_bytes).unwrap(),
+            unflagged
         );
-        let bytes = bincode::serialize(&PluginResponse::StagePluginClassInstanceResult(Ok(
-            vec![document::Handle::new(0x51)],
-        )))
+        let mut v17_request_bytes = bincode::serialize(&PluginRequest::StagePluginClassInstance {
+            instance: unflagged.clone(),
+        })
+        .unwrap();
+        assert_eq!(v17_request_bytes.pop(), Some(0));
+        assert!(matches!(
+            bincode::deserialize::<PluginRequest>(&v17_request_bytes).unwrap(),
+            PluginRequest::StagePluginClassInstance { instance: got }
+                if got == unflagged && !got.selectable_custom
+        ));
+
+        let bytes = bincode::serialize(&PluginResponse::RegisterPluginClassResult(Ok(()))).unwrap();
+        assert!(matches!(
+            bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+            PluginResponse::RegisterPluginClassResult(Ok(()))
+        ));
+        let bytes = bincode::serialize(&PluginResponse::StagePluginClassInstanceResult(Ok(vec![
+            document::Handle::new(0x51),
+        ])))
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
             PluginResponse::StagePluginClassInstanceResult(Ok(handles)) if handles.len() == 1)
         );
-        let bytes = bincode::serialize(&PluginResponse::StagePluginClassInstanceResult(
-            Err("class not registered in this session".to_owned()),
-        ))
+        let bytes = bincode::serialize(&PluginResponse::StagePluginClassInstanceResult(Err(
+            "class not registered in this session".to_owned(),
+        )))
         .unwrap();
-        assert!(
-            matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::StagePluginClassInstanceResult(Err(_)))
-        );
+        assert!(matches!(
+            bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+            PluginResponse::StagePluginClassInstanceResult(Err(_))
+        ));
         // The descriptor hook rides the v11 response additively: the
         // default round-trips as None, and a set descriptor survives.
         let bytes = bincode::serialize(&crate::host::CustomGripResponse::default()).unwrap();
         assert!(
             matches!(
-                bincode::deserialize::<crate::host::CustomGripResponse>(&bytes).unwrap().descriptor,
+                bincode::deserialize::<crate::host::CustomGripResponse>(&bytes)
+                    .unwrap()
+                    .descriptor,
                 None
             ),
             "a default response stays descriptor-free"
@@ -602,7 +650,9 @@ mod tests {
         .unwrap();
         assert!(
             matches!(
-                bincode::deserialize::<crate::host::CustomGripResponse>(&bytes).unwrap().descriptor,
+                bincode::deserialize::<crate::host::CustomGripResponse>(&bytes)
+                    .unwrap()
+                    .descriptor,
                 Some(crate::host::PluginDisplayDescriptor::ParametricChain(_))
             ),
             "the descriptor hook survives the wire"
@@ -640,9 +690,9 @@ mod tests {
                     && rows[0].editable
                     && rows[0].value.as_deref() == Some("0.09"))
         );
-        let bytes = bincode::serialize(&PluginResponse::PluginClassInstancePropertiesResult(
-            Err("entity carries the class stamp without its schema version".to_owned()),
-        ))
+        let bytes = bincode::serialize(&PluginResponse::PluginClassInstancePropertiesResult(Err(
+            "entity carries the class stamp without its schema version".to_owned(),
+        )))
         .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
@@ -752,8 +802,11 @@ mod tests {
             PluginRequest::StageParametricChain { reference_name, chain: got, tolerance }
                 if reference_name == "align-1" && got == chain && tolerance == 1e-3)
         );
-        let bytes = bincode::serialize(&PluginRequest::SampleParametric { chain: chain.clone(), s: 30.0 })
-            .unwrap();
+        let bytes = bincode::serialize(&PluginRequest::SampleParametric {
+            chain: chain.clone(),
+            s: 30.0,
+        })
+        .unwrap();
         assert!(
             matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
             PluginRequest::SampleParametric { chain: got, s } if got == chain && s == 30.0)
@@ -785,12 +838,11 @@ mod tests {
             matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
             PluginResponse::SampleParametricResult(Ok(Some(sample))) if sample.point == [100.0, -0.2])
         );
-        let bytes =
-            bincode::serialize(&PluginResponse::SampleParametricResult(Ok(None))).unwrap();
-        assert!(
-            matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
-            PluginResponse::SampleParametricResult(Ok(None)))
-        );
+        let bytes = bincode::serialize(&PluginResponse::SampleParametricResult(Ok(None))).unwrap();
+        assert!(matches!(
+            bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+            PluginResponse::SampleParametricResult(Ok(None))
+        ));
 
         let request = PluginToHostV4::Request {
             id: 80,
@@ -818,10 +870,7 @@ mod tests {
             }
             other => panic!("unexpected validation request: {other:?}"),
         }
-        for (id, result) in [
-            (81, Ok(())),
-            (82, Err("hard-corner seam".to_owned())),
-        ] {
+        for (id, result) in [(81, Ok(())), (82, Err("hard-corner seam".to_owned()))] {
             let response = HostToPluginV4::Response {
                 id,
                 payload: PluginResponse::ValidateParametricChainResult(result.clone()),

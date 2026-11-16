@@ -397,7 +397,7 @@ pub(crate) struct PatternStationMap {
 }
 
 pub(crate) fn pattern_station_values(data: &[f32], point_count: usize) -> Option<(&[f32], f32)> {
-    (data.len() >= point_count + 1).then(|| (&data[..point_count], data[point_count]))
+    (data.len() > point_count).then(|| (&data[..point_count], data[point_count]))
 }
 
 pub(crate) fn encode_pattern_stations(
@@ -426,7 +426,7 @@ pub(crate) fn decode_pattern_station_map(
     point_count: usize,
 ) -> Option<PatternStationMap> {
     let metadata_start = point_count.checked_mul(2)?.checked_add(1)?;
-    if data.len() < metadata_start || (data.len() - metadata_start) % 8 != 0 {
+    if data.len() < metadata_start || !(data.len() - metadata_start).is_multiple_of(8) {
         return None;
     }
     let point_segments = data[point_count + 1..metadata_start]
@@ -606,7 +606,7 @@ pub fn clean_searchable_text(raw: &str) -> String {
             match c {
                 b'd' | b'D' => out.push('°'),
                 b'p' | b'P' => out.push('±'),
-                b'c' | b'C' => out.push('Ø'),
+                b'c' | b'C' => out.push('∅'),
                 b'%' => out.push('%'),
                 _ if c.is_ascii_digit()
                     && i + 4 < bytes.len()
@@ -710,6 +710,10 @@ pub enum DashClosure {
 pub struct WireModel {
     /// Unique identifier — the handle value as a decimal string.
     pub name: String,
+    /// Fully resolved display/export layer for this occurrence. Block children
+    /// keep their own nonzero layer or inherit the nearest nonzero INSERT layer;
+    /// `None` retains the handle-based fallback for direct and synthetic wires.
+    pub effective_layer: Option<std::sync::Arc<str>>,
     /// Ordered world-space positions forming a strip of quads. Each entry is
     /// the "high" half of a double-single f32 pair; [`points_low`] carries the
     /// matching residual so the shader can reconstruct the f64 source.
@@ -859,6 +863,12 @@ pub struct WireModel {
     /// `true` only for a planar SOLID entity's interior. Wireframe 3D omits
     /// this fill while preserving its perimeter and every other 2-D overlay.
     pub fill_is_2d_solid: bool,
+    /// The direction a planar SOLID was drawn with, in the coordinates of the
+    /// space or block that holds it. The reference of a block turns the
+    /// triangles and leaves this alone: the fill shows when the view looks
+    /// along the solid's own direction, however its block is placed. `None`
+    /// for every other fill, whose triangles tell.
+    pub solid_normal: Option<[f32; 3]>,
     /// Shared block-render source and this placement's translation.
     pub render_instance: Option<super::instance_model::RenderInstance>,
     /// Set on a wire that stands for a translated copy of a nested block
@@ -872,6 +882,54 @@ impl WireModel {
     pub const SELECTED: [f32; 4] = [0.15, 0.55, 1.00, 1.0];
     /// Rollover (hover) highlight — orange, distinct from the blue selection.
     pub const HOVER: [f32; 4] = [0.95, 0.55, 0.10, 1.0];
+
+    /// Clone every geometry/style field while assigning `name`, avoiding a
+    /// throwaway heap clone of `self.name` on prototype leaf instantiation.
+    pub(crate) fn clone_with_name(&self, name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            effective_layer: self.effective_layer.clone(),
+            points: self.points.clone(),
+            points_low: self.points_low.clone(),
+            point_marker: self.point_marker,
+            color: self.color,
+            bg_adapt: self.bg_adapt.clone(),
+            selected: self.selected,
+            pattern_length: self.pattern_length,
+            pattern: self.pattern,
+            line_weight_px: self.line_weight_px,
+            world_width: self.world_width,
+            taper_widths: self.taper_widths.clone(),
+            pattern_stations: self.pattern_stations.clone(),
+            aci: self.aci,
+            snap_pts: self.snap_pts.clone(),
+            tangent_geoms: self.tangent_geoms.clone(),
+            key_vertices: self.key_vertices.clone(),
+            aabb: self.aabb,
+            plinegen: self.plinegen,
+            dash_from_start: self.dash_from_start,
+            element_linetype: self.element_linetype.clone(),
+            element_color: self.element_color,
+            dash_closure: self.dash_closure,
+            fill_tris: self.fill_tris.clone(),
+            fill_tris_low: self.fill_tris_low.clone(),
+            pick_tris: self.pick_tris.clone(),
+            pick_tris_low: self.pick_tris_low.clone(),
+            text_verts: self.text_verts.clone(),
+            searchable_text: self.searchable_text.clone(),
+            depth_override: self.depth_override,
+            display_visible: self.display_visible,
+            snap_only: self.snap_only,
+            region_boundary_click: self.region_boundary_click,
+            reference_only: self.reference_only,
+            plot_visible: self.plot_visible,
+            fill_is_3d: self.fill_is_3d,
+            fill_is_2d_solid: self.fill_is_2d_solid,
+            solid_normal: self.solid_normal,
+            render_instance: self.render_instance.clone(),
+            stub: self.stub.clone(),
+        }
+    }
 
     /// Drawn underlay content: shown and plotted, never picked or snapped.
     pub fn is_display_only(&self) -> bool {
@@ -940,6 +998,7 @@ impl WireModel {
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            solid_normal: None,
             render_instance: None,
             stub: None,
             pick_tris: Vec::new(),
@@ -947,6 +1006,7 @@ impl WireModel {
             text_verts: Vec::new(),
             searchable_text: Vec::new(),
             name,
+            effective_layer: None,
             points,
             points_low: Vec::new(),
             color,
@@ -1018,6 +1078,14 @@ impl WireModel {
         out
     }
 
+    /// Like [`Self::mapped`], but preserves the wire's existing color and selection state.
+    pub fn mapped_preserving_style(&self, map: impl Fn(glam::DVec3) -> glam::DVec3) -> Self {
+        let mut out = self.mapped(map);
+        out.color = self.color;
+        out.selected = self.selected;
+        out
+    }
+
     /// Return a clone with every point rotated around `center` by `angle_rad`.
     pub fn rotated(&self, center: glam::Vec3, angle_rad: f32) -> Self {
         self.rotated_about_axis(center, glam::Vec3::Z, angle_rad)
@@ -1070,31 +1138,34 @@ impl WireModel {
 
     /// Return a clone with every point uniformly scaled from `center` by `factor`.
     pub fn scaled(&self, center: glam::Vec3, factor: f32) -> Self {
+        self.scaled_precise(center.as_dvec3(), factor as f64)
+    }
+
+    /// Uniform preview scaling without rounding a world-space base to f32.
+    pub fn scaled_precise(&self, center: glam::DVec3, factor: f64) -> Self {
         let mut out = self.clone();
         out.name = format!("preview_{}", self.name);
         out.color = Self::CYAN;
         out.selected = false;
         if let Some(marker) = out.point_marker {
-            let center = center.as_dvec3();
             let normal = marker.normal.normalize_or(glam::DVec3::Z);
-            let target_origin = center + (marker.origin - center) * factor as f64;
+            let target_origin = center + (marker.origin - center) * factor;
             map_points(&mut out.points, &mut out.points_low, |point| {
                 let delta = point - marker.origin;
                 let axial = normal * delta.dot(normal);
-                target_origin + (delta - axial) + axial * factor as f64
+                target_origin + (delta - axial) + axial * factor
             });
             if let Some(target) = &mut out.point_marker {
                 target.origin = target_origin;
             }
         } else {
-            let center = center.as_dvec3();
             map_points(&mut out.points, &mut out.points_low, |point| {
-                center + (point - center) * factor as f64
+                center + (point - center) * factor
             });
         }
         if !out.text_verts.is_empty() {
-            let (cx, cy, cz) = (center.x as f64, center.y as f64, center.z as f64);
-            let f = factor as f64;
+            let (cx, cy, cz) = (center.x, center.y, center.z);
+            let f = factor;
             out.text_verts = map_text_verts(&self.text_verts, |x, y, z| {
                 (cx + (x - cx) * f, cy + (y - cy) * f, cz + (z - cz) * f)
             });
@@ -1102,7 +1173,7 @@ impl WireModel {
         out.tangent_geoms = self
             .tangent_geoms
             .iter()
-            .map(|tg| tg.scaled(center.as_dvec3(), factor as f64))
+            .map(|tg| tg.scaled(center, factor))
             .collect();
         out.searchable_text.clear();
         out
@@ -1186,6 +1257,96 @@ impl WireModel {
                 (dx * dx + dy * dy + dz * dz).sqrt()
             })
             .sum()
+    }
+
+    /// Plot output: a lone circle, arc or ellipse drawn as one unbroken run
+    /// takes its points again from its geometry, fine enough that a large
+    /// radius stays round on paper. The display set keeps few points for such
+    /// curves, since the GPU draws them analytically.
+    // ponytail: relative chord tolerance (2e-5 of the radius), a paper-space
+    // tolerance needs the plot scale here.
+    pub(crate) fn resample_plot_curve(&mut self) {
+        use glam::DVec3;
+        const STEP: f64 = 0.0126; // 2·acos(1 − 2e-5): sagitta ≤ 2e-5·r
+        const MAX_POINTS: usize = 16384;
+        if self.tangent_geoms.len() != 1
+            || self.points.len() < 2
+            || self.world_width > 0.0
+            || self.point_marker.is_some()
+            || !self.pattern_stations.is_empty()
+            || !self.taper_widths.is_empty()
+            || self.points.iter().flatten().any(|v| !v.is_finite())
+        {
+            return;
+        }
+        let v = |a: [f64; 3]| DVec3::from_array(a);
+        // (centre, x axis, y axis, start, end), each axis carrying its radius.
+        let (c, ax, ay, t0, t1) = match self.tangent_geoms[0] {
+            TangentGeom::Circle { center, radius } => (
+                DVec3::new(center[0] as f64, center[1] as f64, center[2] as f64),
+                DVec3::X * radius as f64,
+                DVec3::Y * radius as f64,
+                0.0,
+                std::f64::consts::TAU,
+            ),
+            TangentGeom::PlanarCircle { center, axis_x, axis_y, radius } => (
+                v(center),
+                v(axis_x).normalize_or_zero() * radius,
+                v(axis_y).normalize_or_zero() * radius,
+                0.0,
+                std::f64::consts::TAU,
+            ),
+            TangentGeom::Arc { center, axis_x, axis_y, radius, start_angle, end_angle } => (
+                v(center),
+                v(axis_x).normalize_or_zero() * radius,
+                v(axis_y).normalize_or_zero() * radius,
+                start_angle,
+                if end_angle < start_angle { end_angle + std::f64::consts::TAU } else { end_angle },
+            ),
+            TangentGeom::PlanarEllipse { center, major_axis, normal, minor_axis_ratio, start_param, end_param } => {
+                let major = v(major_axis);
+                let minor = v(normal).cross(major).normalize_or_zero() * major.length() * minor_axis_ratio;
+                (
+                    v(center),
+                    major,
+                    minor,
+                    start_param,
+                    if end_param < start_param { end_param + std::f64::consts::TAU } else { end_param },
+                )
+            }
+            TangentGeom::Line { .. } => return,
+        };
+        let size = ax.length().max(ay.length());
+        if !(size.is_finite() && size > 0.0 && (t1 - t0).is_finite()) {
+            return;
+        }
+        let at = |t: f64| c + ax * t.cos() + ay * t.sin();
+        let last = self.points.len() - 1;
+        let (first_pt, last_pt) = (self.point_world(0, 1.0), self.point_world(last, 1.0));
+        let close = |a: DVec3, b: DVec3| a.distance(b) <= size * 1e-4 + 1e-9;
+        // The run must be this curve, in either direction.
+        let reversed = if close(first_pt, at(t0)) && close(last_pt, at(t1)) {
+            false
+        } else if close(first_pt, at(t1)) && close(last_pt, at(t0)) {
+            true
+        } else {
+            return;
+        };
+        let n = (((t1 - t0) / STEP).ceil() as usize).min(MAX_POINTS);
+        if n <= last {
+            return;
+        }
+        let mut points = Vec::with_capacity(n + 1);
+        let mut low = Vec::with_capacity(n + 1);
+        for k in 0..=n {
+            let k = if reversed { n - k } else { k };
+            let p = at(t0 + (t1 - t0) * k as f64 / n as f64);
+            let high = p.as_vec3();
+            points.push(high.to_array());
+            low.push((p - high.as_dvec3()).as_vec3().to_array());
+        }
+        self.points = points;
+        self.points_low = low;
     }
 
     pub fn point_world(&self, index: usize, view_height: f64) -> glam::DVec3 {
@@ -1384,6 +1545,7 @@ impl Default for WireModel {
             text_verts: Vec::new(),
             searchable_text: Vec::new(),
             name: String::new(),
+            effective_layer: None,
             points: Vec::new(),
             points_low: Vec::new(),
             color: Self::WHITE,
@@ -1415,6 +1577,7 @@ impl Default for WireModel {
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            solid_normal: None,
             render_instance: None,
             stub: None,
             pick_tris: Vec::new(),
@@ -1612,7 +1775,7 @@ mod tests {
         // DXF specials decode (incl. %%nnn codes).
         assert_eq!(clean_searchable_text("%%d"), "°");
         assert_eq!(clean_searchable_text("%%p"), "±");
-        assert_eq!(clean_searchable_text("%%c"), "Ø");
+        assert_eq!(clean_searchable_text("%%c"), "∅");
         assert_eq!(clean_searchable_text("%%065"), "A");
         // Stacking, unicode escapes and grouping braces.
         assert_eq!(clean_searchable_text("\\S1^2;"), "1/2");

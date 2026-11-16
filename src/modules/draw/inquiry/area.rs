@@ -43,6 +43,12 @@ pub struct AreaCommand {
     total_perimeter: f64,
 }
 
+impl Default for AreaCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AreaCommand {
     pub fn new() -> Self {
         Self {

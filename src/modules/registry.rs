@@ -36,9 +36,9 @@ const COMMAND_ICON_ALIASES: &[(&str, &str)] = &[
     ("RECTANG", "RECT"),
     ("RECTANGLE", "RECT"),
     ("POLYGON", "POLY"),
+    // Polygonal and Freehand have their own icons from the Revision Cloud
+    // dropdown; Rectangular shares the face's.
     ("REVCLOUD_RECTANGULAR", "REVCLOUD"),
-    ("REVCLOUD_POLYGONAL", "REVCLOUD"),
-    ("REVCLOUD_FREEHAND", "REVCLOUD"),
     ("CONSTRUCTIONLINE", "XLINE"),
     ("SPLINEFIT", "SPLINE"),
     ("FITSPLINE", "SPLINE"),
@@ -220,6 +220,9 @@ const COMMAND_ICON_ALIASES: &[(&str, &str)] = &[
     ("ANNORESET", "SCALELISTEDIT"),
     ("ANNOSCALE", "SCALELISTEDIT"),
     ("OBJECTSCALE", "SCALELISTEDIT"),
+    ("-OBJECTSCALE", "SCALELISTEDIT"),
+    ("AIOBJECTSCALEADD", "SCALELISTEDIT"),
+    ("AIOBJECTSCALEREMOVE", "SCALELISTEDIT"),
     ("-DATAEXTRACTION", "DATAEXTRACTION"),
     ("DE", "DATAEXTRACTION"),
     // Inquiry, selection & clipboard
@@ -411,8 +414,7 @@ pub fn ribbon_commands() -> &'static HashMap<String, (&'static str, IconKind)> {
                                 out.insert(upper, (*item_label, *item_icon));
                             }
                             if !id.is_empty() {
-                                let default_label =
-                                    items.first().map_or(*default, |(_, l, _)| *l);
+                                let default_label = items.first().map_or(*default, |(_, l, _)| *l);
                                 out.entry(id.to_ascii_uppercase())
                                     .or_insert((default_label, *icon));
                             }
@@ -520,7 +522,11 @@ pub fn ribbon_commands() -> &'static HashMap<String, (&'static str, IconKind)> {
             // Status-bar & drafting aids
             ("OSNAP", "Object Snap", crate::ui::icons::ST_OSNAP),
             ("DDOSNAP", "Object Snap", crate::ui::icons::ST_OSNAP),
-            ("OTRACK", "Object Snap Tracking", crate::ui::icons::ST_OTRACK),
+            (
+                "OTRACK",
+                "Object Snap Tracking",
+                crate::ui::icons::ST_OTRACK,
+            ),
             ("POLAR", "Polar Tracking", crate::ui::icons::ST_POLAR),
             ("GRID", "Grid", crate::ui::icons::GRID),
             ("SNAP", "Snap", crate::ui::icons::SNAP),
@@ -572,7 +578,11 @@ pub fn ribbon_commands() -> &'static HashMap<String, (&'static str, IconKind)> {
                 "QuickCalc",
                 include_bytes!("../../assets/icons/quickcalc/quickcalc.svg"),
             ),
-            ("FIND", "Find", include_bytes!("../../assets/icons/find.svg")),
+            (
+                "FIND",
+                "Find",
+                include_bytes!("../../assets/icons/find.svg"),
+            ),
             (
                 "STYLE",
                 "Text Style",
@@ -587,8 +597,16 @@ pub fn ribbon_commands() -> &'static HashMap<String, (&'static str, IconKind)> {
             // (docs/quad-menu.md §3.9): DIMEDIT is dim_edit.svg the way
             // annotate/dimedit.rs claims it; DIMCENTER rides CENTERMARK's
             // line.svg rather than a hand-invented icon.
-            ("DIMEDIT", "Dim Edit", include_bytes!("../../assets/icons/dim_edit.svg")),
-            ("DIMCENTER", "Dim Center", include_bytes!("../../assets/icons/line.svg")),
+            (
+                "DIMEDIT",
+                "Dim Edit",
+                include_bytes!("../../assets/icons/dim_edit.svg"),
+            ),
+            (
+                "DIMCENTER",
+                "Dim Center",
+                include_bytes!("../../assets/icons/line.svg"),
+            ),
             (
                 "MLEADERSTYLE",
                 "Multileader Style",
@@ -716,6 +734,13 @@ pub fn ribbon_commands() -> &'static HashMap<String, (&'static str, IconKind)> {
 /// Dedicated `VAR` badge SVG for system variables and `SETVAR`.
 static SYSVAR_ICON: &[u8] = include_bytes!("../../assets/icons/sysvar.svg");
 
+/// Whether `name` is a registered system variable (HELP opens its own page).
+pub fn is_system_variable(name: &str) -> bool {
+    SYSTEM_VARIABLES
+        .iter()
+        .any(|sysvar| sysvar.eq_ignore_ascii_case(name))
+}
+
 /// Registered system variables that display the `VAR` badge icon in
 /// command-line autocomplete and action lists.
 const SYSTEM_VARIABLES: &[&str] = &[
@@ -724,6 +749,7 @@ const SYSTEM_VARIABLES: &[&str] = &[
     "ANGDIR",
     "ANNOALLVISIBLE",
     "ANNOAUTOSCALE",
+    "ANNOMONITOR",
     "APERTURE",
     "APSTATE",
     "ATTDIA",
@@ -758,6 +784,7 @@ const SYSTEM_VARIABLES: &[&str] = &[
     "BVMODE",
     "CAMERADISPLAY",
     "CANNOSCALE",
+    "CANNOSCALEVALUE",
     "CCONSTRAINTFORM",
     "CDIMSTY",
     "CECOLOR",
@@ -922,6 +949,7 @@ const SYSTEM_VARIABLES: &[&str] = &[
     "REGENMODE",
     "SAVETIME",
     "SDI",
+    "SELECTIONANNODISPLAY",
     "SELECTIONAREA",
     "SELECTIONAREAOPACITY",
     "SELECTIONCYCLING",
@@ -968,6 +996,7 @@ const SYSTEM_VARIABLES: &[&str] = &[
     "REVCLOUDGRIPS",
     "GROUPDISPLAYMODE",
     "OFFSETGAPTYPE",
+    "MEASUREMODE",
     "MATCHMODE",
     "REVCLOUDAPPROXARCLEN",
     "TXT2MTXTCOMBINEMTEXT",
@@ -985,6 +1014,7 @@ const SYSTEM_VARIABLES: &[&str] = &[
     "USERR",
     "USRTIMER",
     "VISRETAIN",
+    "VPCONTROL",
     "VPHIGHLIGHT",
     "VPHIGHLIGHTOPACITY",
     "VSCURRENT",
@@ -1022,13 +1052,106 @@ pub fn command_icon(command: &str) -> Option<&'static [u8]> {
 mod tests {
     use super::*;
 
+    /// The Paste dropdown lists its five variants, each with its own icon,
+    /// which every other place showing the command uses too; the face is
+    /// plain Paste.
+    #[test]
+    fn paste_variants_have_their_own_icons() {
+        use crate::modules::draw::clipboard::paste;
+        let bytes = |icon: IconKind| match icon {
+            IconKind::Svg(bytes) => bytes,
+            IconKind::Glyph(_) => panic!("paste icons are SVG"),
+        };
+        let commands: Vec<&str> = paste::MENU_ITEMS.iter().map(|(cmd, _, _)| *cmd).collect();
+        assert_eq!(
+            commands,
+            [
+                "PASTECLIP",
+                "PASTEORIG",
+                "PASTEBLOCK",
+                "PASTEASHYPERLINK",
+                "PASTESPEC"
+            ]
+        );
+        let icons: Vec<&[u8]> = paste::MENU_ITEMS
+            .iter()
+            .map(|(_, _, icon)| bytes(*icon))
+            .collect();
+        for (n, a) in icons.iter().enumerate() {
+            for b in &icons[n + 1..] {
+                assert_ne!(a, b, "two Paste variants share an icon");
+            }
+        }
+        assert_eq!(bytes(paste::ICON), icons[0], "the face is plain Paste");
+        for (command, icon) in commands.iter().zip(&icons) {
+            assert_eq!(command_icon(command), Some(*icon), "{command}");
+            assert!(crate::ui::menu_bar::implemented(command), "{command} runs");
+        }
+    }
+
+    /// Authoring Palettes shows its own icon wherever the command appears
+    /// (ribbon, command search, QAT and its dock tab); Tool Palettes and
+    /// Editor Settings keep the plain tool palette.
+    #[test]
+    fn authoring_palettes_have_their_own_icon() {
+        let authoring = crate::ui::icons::AUTHORING_PALETTES;
+        for command in ["BAUTHORPALETTE", "BAUTHORPALETTECLOSE"] {
+            assert_eq!(command_icon(command), Some(authoring), "{command}");
+        }
+        assert_eq!(
+            crate::ui::dock::PanelId::AuthoringPalettes.icon(),
+            authoring
+        );
+        let tool_palettes: &[u8] = include_bytes!("../../assets/icons/tool_palettes.svg");
+        assert_ne!(authoring, tool_palettes);
+        for command in ["TOOLPALETTES", "BESETTINGS"] {
+            assert_eq!(command_icon(command), Some(tool_palettes), "{command}");
+        }
+        assert_eq!(crate::ui::dock::PanelId::ToolPalettes.icon(), tool_palettes);
+    }
+
+    /// The three revision cloud types each show their own icon, in the
+    /// Revision Cloud dropdown and wherever else the command appears; the
+    /// dropdown face shows the Rectangular cloud until another type is chosen.
+    #[test]
+    fn revision_cloud_types_have_their_own_icons() {
+        let mut found = None;
+        for module in all_modules() {
+            for group in module.ribbon_groups() {
+                for item in &group.tools {
+                    if let RibbonItem::LargeDropdown {
+                        id: "REVCLOUD",
+                        icon,
+                        items,
+                        ..
+                    } = item
+                    {
+                        found = Some((*icon, items.clone()));
+                    }
+                }
+            }
+        }
+        let (face, items) = found.expect("the Revision Cloud dropdown");
+        let bytes = |icon: IconKind| match icon {
+            IconKind::Svg(bytes) => bytes,
+            IconKind::Glyph(_) => panic!("revision cloud icons are SVG"),
+        };
+        let icons: Vec<&[u8]> = items.iter().map(|(_, _, icon)| bytes(*icon)).collect();
+        assert_eq!(icons.len(), 3);
+        assert_ne!(icons[0], icons[1]);
+        assert_ne!(icons[0], icons[2]);
+        assert_ne!(icons[1], icons[2]);
+        assert_eq!(bytes(face), icons[0], "the face starts as Rectangular");
+        for ((command, _, _), icon) in items.iter().zip(&icons) {
+            assert_eq!(command_icon(command), Some(*icon), "{command}");
+        }
+    }
+
     #[test]
     fn command_aliases_and_variants_resolve_target_icons() {
         for (alias, target) in [
             ("RECTANG", "RECT"),
             ("REVCLOUD_RECTANGULAR", "REVCLOUD"),
-            ("REVCLOUD_POLYGONAL", "REVCLOUD"),
-            ("REVCLOUD_FREEHAND", "REVCLOUD"),
             ("POLYGON", "POLY"),
             ("ARC", "ARC_3P"),
             ("PASTE", "PASTECLIP"),
@@ -1128,17 +1251,8 @@ mod tests {
 
         // System variables and SETVAR must resolve to the VAR badge icon.
         for sysvar in [
-            "SETVAR",
-            "AUPREC",
-            "LUPREC",
-            "PDMODE",
-            "PDSIZE",
-            "AFLAGS",
-            "PICKBOX",
-            "SAVETIME",
-            "ANGDIR",
-            "INSUNITS",
-            "TILEMODE",
+            "SETVAR", "AUPREC", "LUPREC", "PDMODE", "PDSIZE", "AFLAGS", "PICKBOX", "SAVETIME",
+            "ANGDIR", "INSUNITS", "TILEMODE",
         ] {
             let icon = command_icon(sysvar);
             assert_eq!(
@@ -1184,15 +1298,7 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
     (
         "LwPolyline",
         &[
-            "MOVE",
-            "COPY",
-            "ROTATE",
-            "SCALE",
-            "MIRROR",
-            "PEDIT",
-            "OFFSET",
-            "EXPLODE",
-            "ERASE",
+            "MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "PEDIT", "OFFSET", "EXPLODE", "ERASE",
         ],
     ),
     (
@@ -1209,7 +1315,9 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
     ),
     (
         "Circle",
-        &["MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "OFFSET", "ERASE"],
+        &[
+            "MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "OFFSET", "ERASE",
+        ],
     ),
     (
         "Arc",
@@ -1253,7 +1361,15 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
     ),
     (
         "Point",
-        &["MOVE", "COPY", "ROTATE", "SCALE", "MATCHPROP", "LIST", "ERASE"],
+        &[
+            "MOVE",
+            "COPY",
+            "ROTATE",
+            "SCALE",
+            "MATCHPROP",
+            "LIST",
+            "ERASE",
+        ],
     ),
     (
         "MText",
@@ -1272,14 +1388,7 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
     (
         "Text",
         &[
-            "MOVE",
-            "COPY",
-            "ROTATE",
-            "SCALE",
-            "MIRROR",
-            "TEXTEDIT",
-            "TXT2MTXT",
-            "ERASE",
+            "MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "TEXTEDIT", "TXT2MTXT", "ERASE",
         ],
     ),
     (
@@ -1326,30 +1435,26 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
             "CLIP",
             "BEDIT",
             "REFEDIT",
-            "ATTREDEF",
             "ERASE",
         ],
     ),
     (
         "MultiLeader",
-        &["MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "EXPLODE", "ERASE"],
+        &[
+            "MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "EXPLODE", "ERASE",
+        ],
     ),
     (
         "Leader",
         &[
-            "MOVE",
-            "COPY",
-            "ROTATE",
-            "SCALE",
-            "MIRROR",
-            "LEADER",
-            "EXPLODE",
-            "ERASE",
+            "MOVE", "COPY", "ROTATE", "SCALE", "MIRROR", "LEADER", "EXPLODE", "ERASE",
         ],
     ),
     (
         "Table",
-        &["MOVE", "COPY", "ROTATE", "SCALE", "TABLEDIT", "EXPLODE", "ERASE"],
+        &[
+            "MOVE", "COPY", "ROTATE", "SCALE", "TABLEDIT", "EXPLODE", "ERASE",
+        ],
     ),
     (
         "Viewport",
@@ -1375,7 +1480,10 @@ pub static QUAD_ENTITY_COMMANDS: &[(&str, &[&str])] = &[
 /// plugins using their own `class_id` casing still resolve. Unknown keys give
 /// an empty slice.
 pub fn quad_entity_commands(type_key: &str) -> &'static [&'static str] {
-    if let Some((_, cmds)) = QUAD_ENTITY_COMMANDS.iter().find(|(key, _)| *key == type_key) {
+    if let Some((_, cmds)) = QUAD_ENTITY_COMMANDS
+        .iter()
+        .find(|(key, _)| *key == type_key)
+    {
         return cmds;
     }
     QUAD_ENTITY_COMMANDS
@@ -1391,15 +1499,7 @@ pub static QUAD_NO_SELECTION_COMMAND_GROUPS: &[(&str, &[&str])] = &[
     (
         "Draw",
         &[
-            "LINE",
-            "CIRCLE",
-            "ARC",
-            "ELLIPSE",
-            "RECT",
-            "PLINE",
-            "SPLINE",
-            "POINT",
-            "HATCH",
+            "LINE", "CIRCLE", "ARC", "ELLIPSE", "RECT", "PLINE", "SPLINE", "POINT", "HATCH",
             "REVCLOUD",
         ],
     ),
@@ -1419,10 +1519,7 @@ pub static QUAD_NO_SELECTION_COMMAND_GROUPS: &[(&str, &[&str])] = &[
         "Annotate",
         &["TEXT", "MTEXT", "LEADER", "MLEADER", "TABLE", "ATTDEF"],
     ),
-    (
-        "Block",
-        &["INSERT", "BEDIT", "ATTEDIT", "XATTACH"],
-    ),
+    ("Block", &["INSERT", "BEDIT", "ATTEDIT", "XATTACH"]),
 ];
 
 /// The No Selection quad's tab groups (label + creation commands).
@@ -1490,7 +1587,10 @@ mod quad_registry_tests {
         assert!(!line.is_empty());
         assert_eq!(quad_entity_commands("line"), line);
         assert_eq!(quad_entity_commands("LINE"), line);
-        assert_eq!(quad_entity_commands("lwPOLYLINE"), quad_entity_commands("LwPolyline"));
+        assert_eq!(
+            quad_entity_commands("lwPOLYLINE"),
+            quad_entity_commands("LwPolyline")
+        );
         assert_eq!(quad_entity_commands("Hatch"), quad_entity_commands("HATCH"));
         assert!(quad_entity_commands("NotAnEntity").is_empty());
         assert!(quad_entity_commands("").is_empty());

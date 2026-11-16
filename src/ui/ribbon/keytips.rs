@@ -245,7 +245,11 @@ pub fn key_released(key: &Key) -> Option<Message> {
 fn now_ms() -> u64 {
     static START: std::sync::OnceLock<iced::time::Instant> = std::sync::OnceLock::new();
     // Starts at 1 so that 0 keeps meaning "not set" for the timestamps.
-    START.get_or_init(iced::time::Instant::now).elapsed().as_millis() as u64 + 1
+    START
+        .get_or_init(iced::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + 1
 }
 
 /// Clear any pending lone-Alt state.
@@ -562,7 +566,11 @@ const CODES: &[(&str, &str, &str)] = &[
     ("annotate", "Centerlines", "CE"),
     ("annotate", "CENTERMARK", "CM"),
     ("annotate", "CENTERLINE", "CL"),
-    ("centerlines_extension", super::widgets::CENTER_LAYER_COMBO, "CA"),
+    (
+        "centerlines_extension",
+        super::widgets::CENTER_LAYER_COMBO,
+        "CA",
+    ),
     ("annotate", "MLEADER", "ML"),
     ("annotate", "MLEADER_STYLE_COMBO", "MY"),
     ("annotate", super::widgets::MLEADER_LAYER_COMBO, "MU"),
@@ -820,9 +828,7 @@ impl Ribbon {
 
     fn tab_tips(&self) -> Vec<Tip> {
         let tabs = self.modules.iter().enumerate().filter(|(index, module)| {
-            module.id() != "layout"
-                && !self.contextual_off(module.id())
-                && !self.tab_hidden(*index)
+            module.id() != "layout" && !self.contextual_off(module.id()) && !self.tab_hidden(*index)
         });
         let mut tips: Vec<Tip> = tabs
             .map(|(index, module)| Tip {
@@ -1226,7 +1232,7 @@ fn bold(renderer: &Renderer) -> iced::Font {
     }
 }
 
-fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
+pub(crate) fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
     <Renderer as advanced_text::Renderer>::Paragraph::with_text(advanced_text::Text {
         content,
         bounds: Size::INFINITE,
@@ -1238,6 +1244,8 @@ fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
         shaping: advanced_text::Shaping::Advanced,
         wrapping: advanced_text::Wrapping::None,
         ellipsis: advanced_text::Ellipsis::None,
+        // Hinting is off in the pinned iced: `iced_graphics::text::hint_factor`
+        // returns `None`; follow `renderer.hint_factor()` once it is enabled.
         hint_factor: None,
     })
     .min_bounds()
@@ -1270,9 +1278,11 @@ fn draw_text(
             shaping: advanced_text::Shaping::Advanced,
             wrapping: advanced_text::Wrapping::None,
             ellipsis: advanced_text::Ellipsis::None,
+            // Hinting is off in the pinned iced: `iced_graphics::text::hint_factor`
+            // returns `None`; follow `renderer.hint_factor()` once it is enabled.
             hint_factor: None,
         },
-        at,
+        crate::ui::style::text::snap_point(at),
         color,
         clip,
     );

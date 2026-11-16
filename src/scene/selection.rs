@@ -2,7 +2,9 @@ use super::*;
 
 /// The address of the object's hyperlink.
 pub(crate) fn pe_url_of(entity: &EntityType) -> Option<&str> {
-    pe_url_strings(entity).next().filter(|text| !text.is_empty())
+    pe_url_strings(entity)
+        .next()
+        .filter(|text| !text.is_empty())
 }
 
 fn pe_url_strings(entity: &EntityType) -> impl Iterator<Item = &str> {
@@ -216,7 +218,8 @@ impl Scene {
             .find(|record| record.handle == block)
             .map(|record| record.entity_handles.clone())
             .unwrap_or_default();
-        let selected = handles
+        let selected = self
+            .without_sheet_viewports(&handles)
             .into_iter()
             .filter(|handle| self.passes_selection_filter(*handle))
             .filter(|handle| !self.is_reference_only(*handle))
@@ -457,13 +460,17 @@ impl Scene {
         };
         let mut keys: rustc_hash::FxHashMap<&str, rustc_hash::FxHashSet<Vec<Option<String>>>> =
             Default::default();
-        for e in self.selected.iter().filter_map(|h| self.document.get_entity(*h)) {
+        for e in self
+            .selected
+            .iter()
+            .filter_map(|h| self.document.get_entity(*h))
+        {
             keys.entry(entity_type_name(e)).or_default().insert(key(e));
         }
         let matches: Vec<Handle> = self
             .current_layout_entity_handles()
             .into_iter()
-            .filter(|h| !self.selected.contains(h))
+            .filter(|h| !self.selected.contains(h) && self.entity_pickable(*h))
             .filter(|h| {
                 self.document.get_entity(*h).is_some_and(|e| {
                     keys.get(entity_type_name(e))
@@ -677,9 +684,30 @@ impl Scene {
             .iter()
             .find(|record| record.handle == block)
         {
-            for &handle in &record.entity_handles {
-                if let Some(entity) = self.document.get_entity(handle) {
-                    let name = entity_type_name(entity);
+            use crate::par::prelude::*;
+            // The status bar asks for this after every edit or undo that is
+            // not a pure add, so a full rescan runs on every such frame: scan
+            // the chunks in parallel (about 1 s on one thread for 3.8M objects).
+            // Tests use tiny chunks so a small drawing spans several.
+            const CHUNK: usize = if cfg!(test) { 2 } else { 64 * 1024 };
+            let document = &self.document;
+            let chunk_names: Vec<std::collections::BTreeSet<&str>> = record
+                .entity_handles
+                .chunks(CHUNK)
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|chunk| {
+                    let mut names = std::collections::BTreeSet::new();
+                    for &handle in chunk {
+                        if let Some(entity) = document.get_entity(handle) {
+                            names.insert(entity_type_name(entity));
+                        }
+                    }
+                    names
+                })
+                .collect();
+            for names in chunk_names {
+                for name in names {
                     if !present.contains(name) {
                         present.insert(name.to_string());
                     }
@@ -898,7 +926,8 @@ impl Scene {
                                 PropValue::LayerChoice(_) => {
                                     QSelectValueEditor::Choice(layer_options.clone())
                                 }
-                                PropValue::Choice { ref options, .. } | PropValue::ChoiceWithTooltip { ref options, .. } => {
+                                PropValue::Choice { ref options, .. }
+                                | PropValue::ChoiceWithTooltip { ref options, .. } => {
                                     QSelectValueEditor::Choice(options.clone())
                                 }
                                 PropValue::EditChoice {
@@ -1059,7 +1088,11 @@ impl Scene {
     /// `"ByLayer"` / `"7"` / `"0.30mm"` are stable; everything else
     /// goes through `geometry_properties()` and pulls the matching
     /// row's value out.
-    pub fn entity_property_value(&self, entity: &document::EntityType, field: &str) -> Option<String> {
+    pub fn entity_property_value(
+        &self,
+        entity: &document::EntityType,
+        field: &str,
+    ) -> Option<String> {
         use crate::entities::traits::EntityTypeOps;
         use crate::scene::model::object::PropValue;
         match field {
@@ -1134,7 +1167,8 @@ impl Scene {
                     | PropValue::PlainText(s)
                     | PropValue::Hyperlink(s) => s,
                     PropValue::LayerChoice(s) => s,
-                    PropValue::Choice { selected, .. } | PropValue::ChoiceWithTooltip { selected, .. } => selected,
+                    PropValue::Choice { selected, .. }
+                    | PropValue::ChoiceWithTooltip { selected, .. } => selected,
                     PropValue::EditChoice { value, .. } => value,
                     PropValue::ColorChoice(c) => Self::format_color(c),
                     PropValue::NamedColorChoice { name, .. } => name,
@@ -1185,12 +1219,14 @@ impl Scene {
     // ── Erase ─────────────────────────────────────────────────────────────
 
     pub fn erase_entities(&mut self, handles: &[Handle]) {
-        self.remove_entities(handles, true, true, true);
+        let handles = self.without_sheet_viewports(handles);
+        self.remove_entities(&handles, true, true, true);
     }
 
     /// Replace only planned sources, preserving annotations or leaders not exploded.
     pub fn erase_entities_exact(&mut self, handles: &[Handle]) {
-        self.remove_entities(handles, true, true, false);
+        let handles = self.without_sheet_viewports(handles);
+        self.remove_entities(&handles, true, true, false);
     }
 
     /// Like [`erase_entities`](Self::erase_entities) but without the
@@ -1198,7 +1234,8 @@ impl Scene {
     /// removes them through the plugin host API; locked-layer policy stays
     /// enforced either way.
     pub fn erase_entities_plugin(&mut self, handles: &[Handle]) {
-        self.remove_entities(handles, true, false, true);
+        let handles = self.without_sheet_viewports(handles);
+        self.remove_entities(&handles, true, false, true);
     }
 
     /// Erase entities a constraint owns, such as the dimension it draws.
@@ -1259,7 +1296,8 @@ impl Scene {
             if respect_layer_locks && self.is_layer_locked(h) {
                 continue;
             }
-            if respect_reference_only && self.is_reference_only(h) {
+            if respect_reference_only && (self.is_reference_only(h) || self.native_edit_disabled(h))
+            {
                 continue;
             }
             let settings_handle = self.document.get_entity(h).and_then(|entity| match entity {
@@ -1316,7 +1354,6 @@ impl Scene {
             // reference-only). Undo restores it through the recorded channel.
             self.reference_only.remove(h);
             selection_changed |= self.selected.remove(&h);
-            self.selected_order.retain(|selected| *selected != h);
             if self.hover_highlight == Some(h) {
                 self.hover_highlight = None;
                 hover_changed = true;
@@ -1341,7 +1378,10 @@ impl Scene {
             handle_set.insert(h);
             erased.push((h, ChangeKind::Removed));
         }
+        // Once for the whole batch: per handle this is quadratic in the selection.
         if selection_changed {
+            self.selected_order
+                .retain(|selected| !handle_set.contains(selected));
             self.bump_selection_set();
         } else if hover_changed {
             self.bump_selection();
@@ -1470,6 +1510,55 @@ const SIMILAR_FIELDS: &[(u16, &[&str])] = &[
 
 #[cfg(test)]
 mod tests {
+    /// The type list is gathered chunk by chunk in parallel: types from every
+    /// chunk show, and an erase that removes the last of a type drops it.
+    #[test]
+    fn layout_type_names_cover_every_chunk_and_follow_erases() {
+        use document::entities::{Circle, Line};
+        use document::types::Vector3;
+        let mut scene = crate::scene::Scene::new();
+        let line = || {
+            EntityType::Line(Line::from_points(
+                Vector3::ZERO,
+                Vector3::new(1.0, 0.0, 0.0),
+            ))
+        };
+        for _ in 0..5 {
+            scene.add_entity(line());
+        }
+        let circle = scene.add_entity(EntityType::Circle(Circle::from_coords(0.0, 0.0, 0.0, 1.0)));
+        scene.add_entity(line());
+        assert_eq!(
+            *scene.entity_type_names_in_layout(),
+            vec!["Circle".to_string(), "Line".to_string()]
+        );
+
+        scene.erase_entities(&[circle]);
+
+        assert_eq!(
+            *scene.entity_type_names_in_layout(),
+            vec!["Line".to_string()]
+        );
+    }
+
+    #[test]
+    fn erasing_part_of_a_selection_keeps_the_rest_in_pick_order() {
+        let mut scene = crate::scene::Scene::new();
+        let mut line = |y| {
+            scene.add_entity(document::EntityType::Line(
+                document::entities::Line::from_coords(0.0, y, 0.0, 1.0, y, 0.0),
+            ))
+        };
+        let (a, b, c) = (line(0.0), line(1.0), line(2.0));
+        for handle in [c, b, a] {
+            scene.select_entity(handle, false);
+        }
+
+        scene.erase_entities(&[b]);
+
+        assert_eq!(scene.selected_handles_in_order(), vec![c, a]);
+    }
+
     #[test]
     fn qselect_sample_matches_identical_entities_without_unique_handles() {
         use crate::app::{QSelectMode, QSelectScope};
@@ -1909,8 +1998,6 @@ mod tests {
     }
 }
 
-
-
 /// Cells picked in one table: the cell the pick started from and the one it
 /// reaches (a Shift+click or a drag moves the second).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1947,8 +2034,17 @@ impl Scene {
         point: glam::DVec3,
         margin: f64,
     ) -> Option<(Handle, (usize, usize))> {
+        // Asked on every click: skip the walk of the space when the drawing
+        // has no table at all.
+        if !self.has_tables() {
+            return None;
+        }
         let block = self.interaction_block_handle();
-        let record = self.document.block_records.iter().find(|r| r.handle == block)?;
+        let record = self
+            .document
+            .block_records
+            .iter()
+            .find(|r| r.handle == block)?;
         record.entity_handles.iter().rev().find_map(|&handle| {
             let Some(EntityType::Table(table)) = self.document.get_entity(handle) else {
                 return None;
@@ -1962,10 +2058,13 @@ impl Scene {
             {
                 return None;
             }
-            let style = table.table_style_handle.and_then(|h| match self.document.objects.get(&h)? {
-                document::objects::ObjectType::TableStyle(style) => Some(style),
-                _ => None,
-            });
+            let style =
+                table
+                    .table_style_handle
+                    .and_then(|h| match self.document.objects.get(&h)? {
+                        document::objects::ObjectType::TableStyle(style) => Some(style),
+                        _ => None,
+                    });
             crate::modules::annotate::table_cmd::table_cell_inside(table, style, point, margin)
                 .map(|cell| (handle, cell))
         })

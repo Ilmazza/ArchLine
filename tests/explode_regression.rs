@@ -536,7 +536,7 @@ fn explode_region_acis_sat_and_binary_sab_with_hole_and_style() {
 
     let body = brep::planar_region(plane, &[outer, hole]).expect("planar region with hole");
     let mut sat = SatDocument::new();
-    kernel::acis::append(&body, &mut sat).expect("sat append");
+    ocs_acis::append(&body, &mut sat).expect("sat append");
     let sat_text = sat.to_sat_string();
     let parsed_sat = SatDocument::parse(&sat_text).expect("sat parse");
     let sab_bytes = SabWriter::write(&parsed_sat);
@@ -577,8 +577,16 @@ fn explode_region_acis_sat_and_binary_sab_with_hole_and_style() {
             })
             .collect();
 
-        assert_eq!(lines.len(), 4, "{label}: outer rectangle must yield 4 lines");
-        assert_eq!(circles.len(), 1, "{label}: circular hole must yield 1 circle");
+        assert_eq!(
+            lines.len(),
+            4,
+            "{label}: outer rectangle must yield 4 lines"
+        );
+        assert_eq!(
+            circles.len(),
+            1,
+            "{label}: circular hole must yield 1 circle"
+        );
         assert!((circles[0].radius - 2.0).abs() < 1e-6);
         assert!((circles[0].center.x - 10.0).abs() < 1e-6);
         assert!((circles[0].center.y - 5.0).abs() < 1e-6);
@@ -586,11 +594,18 @@ fn explode_region_acis_sat_and_binary_sab_with_hole_and_style() {
         for piece in &pieces {
             let c = piece.common();
             assert_eq!(c.layer, "REGIONS", "{label}: layer preserved");
-            assert_eq!(c.color, document::types::Color::from_index(3), "{label}: color preserved");
+            assert_eq!(
+                c.color,
+                document::types::Color::from_index(3),
+                "{label}: color preserved"
+            );
             assert_eq!(c.linetype, "DASHED", "{label}: linetype preserved");
             assert!(c.handle.is_null(), "{label}: handle cleared");
             assert!(c.owner_handle.is_null(), "{label}: owner_handle cleared");
-            assert!(c.xdictionary_handle.is_none(), "{label}: xdict must not leak");
+            assert!(
+                c.xdictionary_handle.is_none(),
+                "{label}: xdict must not leak"
+            );
         }
     }
 }
@@ -619,7 +634,7 @@ fn explode_region_tilted_plane_arc_and_multi_island() {
     ];
     let body = brep::planar_region(plane, &[d_loop]).expect("tilted D region");
     let mut sat = SatDocument::new();
-    kernel::acis::append(&body, &mut sat).expect("sat append");
+    ocs_acis::append(&body, &mut sat).expect("sat append");
     let mut region = Region::new();
     region.acis_data = AcisData::from_sat(&sat.to_sat_string());
 
@@ -676,7 +691,7 @@ fn explode_region_tilted_plane_arc_and_multi_island() {
     let r2 = brep::planar_region(xy, &[rect_loop(10.0, 15.0)]).unwrap();
     let union_body = brep::union_planar_regions(&[r1, r2], 1e-6).unwrap();
     let mut union_sat = SatDocument::new();
-    kernel::acis::append(&union_body, &mut union_sat).unwrap();
+    ocs_acis::append(&union_body, &mut union_sat).unwrap();
     let mut multi_region = Region::new();
     multi_region.acis_data = AcisData::from_sat(&union_sat.to_sat_string());
     let multi_pieces = explode_entity(&EntityType::Region(multi_region), &doc);
@@ -731,7 +746,7 @@ fn explode_region_acis_with_body_transform() {
     ];
     let body = brep::planar_region(plane, &[rect]).expect("planar region");
     let mut sat = SatDocument::new();
-    kernel::acis::append(&body, &mut sat).expect("sat append");
+    ocs_acis::append(&body, &mut sat).expect("sat append");
 
     // A placed region carries a body transform record.
     // Translate by [50.0, 100.0, 0.0].
@@ -792,7 +807,7 @@ fn explode_region_elliptical_and_spline_boundaries() {
     }))];
     let body = brep::planar_region(plane, &[ell_loop]).expect("ellipse region");
     let mut sat = SatDocument::new();
-    kernel::acis::append(&body, &mut sat).expect("sat append");
+    ocs_acis::append(&body, &mut sat).expect("sat append");
     let mut region = Region::new();
     region.acis_data = AcisData::from_sat(&sat.to_sat_string());
     region.common.layer = "ELLIPSES".to_string();
@@ -817,12 +832,7 @@ fn explode_region_elliptical_and_spline_boundaries() {
     // 2. Region with a cubic NURBS/Spline edge closed by a straight line.
     let nurbs = KNurbs::new(
         3,
-        vec![
-            [0.0, 0.0],
-            [3.0, 5.0],
-            [7.0, -2.0],
-            [10.0, 0.0],
-        ],
+        vec![[0.0, 0.0], [3.0, 5.0], [7.0, -2.0], [10.0, 0.0]],
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         None,
     )
@@ -836,7 +846,7 @@ fn explode_region_elliptical_and_spline_boundaries() {
     ];
     let body_spline = brep::planar_region(plane, &[spline_loop]).expect("spline region");
     let mut sat_spline = SatDocument::new();
-    kernel::acis::append(&body_spline, &mut sat_spline).expect("sat append");
+    ocs_acis::append(&body_spline, &mut sat_spline).expect("sat append");
     let mut region_spline = Region::new();
     region_spline.acis_data = AcisData::from_sat(&sat_spline.to_sat_string());
     region_spline.common.layer = "SPLINES".to_string();
@@ -847,8 +857,12 @@ fn explode_region_elliptical_and_spline_boundaries() {
         2,
         "spline region must explode to 1 Spline and 1 Line"
     );
-    let has_line = pieces_spline.iter().any(|p| matches!(p, EntityType::Line(_)));
-    let has_spline = pieces_spline.iter().any(|p| matches!(p, EntityType::Spline(_)));
+    let has_line = pieces_spline
+        .iter()
+        .any(|p| matches!(p, EntityType::Line(_)));
+    let has_spline = pieces_spline
+        .iter()
+        .any(|p| matches!(p, EntityType::Spline(_)));
     assert!(has_line, "must contain a Line");
     assert!(has_spline, "must contain a Spline");
     for p in &pieces_spline {
@@ -880,7 +894,7 @@ fn explode_region_elliptical_and_spline_boundaries() {
     ];
     let body_arc = brep::planar_region(plane, &[d_equal_loop]).expect("equal-radii ellipse region");
     let mut sat_arc = SatDocument::new();
-    kernel::acis::append(&body_arc, &mut sat_arc).expect("sat append");
+    ocs_acis::append(&body_arc, &mut sat_arc).expect("sat append");
     let mut region_arc = Region::new();
     region_arc.acis_data = AcisData::from_sat(&sat_arc.to_sat_string());
 
@@ -895,4 +909,3 @@ fn explode_region_elliptical_and_spline_boundaries() {
         .expect("equal-radii ellipse arc must emit EntityType::Arc");
     assert!((arc_piece.radius - 5.0).abs() < 1e-6);
 }
-

@@ -3,9 +3,9 @@ use document::types::Vector3;
 use kernel::geom2d::{intersect::line_line, Vec2};
 use kernel::space::Plane;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{edit_prop as edit, ro_prop, square_grip};
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -566,7 +566,10 @@ pub fn mline_lines_with_style(m: &MLine, style: &document::objects::MLineStyle) 
     mline_lines_resolved(m, Some(style))
 }
 
-fn mline_lines_resolved(m: &MLine, style: Option<&document::objects::MLineStyle>) -> Vec<MLineLine> {
+fn mline_lines_resolved(
+    m: &MLine,
+    style: Option<&document::objects::MLineStyle>,
+) -> Vec<MLineLine> {
     use document::entities::{MLineFlags, MLineJustification};
     use document::types::Color;
 
@@ -999,13 +1002,11 @@ impl Grippable for MLine {
         };
         let position = match apply {
             GripApply::Translate(delta) => document::types::Vector3::new(
-                vertex.position.x + delta.x as f64,
-                vertex.position.y + delta.y as f64,
-                vertex.position.z + delta.z as f64,
+                vertex.position.x + delta.x,
+                vertex.position.y + delta.y,
+                vertex.position.z + delta.z,
             ),
-            GripApply::Absolute(point) => {
-                document::types::Vector3::new(point.x as f64, point.y as f64, point.z as f64)
-            }
+            GripApply::Absolute(point) => document::types::Vector3::new(point.x, point.y, point.z),
         };
         let count = self.vertices.len();
         let segment_count = if self.is_closed() {

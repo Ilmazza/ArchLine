@@ -137,6 +137,12 @@ enum StepCR {
     Diameter(DVec3),
 }
 
+impl Default for CircleCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CircleCommand {
     pub fn new() -> Self {
         Self {
@@ -152,7 +158,11 @@ impl CircleCommand {
         match self.step {
             StepCR::Center => crate::tr!("hatch-cmd", "circle-center"),
             StepCR::Radius(_) => {
-                crate::tr!("hatch-cmd", "circle-radius", radius = format(self.default_r))
+                crate::tr!(
+                    "hatch-cmd",
+                    "circle-radius",
+                    radius = format(self.default_r)
+                )
             }
             StepCR::Diameter(_) => crate::tr!(
                 "hatch-cmd",
@@ -170,6 +180,11 @@ impl CadCommand for CircleCommand {
 
     fn name(&self) -> &'static str {
         "CIRCLE"
+    }
+
+    fn point_rejection(&self) -> Option<String> {
+        matches!(self.step, StepCR::Radius(_))
+            .then(|| t!("Requires numeric radius, point on circumference, or \"D\".").into_owned())
     }
     fn prompt(&self) -> String {
         match &self.step {
@@ -199,7 +214,7 @@ impl CadCommand for CircleCommand {
                 CmdOption::new("3P", "3P"),
                 CmdOption::new("2P", "2P"),
                 CmdOption::new("Ttr", "TTR"),
-                CmdOption::new("Ttt", "TTT"),
+                CmdOption::new("TTt", "TTT"),
             ],
             StepCR::Radius(_) => vec![CmdOption::new(t!("Diameter").as_ref(), "D")],
             StepCR::Diameter(_) => vec![],
@@ -270,7 +285,7 @@ impl CadCommand for CircleCommand {
                 "3P" => Some(CmdResult::Dispatch("CIRCLE_3P".into())),
                 "2P" => Some(CmdResult::Dispatch("CIRCLE_2P".into())),
                 "T" | "TTR" => Some(CmdResult::Dispatch("CIRCLE_TTR".into())),
-                "TTT" => Some(CmdResult::Dispatch("CIRCLE_TTT".into())),
+                "TT" | "TTT" => Some(CmdResult::Dispatch("CIRCLE_TTT".into())),
                 _ => None,
             };
         }
@@ -333,6 +348,12 @@ pub struct CircleCDCommand {
     step: StepCR,
     default_d: f64,
     plane: WorkingPlane,
+}
+
+impl Default for CircleCDCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CircleCDCommand {
@@ -442,6 +463,12 @@ pub struct Circle2PCommand {
     plane: WorkingPlane,
 }
 
+impl Default for Circle2PCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Circle2PCommand {
     pub fn new() -> Self {
         Self {
@@ -511,6 +538,12 @@ impl CadCommand for Circle2PCommand {
 pub struct Circle3PCommand {
     pts: Vec<DVec3>,
     plane: WorkingPlane,
+}
+
+impl Default for Circle3PCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Circle3PCommand {
@@ -1309,6 +1342,12 @@ enum StepTTR {
     },
 }
 
+impl Default for CircleTTRCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CircleTTRCommand {
     pub fn new() -> Self {
         Self {
@@ -1496,6 +1535,12 @@ pub struct CircleTTTCommand {
     objs: Vec<TangentObject>,
     hits: Vec<DVec3>,
     plane: WorkingPlane,
+}
+
+impl Default for CircleTTTCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CircleTTTCommand {

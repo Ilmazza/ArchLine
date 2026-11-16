@@ -1,7 +1,3 @@
-/// Single source of truth for UI row height (px).
-/// Change this to scale the ribbon, layer manager rows, and property panel rows uniformly.
-pub const ROW_H: f32 = 26.0;
-
 pub mod color_select;
 pub mod command_line;
 pub mod dock;
@@ -9,8 +5,9 @@ pub mod drop_down_fit;
 pub mod dropdown_list;
 pub mod font_picker;
 pub mod hover_zone;
-pub mod ime_zone;
 pub mod icons;
+pub mod ime_zone;
+pub mod kit;
 pub mod live_result;
 pub mod menu_bar;
 pub mod modal;

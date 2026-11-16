@@ -169,12 +169,16 @@ impl OpenCADStudio {
             self.tabs[i].dirty = true;
             let count = consumed.len();
             let message = match self.tabs[i].scene.document.get_entity(source) {
-                Some(document::EntityType::Arc(_)) if count == 1 => crate::tf!("{count} arc joined to source"),
+                Some(document::EntityType::Arc(_)) if count == 1 => {
+                    crate::tf!("{count} arc joined to source")
+                }
                 Some(document::EntityType::Arc(_)) => crate::tf!("{count} arcs joined to source"),
                 Some(document::EntityType::Line(_)) if line_source && count == 1 => {
                     crate::tf!("{count} line joined to source")
                 }
-                Some(document::EntityType::Line(_)) if line_source => crate::tf!("{count} lines joined to source"),
+                Some(document::EntityType::Line(_)) if line_source => {
+                    crate::tf!("{count} lines joined to source")
+                }
                 _ => crate::tf!("{count} segments added to polyline"),
             };
             self.command_line.push_output(message.as_ref());
@@ -221,13 +225,23 @@ impl OpenCADStudio {
                 let all = |test: fn(&document::EntityType) -> bool| joined.iter().all(|e| test(e));
                 let polylines = joined
                     .iter()
-                    .filter(|e| matches!(e, document::EntityType::LwPolyline(_) | document::EntityType::Polyline2D(_)))
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            document::EntityType::LwPolyline(_)
+                                | document::EntityType::Polyline2D(_)
+                        )
+                    })
                     .count();
                 let summary = match (merged.as_slice(), merged.len()) {
-                    ([document::EntityType::Line(_)], _) if all(|e| matches!(e, document::EntityType::Line(_))) => {
+                    ([document::EntityType::Line(_)], _)
+                        if all(|e| matches!(e, document::EntityType::Line(_))) =>
+                    {
                         crate::tf!("{count_in} lines joined into 1 line").into_owned()
                     }
-                    ([document::EntityType::Arc(_)], _) if all(|e| matches!(e, document::EntityType::Arc(_))) => {
+                    ([document::EntityType::Arc(_)], _)
+                        if all(|e| matches!(e, document::EntityType::Arc(_))) =>
+                    {
                         crate::tf!("{count_in} arcs joined into 1 arc").into_owned()
                     }
                     (_, 1) if polylines > 0 => {
@@ -239,7 +253,9 @@ impl OpenCADStudio {
                         }
                     }
                     (_, 1) => crate::tf!("{count_in} objects converted to 1 polyline").into_owned(),
-                    (_, count) => crate::tf!("{count_in} objects converted to {count} polylines").into_owned(),
+                    (_, count) => {
+                        crate::tf!("{count_in} objects converted to {count} polylines").into_owned()
+                    }
                 } + &discarded_note(pairs.len() - count_in);
                 let label = self.history_label_from_active_cmd(i, "JOIN");
                 self.push_undo_snapshot(i, label);
@@ -262,7 +278,8 @@ impl OpenCADStudio {
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
                 self.command_line.push_output(
-                    crate::tf!("0 objects joined, {count} objects discarded from the operation").as_ref(),
+                    crate::tf!("0 objects joined, {count} objects discarded from the operation")
+                        .as_ref(),
                 );
             }
         }
@@ -477,6 +494,7 @@ impl OpenCADStudio {
                             common.transparency = value;
                         }
                     }
+                    self.tabs[i].scene.refresh_fill_model(handle);
                     self.tabs[i]
                         .scene
                         .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
@@ -743,6 +761,101 @@ impl OpenCADStudio {
         self.tabs[i].scene.clear_preview_wire();
         self.restore_pre_cmd_tangent();
         None
+    }
+
+    /// OK on the Hatch panel during HATCHEDIT: what changed on the panel
+    /// goes onto the hatch as one undo step, and HATCHEDIT ends.
+    pub(in crate::app) fn apply_hatch_panel_edit(
+        &mut self,
+        handle: document::Handle,
+        before: &crate::modules::draw::draw::hatch::HatchSettings,
+        after: &crate::modules::draw::draw::hatch::HatchSettings,
+    ) {
+        let i = self.active_tab;
+        let finish = |app: &mut Self| {
+            app.tabs[i].active_cmd = None;
+            app.tabs[i].snap_result = None;
+            app.tabs[i].scene.clear_preview_wire();
+            app.restore_pre_cmd_tangent();
+        };
+        if before == after {
+            finish(self);
+            return;
+        }
+        if self.reject_locked_edit(i, handle) {
+            return;
+        }
+        let Some(document::EntityType::Hatch(mut hatch)) =
+            self.tabs[i].scene.document.get_entity(handle).cloned()
+        else {
+            self.command_line
+                .push_error(crate::t!("HATCHEDIT: hatch entity not found.").as_ref());
+            finish(self);
+            return;
+        };
+        let layer = after
+            .layer
+            .clone()
+            .filter(|name| before.layer.as_ref() != Some(name));
+        if layer
+            .as_ref()
+            .is_some_and(|name| self.tabs[i].scene.document.layers.get(name).is_none())
+        {
+            self.command_line.push_error("HATCHEDIT: layer not found.");
+            return;
+        }
+        self.push_undo_snapshot(i, "HATCHEDIT");
+        crate::entities::hatch::apply_panel_settings(&mut hatch, before, after);
+        if after.color != before.color {
+            hatch.common.color = after.color.unwrap_or(document::types::Color::ByLayer);
+            hatch.common.color_name = None;
+            hatch.common.color_book_handle = None;
+        }
+        if let Some(name) = layer {
+            hatch.common.layer = name;
+        }
+        if after.transparency != before.transparency {
+            hatch.common.transparency = match after.transparency {
+                Some(percent) => {
+                    document::types::Transparency::from_percent(f64::from(percent) / 100.0)
+                }
+                None => document::types::Transparency::ByLayer,
+            };
+        }
+        self.tabs[i]
+            .scene
+            .update_entity(document::EntityType::Hatch(hatch));
+        if after.annotative != before.annotative {
+            crate::scene::annotative::set_entity_annotative(
+                &mut self.tabs[i].scene.document,
+                handle,
+                after.annotative,
+            );
+            if after.annotative {
+                if let Some(scale) = self.tabs[i].scene.creation_annotation_scale_handle() {
+                    crate::scene::annotative::create_annotation_context(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                        scale,
+                    );
+                }
+            }
+        }
+        if after.draw_order != before.draw_order {
+            let _ = match after.draw_order {
+                1 => self.apply_draw_order(i, &[handle], Some(false), None),
+                2 => self.apply_draw_order(i, &[handle], Some(true), None),
+                _ => None,
+            };
+        }
+        self.tabs[i]
+            .scene
+            .bump_entities(&[(handle, crate::scene::ChangeKind::Modified)]);
+        self.tabs[i].dirty = true;
+        self.refresh_properties();
+        self.command_line
+            .push_output(crate::t!("HATCHEDIT: hatch updated.").as_ref());
+        finish(self);
     }
 
     fn apply_pedit_result(

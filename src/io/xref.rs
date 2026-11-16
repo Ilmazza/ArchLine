@@ -216,6 +216,17 @@ fn read_registered_outcome(
     Ok(outcome)
 }
 
+/// Parse a registered drawing for transmittal dependency discovery without
+/// consuming the one-shot parse cache used by XREF resolution.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn registered_document(key: &str) -> Result<Document, String> {
+    let bytes =
+        registered_bytes(key).ok_or_else(|| format!("no registered bytes for xref \"{key}\""))?;
+    let mut outcome = read_outcome_from_bytes(key, bytes, None)?;
+    finalize_xref_outcome(&mut outcome);
+    Ok(outcome.document)
+}
+
 /// Apply the same post-parse fixups the file-open tail applies, so merged
 /// xref content behaves like natively loaded content.
 #[cfg(target_arch = "wasm32")]
@@ -575,7 +586,7 @@ struct LayerLook {
 impl LayerLook {
     fn of(layer: &document::tables::Layer) -> Self {
         Self {
-            color: layer.color.clone(),
+            color: layer.color,
             line_type: layer.line_type.to_uppercase(),
             line_weight: layer.line_weight,
             off: layer.flags.off,
@@ -661,6 +672,10 @@ pub(crate) fn resolve_path(raw: &str, base_dir: &Path) -> Option<PathBuf> {
             if c.exists() {
                 return Some(c);
             }
+            let structured = base_dir.join("xref").join(fname);
+            if structured.is_file() {
+                return Some(structured);
+            }
         }
         return None;
     }
@@ -676,6 +691,13 @@ pub(crate) fn resolve_path(raw: &str, base_dir: &Path) -> Option<PathBuf> {
         let c = base_dir.join(fname);
         if c.exists() {
             return Some(c);
+        }
+        // Flat references from older packages also resolve into the structured
+        // AutoCAD-style xref/ folder. The reverse (an xref/ path with a flat
+        // package) is covered by the bare-name fallback above.
+        let structured = base_dir.join("xref").join(fname);
+        if structured.is_file() {
+            return Some(structured);
         }
     }
 
@@ -1393,6 +1415,32 @@ pub fn collect_entries_with_prev(
     unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
     prev: &std::collections::HashMap<u64, std::time::SystemTime>,
 ) -> Vec<crate::io::xref_model::ReferenceEntry> {
+    collect_entries_impl(doc, base_dir, unloaded, prev, true)
+}
+
+/// Resolve one host-owned row without applying the manager's nested-row
+/// deduplication filter. A direct, uninserted record can intentionally be
+/// hidden by that filter immediately after a path edit; lifecycle responses
+/// still need to serialize the row they just changed.
+pub(crate) fn collect_direct_entry_with_prev(
+    doc: &document::Document,
+    base_dir: &Path,
+    unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
+    prev: &std::collections::HashMap<u64, std::time::SystemTime>,
+    key: u64,
+) -> Option<crate::io::xref_model::ReferenceEntry> {
+    collect_entries_impl(doc, base_dir, unloaded, prev, false)
+        .into_iter()
+        .find(|entry| entry.key == key && entry.parent_key.is_none())
+}
+
+fn collect_entries_impl(
+    doc: &document::Document,
+    base_dir: &Path,
+    unloaded: &std::collections::HashSet<crate::io::xref_model::UnloadKey>,
+    prev: &std::collections::HashMap<u64, std::time::SystemTime>,
+    deduplicate_nested: bool,
+) -> Vec<crate::io::xref_model::ReferenceEntry> {
     use crate::io::xref_model::{
         child_key, decide_status, normalize_lexical, RefKind, RefStatus, RefType, ReferenceEntry,
         UnloadKey,
@@ -1673,6 +1721,34 @@ pub fn collect_entries_with_prev(
         }
     }
 
+    // A drawing saved by AutoCAD also keeps its nested xrefs' block records,
+    // so a nested reference showed up twice: once at the top, once under its
+    // parent (#2838). A top-level row the host never inserts itself, whose
+    // file the walk found under a parent, is that nested row.
+    if deduplicate_nested {
+        let nested_files: HashSet<String> = entries
+            .iter()
+            .filter(|e| e.parent_key.is_some())
+            .filter_map(|e| e.found_at.as_deref().map(normalize_lexical))
+            .collect();
+        let inserted: HashSet<String> = doc
+            .entities()
+            .filter_map(|e| match e {
+                document::EntityType::Insert(insert) => Some(insert.block_name.to_uppercase()),
+                _ => None,
+            })
+            .collect();
+        entries.retain(|e| {
+            e.parent_key.is_some()
+                || e.kind != RefKind::DwgXref
+                || inserted.contains(&e.name.to_uppercase())
+                || !e
+                    .found_at
+                    .as_deref()
+                    .is_some_and(|found| nested_files.contains(&normalize_lexical(found)))
+        });
+    }
+
     // Stale propagation (plan §3.1): a Loaded parent with a Stale descendant
     // shows Stale. Roots append before their children, so one reverse pass
     // carries staleness transitively up any depth: by the time the iteration
@@ -1731,7 +1807,9 @@ fn find_target(doc: &Document, key: u64) -> Option<RefTarget> {
                 });
             }
             ObjectType::ClassObject(object) if handle.value() == key => {
-                if let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &object.data {
+                if let document::objects::ClassObjectData::PointCloudDefinitionEx(def) =
+                    &object.data
+                {
                     return Some(RefTarget::PointCloud {
                         handle: *handle,
                         name: def.source_filename.clone(),
@@ -2159,10 +2237,7 @@ pub fn xbind_symbols(
         let Some(source_layer) = source.layers.get(source_name) else {
             continue;
         };
-        let Some(new_linetype) = maps
-            .linetypes
-            .get(&source_layer.line_type.to_uppercase())
-        else {
+        let Some(new_linetype) = maps.linetypes.get(&source_layer.line_type.to_uppercase()) else {
             continue;
         };
         if let Some(host_layer) = doc.layers.get_mut(host_name) {
@@ -2287,9 +2362,7 @@ fn collect_xbind_dependencies(source: &Document, selection: &mut XbindSelection)
                 EntityType::Dimension(dimension) => {
                     let base = dimension.base();
                     if !base.style_name.is_empty() {
-                        selection
-                            .dim_styles
-                            .insert(base.style_name.to_uppercase());
+                        selection.dim_styles.insert(base.style_name.to_uppercase());
                     }
                     queue_bindable_block(source, &base.block_name, selection, &mut queue);
                 }
@@ -2588,7 +2661,10 @@ fn bind_nested_closure(
     let children: Vec<(String, Handle, String)> = source
         .block_records
         .iter()
-        .filter(|br| (br.flags.is_xref || br.flags.is_xref_overlay) && !br.xref_path.is_empty())
+        // An overlay never re-exports through the host: it has no business
+        // being bound when the host is bound. Only drawing attachments join
+        // the closure.
+        .filter(|br| br.flags.is_xref && !br.flags.is_xref_overlay && !br.xref_path.is_empty())
         .map(|br| (br.name.clone(), br.handle, br.xref_path.clone()))
         .collect();
     let mut taken = BindTaken::capture(source);
@@ -2981,15 +3057,15 @@ fn restore_dependent_layers(
         let (Some(cur), Some(old)) = (doc.layers.get_mut(&n), kept.get(&n.to_uppercase())) else {
             continue;
         };
-        cur.flags = old.flags.clone();
-        cur.color = old.color.clone();
+        cur.flags = old.flags;
+        cur.color = old.color;
         cur.color_name = old.color_name.clone();
         cur.book_name = old.book_name.clone();
         cur.line_type = old.line_type.clone();
-        cur.line_weight = old.line_weight.clone();
+        cur.line_weight = old.line_weight;
         cur.plot_style = old.plot_style.clone();
         cur.is_plottable = old.is_plottable;
-        cur.transparency = old.transparency.clone();
+        cur.transparency = old.transparency;
     }
 }
 
@@ -3042,14 +3118,21 @@ pub fn set_ref_path(doc: &mut Document, key: u64, new_raw: &str) -> Result<Strin
     }
 }
 
-/// Convert one reference's stored path to `pathtype` against `host_path`.
-/// Verbatim store on success; neutral errors otherwise.
-pub fn apply_pathtype(
+#[derive(Debug)]
+pub(crate) enum ApplyPathtypeError {
+    MissingReference,
+    Conversion(crate::io::xref_model::PathtypeError),
+    Store(String),
+}
+
+/// Typed implementation shared by the UI wrapper and automation. Keeping the
+/// conversion variant intact prevents stable API errors depending on locale.
+pub(crate) fn apply_pathtype_typed(
     doc: &mut Document,
     key: u64,
     pathtype: crate::io::xref_model::Pathtype,
     host_path: &Path,
-) -> Result<String, String> {
+) -> Result<String, ApplyPathtypeError> {
     let saved = match find_target(doc, key) {
         Some(RefTarget::DwgXref { name, .. }) => doc
             .block_records
@@ -3071,7 +3154,7 @@ pub fn apply_pathtype(
             }
         }
         Some(RefTarget::PointCloud { name, .. }) => name,
-        None => return Err(crate::t!("XREF: no loaded reference with that key.").to_string()),
+        None => return Err(ApplyPathtypeError::MissingReference),
     };
     // A stored relative path first has to be resolved against its current host
     // folder.  Passing it straight to `to_pathtype_result` made `Full` a
@@ -3092,17 +3175,33 @@ pub fn apply_pathtype(
     };
     match crate::io::xref_model::to_pathtype_result(&effective, host_path, pathtype) {
         Ok(next) => {
-            set_ref_path(doc, key, &next)?;
+            set_ref_path(doc, key, &next).map_err(ApplyPathtypeError::Store)?;
             Ok(next)
         }
-        Err(crate::io::xref_model::PathtypeError::AcrossDrives) => {
-            Err(crate::t!("XREF: cannot make path relative across drives.").to_string())
-        }
-        Err(crate::io::xref_model::PathtypeError::UnsavedHost) => Err(crate::t!(
-            "XREF  Save the drawing first to resolve relative XREF paths."
-        )
-        .to_string()),
+        Err(error) => Err(ApplyPathtypeError::Conversion(error)),
     }
+}
+
+/// Convert one reference's stored path to `pathtype` against `host_path`.
+/// Verbatim store on success; localized UI errors otherwise.
+pub fn apply_pathtype(
+    doc: &mut Document,
+    key: u64,
+    pathtype: crate::io::xref_model::Pathtype,
+    host_path: &Path,
+) -> Result<String, String> {
+    apply_pathtype_typed(doc, key, pathtype, host_path).map_err(|error| match error {
+        ApplyPathtypeError::MissingReference => {
+            crate::t!("XREF: no loaded reference with that key.").to_string()
+        }
+        ApplyPathtypeError::Conversion(crate::io::xref_model::PathtypeError::AcrossDrives) => {
+            crate::t!("XREF: cannot make path relative across drives.").to_string()
+        }
+        ApplyPathtypeError::Conversion(crate::io::xref_model::PathtypeError::UnsavedHost) => {
+            crate::t!("XREF  Save the drawing first to resolve relative XREF paths.").to_string()
+        }
+        ApplyPathtypeError::Store(error) => error,
+    })
 }
 
 /// Find & Replace: rewrite `old` → `new` as a component-wise prefix replace
@@ -3400,10 +3499,15 @@ mod tests {
         img_def.handle = img_h;
         doc.objects
             .insert(img_h, ObjectType::ImageDefinition(img_def));
-        let mut img =
-            document::entities::RasterImage::new("img.png", document::types::Vector3::ZERO, 8.0, 8.0);
+        let mut img = document::entities::RasterImage::new(
+            "img.png",
+            document::types::Vector3::ZERO,
+            8.0,
+            8.0,
+        );
         img.definition_handle = Some(img_h);
-        doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
+        doc.add_entity(document::EntityType::RasterImage(img))
+            .unwrap();
         // Unreferenced PDF definition → listed, never merged.
         let pdf_h = doc.allocate_handle();
         let mut pdf_def = UnderlayDefinition::pdf("doc.pdf", "1");
@@ -3818,7 +3922,8 @@ mod tests {
                 let mut other_line = document::entities::Line::new();
                 other_line.common.layer = "HIDDEN".to_string();
                 other_line.common.owner_handle = other_handle;
-                doc.add_entity(document::EntityType::Line(other_line)).unwrap();
+                doc.add_entity(document::EntityType::Line(other_line))
+                    .unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
 
@@ -3862,8 +3967,11 @@ mod tests {
             detach_reference(&mut host, key).expect("detach");
             assert!(host.block_records.get("PLAN").is_none());
             assert!(host.block_records.get("PLAN$0$TITLE").is_some());
-            let insert = document::entities::Insert::new("PLAN$0$TITLE", document::types::Vector3::ZERO);
-            let handle = host.add_entity(document::EntityType::Insert(insert)).expect("insert");
+            let insert =
+                document::entities::Insert::new("PLAN$0$TITLE", document::types::Vector3::ZERO);
+            let handle = host
+                .add_entity(document::EntityType::Insert(insert))
+                .expect("insert");
             assert!(host.get_entity(handle).is_some());
             std::fs::remove_dir_all(&dir).ok();
         }
@@ -3974,6 +4082,51 @@ mod tests {
         }
 
         #[test]
+        fn bind_skips_nested_overlays() {
+            let dir = bind_dir("overlay");
+            let detail_path = write_xref_file(&dir, "detail.dwg", |doc| {
+                add_layer(doc, "WALLS");
+                doc.add_entity(line_on("WALLS")).unwrap();
+            });
+            let overlay_path = write_xref_file(&dir, "labels.dwg", |doc| {
+                add_layer(doc, "LABELS");
+                doc.add_entity(line_on("LABELS")).unwrap();
+            });
+            let plan_path = write_xref_file(&dir, "plan.dwg", |doc| {
+                add_layer(doc, "PLANLAYER");
+                doc.add_entity(line_on("PLANLAYER")).unwrap();
+                let mut detail = document::tables::BlockRecord::new("DETAIL");
+                detail.flags.is_xref = true;
+                detail.xref_path = detail_path.clone();
+                doc.block_records.add(detail).expect("add nested attach");
+                let mut labels = document::tables::BlockRecord::new("LABELS");
+                labels.flags.is_xref_overlay = true;
+                labels.xref_path = overlay_path.clone();
+                doc.block_records.add(labels).expect("add nested overlay");
+            });
+            let (mut host, key) = xref_doc_with("PLAN", &plan_path);
+            let outcome = bind_reference(&mut host, key, &dir, &dir).expect("bind");
+            assert_eq!(outcome.name, "PLAN");
+            assert!(
+                host.layers.get("PLAN$0$DETAIL$0$WALLS").is_some(),
+                "the attachment's layers join the binding"
+            );
+            assert!(
+                !host.layers.get("PLAN$0$LABELS").is_some(),
+                "the overlay's layers stay out of the binding"
+            );
+            let overlay = host
+                .block_records
+                .iter()
+                .find(|record| record.name == "PLAN$0$LABELS");
+            assert!(
+                overlay.is_none(),
+                "an overlay reference is not rewritten by the binding"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[test]
         fn bind_remaps_hatch_dim_block_refs() {
             let dir = bind_dir("refs");
             let xref_path = write_xref_file(&dir, "plan.dwg", |doc| {
@@ -3992,14 +4145,16 @@ mod tests {
                 // Hatch (pattern names have no table — preserved verbatim).
                 let mut hatch = document::entities::Hatch::new();
                 hatch.pattern.name = "ANSI31".to_string();
-                doc.add_entity(document::EntityType::Hatch(Box::new(hatch))).unwrap();
+                doc.add_entity(document::EntityType::Hatch(Box::new(hatch)))
+                    .unwrap();
                 // Dim-style reference via a tolerance entity.
                 doc.dim_styles
                     .add(document::tables::DimStyle::new("ARCH"))
                     .expect("add dimstyle");
                 let mut tol = document::entities::Tolerance::new();
                 tol.dimension_style_name = "ARCH".to_string();
-                doc.add_entity(document::EntityType::Tolerance(tol)).unwrap();
+                doc.add_entity(document::EntityType::Tolerance(tol))
+                    .unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             bind_reference(&mut host, key, &dir, &dir).expect("bind");
@@ -4023,7 +4178,8 @@ mod tests {
             let hatches: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle && matches!(e, document::EntityType::Hatch(_))
+                    e.common().owner_handle == br.handle
+                        && matches!(e, document::EntityType::Hatch(_))
                 })
                 .collect();
             assert_eq!(hatches.len(), 1);
@@ -4077,7 +4233,8 @@ mod tests {
             let lines: Vec<_> = host
                 .entities()
                 .filter(|e| {
-                    e.common().owner_handle == br.handle && matches!(e, document::EntityType::Line(_))
+                    e.common().owner_handle == br.handle
+                        && matches!(e, document::EntityType::Line(_))
                 })
                 .collect();
             assert_eq!(lines.len(), 1);
@@ -4111,7 +4268,8 @@ mod tests {
                     8.0,
                 );
                 img.definition_handle = Some(h);
-                doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
+                doc.add_entity(document::EntityType::RasterImage(img))
+                    .unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             bind_reference(&mut host, key, &src_dir, &host_dir).expect("bind");
@@ -4147,7 +4305,8 @@ mod tests {
                     8.0,
                 );
                 img.definition_handle = Some(h);
-                doc.add_entity(document::EntityType::RasterImage(img)).unwrap();
+                doc.add_entity(document::EntityType::RasterImage(img))
+                    .unwrap();
             });
             let (mut host, key) = xref_doc_with("PLAN", &xref_path);
             let err = bind_reference(&mut host, key, &dir, &dir).unwrap_err();
@@ -4201,7 +4360,8 @@ mod tests {
 /// stays full.
 fn relative_point_cloud_path(doc: &mut Document, handle: Handle, host: &Path) {
     use crate::io::xref_model::{to_pathtype_result, Pathtype};
-    let Some(document::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle) else {
+    let Some(document::objects::ObjectType::ClassObject(object)) = doc.objects.get_mut(&handle)
+    else {
         return;
     };
     let document::objects::ClassObjectData::PointCloudDefinitionEx(def) = &mut object.data else {

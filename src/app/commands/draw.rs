@@ -38,13 +38,17 @@ impl OpenCADStudio {
             // WIPEOUT's Frames option: a new mode regenerates twice (the
             // reference prints it twice); the current mode changes nothing.
             cmd if cmd.starts_with("_WIPEOUT_FRAMES ") => {
-                let mode = cmd["_WIPEOUT_FRAMES ".len()..].trim().parse::<i16>().unwrap_or(1);
+                let mode = cmd["_WIPEOUT_FRAMES ".len()..]
+                    .trim()
+                    .parse::<i16>()
+                    .unwrap_or(1);
                 let current = crate::modules::draw::draw::wipeout::wipeout_frame_mode(
                     &self.tabs[i].scene.document,
                 );
                 if mode != current {
                     let task = self.dispatch_command(&format!("WIPEOUTFRAME {mode}"));
-                    self.command_line.push_output(crate::t!("Regenerating model.").as_ref());
+                    self.command_line
+                        .push_output(crate::t!("Regenerating model.").as_ref());
                     return Some(task);
                 }
                 return Some(Task::none());
@@ -69,8 +73,30 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(wo_cmd));
             }
 
-            cmd if cmd == "IMAGE" || cmd == "IMAGEATTACH" || cmd == "IM" => {
-                return Some(Task::done(Message::ImagePick));
+            // IMAGE / IMAGEATTACH / -IMAGEATTACH / IM [path]
+            // A bare command opens the file picker. A path on the command
+            // line is attached the way a dropped picture is, so a script can
+            // place a raster reference without a dialog; the insertion point
+            // prompt then follows as usual.
+            cmd if {
+                let verb = cmd.split_whitespace().next().unwrap_or_default();
+                matches!(
+                    verb.trim_start_matches('-').to_ascii_uppercase().as_str(),
+                    "IMAGE" | "IMAGEATTACH" | "IM"
+                )
+            } =>
+            {
+                let rest = cmd
+                    .split_once(char::is_whitespace)
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or("");
+                if rest.is_empty() {
+                    return Some(Task::done(Message::ImagePick));
+                }
+                let path = std::path::PathBuf::from(rest.trim_matches('"'));
+                return Some(self.update(Message::ImagePickResult(
+                    crate::io::image_file_size(path),
+                )));
             }
 
             cmd if cmd == "IMAGEEMBED" => {
@@ -147,10 +173,12 @@ impl OpenCADStudio {
                                     insert.insert_point.z,
                                 ),
                             );
+                            let handle = insert.common.handle;
                             insert
                                 .attributes
                                 .iter()
                                 .map(move |attr| AttributeCandidate {
+                                    handle,
                                     block: insert.block_name.clone(),
                                     tag: attr.tag.clone(),
                                     value: attr.get_value().to_string(),
@@ -238,7 +266,9 @@ impl OpenCADStudio {
                                 if attr.tag.to_uppercase() == old_up {
                                     let previous = attr.tag.clone();
                                     attr.tag = (*new).to_string();
-                                    reports.push(format!("  Insert {handle:x}: [{previous}] -> [{new}]"));
+                                    reports.push(format!(
+                                        "  Insert {handle:x}: [{previous}] -> [{new}]"
+                                    ));
                                     changed += 1;
                                     renamed_here += 1;
                                 }
@@ -260,9 +290,8 @@ impl OpenCADStudio {
                             .as_ref(),
                         );
                     } else {
-                        self.command_line.push_error(
-                            crate::tf!("ATTEDIT: tag '{old_up}' not found.").as_ref(),
-                        );
+                        self.command_line
+                            .push_error(crate::tf!("ATTEDIT: tag '{old_up}' not found.").as_ref());
                     }
                 } else if option.as_deref() == Some("REPLACE") {
                     let (Some(old), Some(new)) = (args.get(1).copied(), args.get(2).copied())
@@ -388,15 +417,16 @@ impl OpenCADStudio {
                     let mut lines = Vec::new();
                     let mut found_any = false;
                     for handle in &targets {
-                        if let Some(document::EntityType::Insert(ins)) = self.tabs[i]
-                            .scene
-                            .document
-                            .get_entity(*handle)
+                        if let Some(document::EntityType::Insert(ins)) =
+                            self.tabs[i].scene.document.get_entity(*handle)
                         {
                             found_any = true;
                             if args.is_empty() {
                                 if ins.attributes.is_empty() {
-                                    lines.push(format!("  Insert {:x}: no attributes.", handle.value()));
+                                    lines.push(format!(
+                                        "  Insert {:x}: no attributes.",
+                                        handle.value()
+                                    ));
                                 } else {
                                     for attr in &ins.attributes {
                                         lines.push(format!(
@@ -742,7 +772,9 @@ impl OpenCADStudio {
                     .document
                     .entities()
                     .filter_map(|entity| match entity {
-                        document::EntityType::Face3D(face) => Some((face.common.handle, face.clone())),
+                        document::EntityType::Face3D(face) => {
+                            Some((face.common.handle, face.clone()))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -794,7 +826,10 @@ impl OpenCADStudio {
             {
                 use crate::modules::draw::select::SelectObjectsCommand;
                 let (prompt, apply) = if cmd == "CENTERRESET" {
-                    (crate::tr!("center-cmd", "reset-select"), "_CENTERRESET_APPLY")
+                    (
+                        crate::tr!("center-cmd", "reset-select"),
+                        "_CENTERRESET_APPLY",
+                    )
                 } else {
                     (
                         crate::tr!("center-cmd", "disassociate-select"),
@@ -830,8 +865,11 @@ impl OpenCADStudio {
                 if count > 0 {
                     self.tabs[i].dirty = true;
                 }
-                self.command_line
-                    .push_output(&crate::tr!("center-cmd", "reset-done", count = count));
+                self.command_line.push_output(&crate::tr!(
+                    "center-cmd",
+                    "reset-done",
+                    count = count
+                ));
             }
 
             "CENTERREASSOCIATE" => {
@@ -866,8 +904,11 @@ impl OpenCADStudio {
                 if count > 0 {
                     self.tabs[i].dirty = true;
                 }
-                self.command_line
-                    .push_output(&crate::tr!("center-cmd", "disassociate-done", count = count));
+                self.command_line.push_output(&crate::tr!(
+                    "center-cmd",
+                    "disassociate-done",
+                    count = count
+                ));
                 for (mark, associated) in was_associated {
                     if associated {
                         self.command_line.push_output(&if mark {
@@ -1106,11 +1147,7 @@ impl OpenCADStudio {
                     glam::DVec3::from_array(storage.y_axis),
                 );
                 let sources_started = crate::perf::enabled().then(iced::time::Instant::now);
-                let mut boundary_sources =
-                    self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
-                self.tabs[i]
-                    .scene
-                    .retain_sources_on_screen(&mut boundary_sources, plane);
+                let boundary_sources = self.tabs[i].scene.boundary_sources_on_screen(plane, 1.0e-6);
                 let sources_ms = crate::perf::elapsed_ms(sources_started);
                 let (source_count, segment_count, curve_count) = if perf_hatch {
                     (
@@ -1136,7 +1173,7 @@ impl OpenCADStudio {
                 let inherited = selected.iter().find_map(|handle| {
                     let model = self.tabs[i].scene.hatches.get(handle)?.clone();
                     let common = self.tabs[i].scene.document.get_entity(*handle)?.common();
-                    Some((model, common.color.clone(), common.transparency))
+                    Some((model, common.color, common.transparency))
                 });
                 let new_cmd = HatchCommand::new(boundary_sources, selected, inherited, plane)
                     .with_origin(self.tabs[i].scene.document.hatch_origin())
@@ -1227,11 +1264,7 @@ impl OpenCADStudio {
             "GRADIENT" | "-GRADIENT" => {
                 use crate::modules::draw::draw::hatch::HatchCommand;
                 let plane = crate::command::WorkingPlane::default();
-                let mut boundary_sources =
-                    self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
-                self.tabs[i]
-                    .scene
-                    .retain_sources_on_screen(&mut boundary_sources, plane);
+                let boundary_sources = self.tabs[i].scene.boundary_sources_on_screen(plane, 1.0e-6);
                 let new_cmd = HatchCommand::new(boundary_sources, Vec::new(), None, plane)
                     .gradient()
                     .with_origin(self.tabs[i].scene.document.hatch_origin())
@@ -1255,8 +1288,7 @@ impl OpenCADStudio {
                 } else {
                     crate::command::WorkingPlane::default()
                 };
-                let mut sources = self.tabs[i].scene.boundary_sources_on_plane(plane, 1.0e-6);
-                self.tabs[i].scene.retain_sources_on_screen(&mut sources, plane);
+                let sources = self.tabs[i].scene.boundary_sources_on_screen(plane, 1.0e-6);
                 let selected = self.tabs[i]
                     .scene
                     .selected_entities()
@@ -1269,18 +1301,26 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
-            "ELLIPSE" => {
+            "ELLIPSE_CENTER" => {
                 use crate::modules::draw::draw::ellipse::EllipseCommand;
-                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                let pellipse = self.tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .create_ellipse_as_polyline;
                 crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
-            "ELLIPSE_AXIS" => {
+            "ELLIPSE" | "ELLIPSE_AXIS" => {
                 use crate::modules::draw::draw::ellipse::EllipseAxisCommand;
-                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                let pellipse = self.tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .create_ellipse_as_polyline;
                 crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseAxisCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
@@ -1289,7 +1329,11 @@ impl OpenCADStudio {
 
             "ELLIPSE_ARC" => {
                 use crate::modules::draw::draw::ellipse::EllipseArcCommand;
-                let pellipse = self.tabs[i].scene.document.header.create_ellipse_as_polyline;
+                let pellipse = self.tabs[i]
+                    .scene
+                    .document
+                    .header
+                    .create_ellipse_as_polyline;
                 crate::modules::draw::defaults::set_pellipse(pellipse);
                 let new_cmd = EllipseArcCommand::new();
                 self.command_line.push_info(&new_cmd.prompt());
@@ -1460,7 +1504,11 @@ impl OpenCADStudio {
             }
 
             cmd if cmd.starts_with("DCDISPLAY ") => {
-                let visible = match cmd["DCDISPLAY ".len()..].trim().to_ascii_uppercase().as_str() {
+                let visible = match cmd["DCDISPLAY ".len()..]
+                    .trim()
+                    .to_ascii_uppercase()
+                    .as_str()
+                {
                     "" | "S" | "SHOW" => true,
                     "H" | "HIDE" => false,
                     _ => {
@@ -1659,6 +1707,11 @@ impl OpenCADStudio {
                             .scene
                             .record_undo_parametric_constraints_before(scope, before);
                         let count = inferred.len();
+                        let mut per_kind: std::collections::BTreeMap<&'static str, usize> =
+                            std::collections::BTreeMap::new();
+                        for (kind, _) in &inferred {
+                            *per_kind.entry(kind.label()).or_default() += 1;
+                        }
                         for (kind, refs) in inferred {
                             let id = self.tabs[i]
                                 .scene
@@ -1691,6 +1744,14 @@ impl OpenCADStudio {
                             )
                             .as_str(),
                         );
+                        let mut breakdown: Vec<(&str, usize)> = per_kind.into_iter().collect();
+                        breakdown.sort_by(|left, right| {
+                            right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0))
+                        });
+                        for (name, n) in breakdown {
+                            self.command_line
+                                .push_output(format!("{n} {name}").as_str());
+                        }
                         self.report_pending_network_moves(i);
                         if let Some(pd) = pending {
                             self.commit_undo_delta(i, pd);
@@ -3328,7 +3389,8 @@ impl OpenCADStudio {
                     &self.tabs[i].scene.document,
                     &style,
                 );
-                let new_cmd = MTextCommand::with_defaults(height, style).with_annotative(annotative);
+                let new_cmd =
+                    MTextCommand::with_defaults(height, style).with_annotative(annotative);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
@@ -3451,7 +3513,17 @@ impl OpenCADStudio {
         };
         let number = |typed: &str| typed.trim().replace(',', ".").parse::<f64>().ok();
         match msg {
-            M::Accept => return self.feed_command(StepInput::Enter),
+            M::Accept => {
+                let edit = self.tabs[i]
+                    .active_cmd
+                    .as_ref()
+                    .and_then(|command| command.hatch_panel_edit());
+                if let Some((handle, before, after)) = edit {
+                    self.apply_hatch_panel_edit(handle, &before, &after);
+                    return Task::none();
+                }
+                return self.feed_command(StepInput::Enter);
+            }
             M::Cancel => return self.feed_command(StepInput::Escape),
             M::Kind(kind) => {
                 use crate::modules::draw::draw::hatch::HatchFill;
@@ -3483,7 +3555,8 @@ impl OpenCADStudio {
                 if let Some((kind, invert)) =
                     crate::scene::model::hatch_model::GradientKind::from_choice_label(&label)
                 {
-                    settings.fill = crate::modules::draw::draw::hatch::HatchFill::Gradient(kind, invert);
+                    settings.fill =
+                        crate::modules::draw::draw::hatch::HatchFill::Gradient(kind, invert);
                 }
             }
             M::Angle(typed) => {
@@ -3499,15 +3572,21 @@ impl OpenCADStudio {
                 self.hatch_drafts.scale = Some(typed);
             }
             M::Spacing(typed) => {
-                if let (Some(value), crate::modules::draw::draw::hatch::HatchFill::User { spacing, .. }) =
-                    (number(&typed).filter(|value| *value > 0.0), &mut settings.fill)
-                {
+                if let (
+                    Some(value),
+                    crate::modules::draw::draw::hatch::HatchFill::User { spacing, .. },
+                ) = (
+                    number(&typed).filter(|value| *value > 0.0),
+                    &mut settings.fill,
+                ) {
                     *spacing = value;
                 }
                 self.hatch_drafts.spacing = Some(typed);
             }
             M::Double(on) => {
-                if let crate::modules::draw::draw::hatch::HatchFill::User { double, .. } = &mut settings.fill {
+                if let crate::modules::draw::draw::hatch::HatchFill::User { double, .. } =
+                    &mut settings.fill
+                {
                     *double = on;
                 }
             }
@@ -3530,7 +3609,9 @@ impl OpenCADStudio {
                 self.hatch_drafts.gap = Some(typed);
             }
             M::Method(method) => settings.method = method,
-            M::Islands(code) => settings.islands = crate::ui::window::hatch_panel::island_style(code),
+            M::Islands(code) => {
+                settings.islands = crate::ui::window::hatch_panel::island_style(code)
+            }
             M::Associative(on) => settings.associative = on,
             M::Separate(on) => settings.separate = on,
             M::KeepBoundaries(on) => settings.keep_boundaries = on,
@@ -3618,7 +3699,11 @@ impl OpenCADStudio {
             }
             M::MovePanel(up) => {
                 if let Some(index) = selected {
-                    let other = if up { index.checked_sub(1) } else { Some(index + 1) };
+                    let other = if up {
+                        index.checked_sub(1)
+                    } else {
+                        Some(index + 1)
+                    };
                     if let Some(other) = other.filter(|other| *other < panels.len()) {
                         panels.swap(index, other);
                         state.selected = Some(other);
@@ -3637,9 +3722,10 @@ impl OpenCADStudio {
             M::AddCommand => {
                 let typed = state.draft.trim().to_uppercase();
                 state.draft.clear();
-                if let (Some(panel), false) =
-                    (selected.and_then(|index| panels.get_mut(index)), typed.is_empty())
-                {
+                if let (Some(panel), false) = (
+                    selected.and_then(|index| panels.get_mut(index)),
+                    typed.is_empty(),
+                ) {
                     let command = self.resolve_alias(&typed).unwrap_or(typed);
                     panel.commands.push(command);
                 }

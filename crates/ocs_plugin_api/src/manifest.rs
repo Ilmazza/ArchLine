@@ -145,7 +145,40 @@
 /// declares v16 and the older host refuses to load it. Custom grips now
 /// snap (object snap, tracking, ortho, polar) and settle click-move-click
 /// like native grips.
-pub const API_VERSION: u32 = 16;
+/// v17: reactive modal dialogs — `InteractiveCommand::on_dialog_action` (a new
+/// vtable slot, so the runner only calls it for v17 plugins), the
+/// `DialogValue::ChoiceOptions` / `Enabled` / `Visible` updates and the
+/// `DialogControl::Label` control, all appended to their enums. A v16 host
+/// cannot decode them, so a plugin that uses them declares v17.
+/// v18: complete dock-panel snapshots. An ordinary document-bound panel
+/// command synchronously reads typed values, exact text and validation errors
+/// through `HostApi::panel_snapshot`; the host authenticates panel ownership
+/// from the IPC transport and attaches the session's real tab. The appended
+/// request requires v18: a v17 host refuses the new plugin at load rather
+/// than accepting it and failing to decode the request. v17 plugins remain
+/// supported. Asynchronous `PanelAction` notifications remain read-only.
+/// v19: presentation controls for dialogs and dock panels —
+/// `DialogControl::StyledText` (heading / strong / muted / success / warning /
+/// danger text, mapped onto the host theme) and `DialogControl::Svg` (a static
+/// plugin-rendered SVG image, e.g. a chart), appended to the enum. A v18 host
+/// cannot decode them, so a plugin that sends them declares v19; v18 and
+/// older plugins remain supported unchanged.
+/// v20 adds `PluginClassInstance::selectable_custom`: flagged display entities
+/// stay selectable for plugin custom grips/panels, expose a class-only label,
+/// and refuse native geometry editing. Unflagged instances keep the legacy
+/// reference-only staging behavior.
+/// v21 adds `PluginGrip::xy_plane`: every custom-grip event is constrained to
+/// the grip's original world-XY plane. The default preserves legacy behavior.
+/// v22 adds `HostApi::set_geo_location` / `remove_geo_location`, writing the
+/// drawing's model-space GEODATA object (appended requests).
+/// v22 also adds `HostNotification::SelectionChangedDigest`: an O(1) selection
+/// notification (`tab_id`, monotonic per-tab `revision`, exact `count`) routed
+/// INSTEAD OF the legacy handle-list selection variants to plugins that report
+/// v22+; older plugins keep the exact legacy streams.
+/// v23 appends `TableOperation::LayoutSetTabOrder`: a plugin sets the order of
+/// the paper-space layout tabs in one undo step. A v22 host cannot decode it,
+/// so a plugin that sends it declares v23.
+pub const API_VERSION: u32 = 23;
 
 /// Oldest plugin API major the current host still loads. This keeps previously
 /// compiled cdylibs usable as long as their vtable layout is a prefix of the

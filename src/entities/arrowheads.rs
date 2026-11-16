@@ -6,7 +6,7 @@
 //! standard names itself; the block still needs its geometry so other
 //! programs draw the same arrow. It is created the first time it is picked.
 
-use document::entities::{Circle, Line, LwPolyline, LwVertex, Solid};
+use document::entities::{Arc, Circle, Line, LwPolyline, LwVertex, Solid};
 use document::types::{Color, LineWeight, Vector3};
 use document::{Document, EntityType, Handle};
 
@@ -26,10 +26,11 @@ pub(crate) const STANDARD: &[(&str, &str)] = &[
     ("Dot small", "_DotSmall"),
     ("Dot blank", "_DotBlank"),
     ("Dot small blank", "_Small"),
-    ("Box blank", "_BoxBlank"),
+    ("Box", "_BoxBlank"),
     ("Box filled", "_BoxFilled"),
     ("Datum triangle", "_DatumBlank"),
     ("Datum triangle filled", "_DatumFilled"),
+    ("Integral", "_Integral"),
     ("None", "_None"),
 ];
 
@@ -73,7 +74,9 @@ pub(crate) fn label_for_block(name: &str) -> String {
     if name.is_empty() {
         return STANDARD[0].0.to_string();
     }
-    standard_by_block(name).map(str::to_string).unwrap_or_else(|| name.to_string())
+    standard_by_block(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// What a picker shows for the arrowhead `handle`.
@@ -93,7 +96,10 @@ pub(crate) fn label(doc: &Document, handle: Handle) -> String {
 /// block in `current` (the values shown now), not every block of the
 /// drawing.
 pub(crate) fn options<'a>(current: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut out: Vec<String> = STANDARD.iter().map(|(label, _)| label.to_string()).collect();
+    let mut out: Vec<String> = STANDARD
+        .iter()
+        .map(|(label, _)| label.to_string())
+        .collect();
     for value in current {
         if !value.is_empty() && !out.iter().any(|known| known == value) {
             out.push(value.to_string());
@@ -117,12 +123,7 @@ pub(crate) fn resolve(doc: &mut Document, value: &str) -> Option<Handle> {
         return Some(record.handle);
     }
     let entities = standard_geometry(name)?;
-    crate::app::define_block_raw_doc(
-        doc,
-        name,
-        Vector3::ZERO,
-        &entities,
-    );
+    crate::app::define_block_raw_doc(doc, name, Vector3::ZERO, &entities);
     doc.block_records.get(name).map(|record| record.handle)
 }
 
@@ -212,14 +213,35 @@ fn standard_geometry(name: &str) -> Option<Vec<EntityType>> {
             line(0.0, -d, 0.0, d),
         ],
         "_DatumFilled" => vec![solid([[0.0, d], [-1.0, 0.0], [0.0, -d], [0.0, -d]])],
+        // Two shallow arcs meeting at the tip, the integral sign laid on
+        // its side.
+        "_Integral" => {
+            let arc = |cx: f64, cy: f64, start: f64, end: f64| {
+                EntityType::Arc(Arc::from_center_radius_angles(
+                    Vector3::new(cx, cy, 0.0),
+                    0.45416667,
+                    start,
+                    end,
+                ))
+            };
+            vec![
+                arc(0.44488802, -0.09133463, 1.780235837, 2.932153143),
+                arc(-0.44488802, 0.09133463, 4.921828491, 6.073745797),
+            ]
+        }
         "_None" => Vec::new(),
         _ => return None,
     };
-    // Arrowheads take the dimension's colour and lineweight.
+    // Arrowheads take the dimension's colour and linetype; lines, arcs and
+    // circles also its lineweight (polylines and solids keep the layer's).
     for entity in &mut entities {
+        let own_weight = matches!(entity, EntityType::LwPolyline(_) | EntityType::Solid(_));
         let common = entity.common_mut();
         common.color = Color::ByBlock;
-        common.line_weight = LineWeight::ByBlock;
+        common.linetype = "ByBlock".to_string();
+        if !own_weight {
+            common.line_weight = LineWeight::ByBlock;
+        }
     }
     Some(entities)
 }

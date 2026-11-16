@@ -20,7 +20,12 @@ fn member_line() -> EntityType {
     ))
 }
 
-pub(super) fn define(app: &mut OpenCADStudio, tab: usize, name: &str, attdefs: Vec<AttributeDefinition>) {
+pub(super) fn define(
+    app: &mut OpenCADStudio,
+    tab: usize,
+    name: &str,
+    attdefs: Vec<AttributeDefinition>,
+) {
     let mut members = vec![member_line()];
     for (index, attdef) in attdefs.into_iter().enumerate() {
         members.push(EntityType::AttributeDefinition(AttributeDefinition {
@@ -52,7 +57,11 @@ pub(super) fn park_insert(app: &mut OpenCADStudio, tab: usize, block: &str) {
     });
 }
 
-pub(super) fn placed_attributes(app: &OpenCADStudio, tab: usize, block: &str) -> Vec<(String, String)> {
+pub(super) fn placed_attributes(
+    app: &OpenCADStudio,
+    tab: usize,
+    block: &str,
+) -> Vec<(String, String)> {
     app.tabs[tab]
         .scene
         .document
@@ -250,6 +259,7 @@ fn the_form_shows_the_block_its_prompts_and_its_buttons() {
             label: "Width".to_string(),
             value: "100".to_string(),
         }],
+        first: 0,
     };
     let mut window = Simulator::with_size(
         iced::Settings::default(),
@@ -333,7 +343,12 @@ fn closing_the_tab_behind_the_form_leaves_no_form_behind() {
     let mut app = OpenCADStudio::new_for_test();
     let _ = app.automation_op(r#"{"op":"new"}"#);
     let i = app.active_tab;
-    define(&mut app, i, "ATTDIA_CLOSING", vec![askable("TAG1", "", "7")]);
+    define(
+        &mut app,
+        i,
+        "ATTDIA_CLOSING",
+        vec![askable("TAG1", "", "7")],
+    );
     park_insert(&mut app, i, "ATTDIA_CLOSING");
     assert_eq!(app.active_modal, Some(ModalKind::InsertAttributes));
 
@@ -344,5 +359,71 @@ fn closing_the_tab_behind_the_form_leaves_no_form_behind() {
         app.active_modal,
         Some(ModalKind::InsertAttributes),
         "the placement the form answers belonged to the tab that just closed"
+    );
+}
+
+#[test]
+fn a_verifiable_attribute_is_asked_again_on_the_command_line() {
+    let mut app = OpenCADStudio::new_for_test();
+    let _ = app.automation_op(r#"{"op":"new"}"#);
+    let i = app.active_tab;
+    app.tabs[i].scene.document.header.attribute_dialog = false;
+    let mut verified = askable("TAG1", "Tag one", "100");
+    verified.flags.verify = true;
+    define(&mut app, i, "VERIFY_LINE", vec![verified]);
+
+    park_insert(&mut app, i, "VERIFY_LINE");
+    assert!(
+        app.command_line
+            .history
+            .iter()
+            .any(|entry| entry.text.contains("Enter attribute values")),
+        "the value section is headed"
+    );
+    let _ = app.feed_active_cmd("ABC");
+    let transcript: Vec<&str> = app.command_line.history.iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        app.command_line
+            .history
+            .iter()
+            .rev()
+            .take(2)
+            .any(|entry| entry.text.contains("Verify attribute values")),
+        "a verifiable attribute is asked again under its own heading: {transcript:#?}"
+    );
+    let _ = app.feed_active_cmd("XYZ");
+    assert_eq!(
+        placed_attributes(&app, i, "VERIFY_LINE"),
+        vec![("TAG1".to_string(), "XYZ".to_string())],
+        "the verified answer is the value that is kept"
+    );
+}
+
+#[test]
+fn the_attribute_form_settles_a_verifiable_attribute_in_one_pass() {
+    let mut app = OpenCADStudio::new_for_test();
+    let _ = app.automation_op(r#"{"op":"new"}"#);
+    let i = app.active_tab;
+    let mut verified = askable("TAG1", "Tag one", "100");
+    verified.flags.verify = true;
+    define(&mut app, i, "VERIFY_FORM", vec![verified]);
+
+    park_insert(&mut app, i, "VERIFY_FORM");
+    assert_eq!(app.active_modal, Some(ModalKind::InsertAttributes));
+    let _ = app.update(Message::InsertAttrDialog(InsertAttrMsg::Ok));
+    assert_eq!(
+        placed_attributes(&app, i, "VERIFY_FORM"),
+        vec![("TAG1".to_string(), "100".to_string())]
+    );
+    assert!(
+        app.tabs[i].active_cmd.is_none(),
+        "the form answered the verified definition too"
+    );
+    assert!(
+        !app.command_line
+            .history
+            .iter()
+            .any(|entry| entry.text.contains("Verify attribute values")),
+        "the form does not ask again"
     );
 }

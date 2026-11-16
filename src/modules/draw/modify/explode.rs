@@ -135,14 +135,40 @@ fn explode_entity_in_context(
         }
         // The codec's explode_from_document refuses a MINSERT; expand it cell
         // by cell from the block's entities instead.
-        EntityType::Insert(ins) => ins
-            .block_entities_from_document(document)
-            .map(|entities| ins.explode(&entities))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entity| !crate::scene::block_construction::is_construction(entity.common()))
-            .map(normalize_insert_entity)
-            .collect(),
+        EntityType::Insert(ins) => {
+            let pieces = ins
+                .block_entities_from_document(document)
+                .map(|entities| ins.explode(&entities))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entity| {
+                    !crate::scene::block_construction::is_construction(entity.common())
+                })
+                .map(normalize_insert_entity);
+            // An associative array explodes into copies of its source
+            // objects, not into one reference per item.
+            let source = crate::scene::assoc_array::array_of_insert(document, ins.common.handle)
+                .and_then(|array| {
+                    document
+                        .block_records
+                        .iter()
+                        .find(|record| record.handle == array.source_block)
+                        .map(|record| record.name.clone())
+                });
+            match source {
+                Some(source) => pieces
+                    .flat_map(|piece| match &piece {
+                        EntityType::Insert(item)
+                            if item.block_name.eq_ignore_ascii_case(&source) =>
+                        {
+                            explode_entity_in_context(&piece, document, annotation_scale_handle)
+                        }
+                        _ => vec![piece],
+                    })
+                    .collect(),
+                None => pieces.collect(),
+            }
+        }
         EntityType::MLine(ml) => explode_mline(ml, document),
         EntityType::Dimension(dim) => explode_dimension(dim, document),
         EntityType::Leader(leader) => explode_leader(leader, document),
@@ -313,10 +339,7 @@ fn attribute_definition_as_text(
 
 /// The block reference owns the attribute, so its layer/colour inheritance has
 /// to be resolved before the text stands on its own.
-fn finish_attribute_common(
-    insert: &document::entities::Insert,
-    common: &mut EntityCommon,
-) {
+fn finish_attribute_common(insert: &document::entities::Insert, common: &mut EntityCommon) {
     if common.layer == "0" {
         common.layer = insert.common.layer.clone();
         common.layer_handle = insert.common.layer_handle;
@@ -760,8 +783,8 @@ fn explode_polyline(p: &Polyline) -> Vec<EntityType> {
         common.handle = Handle::NULL;
         result.push(EntityType::Line(LineEnt {
             common,
-            start: v0.location.clone(),
-            end: v1.location.clone(),
+            start: v0.location,
+            end: v1.location,
             ..LineEnt::new()
         }));
     }
@@ -783,8 +806,8 @@ fn explode_polyline3d(p: &document::entities::Polyline3D) -> Vec<EntityType> {
         common.handle = Handle::NULL;
         result.push(EntityType::Line(LineEnt {
             common,
-            start: v0.position.clone(),
-            end: v1.position.clone(),
+            start: v0.position,
+            end: v1.position,
             ..LineEnt::new()
         }));
     }
@@ -803,7 +826,7 @@ fn explode_polyline2d(p: &Polyline2D) -> Vec<EntityType> {
         .try_normalize()
         .unwrap_or(DVec3::Z);
     let normal = Vector3::new(normal.x, normal.y, normal.z);
-    let plane = crate::entities::curve::ocs_plane(normal.clone(), elevation);
+    let plane = crate::entities::curve::ocs_plane(normal, elevation);
 
     let mut result = Vec::with_capacity(n_segs);
     for i in 0..n_segs {
@@ -822,18 +845,12 @@ fn explode_polyline2d(p: &Polyline2D) -> Vec<EntityType> {
                 start: Vector3::new(start[0], start[1], start[2]),
                 end: Vector3::new(end[0], end[1], end[2]),
                 thickness: p.thickness,
-                normal: normal.clone(),
+                normal,
                 ..LineEnt::new()
             }));
-        } else if let Some(arc) = bulge_to_arc(
-            p0,
-            p1,
-            v0.bulge,
-            elevation,
-            &p.common,
-            p.thickness,
-            normal.clone(),
-        ) {
+        } else if let Some(arc) =
+            bulge_to_arc(p0, p1, v0.bulge, elevation, &p.common, p.thickness, normal)
+        {
             result.push(arc);
         }
     }
@@ -841,26 +858,23 @@ fn explode_polyline2d(p: &Polyline2D) -> Vec<EntityType> {
 }
 
 pub fn normalize_insert_entity(mut entity: EntityType) -> EntityType {
-    match &mut entity {
-        EntityType::Ellipse(ell) => {
-            let major_len = ell.major_axis_length();
-            let full_span = {
-                let mut span = ell.end_parameter - ell.start_parameter;
-                if span < 0.0 {
-                    span += std::f64::consts::TAU;
-                }
-                (span - std::f64::consts::TAU).abs() < 1e-6
-            };
-            if (ell.minor_axis_ratio - 1.0).abs() < 1e-6 && full_span {
-                let mut circle = CircleEnt::new();
-                circle.common = ell.common.clone();
-                circle.center = ell.center;
-                circle.radius = major_len;
-                circle.normal = ell.normal;
-                entity = EntityType::Circle(circle);
+    if let EntityType::Ellipse(ell) = &mut entity {
+        let major_len = ell.major_axis_length();
+        let full_span = {
+            let mut span = ell.end_parameter - ell.start_parameter;
+            if span < 0.0 {
+                span += std::f64::consts::TAU;
             }
+            (span - std::f64::consts::TAU).abs() < 1e-6
+        };
+        if (ell.minor_axis_ratio - 1.0).abs() < 1e-6 && full_span {
+            let mut circle = CircleEnt::new();
+            circle.common = ell.common.clone();
+            circle.center = ell.center;
+            circle.radius = major_len;
+            circle.normal = ell.normal;
+            entity = EntityType::Circle(circle);
         }
-        _ => {}
     }
 
     entity.common_mut().handle = Handle::NULL;
@@ -901,7 +915,7 @@ fn explode_lwpolyline(p: &LwPolyline) -> Vec<EntityType> {
                 start: Vector3::new(p0[0], p0[1], elevation),
                 end: Vector3::new(p1[0], p1[1], elevation),
                 thickness: p.thickness,
-                normal: p.normal.clone(),
+                normal: p.normal,
                 ..LineEnt::new()
             };
             result.push(EntityType::Line(line));
@@ -914,7 +928,7 @@ fn explode_lwpolyline(p: &LwPolyline) -> Vec<EntityType> {
                 elevation,
                 &p.common,
                 p.thickness,
-                p.normal.clone(),
+                p.normal,
             ) {
                 result.push(arc);
             }
@@ -1018,7 +1032,7 @@ fn explode_region(region: &document::entities::Region) -> Vec<EntityType> {
                 .flatten()
         });
         if let Some(sat) = sat {
-            let (bodies, _loss) = kernel::acis::lift(&sat);
+            let (bodies, _loss) = ocs_acis::lift(&sat);
             for body in &bodies {
                 for face in body.face_keys() {
                     if let Some(profile) = kernel::brep::planar_face_profile(body, face) {
@@ -1086,7 +1100,12 @@ fn as_circular_piece(curve: &kernel::geom2d::Curve) -> Option<CircularPiece> {
         Curve::Arc(arc) if arc.radius > 1e-12 => {
             let centre = arc.centre;
             let radius = arc.radius;
-            let pt_at = |ang: f64| [centre[0] + radius * ang.cos(), centre[1] + radius * ang.sin()];
+            let pt_at = |ang: f64| {
+                [
+                    centre[0] + radius * ang.cos(),
+                    centre[1] + radius * ang.sin(),
+                ]
+            };
             let start_pt = pt_at(arc.start_angle);
             let end_pt = pt_at(arc.end_angle);
             let diff = (arc.end_angle - arc.start_angle).abs();
@@ -1127,9 +1146,11 @@ fn as_circular_piece(curve: &kernel::geom2d::Curve) -> Option<CircularPiece> {
                     diff
                 };
                 let mid_pt = if (sweep - std::f64::consts::TAU).abs() <= 1e-6 {
-                    arc.ellipse.point_at(arc.start_parameter + std::f64::consts::PI)
+                    arc.ellipse
+                        .point_at(arc.start_parameter + std::f64::consts::PI)
                 } else {
-                    arc.ellipse.point_at((arc.start_parameter + arc.end_parameter) * 0.5)
+                    arc.ellipse
+                        .point_at((arc.start_parameter + arc.end_parameter) * 0.5)
                 };
                 Some(CircularPiece {
                     centre,
@@ -1147,13 +1168,18 @@ fn as_circular_piece(curve: &kernel::geom2d::Curve) -> Option<CircularPiece> {
             let p0 = nurbs.point_at(0.0);
             let p1 = nurbs.point_at(0.5);
             let p2 = nurbs.point_at(1.0);
-            let d = 2.0 * (p0[0] * (p1[1] - p2[1]) + p1[0] * (p2[1] - p0[1]) + p2[0] * (p0[1] - p1[1]));
+            let d =
+                2.0 * (p0[0] * (p1[1] - p2[1]) + p1[0] * (p2[1] - p0[1]) + p2[0] * (p0[1] - p1[1]));
             if d.abs() > 1e-12 {
                 let p0_sq = p0[0] * p0[0] + p0[1] * p0[1];
                 let p1_sq = p1[0] * p1[0] + p1[1] * p1[1];
                 let p2_sq = p2[0] * p2[0] + p2[1] * p2[1];
-                let cx = (p0_sq * (p1[1] - p2[1]) + p1_sq * (p2[1] - p0[1]) + p2_sq * (p0[1] - p1[1])) / d;
-                let cy = (p0_sq * (p2[0] - p1[0]) + p1_sq * (p0[0] - p2[0]) + p2_sq * (p1[0] - p0[0])) / d;
+                let cx =
+                    (p0_sq * (p1[1] - p2[1]) + p1_sq * (p2[1] - p0[1]) + p2_sq * (p0[1] - p1[1]))
+                        / d;
+                let cy =
+                    (p0_sq * (p2[0] - p1[0]) + p1_sq * (p0[0] - p2[0]) + p2_sq * (p1[0] - p0[0]))
+                        / d;
                 let r = (p0[0] - cx).hypot(p0[1] - cy);
                 if r > 1e-12 {
                     let tol = 1e-5 * (1.0 + r);
@@ -1237,7 +1263,10 @@ fn append_region_loops(
         EntityType::Circle(circle)
     };
 
-    let make_ellipse = |ellipse: &kernel::geom2d::Ellipse, start_param: f64, end_param: f64| -> Option<EntityType> {
+    let make_ellipse = |ellipse: &kernel::geom2d::Ellipse,
+                        start_param: f64,
+                        end_param: f64|
+     -> Option<EntityType> {
         if ellipse.major_radius <= 1e-12 || ellipse.minor_radius <= 1e-12 {
             return None;
         }
@@ -1307,7 +1336,8 @@ fn append_region_loops(
 
     for ring in loops {
         // Collapse a closed loop of circular arcs/curves into one Circle.
-        let circular_pieces: Vec<CircularPiece> = ring.iter().filter_map(as_circular_piece).collect();
+        let circular_pieces: Vec<CircularPiece> =
+            ring.iter().filter_map(as_circular_piece).collect();
         if circular_pieces.len() == ring.len() && !circular_pieces.is_empty() {
             let first = &circular_pieces[0];
             let tol = 1e-5 * (1.0 + first.radius);
@@ -1790,6 +1820,35 @@ struct DimMetrics {
 }
 
 /// Resolve style metrics used by saved dimension geometry.
+/// The size multiplier of an annotative dimension's picture: the model units
+/// per paper unit of the scale it is drawn at: the current annotation scale
+/// when the dimension has it or has no scales, else the first of its scales. The saved picture
+/// is what a reader shows for that scale, so it can't be drawn at 1:1.
+pub(crate) fn annotative_picture_scale(dim: &Dimension, doc: &Document) -> f64 {
+    let memberships =
+        crate::scene::annotative::object_scale_memberships(doc, dim.base().common.handle);
+    let current = &doc.header.current_annotation_scale;
+    let chosen = memberships
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(current))
+        .or_else(|| memberships.first());
+    let factor = |handle: &Handle| match doc.objects.get(handle) {
+        // The scale's own ratio, whatever the drawing units: annotation
+        // sizes are in drawing units (#2354).
+        Some(document::objects::ObjectType::Scale(scale)) => Some(scale.inverse_factor()),
+        _ => None,
+    };
+    // Without scales of its own, a dimension annotative by its style draws at
+    // the current one.
+    let handle = chosen
+        .map(|(_, handle)| *handle)
+        .or_else(|| crate::scene::annotative::scale_handle_by_name(doc, current));
+    handle
+        .and_then(|handle| factor(&handle))
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .unwrap_or(1.0)
+}
+
 fn dim_metrics(dim: &Dimension, doc: &Document) -> DimMetrics {
     let name = dim.base().style_name.as_str();
     let effective_style = doc
@@ -1802,7 +1861,13 @@ fn dim_metrics(dim: &Dimension, doc: &Document) -> DimMetrics {
         .map(|style| crate::entities::dimension::resolved_dimension_style(style, dim, doc));
     let style = effective_style.as_ref();
     let scale = style
-        .map(|s| if s.dimscale > 1e-6 { s.dimscale } else { 1.0 })
+        .map(|s| {
+            if s.dimscale > 1e-6 {
+                s.dimscale
+            } else {
+                annotative_picture_scale(dim, doc)
+            }
+        })
         .unwrap_or(1.0);
     use crate::scene::convert::tessellate::{arrow_from_block, ArrowKind};
     let dimasz = style
@@ -2179,8 +2244,8 @@ fn explode_dimension(dim: &Dimension, doc: &Document) -> Vec<EntityType> {
         c.handle = Handle::NULL;
         EntityType::Line(LineEnt {
             common: c,
-            start: a.clone(),
-            end: b.clone(),
+            start: *a,
+            end: *b,
             ..LineEnt::new()
         })
     };
@@ -2545,7 +2610,11 @@ fn explode_dimension(dim: &Dimension, doc: &Document) -> Vec<EntityType> {
     // position, height, rotation, alignment, text style, MText handling all
     // shared), so the baked block matches the on-screen dimension and the label
     // doesn't shift when the file is saved and reopened. `None` = suppressed.
-    for mut tent in crate::entities::dimension::baked_dimension_text_entities(dim, doc, 1.0) {
+    for mut tent in crate::entities::dimension::baked_dimension_text_entities(
+        dim,
+        doc,
+        annotative_picture_scale(dim, doc),
+    ) {
         // Apply the text colour / lineweight (DIMCLRT) onto the entity.
         let tc = dim_common(&base.common, met.dimclrt, -2);
         tent.common_mut().color = tc.color;
@@ -2599,6 +2668,22 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut Document) -> Vec<Han
             Some((base.common.handle, needs_sync, block_missing))
         })
         .collect();
+    // A `*D` picture is one dimension's own geometry. Files that point several
+    // dimensions at one block would save the same picture for all of them, so
+    // every sharer is rebaked into a block of its own.
+    let shared = shared_dimension_blocks(doc);
+    let dimensions: Vec<(Handle, Option<Vector3>, bool)> = dimensions
+        .into_iter()
+        .map(|(handle, point, missing)| {
+            let shares = match doc.get_entity(handle) {
+                Some(EntityType::Dimension(d)) => {
+                    shared.contains(&d.base().block_name.to_ascii_uppercase())
+                }
+                _ => false,
+            };
+            (handle, point, missing || shares)
+        })
+        .collect();
 
     let mut pending = Vec::new();
     for (handle, definition_point, block_missing) in dimensions {
@@ -2620,6 +2705,34 @@ fn sync_dimension_base_points_and_collect_pending(doc: &mut Document) -> Vec<Han
         }
     }
     pending
+}
+
+/// Upper-cased `*D` block names more than one dimension refers to, counting
+/// dimensions inside block definitions too.
+fn shared_dimension_blocks(doc: &Document) -> rustc_hash::FxHashSet<String> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut shared = rustc_hash::FxHashSet::default();
+    // The layout records hold the drawing's own entities again; count each
+    // dimension once.
+    let mut counted = rustc_hash::FxHashSet::default();
+    let nested = doc
+        .block_records
+        .iter()
+        .flat_map(|record| record.entity_handles.iter())
+        .filter_map(|handle| doc.get_entity(*handle));
+    for entity in doc.entities().chain(nested) {
+        let EntityType::Dimension(d) = entity else {
+            continue;
+        };
+        if !counted.insert(d.base().common.handle) {
+            continue;
+        }
+        let name = d.base().block_name.to_ascii_uppercase();
+        if name.starts_with("*D") && !seen.insert(name.clone()) {
+            shared.insert(name);
+        }
+    }
+    shared
 }
 
 /// Remove `*D` pictures no dimension, insert or scale representation refers to
@@ -2760,6 +2873,8 @@ pub fn bake_dimension_blocks(doc: &mut Document) {
             d.base_mut().insertion_point = Vector3::new(0.0, 0.0, 0.0);
         }
     }
+    // A shared picture whose sharers were all rebaked is now unreferenced.
+    drop_detached_dimension_blocks(doc);
 }
 
 /// Drop baked dimension geometry so the next save regenerates it.
@@ -2771,10 +2886,13 @@ pub fn invalidate_dim_block(doc: &mut Document, handle: Handle) {
     if bn.trim().is_empty() {
         return;
     }
-    // Dimension graphics live in an anonymous "*D…" block, unique to the one
-    // dimension, so it is safe to delete along with its sub-entities. Guard on
-    // the anonymous prefix so a hand-referenced named block is never removed.
-    if bn.starts_with("*D") || bn.starts_with("*d") {
+    // Dimension graphics live in an anonymous "*D…" block, normally unique to
+    // the one dimension, so it is deleted along with its sub-entities. Guard on
+    // the anonymous prefix so a hand-referenced named block is never removed,
+    // and keep a block other dimensions still point at.
+    if (bn.starts_with("*D") || bn.starts_with("*d"))
+        && !shared_dimension_blocks(doc).contains(&bn.to_ascii_uppercase())
+    {
         if let Some(rec) = doc.block_records.remove(&bn) {
             let mut owned = rec.entity_handles.clone();
             owned.push(rec.block_entity_handle);
@@ -2905,7 +3023,8 @@ mod tests {
         block.entity_handles.push(child_handle);
         doc.block_records.add(block).unwrap();
 
-        let mut insert = document::entities::Insert::new("BYBLOCK_STYLE", Vector3::new(0.0, 0.0, 0.0));
+        let mut insert =
+            document::entities::Insert::new("BYBLOCK_STYLE", Vector3::new(0.0, 0.0, 0.0));
         insert.common.color = document::types::Color::from_index(1);
         insert.common.transparency = document::types::Transparency::new(96);
         insert.common.linetype = "DASHED".to_string();
@@ -3034,6 +3153,72 @@ mod tests {
             before,
             "a dimension that already owns a block must not be re-baked"
         );
+    }
+
+    /// An annotative dimension's saved picture is drawn at its scale (text =
+    /// DIMTXT × 100 at 1:100, in any drawing units), and a picture saved at
+    /// 1:1 by an earlier version is not drawn: the dimension is rebuilt
+    /// (#2457, #2542).
+    #[test]
+    fn annotative_dimension_picture_follows_its_scale() {
+        let mut doc = Document::new();
+        doc.header.insertion_units = 6; // metres
+        let mut style = document::tables::DimStyle::new("ANNO");
+        style.annotative = true;
+        style.dimscale = 0.0;
+        style.dimtxt = 2.5;
+        doc.dim_styles.add(style).unwrap();
+        let scale = doc.allocate_handle();
+        let mut scale_object = document::objects::Scale::new("1:100", 1.0, 100.0);
+        scale_object.handle = scale;
+        doc.objects.insert(scale, document::objects::ObjectType::Scale(scale_object));
+        doc.header.current_annotation_scale = "1:100".into();
+
+        let mut d = DimensionLinear::new(Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 0.0, 0.0));
+        d.definition_point = Vector3::new(0.0, 5.0, 0.0);
+        d.base.style_name = "ANNO".into();
+        let handle = doc
+            .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(d))))
+            .unwrap();
+        crate::scene::annotative::set_entity_annotative(&mut doc, handle, true);
+        assert!(crate::scene::annotative::create_annotation_context(&mut doc, handle, scale));
+
+        bake_dimension_blocks(&mut doc);
+        let block = match doc.get_entity(handle) {
+            Some(EntityType::Dimension(d)) => d.base().block_name.clone(),
+            _ => panic!("dimension missing"),
+        };
+        let text_height = |doc: &Document| {
+            let record = doc.block_records.get(&block).unwrap();
+            record
+                .entity_handles
+                .iter()
+                .find_map(|h| match doc.get_entity(*h) {
+                    Some(EntityType::Text(t)) => Some(t.height),
+                    Some(EntityType::MText(t)) => Some(t.height),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!((text_height(&doc) - 250.0).abs() < 1e-6, "picture text {}", text_height(&doc));
+        let entity = doc.get_entity(handle).unwrap().clone();
+        let drawn = |doc: &Document| {
+            crate::scene::render_graph::entity_render_block_uses(doc, &entity, 100.0)
+                .iter()
+                .any(|u| u.active)
+        };
+        assert!(drawn(&doc), "a picture at its scale is drawn");
+
+        // A picture saved at 1:1 (text 2.5) is rebuilt instead.
+        let record = doc.block_records.get(&block).unwrap().clone();
+        for h in &record.entity_handles {
+            match doc.get_entity_mut(*h) {
+                Some(EntityType::Text(t)) => t.height = 2.5,
+                Some(EntityType::MText(t)) => t.height = 2.5,
+                _ => {}
+            }
+        }
+        assert!(!drawn(&doc), "a picture at 1:1 is not drawn");
     }
 
     /// A dimension with a scale representation drawn by a block nothing else

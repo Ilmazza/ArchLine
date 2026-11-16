@@ -1,12 +1,12 @@
 use crate::t;
 use document::entities::{Polyline, Polyline2D, Polyline3D};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     edit_prop as edit, format_area, format_length, parse_f64, ro_prop as ro, square_grip,
     stepper_prop as stepper, VARIES_LABEL,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
@@ -61,14 +61,14 @@ impl Grippable for Polyline {
         if let Some(v) = self.vertices.get_mut(grip_id) {
             match apply {
                 GripApply::Translate(d) => {
-                    v.location.x += d.x as f64;
-                    v.location.y += d.y as f64;
-                    v.location.z += d.z as f64;
+                    v.location.x += d.x;
+                    v.location.y += d.y;
+                    v.location.z += d.z;
                 }
                 GripApply::Absolute(p) => {
-                    v.location.x = p.x as f64;
-                    v.location.y = p.y as f64;
-                    v.location.z = p.z as f64;
+                    v.location.x = p.x;
+                    v.location.y = p.y;
+                    v.location.z = p.z;
                 }
             }
         }
@@ -625,7 +625,10 @@ impl RenderConvertible for Polyline2D {
 
 /// A heavy 2D polyline's vertices as (position, bulge) pairs.
 fn plain_points(pl: &Polyline2D) -> Vec<([f64; 2], f64)> {
-    pl.vertices.iter().map(|v| ([v.location.x, v.location.y], v.bulge)).collect()
+    pl.vertices
+        .iter()
+        .map(|v| ([v.location.x, v.location.y], v.bulge))
+        .collect()
 }
 
 impl Grippable for Polyline2D {
@@ -657,7 +660,12 @@ impl Grippable for Polyline2D {
         let n = self.vertices.len();
         if grip_id >= n && self.flags.bits() & (2 | 4) == 0 {
             let mut points = plain_points(self);
-            crate::entities::lwpolyline::apply_mid_grip(&mut points, self.flags.is_closed(), grip_id - n, apply);
+            crate::entities::lwpolyline::apply_mid_grip(
+                &mut points,
+                self.flags.is_closed(),
+                grip_id - n,
+                apply,
+            );
             for (vertex, ([x, y], bulge)) in self.vertices.iter_mut().zip(points) {
                 (vertex.location.x, vertex.location.y, vertex.bulge) = (x, y, bulge);
             }
@@ -666,12 +674,12 @@ impl Grippable for Polyline2D {
         if let Some(v) = self.vertices.get_mut(grip_id) {
             match apply {
                 GripApply::Translate(d) => {
-                    v.location.x += d.x as f64;
-                    v.location.y += d.y as f64;
+                    v.location.x += d.x;
+                    v.location.y += d.y;
                 }
                 GripApply::Absolute(p) => {
-                    v.location.x = p.x as f64;
-                    v.location.y = p.y as f64;
+                    v.location.x = p.x;
+                    v.location.y = p.y;
                 }
             }
         }
@@ -903,7 +911,9 @@ impl PropertyEditable for Polyline2D {
                     Property {
                         label: t!("Linetype generation").into_owned(),
                         field: "pl2_ltype_gen",
-                        value: crate::entities::common::enabled_choice(self.flags.bits() & 128 != 0),
+                        value: crate::entities::common::enabled_choice(
+                            self.flags.bits() & 128 != 0,
+                        ),
                     },
                 ],
             },
@@ -1206,7 +1216,8 @@ fn rebuild_polyline3d_fit(pl: &mut Polyline3D) -> bool {
         .map(|vertex| vertex.layer.clone())
         .unwrap_or_else(|| "0".to_string());
     let curve_vertices = samples.into_iter().map(|point| {
-        let mut vertex = document::entities::Vertex3DPolyline::from_xyz(point[0], point[1], point[2]);
+        let mut vertex =
+            document::entities::Vertex3DPolyline::from_xyz(point[0], point[1], point[2]);
         vertex.layer = vertex_layer.clone();
         vertex.flags = POLY3D_VERTEX | POLY3D_SPLINE_POINT;
         vertex
@@ -1297,14 +1308,14 @@ impl Grippable for Polyline3D {
         if let Some(v) = raw_index.and_then(|index| self.vertices.get_mut(index)) {
             match apply {
                 GripApply::Translate(d) => {
-                    v.position.x += d.x as f64;
-                    v.position.y += d.y as f64;
-                    v.position.z += d.z as f64;
+                    v.position.x += d.x;
+                    v.position.y += d.y;
+                    v.position.z += d.z;
                 }
                 GripApply::Absolute(p) => {
-                    v.position.x = p.x as f64;
-                    v.position.y = p.y as f64;
-                    v.position.z = p.z as f64;
+                    v.position.x = p.x;
+                    v.position.y = p.y;
+                    v.position.z = p.z;
                 }
             }
             if self.smooth_type != document::entities::polyline3d::SmoothSurfaceType::None {

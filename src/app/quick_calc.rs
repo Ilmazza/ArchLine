@@ -45,7 +45,10 @@ pub(super) fn sysvars(tab: &DocumentTab) -> SysVars {
         ("dimscale", n(h.dim_scale)),
         ("mirrtext", n(f64::from(u8::from(h.mirror_text)))),
         ("osmode", n(f64::from(h.object_snap_mode))),
-        ("matchmode", n(f64::from(crate::entities::match_props::match_mode()))),
+        (
+            "matchmode",
+            n(f64::from(crate::entities::match_props::match_mode())),
+        ),
         ("userr1", n(h.user_real1)),
         ("userr2", n(h.user_real2)),
         ("userr3", n(h.user_real3)),
@@ -506,6 +509,16 @@ mod tests {
     fn floats_tall_enough_for_the_keypad() {
         let app = app();
         let float_height = crate::ui::window::quick_calc::float_height();
+        // The workspace is the viewport plus the drawing-tab bar beside
+        // the docks.
+        let tabs = app.dock_workspace_size().1
+            - app.tabs[app.active_tab]
+                .scene
+                .selection
+                .borrow()
+                .view
+                .vp_size
+                .1;
         let workspace = |h: f32| {
             app.tabs[app.active_tab]
                 .scene
@@ -513,7 +526,7 @@ mod tests {
                 .borrow_mut()
                 .view
                 .vp_size
-                .1 = h;
+                .1 = h - tabs;
         };
         // A short workspace: other pallets float at 60 % of it.
         workspace(700.0);

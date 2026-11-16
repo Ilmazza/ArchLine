@@ -28,6 +28,12 @@ pub struct JoinCommand {
     /// source instead.
     needs_supported: bool,
 }
+impl Default for JoinCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JoinCommand {
     pub fn new() -> Self {
         Self {
@@ -97,8 +103,8 @@ impl CadCommand for JoinCommand {
                 let mut circle = document::entities::Circle::new();
                 circle.common = arc.common.clone();
                 circle.common.handle = Handle::NULL;
-                circle.center = arc.center.clone();
-                circle.normal = arc.normal.clone();
+                circle.center = arc.center;
+                circle.normal = arc.normal;
                 circle.radius = arc.radius;
                 circle.thickness = arc.thickness;
                 return Some(CmdResult::ReplaceMany(
@@ -235,8 +241,8 @@ pub fn join_to_source(
                             if span[1] - span[0] >= std::f64::consts::TAU {
                                 let mut circle = document::entities::Circle::new();
                                 circle.common = a.common.clone();
-                                circle.center = a.center.clone();
-                                circle.normal = a.normal.clone();
+                                circle.center = a.center;
+                                circle.normal = a.normal;
                                 circle.radius = a.radius;
                                 circle.thickness = a.thickness;
                                 EntityType::Circle(circle)
@@ -461,7 +467,7 @@ fn segs_of(e: &EntityType) -> Option<Vec<Seg>> {
             else {
                 return None;
             };
-            let z = crate::entities::curve::ocs_plane(p.normal.clone(), p.elevation).origin[2];
+            let z = crate::entities::curve::ocs_plane(p.normal, p.elevation).origin[2];
             Some(
                 curve
                     .vertices
@@ -549,8 +555,10 @@ fn join_touching(entities: &[(Handle, &EntityType)]) -> Option<(Vec<Handle>, Vec
     if let Some(joined) = join_chain(entities, true) {
         return Some(joined);
     }
-    let ends: Vec<Option<Vec<DVec3>>> =
-        entities.iter().map(|(_, entity)| endpoints(entity)).collect();
+    let ends: Vec<Option<Vec<DVec3>>> = entities
+        .iter()
+        .map(|(_, entity)| endpoints(entity))
+        .collect();
     fn root(group: &mut [usize], mut index: usize) -> usize {
         while group[index] != index {
             group[index] = group[group[index]];
@@ -708,8 +716,8 @@ fn join_chain(
         }
         if let EntityType::Polyline2D(source) = entities[0].1 {
             let mut polyline = source.clone();
-            let input = crate::entities::curve::ocs_plane(pl.normal.clone(), pl.elevation);
-            let output = crate::entities::curve::ocs_plane(source.normal.clone(), source.elevation);
+            let input = crate::entities::curve::ocs_plane(pl.normal, pl.elevation);
+            let output = crate::entities::curve::ocs_plane(source.normal, source.elevation);
             polyline.vertices = pl
                 .vertices
                 .iter()
@@ -924,7 +932,10 @@ mod join_tests {
     // Collinear lines with a gap join into one line spanning it (#2017).
     #[test]
     fn collinear_lines_join_across_a_gap() {
-        let (e1, e2) = (line(0.0, 0.0, 4.0, 0.0, 0.0), line(7.0, 0.0, 10.0, 0.0, 0.0));
+        let (e1, e2) = (
+            line(0.0, 0.0, 4.0, 0.0, 0.0),
+            line(7.0, 0.0, 10.0, 0.0, 0.0),
+        );
         let pairs = [(Handle::new(1), &e1), (Handle::new(2), &e2)];
         let (removed, out) = join_entities(&pairs).expect("gap joins");
         assert_eq!(removed.len(), 2);

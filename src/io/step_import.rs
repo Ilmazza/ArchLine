@@ -75,7 +75,11 @@ impl Cursor<'_> {
             while self.s.get(self.i).is_some_and(|c| c.is_ascii_whitespace()) {
                 self.i += 1;
             }
-            if self.s.get(self.i..).is_some_and(|rest| rest.starts_with(b"/*")) {
+            if self
+                .s
+                .get(self.i..)
+                .is_some_and(|rest| rest.starts_with(b"/*"))
+            {
                 match self.s[self.i + 2..].windows(2).position(|w| w == b"*/") {
                     Some(end) => self.i += end + 4,
                     None => self.i = self.s.len(),
@@ -276,7 +280,11 @@ impl Doc {
     fn colour(&self, p: &P) -> Option<Rgb> {
         let (kind, params) = self.simple(p.reference()?)?;
         match kind {
-            "COLOUR_RGB" => Some([params.get(1)?.num()?, params.get(2)?.num()?, params.get(3)?.num()?]),
+            "COLOUR_RGB" => Some([
+                params.get(1)?.num()?,
+                params.get(2)?.num()?,
+                params.get(3)?.num()?,
+            ]),
             "DRAUGHTING_PRE_DEFINED_COLOUR" => Some(match params.first()?.text()? {
                 "red" => [1.0, 0.0, 0.0],
                 "green" => [0.0, 1.0, 0.0],
@@ -303,7 +311,9 @@ impl Doc {
                 P::List(items) | P::Typed(items) => stack.extend(items.iter().rev()),
                 P::Ref(id) if !seen.contains(id) => {
                     seen.push(*id);
-                    let Some((kind, params)) = self.simple(*id) else { continue };
+                    let Some((kind, params)) = self.simple(*id) else {
+                        continue;
+                    };
                     match kind {
                         "FILL_AREA_STYLE_COLOUR" => {
                             if let Some(c) = params.get(1).and_then(|c| self.colour(c)) {
@@ -315,7 +325,9 @@ impl Doc {
                                 return Some(c);
                             }
                         }
-                        "CURVE_STYLE" => curve = curve.or_else(|| params.get(3).and_then(|c| self.colour(c))),
+                        "CURVE_STYLE" => {
+                            curve = curve.or_else(|| params.get(3).and_then(|c| self.colour(c)))
+                        }
                         _ => stack.extend(params.iter().rev()),
                     }
                 }
@@ -350,7 +362,11 @@ impl Doc {
     fn point(&self, p: &P) -> Option<[f64; 3]> {
         let (_, params) = self.simple(p.reference()?)?;
         let c = params.get(1)?.list();
-        Some([c.first()?.num()?, c.get(1)?.num()?, c.get(2).and_then(P::num).unwrap_or(0.0)])
+        Some([
+            c.first()?.num()?,
+            c.get(1)?.num()?,
+            c.get(2).and_then(P::num).unwrap_or(0.0),
+        ])
     }
     fn direction(&self, p: &P) -> Option<[f64; 3]> {
         self.point(p)
@@ -358,13 +374,20 @@ impl Doc {
     fn placement(&self, p: &P) -> Option<Plane> {
         let (_, params) = self.simple(p.reference()?)?;
         let origin = self.point(params.get(1)?)?;
-        let z = params.get(2).and_then(|d| self.direction(d)).unwrap_or([0.0, 0.0, 1.0]);
+        let z = params
+            .get(2)
+            .and_then(|d| self.direction(d))
+            .unwrap_or([0.0, 0.0, 1.0]);
         let x = params
             .get(3)
             .and_then(|d| self.direction(d))
             .filter(|x| Vec3::from(*x).cross(Vec3::from(z)).length() > 1e-9)
             // Any axis off the normal; the plane squares it up.
-            .unwrap_or(if z[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] });
+            .unwrap_or(if z[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            });
         Plane::orthonormal(origin, x, z)
     }
 
@@ -421,8 +444,12 @@ impl Doc {
                 minor_radius: params.get(3)?.num()?,
             }),
             "POLYLINE" => {
-                let points: Option<Vec<_>> =
-                    params.get(1)?.list().iter().map(|q| self.point(q)).collect();
+                let points: Option<Vec<_>> = params
+                    .get(1)?
+                    .list()
+                    .iter()
+                    .map(|q| self.point(q))
+                    .collect();
                 Curve3::Nurbs(NurbsCurve3::new(1, points?, Vec::new(), None)?)
             }
             _ => return None,
@@ -432,17 +459,28 @@ impl Doc {
     fn spline_curve(&self, id: u64) -> Option<NurbsCurve3> {
         // The simple form carries everything after its name; the complex
         // form splits it over parts that have no name.
-        let (degree, points, mults, knots, weights) =
-            if let Some(p) = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS").filter(|p| p.len() >= 9) {
-                (&p[1], &p[2], &p[6], &p[7], None)
-            } else {
-                let base = self.part(id, "B_SPLINE_CURVE")?;
-                let with = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS")?;
-                let weights = self.part(id, "RATIONAL_B_SPLINE_CURVE").and_then(|w| w.first());
-                (base.first()?, base.get(1)?, with.first()?, with.get(1)?, weights)
-            };
+        let (degree, points, mults, knots, weights) = if let Some(p) = self
+            .part(id, "B_SPLINE_CURVE_WITH_KNOTS")
+            .filter(|p| p.len() >= 9)
+        {
+            (&p[1], &p[2], &p[6], &p[7], None)
+        } else {
+            let base = self.part(id, "B_SPLINE_CURVE")?;
+            let with = self.part(id, "B_SPLINE_CURVE_WITH_KNOTS")?;
+            let weights = self
+                .part(id, "RATIONAL_B_SPLINE_CURVE")
+                .and_then(|w| w.first());
+            (
+                base.first()?,
+                base.get(1)?,
+                with.first()?,
+                with.get(1)?,
+                weights,
+            )
+        };
         let points: Option<Vec<_>> = points.list().iter().map(|q| self.point(q)).collect();
-        let weights: Option<Vec<f64>> = weights.map(|w| w.list().iter().filter_map(P::num).collect());
+        let weights: Option<Vec<f64>> =
+            weights.map(|w| w.list().iter().filter_map(P::num).collect());
         let degree = degree.num()? as usize;
         let points = points?;
         let knots = Self::knots(mults, knots, degree)?;
@@ -496,7 +534,9 @@ impl Doc {
         } else {
             let base = self.part(id, "B_SPLINE_SURFACE")?;
             let with = self.part(id, "B_SPLINE_SURFACE_WITH_KNOTS")?;
-            let weights = self.part(id, "RATIONAL_B_SPLINE_SURFACE").and_then(|w| w.first());
+            let weights = self
+                .part(id, "RATIONAL_B_SPLINE_SURFACE")
+                .and_then(|w| w.first());
             (
                 base.first()?,
                 base.get(1)?,
@@ -520,7 +560,14 @@ impl Doc {
                 .collect()
         });
         let (ud, vd) = (ud.num()? as usize, vd.num()? as usize);
-        NurbsSurface3::new(ud, vd, rows?, Self::knots(um, uk, ud)?, Self::knots(vm, vk, vd)?, weights)
+        NurbsSurface3::new(
+            ud,
+            vd,
+            rows?,
+            Self::knots(um, uk, ud)?,
+            Self::knots(vm, vk, vd)?,
+            weights,
+        )
     }
 }
 
@@ -627,7 +674,9 @@ impl Assembly<'_> {
     fn shell(&mut self, p: &P) -> Option<Vec<FaceSpec>> {
         let mut id = p.reference()?;
         let mut flip = false;
-        if self.doc.kind(id) == "ORIENTED_CLOSED_SHELL" || self.doc.kind(id) == "ORIENTED_OPEN_SHELL" {
+        if self.doc.kind(id) == "ORIENTED_CLOSED_SHELL"
+            || self.doc.kind(id) == "ORIENTED_OPEN_SHELL"
+        {
             let (_, params) = self.doc.simple(id)?;
             flip = !params.get(3).is_none_or(P::truth);
             id = params.get(2)?.reference()?;
@@ -645,7 +694,11 @@ impl Assembly<'_> {
 /// A 3×4 placement: the columns are the x, y and z axes and the origin.
 pub type Placement = [[f64; 4]; 3];
 
-const IDENTITY: Placement = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+const IDENTITY: Placement = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+];
 
 /// A body with the colours the file shows it in.
 pub struct StepBody {
@@ -775,7 +828,11 @@ fn item_bodies(doc: &Doc, id: u64) -> Vec<StepBody> {
                 bodies.push(StepBody {
                     body: assembly.build.body,
                     colour,
-                    faces: assembly.faces.iter().map(|face| doc.styles.get(face).copied()).collect(),
+                    faces: assembly
+                        .faces
+                        .iter()
+                        .map(|face| doc.styles.get(face).copied())
+                        .collect(),
                 });
             }
         }
@@ -792,8 +849,12 @@ impl Doc {
         }
         let (_, p) = self.simple(id)?;
         let axis = |k: usize| p.get(k).and_then(|d| self.direction(d)).map(Vec3::from);
-        let x = axis(3).and_then(Vec3::normalize).unwrap_or(Vec3::new(1.0, 0.0, 0.0));
-        let z = axis(7).and_then(Vec3::normalize).unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        let x = axis(3)
+            .and_then(Vec3::normalize)
+            .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
+        let z = axis(7)
+            .and_then(Vec3::normalize)
+            .unwrap_or(Vec3::new(0.0, 0.0, 1.0));
         let y = axis(4)
             .and_then(Vec3::normalize)
             .or_else(|| z.cross(x).normalize())
@@ -818,7 +879,8 @@ pub(super) fn compose(a: &Placement, b: &Placement) -> Placement {
     let mut out = [[0.0; 4]; 3];
     for r in 0..3 {
         for c in 0..4 {
-            out[r][c] = (0..3).map(|k| a[r][k] * b[k][c]).sum::<f64>() + if c == 3 { a[r][3] } else { 0.0 };
+            out[r][c] =
+                (0..3).map(|k| a[r][k] * b[k][c]).sum::<f64>() + if c == 3 { a[r][3] } else { 0.0 };
         }
     }
     out
@@ -879,7 +941,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             continue;
         };
         for unit in units.first().map(P::list).unwrap_or_default() {
-            let Some(unit) = unit.reference() else { continue };
+            let Some(unit) = unit.reference() else {
+                continue;
+            };
             if doc.part(unit, "LENGTH_UNIT").is_some() {
                 unit_mm = Some(unit_size(&doc, unit).unwrap_or(1.0));
             } else if doc.part(unit, "PLANE_ANGLE_UNIT").is_some() {
@@ -896,8 +960,11 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             if doc.kind(id) != kind {
                 continue;
             }
-            let Some((_, params)) = doc.simple(id) else { continue };
-            let (Some(styles), Some(item)) = (params.get(1), params.get(2).and_then(P::reference)) else {
+            let Some((_, params)) = doc.simple(id) else {
+                continue;
+            };
+            let (Some(styles), Some(item)) = (params.get(1), params.get(2).and_then(P::reference))
+            else {
                 continue;
             };
             if let Some(colour) = doc.style_colour(styles) {
@@ -916,7 +983,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             .collect()
     };
     let param = |id: u64, k: usize| {
-        doc.simple(id).and_then(|(_, p)| p.get(k)).and_then(P::reference)
+        doc.simple(id)
+            .and_then(|(_, p)| p.get(k))
+            .and_then(P::reference)
     };
 
     // Product definitions and the name of the product each defines.
@@ -924,7 +993,10 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         .iter()
         .copied()
         .filter(|&id| {
-            matches!(doc.kind(id), "PRODUCT_DEFINITION" | "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS")
+            matches!(
+                doc.kind(id),
+                "PRODUCT_DEFINITION" | "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS"
+            )
         })
         .collect();
     let product_name = |definition: u64| -> String {
@@ -962,7 +1034,10 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         let Some(("SHAPE_REPRESENTATION_RELATIONSHIP", params)) = doc.simple(*id) else {
             continue;
         };
-        if let (Some(a), Some(b)) = (params.get(2).and_then(P::reference), params.get(3).and_then(P::reference)) {
+        if let (Some(a), Some(b)) = (
+            params.get(2).and_then(P::reference),
+            params.get(3).and_then(P::reference),
+        ) {
             linked.entry(a).or_default().push(b);
             linked.entry(b).or_default().push(a);
         }
@@ -990,7 +1065,12 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
     let mut used_items: HashSet<u64> = HashSet::new();
     for &definition in &definitions {
         let mut bodies = Vec::new();
-        for rep in shape_of.get(&definition).and_then(|pds| reps_of_shape.get(pds)).into_iter().flatten() {
+        for rep in shape_of
+            .get(&definition)
+            .and_then(|pds| reps_of_shape.get(pds))
+            .into_iter()
+            .flatten()
+        {
             for item in items_of(*rep) {
                 if !used_items.contains(&item) {
                     let found = item_bodies(&doc, item);
@@ -1034,7 +1114,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
             .get(&occurrence)
             .and_then(|pds| cdsr_of_shape.get(pds).copied())
             .and_then(|cdsr| param(cdsr, 0))
-            .and_then(|relation| doc.part(relation, "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"))
+            .and_then(|relation| {
+                doc.part(relation, "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")
+            })
             .and_then(|p| p.first()?.reference())
             .and_then(|transformation| {
                 let (_, t) = doc.simple(transformation)?;
@@ -1059,7 +1141,10 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
         loose_bodies.extend(item_bodies(&doc, id));
     }
     if !loose_bodies.is_empty() {
-        let name = definitions.first().map(|d| product_name(*d)).unwrap_or_default();
+        let name = definitions
+            .first()
+            .map(|d| product_name(*d))
+            .unwrap_or_default();
         component.push(false);
         products.push(StepProduct {
             name,
@@ -1071,7 +1156,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
     }
 
     let roots = (0..products.len())
-        .filter(|&k| !component[k] && (!products[k].bodies.is_empty() || !products[k].children.is_empty()))
+        .filter(|&k| {
+            !component[k] && (!products[k].bodies.is_empty() || !products[k].children.is_empty())
+        })
         .collect();
     Some(StepModel {
         unit_mm,
@@ -1087,7 +1174,9 @@ pub fn read(bytes: &[u8]) -> Option<StepModel> {
 /// that places nothing puts its solids straight into the drawing.
 fn without_products(doc: &Doc, ids: &[u64], unit_mm: Option<f64>) -> StepModel {
     let param = |id: u64, k: usize| {
-        doc.simple(id).and_then(|(_, p)| p.get(k)).and_then(P::reference)
+        doc.simple(id)
+            .and_then(|(_, p)| p.get(k))
+            .and_then(P::reference)
     };
     let reps: Vec<u64> = ids
         .iter()
@@ -1117,9 +1206,13 @@ fn without_products(doc: &Doc, ids: &[u64], unit_mm: Option<f64>) -> StepModel {
                 // MAPPED_ITEM(name, map, target): the map's representation,
                 // moved from the map's origin to the target.
                 let Some(map) = param(item, 1) else { continue };
-                let Some(source) = param(map, 1) else { continue };
+                let Some(source) = param(map, 1) else {
+                    continue;
+                };
                 let from = param(map, 0).and_then(|o| doc.frame(o)).unwrap_or(IDENTITY);
-                let to = param(item, 2).and_then(|t| doc.target_frame(t)).unwrap_or(IDENTITY);
+                let to = param(item, 2)
+                    .and_then(|t| doc.target_frame(t))
+                    .unwrap_or(IDENTITY);
                 mapped.push((products.len(), source, compose(&to, &invert(&from))));
             } else {
                 bodies.extend(item_bodies(doc, item));
@@ -1178,4 +1271,349 @@ fn without_products(doc: &Doc, ids: &[u64], unit_mm: Option<f64>) -> StepModel {
         products,
         roots,
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOX: &[u8] = include_bytes!("../../tests/fixtures/step/box.step");
+    const INCH_BOX: &[u8] = include_bytes!("../../tests/fixtures/step/inch_box.step");
+    const CURVED: &[u8] = include_bytes!("../../tests/fixtures/step/curved.step");
+    const NURBS_SPHERE: &[u8] = include_bytes!("../../tests/fixtures/step/nurbs_sphere.step");
+    const ASSEMBLY: &[u8] = include_bytes!("../../tests/fixtures/step/assembly.step");
+    const OPEN_BOX: &[u8] = include_bytes!("../../tests/fixtures/step/open_box.step");
+    const COLOURED_BOX: &[u8] = include_bytes!("../../tests/fixtures/step/coloured_box.step");
+    const NO_PRODUCTS: &[u8] = include_bytes!("../../tests/fixtures/step/no_products.step");
+
+    fn bounds(body: &kernel::brep::Body) -> ([f64; 3], [f64; 3]) {
+        let b = kernel::brep::body_bounds(body).expect("a body with geometry");
+        (b.min, b.max)
+    }
+
+    fn assert_close(actual: [f64; 3], expected: [f64; 3], tolerance: f64, what: &str) {
+        for k in 0..3 {
+            assert!(
+                (actual[k] - expected[k]).abs() <= tolerance,
+                "{what}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    fn volume(body: &kernel::brep::Body) -> f64 {
+        kernel::brep::mass_properties(body)
+            .expect("a closed body")
+            .volume
+    }
+
+    fn assert_volume(body: &kernel::brep::Body, expected: f64, what: &str) {
+        let v = volume(body);
+        assert!(
+            (v - expected).abs() <= expected * 1e-6,
+            "{what}: volume {v} != {expected}"
+        );
+    }
+
+    /// The one product of a file holding one solid.
+    fn only_product(model: &StepModel) -> &StepProduct {
+        assert!(model.direct.is_empty());
+        assert_eq!(model.roots.len(), 1);
+        let product = &model.products[model.roots[0]];
+        assert!(product.children.is_empty());
+        assert_eq!(product.bodies.len(), 1);
+        product
+    }
+
+    #[test]
+    fn a_box_is_one_named_product_with_one_solid() {
+        let model = read(BOX).expect("a STEP model");
+        assert_eq!(model.unit_mm, Some(1.0));
+        let product = only_product(&model);
+        assert_eq!(product.name, "Box");
+        assert_eq!((product.numbered, product.scale), (None, 1.0));
+        let body = &product.bodies[0];
+        assert_eq!(body.body.faces.len(), 6);
+        assert_eq!(body.colour, None);
+        let (min, max) = bounds(&body.body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "min");
+        assert_close(max, [10.0, 20.0, 30.0], 1e-9, "max");
+        assert_volume(&body.body, 6000.0, "box");
+    }
+
+    #[test]
+    fn coordinates_stay_in_the_file_unit_it_names() {
+        // A 1 × 2 × 3 inch box: the numbers are inches, and the unit says so;
+        // scaling to the drawing is the caller's.
+        let model = read(INCH_BOX).expect("a STEP model");
+        assert_eq!(model.unit_mm, Some(25.4));
+        let body = &only_product(&model).bodies[0].body;
+        let (min, max) = bounds(body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "min");
+        assert_close(max, [1.0, 2.0, 3.0], 1e-9, "max");
+        assert_volume(body, 6.0, "inch box");
+    }
+
+    #[test]
+    fn curved_solids_read_on_their_analytic_surfaces() {
+        use std::f64::consts::PI;
+        let model = read(CURVED).expect("a STEP model");
+        let root = &model.products[model.roots[0]];
+        assert!(root.bodies.is_empty());
+        let children: Vec<&StepProduct> = root
+            .children
+            .iter()
+            .map(|(k, _)| &model.products[*k])
+            .collect();
+        let names: Vec<&str> = children.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Sphere", "Cylinder", "Cone", "Torus"]);
+        for (_, placement) in &root.children {
+            assert_eq!(*placement, IDENTITY);
+        }
+        // (faces, min, max, volume)
+        let expected = [
+            (
+                1,
+                [-5.0, -5.0, -5.0],
+                [5.0, 5.0, 5.0],
+                4.0 / 3.0 * PI * 125.0,
+            ),
+            (3, [17.0, -3.0, 0.0], [23.0, 3.0, 10.0], PI * 9.0 * 10.0),
+            (
+                3,
+                [36.0, -4.0, 0.0],
+                [44.0, 4.0, 8.0],
+                PI * 8.0 / 3.0 * (16.0 + 4.0 + 1.0),
+            ),
+            (
+                1,
+                [52.0, -8.0, -2.0],
+                [68.0, 8.0, 2.0],
+                2.0 * PI * PI * 6.0 * 4.0,
+            ),
+        ];
+        for (product, (faces, min, max, v)) in children.iter().zip(expected) {
+            assert_eq!(product.bodies.len(), 1, "{}", product.name);
+            let body = &product.bodies[0].body;
+            assert_eq!(body.faces.len(), faces, "{}", product.name);
+            let (lo, hi) = bounds(body);
+            assert_close(lo, min, 1e-6, &product.name);
+            assert_close(hi, max, 1e-6, &product.name);
+            assert_volume(body, v, &product.name);
+        }
+        let kinds: Vec<&str> = children
+            .iter()
+            .flat_map(|p| {
+                p.bodies[0].body.surfaces.iter().map(|(_, s)| match s {
+                    Surface::Plane(_) => "plane",
+                    Surface::Sphere(_) => "sphere",
+                    Surface::Cylinder(_) => "cylinder",
+                    Surface::Cone(_) => "cone",
+                    Surface::Torus(_) => "torus",
+                    _ => "other",
+                })
+            })
+            .collect();
+        for kind in ["sphere", "cylinder", "cone", "torus"] {
+            assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
+        }
+        assert!(!kinds.contains(&"other"), "{kinds:?}");
+    }
+
+    #[test]
+    fn a_rational_spline_surface_keeps_its_weights() {
+        // A sphere of radius 5 written as a rational B-spline surface (a
+        // complex entity). The builder turns a spline that is exactly an
+        // analytic surface into that surface, which it can only do here if
+        // the knots, control points and weights were all read right.
+        let model = read(NURBS_SPHERE).expect("a STEP model");
+        let body = &only_product(&model).bodies[0].body;
+        let surfaces: Vec<&Surface> = body.surfaces.iter().map(|(_, s)| s).collect();
+        assert_eq!(surfaces.len(), 1);
+        let Surface::Sphere(sphere) = surfaces[0] else {
+            panic!(
+                "the spline was not recognised as a sphere: {:?}",
+                surfaces[0]
+            );
+        };
+        assert!(
+            (sphere.radius - 5.0).abs() < 1e-9,
+            "radius {}",
+            sphere.radius
+        );
+        assert_close(sphere.frame.origin, [0.0, 0.0, 0.0], 1e-9, "centre");
+        assert_volume(body, 4.0 / 3.0 * std::f64::consts::PI * 125.0, "sphere");
+    }
+
+    #[test]
+    fn an_assembly_places_its_components() {
+        let model = read(ASSEMBLY).expect("a STEP model");
+        assert_eq!(model.roots.len(), 1);
+        let root = &model.products[model.roots[0]];
+        assert_eq!(root.name, "Assembly");
+        assert!(root.bodies.is_empty());
+        assert_eq!(root.children.len(), 2);
+        let child = |k: usize| (&model.products[root.children[k].0], root.children[k].1);
+        let (plate, at_plate) = child(0);
+        let (post, at_post) = child(1);
+        assert_eq!((plate.name.as_str(), post.name.as_str()), ("Plate", "Post"));
+        assert_eq!(at_plate, IDENTITY);
+        // Turned 90° about z, then moved 50 along x.
+        let expected = [
+            [0.0, -1.0, 0.0, 50.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        for r in 0..3 {
+            for c in 0..4 {
+                assert!((at_post[r][c] - expected[r][c]).abs() < 1e-9, "{at_post:?}");
+            }
+        }
+        // Each component's solid is in its own frame.
+        let (min, max) = bounds(&plate.bodies[0].body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "plate min");
+        assert_close(max, [10.0, 20.0, 2.0], 1e-9, "plate max");
+        let (min, max) = bounds(&post.bodies[0].body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "post min");
+        assert_close(max, [2.0, 2.0, 15.0], 1e-9, "post max");
+        // Neither component is a root of its own.
+        assert!(!model.roots.contains(&root.children[0].0));
+        assert!(!model.roots.contains(&root.children[1].0));
+    }
+
+    #[test]
+    fn a_shell_model_reads_as_an_open_body() {
+        let model = read(OPEN_BOX).expect("a STEP model");
+        let product = only_product(&model);
+        assert_eq!(product.name, "OpenBox");
+        let body = &product.bodies[0].body;
+        assert_eq!(body.faces.len(), 5, "a box without its top");
+        let (min, max) = bounds(body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "min");
+        assert_close(max, [10.0, 10.0, 10.0], 1e-9, "max");
+    }
+
+    #[test]
+    fn solid_and_face_colours_come_from_their_styles() {
+        let model = read(COLOURED_BOX).expect("a STEP model");
+        let body = &only_product(&model).bodies[0];
+        assert_eq!(body.colour, Some([0.8, 0.2, 0.1]), "the solid's own RGB");
+        assert_eq!(body.faces.len(), 6);
+        assert_eq!(body.faces[0], Some([0.0, 0.0, 1.0]), "a predefined colour");
+        assert_eq!(
+            body.faces[1],
+            Some([1.0, 1.0, 0.0]),
+            "an overriding style wins"
+        );
+        assert_eq!(body.faces[2], Some([0.25, 0.5, 0.75]), "a rendering style");
+        assert_eq!(&body.faces[3..], &[None, None, None]);
+        // The styles change nothing else.
+        assert_volume(&body.body, 6000.0, "coloured box");
+    }
+
+    #[test]
+    fn a_file_without_products_puts_its_solids_straight_in() {
+        let model = read(NO_PRODUCTS).expect("a STEP model");
+        assert_eq!(model.unit_mm, Some(1.0));
+        assert!(model.roots.is_empty());
+        assert_eq!(model.direct.len(), 1);
+        let body = &model.direct[0].body;
+        assert_eq!(body.faces.len(), 6);
+        let (min, max) = bounds(body);
+        assert_close(min, [0.0, 0.0, 0.0], 1e-9, "min");
+        assert_close(max, [10.0, 20.0, 30.0], 1e-9, "max");
+    }
+
+    #[test]
+    fn input_that_is_not_step_reads_as_nothing() {
+        assert!(read(b"").is_none());
+        assert!(read(b"not a STEP file").is_none());
+        assert!(read(b"ISO-10303-21;\nHEADER;\nENDSEC;\nEND-ISO-10303-21;\n").is_none());
+        // A data section with no shape is an empty model.
+        let model = read(b"ISO-10303-21;\nDATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\n")
+            .expect("a STEP file");
+        assert!(model.direct.is_empty() && model.roots.is_empty());
+    }
+
+    /// Damaged copies of every fixture: cut at every third line, each line
+    /// left out, and every fourth number replaced by a value a careless
+    /// writer might leave there. None may panic.
+    #[test]
+    fn damaged_files_never_panic() {
+        const VALUES: [&str; 6] = ["0.", "-1.", "1.E308", "-1.E308", "1.E-308", "99999999"];
+        let mut cases = 0;
+        for bytes in [
+            BOX,
+            INCH_BOX,
+            CURVED,
+            NURBS_SPHERE,
+            ASSEMBLY,
+            OPEN_BOX,
+            COLOURED_BOX,
+            NO_PRODUCTS,
+        ] {
+            let text = std::str::from_utf8(bytes).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let mut check = |damaged: String| {
+                cases += 1;
+                let _ = read(damaged.as_bytes());
+            };
+            for n in 0..lines.len() {
+                if n % 3 == 0 {
+                    check(lines[..n].join("\n"));
+                }
+                check([&lines[..n], &lines[n + 1..]].concat().join("\n"));
+            }
+            let mut value = 0;
+            let mut number = 0;
+            for (n, line) in lines.iter().enumerate() {
+                if !line.starts_with('#') {
+                    continue;
+                }
+                // Each number after the instance's `=`.
+                let Some(eq) = line.find('=') else { continue };
+                let mut start = None;
+                for (i, c) in line.char_indices().skip(eq + 1).chain([(line.len(), ',')]) {
+                    let numeric = c.is_ascii_digit() || matches!(c, '.' | '-' | 'E' | '+');
+                    match (start, numeric) {
+                        (None, true) if !line[..i].ends_with('#') => start = Some(i),
+                        (Some(s), false) => {
+                            number += 1;
+                            start = None;
+                            if number % 4 != 0 {
+                                continue;
+                            }
+                            let replaced = format!(
+                                "{}{}{}",
+                                &line[..s],
+                                VALUES[value % VALUES.len()],
+                                &line[i..]
+                            );
+                            value += 1;
+                            let mut damaged = lines.clone();
+                            damaged[n] = &replaced;
+                            check(damaged.join("\n"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(cases > 1000, "{cases} damaged files");
+    }
+
+    /// A whole sphere bounded by a vertex loop gets its seam and meshes
+    /// (#3051), whether written analytic or as a spline.
+    #[test]
+    fn a_sphere_on_a_vertex_loop_gets_a_seam_and_meshes() {
+        let curved = read(CURVED).expect("a STEP model");
+        let analytic = &curved.products[curved.products[curved.roots[0]].children[0].0];
+        let spline = read(NURBS_SPHERE).expect("a STEP model");
+        for body in [&analytic.bodies[0].body, &only_product(&spline).bodies[0].body] {
+            assert_eq!((body.edges.len(), body.vertices.len()), (1, 2));
+            assert!(body.validate().is_empty(), "{:?}", body.validate());
+            let mesh = kernel::brep::mesh_body(body, 0.1, 0.01);
+            assert!(!mesh.triangles.is_empty(), "the sphere meshes");
+        }
+    }
+
 }

@@ -80,20 +80,20 @@ use crate::command::{CmdResult, SelectionEntity, StepInput};
 use document::Handle;
 use iced::Task;
 
+mod autolisp_tests;
 pub(super) mod clipboard;
 mod stretch_grips;
 mod constraint;
 mod dim_edit;
 mod entity_commit;
 mod modify;
+#[cfg(test)]
+mod mtext_preview_tests;
 mod parameters;
 mod property_match;
 mod solid3d;
 mod tests;
-mod autolisp_tests;
 mod text_edit;
-#[cfg(test)]
-mod mtext_preview_tests;
 mod transform;
 mod utilities;
 mod viewport;
@@ -128,11 +128,7 @@ impl OpenCADStudio {
             .as_mut()
             .map(|c| c.take_pending_panel_updates())
             .unwrap_or_default();
-        for (panel_id, values) in panel_updates {
-            if let Some(panel) = self.plugin_panels.get_mut(&panel_id) {
-                panel.update_values(values);
-            }
-        }
+        self.apply_panel_or_dialog_updates(panel_updates);
         if let CmdResult::ReturnPoint(pt) = result {
             self.tabs[i].scene.clear_preview_wire();
             if let Some(mut suspended) = self.tabs[i].suspended_cmd.take() {
@@ -208,7 +204,9 @@ impl OpenCADStudio {
         }
         if let Some((name, value)) = variable {
             let tab = &mut self.tabs[self.active_tab];
-            if crate::io::drawing_variable(&tab.scene.document, name).as_deref() != Some(value.as_str()) {
+            if crate::io::drawing_variable(&tab.scene.document, name).as_deref()
+                != Some(value.as_str())
+            {
                 crate::io::set_drawing_variable(&mut tab.scene.document, name, &value);
                 tab.dirty = true;
             }
@@ -248,6 +246,8 @@ impl OpenCADStudio {
                 | CmdResult::HatchBoundariesPicked { .. }
                 // An array arrow keeps the array selected for the next arrow.
                 | CmdResult::EditAssocArray { .. }
+                // A parameter grip keeps its references selected, as other grips do.
+                | CmdResult::EvaluateBlockParameter { insert: Some(_), .. }
         );
         self.result_depth += 1;
         let task = self.apply_cmd_result_inner(result);
@@ -277,7 +277,11 @@ impl OpenCADStudio {
             .as_ref()
             .map(|command| command.preview_hidden_handles().to_vec())
             .unwrap_or_default();
-        if let Some(cell) = self.table_cell_editor.as_ref().filter(|c| c.tab_id == self.tabs[i].id) {
+        if let Some(cell) = self
+            .table_cell_editor
+            .as_ref()
+            .filter(|c| c.tab_id == self.tabs[i].id)
+        {
             preview_hidden.push(cell.handle);
         }
         self.tabs[i]
@@ -816,10 +820,17 @@ impl OpenCADStudio {
             result @ CmdResult::EditBlockAuthoring { .. } => {
                 return self.handle_authoring_edit(result);
             }
-            CmdResult::SetBlockActionBars { document,definition,mode,parameters } => {
-                return self.set_action_bars(document,definition,mode,parameters);
+            CmdResult::SetBlockActionBars {
+                document,
+                definition,
+                mode,
+                parameters,
+            } => {
+                return self.set_action_bars(document, definition, mode, parameters);
             }
-            result @ CmdResult::AlignBlockReference { .. } => { return self.handle_block_alignment(result); }
+            result @ CmdResult::AlignBlockReference { .. } => {
+                return self.handle_block_alignment(result);
+            }
             result @ (CmdResult::PlaceBlockAction { .. }
             | CmdResult::EditBlockActionSet { .. }
             | CmdResult::AssociateBlockAction { .. }
@@ -828,9 +839,6 @@ impl OpenCADStudio {
             }
             result @ CmdResult::PlaceBlockSingleParameter { .. } => {
                 return self.handle_place_block_single_parameter(result);
-            }
-            CmdResult::StartBlockLookupAction { document, definition } => {
-                return self.start_block_lookup_action(document, definition);
             }
             CmdResult::OpenBlockLookupTable {
                 document,
@@ -907,8 +915,12 @@ impl OpenCADStudio {
                     return task;
                 }
             }
-            CmdResult::AssocArray { handles, spec } => {
-                self.handle_assoc_array(handles, spec);
+            CmdResult::AssocArray {
+                handles,
+                spec,
+                base_point,
+            } => {
+                self.handle_assoc_array(handles, spec, base_point);
             }
             CmdResult::ReplaceMany(replacements, additions) => {
                 if let Some(task) = self.handle_replace_many(replacements, additions) {
@@ -958,12 +970,17 @@ impl OpenCADStudio {
                 self.attach_point_cloud(i, label, placement);
                 self.restore_pre_cmd_tangent();
             }
-            CmdResult::AttachPdfPages { kind, path, pages } => {
+            CmdResult::AttachPdfPages {
+                kind,
+                path,
+                pages,
+                auto_place,
+            } => {
                 let label = self.history_label_from_active_cmd(i, "PDFATTACH");
                 self.tabs[i].scene.clear_preview_wire();
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
-                self.attach_pdf_pages(i, label, kind, &path, pages);
+                self.attach_pdf_pages(i, label, kind, &path, pages, auto_place);
                 self.restore_pre_cmd_tangent();
             }
             CmdResult::PdfImport(request) => {
@@ -1224,6 +1241,20 @@ impl OpenCADStudio {
             CmdResult::PasteClipboard { base_pt } => {
                 self.handle_paste_clipboard(base_pt);
             }
+            CmdResult::PlaceLinkedTable(link) => {
+                self.tabs[i].active_cmd = None;
+                self.tabs[i].snap_result = None;
+                self.tabs[i].scene.clear_preview_wire();
+                self.restore_pre_cmd_tangent();
+                self.place_linked_table(link);
+            }
+            CmdResult::PlacePastedImage { image, embedded } => {
+                self.tabs[i].active_cmd = None;
+                self.tabs[i].snap_result = None;
+                self.tabs[i].scene.clear_preview_wire();
+                self.restore_pre_cmd_tangent();
+                dispatched = self.place_pasted_image(image, embedded);
+            }
             CmdResult::CreateGroup { handles, name } => {
                 if let Some(task) = self.handle_create_group(handles, name) {
                     return task;
@@ -1234,6 +1265,15 @@ impl OpenCADStudio {
                     return task;
                 }
             }
+            CmdResult::VpLayerOverride {
+                vp_handle,
+                layer,
+                channel,
+                value,
+            } => {
+                self.handle_vp_layer_override(vp_handle, &layer, channel, &value);
+            }
+
             CmdResult::VpLayerUpdate {
                 vp_handle,
                 freeze,
@@ -1487,7 +1527,13 @@ impl OpenCADStudio {
             self.focus_cmd_input()
         };
         crate::ui::ribbon::keytip_note_command_finished();
-        Task::batch([dispatched, focus])
+        // MULTIPLE: the command ended without Escape, so it starts again.
+        let tab = &self.tabs[self.active_tab];
+        let again = match (&tab.active_cmd, &tab.multiple_cmd) {
+            (None, Some(cmd)) => Task::done(Message::Command(cmd.clone())),
+            _ => Task::none(),
+        };
+        Task::batch([dispatched, focus, again])
     }
 
     // --- C2a handlers: flow / lifecycle (thin-router targets, bodies moved verbatim) ---
@@ -1511,6 +1557,13 @@ impl OpenCADStudio {
             self.command_line.set_step_options(Vec::new());
             self.open_attribute_editor(ins_handle);
             return Some(Task::none());
+        }
+        let heading = self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .and_then(|c| c.prompt_heading());
+        if let Some(h) = heading.filter(|_| !quiet) {
+            self.command_line.push_info(&h);
         }
         let prompt = self.tabs[i].active_cmd.as_ref().map(|c| c.prompt());
         if let Some(p) = prompt.filter(|_| !quiet) {
@@ -1582,9 +1635,35 @@ impl OpenCADStudio {
         }
     }
 
+    /// A box or pair Parameter Set is one operation: when its action steps are
+    /// abandoned, the parameter it placed is taken back with them so a rerun
+    /// does not author a second copy.
+    pub(super) fn rollback_cancelled_parameter_set(&mut self) {
+        let i = self.active_tab;
+        let Some((document, dirty)) = self.tabs[i].pending_set_snapshot.take() else {
+            return;
+        };
+        self.tabs[i]
+            .scene
+            .document
+            .record_all_entities_for_transaction();
+        self.tabs[i].scene.document = document;
+        self.tabs[i].dirty = dirty;
+        self.tabs[i].selected_authoring = None;
+        self.tabs[i].scene.bump_geometry();
+        self.refresh_properties();
+    }
+
     fn handle_cancel(&mut self, cancel: CmdResult) {
         crate::ui::ribbon::keytip_note_command_finished();
         let i = self.active_tab;
+        self.tabs[i].multiple_cmd = None;
+        if self.tabs[i].pending_parameter_set_follow_up.is_some()
+            || self.tabs[i].pending_xy_box_set.is_some()
+            || self.tabs[i].pending_action_pair.is_some()
+        {
+            self.rollback_cancelled_parameter_set();
+        }
         self.tabs[i].pending_parameter_set_follow_up = None;
         self.tabs[i].pending_xy_box_set = None;
         self.tabs[i].pending_action_pair = None;
@@ -1654,10 +1733,9 @@ impl OpenCADStudio {
             .viewport_edit_frame(canvas)
             .map(|(cam, _)| cam);
         let (view_rot, eye, _) = self.pick_view(i, &edit_cam, bounds);
-        crate::scene::view::projection::project_screen(view_rot, eye, bounds, wcs)
-            .is_some_and(|p| {
-                (0.0..=bounds.width).contains(&p.x) && (0.0..=bounds.height).contains(&p.y)
-            })
+        crate::scene::view::projection::project_screen(view_rot, eye, bounds, wcs).is_some_and(
+            |p| (0.0..=bounds.width).contains(&p.x) && (0.0..=bounds.height).contains(&p.y),
+        )
     }
 
     /// A window between two typed corners, run through the same box test
@@ -1805,8 +1883,10 @@ impl OpenCADStudio {
         for h in &handles {
             self.tabs[i].scene.select_entity(*h, false);
         }
-        self.tabs[i].scene.sub_segments =
-            segments.into_iter().filter(|(handle, _)| handles.contains(handle)).collect();
+        self.tabs[i].scene.sub_segments = segments
+            .into_iter()
+            .filter(|(handle, _)| handles.contains(handle))
+            .collect();
         self.tabs[i].active_cmd = None;
         self.tabs[i].snap_result = None;
         self.tabs[i].scene.clear_preview_wire();
@@ -1851,9 +1931,8 @@ impl OpenCADStudio {
                 .map(document::Handle::new)
                 .collect();
             if let (Some(new), false) = (new, others.is_empty() || choice == 'N') {
-                let dimdli = crate::scene::creation_style::drawing_dimdli(
-                    &self.tabs[i].scene.document,
-                );
+                let dimdli =
+                    crate::scene::creation_style::drawing_dimdli(&self.tabs[i].scene.document);
                 self.push_undo_snapshot(i, "DIM");
                 dim_edit::apply_dim_overlap(&mut self.tabs[i].scene, choice, new, &others, dimdli);
                 self.tabs[i].dirty = true;
@@ -2050,6 +2129,8 @@ impl OpenCADStudio {
         let count = self.tabs[i].scene.delete_groups_containing(&handles);
         self.tabs[i].dirty = true;
         self.commit_group_undo(i, undo);
+        // Grips picked before UNGROUP still show the dissolved group's box.
+        self.refresh_selected_grips();
         if count > 0 {
             self.command_line
                 .push_info(crate::tf!("{} group(s) dissolved.", count).as_ref());
@@ -2109,12 +2190,20 @@ impl OpenCADStudio {
             TableCellEditStart::LockedCell => {
                 self.command_line
                     .push_error(crate::t!("The cell is content locked.").as_ref());
-                let _ = self.dispatch_command(if command_line { "-TABLEDIT" } else { "TABLEDIT" });
+                let _ = self.dispatch_command(if command_line {
+                    "-TABLEDIT"
+                } else {
+                    "TABLEDIT"
+                });
             }
             TableCellEditStart::NoCell => {
                 self.command_line
                     .push_error(crate::t!("No editable table cell picked.").as_ref());
-                let _ = self.dispatch_command(if command_line { "-TABLEDIT" } else { "TABLEDIT" });
+                let _ = self.dispatch_command(if command_line {
+                    "-TABLEDIT"
+                } else {
+                    "TABLEDIT"
+                });
             }
         }
         None
@@ -2279,12 +2368,13 @@ fn entity_at_typed_point(
                     _ => continue,
                 },
                 // A text or an ellipse answers by its extent, the way a click
-                // inside it picks it.
+                // inside it picks it; a point by its location.
                 None if matches!(
                     entity,
                     document::EntityType::Text(_)
                         | document::EntityType::MText(_)
                         | document::EntityType::Ellipse(_)
+                        | document::EntityType::Point(_)
                 ) =>
                 {
                     let dx = (bounds.min.x - point.x)
@@ -2292,6 +2382,24 @@ fn entity_at_typed_point(
                         .max(0.0);
                     let dy = (bounds.min.y - point.y)
                         .max(point.y - bounds.max.y)
+                        .max(0.0);
+                    dx.hypot(dy)
+                }
+                // An insert answers by the box of its expanded definition, the
+                // way a click on its box picks it.
+                None if matches!(entity, document::EntityType::Insert(_)) => {
+                    let document::EntityType::Insert(insert) = entity else {
+                        continue;
+                    };
+                    let Some(world) = crate::app::helpers::insert_world_bounds(document, insert)
+                    else {
+                        continue;
+                    };
+                    let dx = (world.min.x - point.x)
+                        .max(point.x - world.max.x)
+                        .max(0.0);
+                    let dy = (world.min.y - point.y)
+                        .max(point.y - world.max.y)
                         .max(0.0);
                     dx.hypot(dy)
                 }
@@ -2363,7 +2471,11 @@ fn mleader_extent_along(ml: &document::entities::MultiLeader, dir: glam::DVec2) 
     let height = match ml.content_type {
         document::entities::LeaderContentType::MText => {
             let lines = ctx.text_string.split("\\P").count().max(1) as f64;
-            let h = if ctx.text_height > 0.0 { ctx.text_height } else { ml.text_height };
+            let h = if ctx.text_height > 0.0 {
+                ctx.text_height
+            } else {
+                ml.text_height
+            };
             h * (1.0 + (lines - 1.0) * 5.0 / 3.0 * ctx.line_spacing_factor.max(0.0))
         }
         _ => ctx.block_content_scale.y.abs().max(1.0e-9),
@@ -2372,7 +2484,11 @@ fn mleader_extent_along(ml: &document::entities::MultiLeader, dir: glam::DVec2) 
     let td = &ctx.text_direction;
     let (ux, uy) = {
         let l = (td.x * td.x + td.y * td.y).sqrt();
-        if l > 1.0e-9 { (td.x / l, td.y / l) } else { (1.0, 0.0) }
+        if l > 1.0e-9 {
+            (td.x / l, td.y / l)
+        } else {
+            (1.0, 0.0)
+        }
     };
     width * (dir.x * ux + dir.y * uy).abs() + height * (-dir.x * uy + dir.y * ux).abs()
 }
@@ -2383,10 +2499,11 @@ fn apply_mleader_align(
     request: &MLeaderAlign,
 ) -> bool {
     use crate::modules::annotate::mleader_edit::MLeaderAlignMode as Mode;
-    let leader = |scene: &crate::scene::Scene, h: document::Handle| match scene.document.get_entity(h) {
-        Some(document::EntityType::MultiLeader(ml)) => Some((**ml).clone()),
-        _ => None,
-    };
+    let leader =
+        |scene: &crate::scene::Scene, h: document::Handle| match scene.document.get_entity(h) {
+            Some(document::EntityType::MultiLeader(ml)) => Some((**ml).clone()),
+            _ => None,
+        };
     let mut moves: Vec<(document::Handle, glam::DVec2)> = Vec::new();
     match request.mode {
         Mode::Distribute => {
@@ -2453,7 +2570,12 @@ fn apply_mleader_align(
                 .filter_map(|&h| leader(scene, h).map(|ml| (h, ml)))
                 .map(|(h, ml)| {
                     let base = mleader_base(&ml);
-                    ((base - origin).dot(dir), h, base, mleader_extent_along(&ml, dir))
+                    (
+                        (base - origin).dot(dir),
+                        h,
+                        base,
+                        mleader_extent_along(&ml, dir),
+                    )
                 })
                 .collect();
             if request.mode == Mode::UseCurrent {

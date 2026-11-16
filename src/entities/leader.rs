@@ -2,11 +2,11 @@ use document::entities::{HooklineDirection, Leader, LeaderCreationType, LeaderPa
 use document::Entity;
 use glam::Vec3;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_prop as edit, ro_prop as ro, square_grip, stepper_prop as stepper,
 };
 use crate::entities::traits::RenderConvertible;
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::TangentGeom;
@@ -170,13 +170,11 @@ fn apply_grip(leader: &mut Leader, grip_id: usize, apply: GripApply) {
 
                 let delta = match apply {
                     GripApply::Absolute(p) => document::types::Vector3::new(
-                        p.x as f64 - old_elbow.x,
-                        p.y as f64 - old_elbow.y,
-                        p.z as f64 - old_elbow.z,
+                        p.x - old_elbow.x,
+                        p.y - old_elbow.y,
+                        p.z - old_elbow.z,
                     ),
-                    GripApply::Translate(d) => {
-                        document::types::Vector3::new(d.x as f64, d.y as f64, d.z as f64)
-                    }
+                    GripApply::Translate(d) => document::types::Vector3::new(d.x, d.y, d.z),
                 };
 
                 leader.vertices[n - 2].x = old_elbow.x + delta.x;
@@ -197,10 +195,10 @@ fn apply_grip(leader: &mut Leader, grip_id: usize, apply: GripApply) {
 
                 match apply {
                     GripApply::Absolute(p) => {
-                        leader.vertices[n - 1].x = p.x as f64;
+                        leader.vertices[n - 1].x = p.x;
                     }
                     GripApply::Translate(d) => {
-                        leader.vertices[n - 1].x += d.x as f64;
+                        leader.vertices[n - 1].x += d.x;
                     }
                 }
 
@@ -213,21 +211,19 @@ fn apply_grip(leader: &mut Leader, grip_id: usize, apply: GripApply) {
         if let Some(v) = leader.vertices.get_mut(grip_id) {
             match apply {
                 GripApply::Absolute(p) => {
-                    v.x = p.x as f64;
-                    v.y = p.y as f64;
-                    v.z = p.z as f64;
+                    v.x = p.x;
+                    v.y = p.y;
+                    v.z = p.z;
                 }
                 GripApply::Translate(d) => {
-                    v.x += d.x as f64;
-                    v.y += d.y as f64;
-                    v.z += d.z as f64;
+                    v.x += d.x;
+                    v.y += d.y;
+                    v.z += d.z;
                 }
             }
         }
     } else if let GripApply::Translate(d) = apply {
-        leader.translate(document::types::Vector3::new(
-            d.x as f64, d.y as f64, d.z as f64,
-        ));
+        leader.translate(document::types::Vector3::new(d.x, d.y, d.z));
     }
 }
 
@@ -498,17 +494,25 @@ fn apply_transform(leader: &mut Leader, t: &EntityTransform) {
         for v in &mut entity.vertices {
             crate::scene::view::transform::reflect_xy_point(&mut v.x, &mut v.y, p1, p2);
         }
+        // Offsets from the last vertex reflect as directions.
+        let axis = p2 - p1;
         crate::scene::view::transform::reflect_xy_point(
             &mut entity.block_offset.x,
             &mut entity.block_offset.y,
-            p1,
-            p2,
+            glam::DVec3::ZERO,
+            axis,
         );
         crate::scene::view::transform::reflect_xy_point(
             &mut entity.annotation_offset.x,
             &mut entity.annotation_offset.y,
-            p1,
-            p2,
+            glam::DVec3::ZERO,
+            axis,
+        );
+        crate::scene::view::transform::reflect_xy_point(
+            &mut entity.horizontal_direction.x,
+            &mut entity.horizontal_direction.y,
+            glam::DVec3::ZERO,
+            axis,
         );
     });
 }
@@ -660,9 +664,9 @@ impl LeaderTess for Leader {
             });
             match dim_clr {
                 Some(idx) if idx != 0 && idx != 256 => {
-                    crate::scene::convert::tess_util::aci_to_rgba(&document::types::Color::from_index(
-                        idx,
-                    ))
+                    crate::scene::convert::tess_util::aci_to_rgba(
+                        &document::types::Color::from_index(idx),
+                    )
                 }
                 _ => entity_color,
             }
@@ -676,8 +680,9 @@ impl LeaderTess for Leader {
             _ => line_weight_px,
         };
         let name = handle.value().to_string();
-        let p3 =
-            |v: &document::types::Vector3| -> [f32; 3] { [(v.x) as f32, (v.y) as f32, (v.z) as f32] };
+        let p3 = |v: &document::types::Vector3| -> [f32; 3] {
+            [(v.x) as f32, (v.y) as f32, (v.z) as f32]
+        };
 
         let verts = &self.vertices;
 
@@ -694,6 +699,7 @@ impl LeaderTess for Leader {
                 plot_visible: true,
                 fill_is_3d: false,
                 fill_is_2d_solid: false,
+                solid_normal: None,
                 render_instance: None,
                 pick_tris: Vec::new(),
                 pick_tris_low: Vec::new(),
@@ -874,6 +880,7 @@ impl LeaderTess for Leader {
             plot_visible: true,
             fill_is_3d: false,
             fill_is_2d_solid: false,
+            solid_normal: None,
             render_instance: None,
             pick_tris: Vec::new(),
             pick_tris_low: Vec::new(),

@@ -213,6 +213,14 @@ pub struct FillPlane {
 /// A hatched region defined by a closed polygon boundary.
 #[derive(Clone, Debug)]
 pub struct HatchModel {
+    /// The hatch entity this model plots for. Hatch models carry the pattern
+    /// catalog name (not an entity handle) in `name`, so plot exports resolve
+    /// the fill's drawing layer through this handle.
+    pub entity: Option<document::Handle>,
+    /// Fully resolved display/export layer for this occurrence. This is
+    /// placement-specific because one block definition can be inserted on many
+    /// layers; `None` retains the entity-handle fallback for direct hatches.
+    pub effective_layer: Option<std::sync::Arc<str>>,
     /// Recorded hatch origin in its fill plane, independent of intrinsic PAT line bases.
     pub pattern_origin: Option<[f64; 2]>,
     pub render_instance: Option<super::instance_model::RenderInstance>,
@@ -325,18 +333,32 @@ impl HatchModel {
 
     /// Indexed local-space fill mesh with even-odd loop containment.
     pub(crate) fn fill_mesh(&self) -> (Vec<[f32; 2]>, Vec<u32>) {
+        // Some DWGs contain closed paths that run from A to B and back to A.
+        // They have no area, but passing them to the polygon triangulator can
+        // make it reject the other, valid rings as well. Discard only paths
+        // with fewer than three distinct points; keep the source boundary
+        // intact for picking, editing, and serialization.
+        let has_three_points = |ring: &[[f64; 2]]| {
+            let Some(first) = ring.first() else {
+                return false;
+            };
+            let Some(second) = ring.iter().find(|point| *point != first) else {
+                return false;
+            };
+            ring.iter().any(|point| point != first && point != second)
+        };
         let mut rings = Vec::new();
         let mut ring = Vec::new();
         for &[x, y] in self.boundary.iter() {
             if x.is_finite() && y.is_finite() {
                 ring.push([x as f64, y as f64]);
-            } else if ring.len() >= 3 {
+            } else if has_three_points(&ring) {
                 rings.push(std::mem::take(&mut ring));
             } else {
                 ring.clear();
             }
         }
-        if ring.len() >= 3 {
+        if has_three_points(&ring) {
             rings.push(ring);
         }
 
@@ -442,7 +464,9 @@ impl HatchModel {
         // the span containment tests. Small boundaries keep the kernel's
         // direct path; the grid costs more than it saves there.
         let edge_index = EdgeIndex::build(&edges);
-        let mut query = edge_index.as_ref().map(|index| EdgeQuery::new(index, edges.len()));
+        let mut query = edge_index
+            .as_ref()
+            .map(|index| EdgeQuery::new(index, edges.len()));
 
         // ── AABB of the boundary in world coords.
         let mut min_x = f64::INFINITY;
@@ -665,8 +689,12 @@ impl EdgeIndex {
         if edges.len() < 64 {
             return None;
         }
-        let (mut min_x, mut max_x, mut min_y, mut max_y) =
-            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
         for &(a, b) in edges {
             for [x, y] in [a, b] {
                 min_x = min_x.min(x);
@@ -923,7 +951,12 @@ impl<'a> EdgeQuery<'a> {
 
     /// Whether `point` lies inside the boundary — the kernel's `contains`,
     /// with the edge sweep and the ray casts enumerated through the grid.
-    fn contains(&mut self, point: [f64; 2], boundary: &[KernelCurve], tolerance: Tolerance) -> bool {
+    fn contains(
+        &mut self,
+        point: [f64; 2],
+        boundary: &[KernelCurve],
+        tolerance: Tolerance,
+    ) -> bool {
         let linear = tolerance.linear();
         // A midpoint between two boundary crossings sits between points on
         // edges, so it is inside the grid; the kernel fallback below only
@@ -1126,7 +1159,10 @@ mod tests {
         let tolerance = Tolerance::new(CLIP_TOLERANCE_LINEAR);
 
         let dirs: [[f64; 2]; 3] = [
-            [std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2],
+            [
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
             [0.0, 1.0],
             [1.0, 0.0],
         ];

@@ -21,16 +21,16 @@ use crate::t;
 
 /// Fixed row height used by the renderer, so `ContextMenu::default_row_y`
 /// (which anchors the default row under the cursor) agrees with the layout.
-pub const MENU_ROW_H: f32 = 22.0;
+pub const MENU_ROW_H: f32 = crate::ui::style::kit_metrics::MENU_ITEM_H;
 /// Height of a separator row (1 px line plus its vertical padding).
-pub const MENU_SEP_H: f32 = 7.0;
+pub const MENU_SEP_H: f32 = crate::ui::style::kit_metrics::MENU_SEPARATOR_H;
 /// Vertical padding inside the menu panel above the first row.
-pub const MENU_PAD_TOP: f32 = 4.0;
+pub const MENU_PAD_TOP: f32 = crate::ui::style::kit_metrics::MENU_PAD_Y;
 /// The row layout the renderer uses, for sizing the menu to its widest row:
 /// side padding, icon gutter, gap after it, indent of a submenu's items,
 /// least gap before a hint or check, and the check and caret.
-const ROW_PAD_LEFT: f32 = 6.0;
-const ROW_PAD_RIGHT: f32 = 12.0;
+const ROW_PAD_LEFT: f32 = crate::ui::style::kit_metrics::TOOL_GAP;
+const ROW_PAD_RIGHT: f32 = crate::ui::style::kit_metrics::MENU_PAD_X;
 const GUTTER_W: f32 = 18.0;
 const GUTTER_GAP: f32 = 4.0;
 const CHILD_INDENT: f32 = 14.0;
@@ -374,7 +374,9 @@ impl ContextMenu {
     /// Vertical offset from the panel's top edge to the top of the default
     /// row, using the renderer's fixed row metrics.
     pub fn default_row_y(&self) -> f32 {
-        let mut y = MENU_PAD_TOP;
+        // The rows start inside the panel's border.
+        let first = MENU_PAD_TOP + crate::ui::style::kit_metrics::LINE;
+        let mut y = first;
         for row in &self.rows {
             match row {
                 MenuRow::Item(item) => {
@@ -397,12 +399,13 @@ impl ContextMenu {
                 }
             }
         }
-        MENU_PAD_TOP
+        first
     }
 
-    /// Total panel height (rows plus the panel's vertical padding).
+    /// Total panel height (rows plus the panel's vertical padding and its
+    /// border, which the rows stay inside).
     pub fn height(&self) -> f32 {
-        let mut h = MENU_PAD_TOP * 2.0;
+        let mut h = MENU_PAD_TOP * 2.0 + 2.0 * crate::ui::style::kit_metrics::LINE;
         for row in &self.rows {
             match row {
                 MenuRow::Item(_) => h += MENU_ROW_H,
@@ -425,7 +428,7 @@ impl ContextMenu {
         let item_w = |item: &MenuItem, indent: f32| {
             let mut end = 0.0;
             if let Some(hint) = &item.hint {
-                end += GUTTER_GAP + width(hint, 11.0, false);
+                end += GUTTER_GAP + width(hint, crate::ui::style::text::UI, false);
             }
             if item.checked {
                 end += GUTTER_GAP + CHECK_W;
@@ -433,7 +436,7 @@ impl ContextMenu {
             if end > 0.0 {
                 end += END_GAP - GUTTER_GAP;
             }
-            indent + width(&item.label, 12.0, item.default) + end
+            indent + width(&item.label, crate::ui::style::text::UI, item.default) + end
         };
         let widest = self
             .rows
@@ -446,7 +449,10 @@ impl ContextMenu {
                 MenuRow::Submenu { label, items, .. } => flat_items(items)
                     .into_iter()
                     .map(|item| item_w(item, CHILD_INDENT))
-                    .fold(width(label, 12.0, false) + END_GAP + CARET_W, f32::max),
+                    .fold(
+                        width(label, crate::ui::style::text::UI, false) + END_GAP + CARET_W,
+                        f32::max,
+                    ),
             })
             .fold(0.0, f32::max);
         // The panel's border on both sides.
@@ -579,8 +585,8 @@ pub fn menu_line_item(
     icon: Option<&'static [u8]>,
 ) -> MenuItem {
     let enabled = line.is_some();
-    let mut item = MenuItem::new(label, MenuAction::MenuLine(line.unwrap_or_default()))
-        .enabled(enabled);
+    let mut item =
+        MenuItem::new(label, MenuAction::MenuLine(line.unwrap_or_default())).enabled(enabled);
     if !hint.is_empty() {
         item = item.hint(hint);
     }
@@ -1426,12 +1432,21 @@ mod tests {
     #[test]
     fn default_row_y_accounts_for_separators() {
         let menu = build_context_menu(&line_ctx(), None);
-        assert_eq!(menu.default_row_y(), MENU_PAD_TOP);
+        assert_eq!(
+            menu.default_row_y(),
+            MENU_PAD_TOP + crate::ui::style::kit_metrics::LINE
+        );
         let menu = build_context_menu(&idle_ctx(false), None);
-        assert_eq!(menu.default_row_y(), MENU_PAD_TOP);
+        assert_eq!(
+            menu.default_row_y(),
+            MENU_PAD_TOP + crate::ui::style::kit_metrics::LINE
+        );
         // 12 items (Filter... among them) + 3 submenu headers + 6
         // separators, plus panel padding. No saved filters: no submenu.
-        let expected = MENU_PAD_TOP * 2.0 + 15.0 * MENU_ROW_H + 6.0 * MENU_SEP_H;
+        let expected = MENU_PAD_TOP * 2.0
+            + 2.0 * crate::ui::style::kit_metrics::LINE
+            + 15.0 * MENU_ROW_H
+            + 6.0 * MENU_SEP_H;
         assert_eq!(menu.height(), expected);
     }
 
@@ -1501,16 +1516,31 @@ pub fn customize_rows(rows: Vec<MenuRow>, custom: &MenuCustomization) -> Vec<Men
     for row in rows {
         let row = match row {
             MenuRow::Item(item) if !item.default && hidden(&item_key(&item)) => continue,
-            MenuRow::Submenu { id, label, icon, items, open } => {
+            MenuRow::Submenu {
+                id,
+                label,
+                icon,
+                items,
+                open,
+            } => {
                 if hidden(&format!("{id:?}")) {
                     continue;
                 }
                 let items: Vec<MenuItem> = if id == SubmenuId::RecentInput {
                     items
                 } else {
-                    items.into_iter().filter(|item| !hidden(&item_key(item))).collect()
+                    items
+                        .into_iter()
+                        .filter(|item| !hidden(&item_key(item)))
+                        .collect()
                 };
-                MenuRow::Submenu { id, label, icon, items, open }
+                MenuRow::Submenu {
+                    id,
+                    label,
+                    icon,
+                    items,
+                    open,
+                }
             }
             row => row,
         };
@@ -1533,14 +1563,21 @@ pub fn customize_rows(rows: Vec<MenuRow>, custom: &MenuCustomization) -> Vec<Men
     }
     out.push(MenuRow::Separator);
     out.push(MenuRow::Item(
-        MenuItem::new(crate::tr!("context-menu", "customize"), MenuAction::Customize)
-            .icon(MenuIcon::Chrome(crate::ui::icons::GEAR)),
+        MenuItem::new(
+            crate::tr!("context-menu", "customize"),
+            MenuAction::Customize,
+        )
+        .icon(MenuIcon::Chrome(crate::ui::icons::GEAR)),
     ));
     // No separator leads, ends or doubles up once rows are gone.
     let mut tidy: Vec<MenuRow> = Vec::with_capacity(out.len());
     for row in out {
         let separator = matches!(row, MenuRow::Separator);
-        if separator && tidy.last().is_none_or(|last| matches!(last, MenuRow::Separator)) {
+        if separator
+            && tidy
+                .last()
+                .is_none_or(|last| matches!(last, MenuRow::Separator))
+        {
             continue;
         }
         tidy.push(row);
@@ -1592,9 +1629,15 @@ mod customization_tests {
         assert!(!shown.contains(&"Undo".to_string()) && !shown.contains(&"COPYCLIP".to_string()));
         assert!(shown.contains(&"Redo".to_string()));
         // Repeat, Recent Input, separator, then the user's command.
-        assert!(matches!(&rows[3], MenuRow::Item(item) if item.action == MenuAction::Command("OFFSET".into())));
-        assert!(matches!(rows.last(), Some(MenuRow::Item(item)) if item.action == MenuAction::Customize));
-        assert!(!rows.windows(2).any(|pair| matches!(pair, [MenuRow::Separator, MenuRow::Separator])));
+        assert!(
+            matches!(&rows[3], MenuRow::Item(item) if item.action == MenuAction::Command("OFFSET".into()))
+        );
+        assert!(
+            matches!(rows.last(), Some(MenuRow::Item(item)) if item.action == MenuAction::Customize)
+        );
+        assert!(!rows
+            .windows(2)
+            .any(|pair| matches!(pair, [MenuRow::Separator, MenuRow::Separator])));
     }
 
     /// #2619: a "--" entry draws a separator between the user's commands.
@@ -1615,6 +1658,8 @@ mod customization_tests {
             .position(|row| matches!(row, MenuRow::Item(item) if item.action == MenuAction::Command("OFFSET".into())))
             .unwrap();
         assert!(matches!(rows[at + 1], MenuRow::Separator));
-        assert!(matches!(&rows[at + 2], MenuRow::Item(item) if item.action == MenuAction::Command("TRIM".into())));
+        assert!(
+            matches!(&rows[at + 2], MenuRow::Item(item) if item.action == MenuAction::Command("TRIM".into()))
+        );
     }
 }

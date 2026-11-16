@@ -1,11 +1,11 @@
 use crate::t;
 use document::entities::Circle;
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_prop as edit, format_decimal, parse_f64, ro_prop as ro, square_grip,
 };
 use crate::entities::traits::RenderConvertible;
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{extrusion_wall_tris, RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection};
 use crate::scene::model::wire_model::TangentGeom;
@@ -175,9 +175,21 @@ fn properties(circle: &Circle) -> Vec<PropSection> {
             edit(t!("Diameter").as_ref(), "diameter", r * 2.0),
             edit(t!("Circumference").as_ref(), "circumference", 2.0 * PI * r),
             edit(t!("Area").as_ref(), "area", PI * r * r),
-            ro(t!("Normal X").as_ref(), "normal_x", format_decimal(circle.normal.x)),
-            ro(t!("Normal Y").as_ref(), "normal_y", format_decimal(circle.normal.y)),
-            ro(t!("Normal Z").as_ref(), "normal_z", format_decimal(circle.normal.z)),
+            ro(
+                t!("Normal X").as_ref(),
+                "normal_x",
+                format_decimal(circle.normal.x),
+            ),
+            ro(
+                t!("Normal Y").as_ref(),
+                "normal_y",
+                format_decimal(circle.normal.y),
+            ),
+            ro(
+                t!("Normal Z").as_ref(),
+                "normal_z",
+                format_decimal(circle.normal.z),
+            ),
         ],
     }]
 }

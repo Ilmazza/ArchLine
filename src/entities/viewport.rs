@@ -1,9 +1,9 @@
 use document::entities::{Viewport, ViewportRenderMode};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_prop as edit, parse_f64, ro_prop as ro, square_grip,
 };
+use crate::entities::transform::EntityTransform;
 
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 
@@ -328,14 +328,14 @@ fn apply_geom_prop(vp: &mut Viewport, field: &str, value: &str) {
 fn apply_grip(vp: &mut Viewport, grip_id: usize, apply: GripApply) {
     match (grip_id, apply) {
         (0, GripApply::Translate(d)) => {
-            vp.center.x += d.x as f64;
-            vp.center.y += d.y as f64;
-            vp.center.z += d.z as f64;
+            vp.center.x += d.x;
+            vp.center.y += d.y;
+            vp.center.z += d.z;
         }
         (0, GripApply::Absolute(p)) => {
-            vp.center.x = p.x as f64;
-            vp.center.y = p.y as f64;
-            vp.center.z = p.z as f64;
+            vp.center.x = p.x;
+            vp.center.y = p.y;
+            vp.center.z = p.z;
         }
         (1..=4, GripApply::Absolute(p)) => {
             let hw = vp.width * 0.5;
@@ -347,7 +347,7 @@ fn apply_grip(vp: &mut Viewport, grip_id: usize, apply: GripApply) {
                 4 => (vp.center.x - hw, vp.center.y + hh),
                 _ => unreachable!(),
             };
-            resize_from_corners(vp, opposite, (p.x as f64, p.y as f64));
+            resize_from_corners(vp, opposite, (p.x, p.y));
         }
         _ => {}
     }
@@ -498,13 +498,29 @@ impl crate::entities::traits::FallbackTess for Viewport {
             [cx - hw, cy + hh, cz],
             [cx - hw, cy - hh, cz],
         ];
-        (pts, vec![], vec![], vec![])
+        // The corners as key vertices: Endpoint snaps to each corner and
+        // Midpoint to each edge, as on any closed polyline.
+        (pts.clone(), vec![], vec![], pts)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2821: a viewport's frame snaps at its corners and edge midpoints.
+    #[test]
+    fn viewport_frame_has_its_corners_as_key_vertices() {
+        use crate::entities::traits::FallbackTess;
+        let mut vp = Viewport::default();
+        vp.center = document::types::Vector3::new(5.0, 2.0, 0.0);
+        vp.width = 10.0;
+        vp.height = 4.0;
+        let (_, _, _, key) = vp.fallback_geometry();
+        assert_eq!(key.first(), Some(&[0.0, 0.0, 0.0]));
+        assert!(key.contains(&[10.0, 4.0, 0.0]));
+        assert_eq!(key.len(), 5, "closed: the last edge has a midpoint too");
+    }
 
     /// D#2542: a 10× viewport read "1:10:1" as its annotation scale.
     #[test]

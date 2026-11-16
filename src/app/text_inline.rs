@@ -170,7 +170,10 @@ impl super::OpenCADStudio {
             self.open_tolerance_dialog(Some(target));
             return iced::Task::none();
         }
-        if matches!(self.tabs[i].scene.document.get_entity(target), Some(EntityType::Table(_))) {
+        if matches!(
+            self.tabs[i].scene.document.get_entity(target),
+            Some(EntityType::Table(_))
+        ) {
             self.open_table_cell_editor(target, 0, 0);
             return self.unfocus_widgets();
         }
@@ -310,10 +313,8 @@ impl super::OpenCADStudio {
                 .header
                 .current_text_style_name
                 .clone();
-            if !cur_style.is_empty() {
-                if t.style.trim().is_empty() {
-                    t.style = cur_style;
-                }
+            if !cur_style.is_empty() && t.style.trim().is_empty() {
+                t.style = cur_style;
             }
             // TEXT asks an annotative style for the paper height; the entity
             // stores the model height of the scale it is created at.
@@ -354,6 +355,7 @@ impl super::OpenCADStudio {
             {
                 self.tabs[i].scene.document.header.text_height = paper_height;
             }
+            let style_name = t.style.clone();
             let handle = self.commit_new_text(plane.place_entity(EntityType::Text(t)));
             if annotative {
                 let scale = self.tabs[i].scene.creation_annotation_scale_handle();
@@ -362,6 +364,11 @@ impl super::OpenCADStudio {
                         &mut self.tabs[i].scene.document,
                         handle,
                         scale,
+                    );
+                    crate::scene::annotative::apply_style_orientation(
+                        &mut self.tabs[i].scene.document,
+                        handle,
+                        &style_name,
                     );
                     self.tabs[i]
                         .scene

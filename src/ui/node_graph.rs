@@ -6,14 +6,17 @@
 //! Properties panel's own rows for that entity (built and written back in
 //! `app::node_graph`); operation rows come from the node's spec.
 
+use crate::ui::style::kit_metrics as km;
 use document::{EntityType, Handle};
 use graph::{Kind, NodeId, Port, Spec};
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{self, Widget};
-use iced::advanced::{renderer, Renderer as _, Shell};
+use iced::advanced::widget::operation::{Focusable, Operation, TextInput};
+use iced::advanced::widget::{self, tree, Widget};
+use iced::advanced::{overlay, renderer, Renderer as _, Shell};
+use iced::keyboard;
 use iced::widget::{
-    button, canvas, checkbox, column, container, mouse_area, opaque, pin, row, scrollable, slider,
-    stack, text, text_input, Space,
+    button, canvas, checkbox, column, container, hover, mouse_area, opaque, pin, row, slider,
+    stack, text, text_input, tooltip, Space,
 };
 use iced::{
     mouse, Background, Border, Element, Length, Point, Rectangle, Size, Theme, Transformation,
@@ -34,6 +37,8 @@ const PORT_W: f32 = 14.0;
 const PORT_HIT: f32 = 10.0;
 const ZOOM_STEP: f32 = 1.1;
 const ZOOM_STEPS: std::ops::RangeInclusive<i32> = -15..=12;
+/// The ribbon's tooltip delay.
+const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Drawing objects a node can create, and `Object`, which creates nothing
 /// and stands for whatever object is linked into it.
@@ -170,7 +175,10 @@ impl ObjectKind {
                 | (ObjectKind::MLine, EntityType::MLine(_))
                 | (ObjectKind::MultiLeader, EntityType::MultiLeader(_))
                 | (ObjectKind::Helix, EntityType::Helix(_))
-                | (ObjectKind::AttributeDefinition, EntityType::AttributeDefinition(_))
+                | (
+                    ObjectKind::AttributeDefinition,
+                    EntityType::AttributeDefinition(_)
+                )
                 | (ObjectKind::Table, EntityType::Table(_))
                 | (ObjectKind::Polyline2D, EntityType::Polyline2D(_))
                 | (ObjectKind::Mesh, EntityType::Mesh(_))
@@ -255,9 +263,9 @@ impl ObjectKind {
             ObjectKind::Text => {
                 EntityType::Text(e::Text::with_value("Text", origin).with_height(2.5))
             }
-            ObjectKind::MText => {
-                EntityType::MText(Box::new(e::MText::with_value("MText", origin).with_height(2.5)))
-            }
+            ObjectKind::MText => EntityType::MText(Box::new(
+                e::MText::with_value("MText", origin).with_height(2.5),
+            )),
             ObjectKind::Spline => EntityType::Spline(e::Spline::from_fit_points(vec![
                 origin,
                 point(5.0, 5.0),
@@ -280,7 +288,9 @@ impl ObjectKind {
                 point(10.0, 10.0),
                 point(0.0, 10.0),
             )),
-            ObjectKind::Leader => EntityType::Leader(e::Leader::two_point(origin, point(10.0, 5.0))),
+            ObjectKind::Leader => {
+                EntityType::Leader(e::Leader::two_point(origin, point(10.0, 5.0)))
+            }
             ObjectKind::Tolerance => {
                 EntityType::Tolerance(e::Tolerance::with_text(origin, "{\\Fgdt;j}%%v0.1"))
             }
@@ -322,16 +332,19 @@ impl ObjectKind {
             // One leader with MText content, in the current multileader style.
             ObjectKind::MultiLeader => {
                 let name = &document.header.current_mleader_style_name;
-                let style = document.objects.iter().find_map(|(handle, object)| match object {
-                    document::objects::ObjectType::MultiLeaderStyle(style)
-                        if style.name.eq_ignore_ascii_case(name) =>
-                    {
-                        let mut style = style.clone();
-                        style.handle = *handle;
-                        Some(style)
-                    }
-                    _ => None,
-                });
+                let style = document
+                    .objects
+                    .iter()
+                    .find_map(|(handle, object)| match object {
+                        document::objects::ObjectType::MultiLeaderStyle(style)
+                            if style.name.eq_ignore_ascii_case(name) =>
+                        {
+                            let mut style = style.clone();
+                            style.handle = *handle;
+                            Some(style)
+                        }
+                        _ => None,
+                    });
                 EntityType::MultiLeader(Box::new(
                     crate::modules::annotate::mleader_cmd::build_mleader(
                         "MText",
@@ -386,7 +399,9 @@ impl ObjectKind {
                 mesh.m_vertex_count = 3;
                 mesh.n_vertex_count = 3;
                 mesh.vertices = (0..9)
-                    .map(|i| e::PolygonMeshVertex::at(point(5.0 * (i / 3) as f64, 5.0 * (i % 3) as f64)))
+                    .map(|i| {
+                        e::PolygonMeshVertex::at(point(5.0 * (i / 3) as f64, 5.0 * (i % 3) as f64))
+                    })
                     .collect();
                 EntityType::PolygonMesh(mesh)
             }
@@ -397,7 +412,14 @@ impl ObjectKind {
                     .iter()
                     .map(|[x, y, z]| mesh.add_vertex_xyz(x * 10.0, y * 10.0, z * 10.0))
                     .collect();
-                for [a, b, c, d] in [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]] {
+                for [a, b, c, d] in [
+                    [0, 3, 2, 1],
+                    [4, 5, 6, 7],
+                    [0, 1, 5, 4],
+                    [1, 2, 6, 5],
+                    [2, 3, 7, 6],
+                    [3, 0, 4, 7],
+                ] {
                     mesh.add_quad(v[a], v[b], v[c], v[d]);
                 }
                 EntityType::PolyfaceMesh(mesh)
@@ -432,9 +454,32 @@ impl PaletteItem {
             PaletteItem::Op(spec) => spec.name,
         }
     }
+
+    /// Whether both are the same entry. Labels will not do: Point names both
+    /// a drawing object and a coordinate.
+    fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (PaletteItem::Object(a), PaletteItem::Object(b)) => a == b,
+            (PaletteItem::Op(a), PaletteItem::Op(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// The tint over the palette entry about to be added.
+/// A node-library entry under the pointer or being dragged: lit like a
+/// palette row.
+fn palette_highlight(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(crate::ui::style::chrome::row_selected(
+            theme,
+        ))),
+        ..Default::default()
+    }
 }
 
 /// Canvas state of one node.
+#[derive(Clone)]
 pub struct NodeUi {
     pub pos: Point,
     /// Expanded section titles and coordinate groups; a new object node opens
@@ -446,9 +491,20 @@ pub struct NodeUi {
 
 pub enum RowWidget {
     Field,
+    /// A plain number: anything else is refused as it is typed.
+    Number,
+    /// A number written the way the Properties panel takes it, as an
+    /// expression or with units; checked when it is committed.
+    Measure,
+    /// A point, typed as `x,y,z` with or without parentheses.
+    Coordinate,
     /// A coordinate group's summary row; its label folds the components.
     Group,
-    Slider { min: f64, max: f64, step: f64 },
+    Slider {
+        min: f64,
+        max: f64,
+        step: f64,
+    },
     Toggle,
 }
 
@@ -478,6 +534,18 @@ pub enum Drag {
     Pan(Point, Vector),
 }
 
+/// What undo and redo put back of a graph: its nodes, links and inputs,
+/// where they sit, and what its last evaluation changed in the drawing, so
+/// the next evaluation unwinds the right edits (#2731).
+#[derive(Clone)]
+pub struct GraphUndo {
+    engine: graph::Graph,
+    ui: HashMap<NodeId, NodeUi>,
+    applied: Vec<(Handle, EntityType)>,
+    applied_records: Vec<(Handle, document::objects::ObjectType)>,
+    created: Vec<Handle>,
+}
+
 #[derive(Default)]
 pub struct Graph {
     pub engine: graph::Graph,
@@ -504,6 +572,30 @@ pub struct Graph {
     pub created: Vec<Handle>,
 }
 
+impl Graph {
+    pub fn undo_state(&self) -> GraphUndo {
+        GraphUndo {
+            engine: self.engine.clone(),
+            ui: self.ui.clone(),
+            applied: self.applied.clone(),
+            applied_records: self.applied_records.clone(),
+            created: self.created.clone(),
+        }
+    }
+
+    /// Puts `state` back; open edits in fields are dropped with it.
+    pub fn restore(&mut self, state: &GraphUndo) {
+        let state = state.clone();
+        self.engine = state.engine;
+        self.ui = state.ui;
+        self.applied = state.applied;
+        self.applied_records = state.applied_records;
+        self.created = state.created;
+        self.drafts.clear();
+        self.drag = None;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum GraphMsg {
     Toggle,
@@ -519,6 +611,10 @@ pub enum GraphMsg {
     InPress(Port),
     Input(Port, String),
     Commit(Port),
+    /// Esc in a field: drop its draft, so the field shows its value again.
+    Discard(Port),
+    /// The pointer went elsewhere: commit every draft but the focused field's.
+    Leave(Option<Port>),
     /// A slider or toggle set an operation input.
     Set(Port, Value),
     Zoom(mouse::ScrollDelta),
@@ -536,6 +632,103 @@ pub enum GraphMsg {
 
 fn msg(m: GraphMsg) -> Message {
     Message::Graph(m)
+}
+
+/// `content` with a tooltip, styled like the node graph's own button on the
+/// command line. Cards are drawn through the canvas zoom, so what goes on them
+/// divides its sizes by `zoom` to come out the same size as any other tooltip.
+fn with_tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip: String,
+    zoom: f32,
+) -> Element<'a, Message> {
+    let bubble = container(text(tip).size(11.0 / zoom))
+        .padding([3.0 / zoom, 6.0 / zoom])
+        .style(container::bordered_box);
+    tooltip(content, bubble, tooltip::Position::Top)
+        .gap(4.0 / zoom)
+        .padding(5.0 / zoom)
+        .delay(TIP_DELAY)
+        .into()
+}
+
+/// A node's name, with its ports below it when it has a spec.
+fn node_tip(name: String, spec: Option<&Spec>) -> String {
+    match spec {
+        Some(spec) => {
+            let inputs: Vec<&str> = spec.inputs.iter().map(|input| input.name).collect();
+            format!(
+                "{name}\n{} -> {}",
+                inputs.join(", "),
+                spec.outputs.join(", ")
+            )
+        }
+        None => name,
+    }
+}
+
+/// What a row's tooltip says: its name and whole value, which the card may
+/// have no room to show.
+fn row_tip(row: &NodeRow) -> String {
+    let value = display(&row.value);
+    if value.is_empty() {
+        row.label.clone()
+    } else {
+        format!("{}: {value}", row.label)
+    }
+}
+
+/// Whether an operation input takes a point or vector. The specs do not say:
+/// points, curves and objects are all inputs without a default, so this goes
+/// by name, and by the operation where a name means different things.
+fn is_coordinate(spec: &Spec, input: &graph::ops::Input) -> bool {
+    if input.list || !matches!(input.default, graph::ops::Initial::None) {
+        return false;
+    }
+    match input.name {
+        // An object to pick, where the spec also asks for the point that
+        // picks it (`first` beside `first point`).
+        "first" | "second" => !spec
+            .inputs
+            .iter()
+            .any(|other| other.name.strip_suffix(" point") == Some(input.name)),
+        "a" | "b" => spec.category == "Geometry",
+        "third" | "point" | "center" | "location" | "vector" | "corner" | "vertex" | "base"
+        | "side" | "keep" | "jog" | "feature" | "leader" => true,
+        name => {
+            name.starts_with("axis ")
+                || [" point", " corner", " source", " target"]
+                    .iter()
+                    .any(|end| name.ends_with(end))
+        }
+    }
+}
+
+/// The widget id of the text field on `port`.
+fn field_id(port: &Port) -> widget::Id {
+    widget::Id::from(format!("node-graph-field:{}:{}", port.node, port.field))
+}
+
+/// Whether `text` is a number, or could still become one with more typing.
+/// A list (`[1, 2.5, 3]`) runs the node once per element.
+fn number_prefix(text: &str) -> bool {
+    if let Some(list) = text.strip_prefix('[') {
+        let list = list.strip_suffix(']').unwrap_or(list);
+        return list.split(',').all(|item| number_prefix(item.trim()));
+    }
+    let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    digits(whole)
+        && digits(fraction)
+        && exponent.is_none_or(|exponent| {
+            mantissa.chars().any(|c| c.is_ascii_digit())
+                && digits(exponent.strip_prefix(['-', '+']).unwrap_or(exponent))
+        })
 }
 
 /// Compact display of a port value.
@@ -737,6 +930,8 @@ impl Graph {
                         step: param("step").unwrap_or(0.0),
                     },
                     ("Boolean", "value") => RowWidget::Toggle,
+                    _ if matches!(input.default, graph::ops::Initial::Num(_)) => RowWidget::Number,
+                    _ if is_coordinate(spec, input) => RowWidget::Coordinate,
                     _ => RowWidget::Field,
                 };
                 let output = spec.outputs.contains(&input.name);
@@ -802,11 +997,9 @@ impl Graph {
 
     /// Whether `row` shows: not folded into a closed coordinate group.
     fn is_shown(&self, id: NodeId, row: &NodeRow) -> bool {
-        row.group.as_ref().is_none_or(|group| {
-            self.ui
-                .get(&id)
-                .is_some_and(|ui| ui.open.contains(group))
-        })
+        row.group
+            .as_ref()
+            .is_none_or(|group| self.ui.get(&id).is_some_and(|ui| ui.open.contains(group)))
     }
 
     /// Row centre of `field`, relative to the node's top. Rows of a collapsed
@@ -905,7 +1098,60 @@ impl Graph {
             })
     }
 
+    /// The rows of node `id` that a link supplies, and so cannot be typed in.
+    /// One value can have several ports: a coordinate is also its group's
+    /// row, and a section's header carries all of its rows. A row is driven
+    /// by a link to any port that includes it, and a group by a link to any
+    /// of its components.
+    pub(crate) fn driven_fields(&self, id: NodeId, sections: &[NodeSection]) -> HashSet<String> {
+        let linked = |field: &str| {
+            self.engine.is_linked(&Port {
+                node: id,
+                field: field.to_owned(),
+            })
+        };
+        let mut driven = HashSet::default();
+        for section in sections {
+            let whole = section.header.as_ref().is_some_and(|h| linked(&h.field));
+            for row in &section.rows {
+                if whole
+                    || row.group.as_ref().is_some_and(|group| linked(group))
+                    || linked(&row.field)
+                    || row.field.split('|').any(linked)
+                {
+                    driven.insert(row.field.clone());
+                }
+            }
+        }
+        driven
+    }
+
+    /// Every text field a user can type in, each card's in Tab order: its
+    /// rows from the top.
+    pub(crate) fn tab_order(&self, sections: &[Vec<NodeSection>]) -> Vec<Port> {
+        let mut fields = Vec::new();
+        for (node, node_sections) in self.engine.nodes.iter().zip(sections) {
+            let id = node.id;
+            let driven = self.driven_fields(id, node_sections);
+            for section in node_sections.iter().filter(|s| self.is_open(id, s)) {
+                for row in &section.rows {
+                    let typed = !matches!(row.widget, RowWidget::Slider { .. } | RowWidget::Toggle);
+                    if typed && row.input && self.is_shown(id, row) && !driven.contains(&row.field)
+                    {
+                        fields.push(Port {
+                            node: id,
+                            field: row.field.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        fields
+    }
+
     pub fn view(&self, sections: Vec<Vec<NodeSection>>) -> Element<'_, Message> {
+        let fields = self.tab_order(&sections);
+        let drafts = self.drafts.keys().cloned().collect();
         let wires = self
             .engine
             .links
@@ -950,6 +1196,8 @@ impl Graph {
             Zoomed {
                 content: nodes.width(Length::Fill).height(Length::Fill).into(),
                 zoom,
+                fields,
+                drafts,
             },
         ];
         if let Some(Drag::Palette(item)) = self.drag {
@@ -972,24 +1220,66 @@ impl Graph {
         let icon: Element<'_, Message> = match item {
             PaletteItem::Object(kind) => crate::modules::registry::command_icon(kind.command())
                 .map_or_else(
-                    || Space::new().width(14.0).into(),
-                    |bytes| crate::ui::icons::semantic(bytes, 14.0),
+                    || Space::new().width(km::ROW_ICON).into(),
+                    |bytes| crate::ui::icons::semantic(bytes, km::ROW_ICON),
                 ),
-            PaletteItem::Op(_) => Space::new().width(14.0).into(),
+            PaletteItem::Op(_) => Space::new().width(km::ROW_ICON).into(),
         };
-        mouse_area(
-            container(
-                row![icon, text(t!(item.label())).size(12)]
-                    .spacing(6)
-                    .align_y(iced::Center),
-            )
-            .padding([3, 10])
-            .width(Length::Fill),
+        let held = match self.drag {
+            Some(Drag::Palette(held)) => Some(held),
+            _ => None,
+        };
+        let selected = held.is_some_and(|held| held.same(item));
+        let entry = container(
+            row![
+                icon,
+                crate::ui::kit::value_text(t!(item.label()).into_owned(), false)
+            ]
+            .spacing(km::TOOL_GAP)
+            .align_y(iced::Center),
         )
-        .on_press(msg(GraphMsg::PalettePress(item)))
-        .on_release(msg(GraphMsg::PaletteRelease))
-        .interaction(mouse::Interaction::Grab)
-        .into()
+        .padding([0.0, km::CELL_PAD_X + km::INDENT])
+        .height(Length::Fixed(km::ROW_H))
+        .align_y(iced::Center)
+        .width(Length::Fill)
+        .style(move |theme: &Theme| {
+            if selected {
+                palette_highlight(theme)
+            } else {
+                container::Style::default()
+            }
+        });
+        // While an entry is being dragged, only that entry stays lit.
+        let dragging = held.is_some();
+        let hovered = container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |theme: &Theme| {
+                if dragging {
+                    container::Style::default()
+                } else {
+                    palette_highlight(theme)
+                }
+            });
+        let spec = match item {
+            PaletteItem::Op(spec) => Some(spec),
+            PaletteItem::Object(_) => None,
+        };
+        // The highlight is a layer under the entry, so the entry's icon and
+        // name stay on top of it.
+        let lit = hover(
+            container(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(km::ROW_H)),
+            hovered,
+        );
+        with_tip(
+            mouse_area(iced::widget::stack![lit, entry])
+                .on_press(msg(GraphMsg::PalettePress(item)))
+                .on_release(msg(GraphMsg::PaletteRelease)),
+            node_tip(t!(item.label()).into_owned(), spec),
+            1.0,
+        )
     }
 
     /// The node library as a docked panel: title bar, a search box with the
@@ -997,30 +1287,33 @@ impl Graph {
     /// clicked or dragged onto the canvas.
     pub fn panel(&self, width: f32, chrome: crate::ui::dock::Chrome) -> Element<'_, Message> {
         use crate::ui::dock::{self, PanelId};
+        use crate::ui::kit;
         let tool = |icon: &'static [u8], tip: &str, message: GraphMsg| {
-            dock::tool_button(
-                crate::ui::icons::themed(icon, dock::TOOL_H - 6.0),
+            kit::tool_button(
+                kit::tool_icon(icon),
                 t!(tip).into_owned(),
-                msg(message),
+                Some(msg(message)),
+                false,
             )
         };
-        let toolbar = row![
-            text_input(&t!("Search nodes…"), &self.search)
-                .on_input(|value| msg(GraphMsg::Search(value)))
-                .padding([4, 8])
-                .size(12),
-            tool(crate::ui::icons::DOC_NEW, "New graph", GraphMsg::New),
-            tool(crate::ui::icons::FOLDER_OPEN, "Open graph", GraphMsg::Open),
-            tool(crate::ui::icons::SAVE, "Save graph", GraphMsg::Save),
-        ]
-        .spacing(4)
-        .align_y(iced::Center);
+        let toolbar = kit::band(
+            row![
+                kit::search_field(&t!("Search nodes…"), &self.search, |value| {
+                    msg(GraphMsg::Search(value))
+                }),
+                tool(crate::ui::icons::DOC_NEW, "New graph", GraphMsg::New),
+                tool(crate::ui::icons::FOLDER_OPEN, "Open graph", GraphMsg::Open),
+                tool(crate::ui::icons::SAVE, "Save graph", GraphMsg::Save),
+            ]
+            .spacing(km::TOOL_GAP)
+            .align_y(iced::Center),
+        );
 
         let query = self.search.trim().to_lowercase();
         let wanted = |item: PaletteItem| {
             query.is_empty() || t!(item.label()).to_lowercase().contains(&query)
         };
-        let mut tree = column![].spacing(1);
+        let mut tree = column![];
         use crate::app::node_graph::ops;
         let categories = std::iter::once("Objects")
             .chain(ops::CATEGORIES.iter().copied())
@@ -1046,43 +1339,24 @@ impl Graph {
             // A search shows every match, collapsed categories included.
             let open = !query.is_empty()
                 || (category == "Objects") != self.toggled_categories.contains(category);
-            tree = tree.push(
-                button(
-                    row![
-                        crate::ui::icons::themed_arrow_toggle(open, 9.0),
-                        text(t!(category)).size(11)
-                    ]
-                    .spacing(4)
-                    .align_y(iced::Center),
-                )
-                .on_press(msg(GraphMsg::Category(category)))
-                .style(|theme: &Theme, status| {
-                    let mut style = button::text(theme, status);
-                    style.background =
-                        Some(Background::Color(theme.palette().background.weak.color));
-                    style
-                })
-                .width(Length::Fill)
-                .padding([3, 6]),
-            );
+            tree = tree.push(kit::category_bar(
+                t!(category).into_owned(),
+                !open,
+                msg(GraphMsg::Category(category)),
+            ));
             if open {
                 for item in items {
                     tree = tree.push(self.palette_entry(item));
                 }
             }
         }
-        let body = scrollable(container(tree).padding(iced::Padding {
-            top: 0.0,
-            right: 8.0,
-            bottom: 6.0,
-            left: 0.0,
-        }))
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        dock::frame(
+        kit::palette(
             dock::title_bar(PanelId::NodeGraph, t!("Node Graph").into_owned(), chrome),
-            column![toolbar, body].spacing(6),
+            column![
+                toolbar,
+                Space::new().height(km::TOOL_GAP),
+                kit::scroll_area(tree)
+            ],
             width,
         )
     }
@@ -1101,26 +1375,40 @@ impl Graph {
                 }
             }
         };
+        let zoom = self.zoom();
+        let spec = match &node.kind {
+            Kind::Op(spec) => Some(*spec),
+            Kind::Object(_) => None,
+        };
+        let title_tip = node_tip(title.clone(), spec);
         let header = row![
-            mouse_area(
-                container(text(title).size(12))
-                    .padding([4, 8])
-                    .width(Length::Fill)
-                    .height(HEADER_H),
-            )
-            .on_press(msg(GraphMsg::NodePress(id)))
-            .interaction(mouse::Interaction::Grab),
-            button(crate::ui::icons::themed(crate::ui::icons::CLOSE, 10.0))
-                .on_press(msg(GraphMsg::NodeDelete(id)))
-                .style(button::text)
-                .padding([6, 8]),
+            with_tip(
+                mouse_area(
+                    container(text(title).size(12))
+                        .padding([4, 8])
+                        .width(Length::Fill)
+                        .height(HEADER_H),
+                )
+                .on_press(msg(GraphMsg::NodePress(id))),
+                title_tip,
+                zoom,
+            ),
+            with_tip(
+                button(crate::ui::icons::themed(crate::ui::icons::CLOSE, 10.0))
+                    .on_press(msg(GraphMsg::NodeDelete(id)))
+                    .style(button::text)
+                    .padding([6, 8]),
+                t!("Delete").into_owned(),
+                zoom,
+            ),
         ]
         .height(HEADER_H);
         let header = container(header).style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(theme.palette().primary.weak.color)),
-            text_color: Some(theme.palette().primary.weak.text),
+            background: Some(Background::Color(crate::ui::style::chrome::lit(theme))),
+            text_color: Some(crate::ui::style::chrome::strong(theme)),
             ..Default::default()
         });
+        let driven = self.driven_fields(id, &sections);
         let mut col = column![header];
         if sections.is_empty() {
             col = col.push(
@@ -1152,17 +1440,20 @@ impl Graph {
                 .width(Length::Fill)
                 .height(SECTION_H)
                 .padding([0, 6]);
-                col = col.push(
+                col = col.push(with_tip(
                     row![in_port, toggle, out_port]
                         .spacing(2)
                         .height(SECTION_H)
                         .align_y(iced::Center),
-                );
+                    section.title.clone(),
+                    zoom,
+                ));
             }
             if open {
                 for node_row in section.rows {
                     if self.is_shown(id, &node_row) {
-                        col = col.push(self.row_view(id, node_row));
+                        let locked = driven.contains(&node_row.field);
+                        col = col.push(self.row_view(id, node_row, locked));
                     }
                 }
             }
@@ -1171,9 +1462,9 @@ impl Graph {
             container(col)
                 .width(NODE_W)
                 .style(|theme: &Theme| container::Style {
-                    background: Some(Background::Color(theme.palette().background.base.color)),
+                    background: Some(Background::Color(crate::ui::style::chrome::surface(theme))),
                     border: Border {
-                        color: theme.palette().background.strong.color,
+                        color: crate::ui::style::chrome::border(theme),
                         width: 1.0,
                         radius: 4.0.into(),
                     },
@@ -1183,7 +1474,11 @@ impl Graph {
     }
 
     /// The input and output port dots of `node_row`, or gaps.
-    fn port_views(&self, id: NodeId, node_row: &NodeRow) -> (Element<'_, Message>, Element<'_, Message>) {
+    fn port_views(
+        &self,
+        id: NodeId,
+        node_row: &NodeRow,
+    ) -> (Element<'_, Message>, Element<'_, Message>) {
         let port = Port {
             node: id,
             field: node_row.field.clone(),
@@ -1206,7 +1501,8 @@ impl Graph {
         (in_port, out_port)
     }
 
-    fn row_view(&self, id: NodeId, node_row: NodeRow) -> Element<'_, Message> {
+    fn row_view(&self, id: NodeId, node_row: NodeRow, locked: bool) -> Element<'_, Message> {
+        let tip = row_tip(&node_row);
         let (in_port, out_port) = self.port_views(id, &node_row);
         let label: Element<'_, Message> = match node_row.widget {
             RowWidget::Group => {
@@ -1234,9 +1530,8 @@ impl Graph {
             node: id,
             field: node_row.field,
         };
-        let linked_in = self.engine.is_linked(&port);
         let shown = display(&node_row.value);
-        let value: Element<'_, Message> = if node_row.input && !linked_in {
+        let value: Element<'_, Message> = if node_row.input && !locked {
             match node_row.widget {
                 RowWidget::Slider { min, max, step } => {
                     let current = graph::value::num(&node_row.value).unwrap_or(min);
@@ -1261,11 +1556,22 @@ impl Graph {
                         .width(Length::Fill)
                         .into()
                 }
-                RowWidget::Field | RowWidget::Group => {
+                RowWidget::Field
+                | RowWidget::Number
+                | RowWidget::Measure
+                | RowWidget::Coordinate
+                | RowWidget::Group => {
+                    let numeric = matches!(node_row.widget, RowWidget::Number);
                     let draft = self.drafts.get(&port).cloned().unwrap_or(shown);
                     let edit = port.clone();
+                    let held = draft.clone();
                     text_input("", &draft)
-                        .on_input(move |s| msg(GraphMsg::Input(edit.clone(), s)))
+                        .id(field_id(&port))
+                        .on_input(move |s| {
+                            let accepted = !numeric || number_prefix(&s);
+                            let s = if accepted { s } else { held.clone() };
+                            msg(GraphMsg::Input(edit.clone(), s))
+                        })
                         .on_submit(msg(GraphMsg::Commit(port)))
                         .size(11)
                         .padding([2, 4])
@@ -1276,11 +1582,14 @@ impl Graph {
         } else {
             text(shown).size(11).width(Length::Fill).into()
         };
-        row![in_port, label, value, out_port]
-        .spacing(2)
-        .height(ROW_H)
-        .align_y(iced::Center)
-        .into()
+        with_tip(
+            row![in_port, label, value, out_port]
+                .spacing(2)
+                .height(ROW_H)
+                .align_y(iced::Center),
+            tip,
+            self.zoom(),
+        )
     }
 
     /// Pure canvas state; document and evaluation work is the app's.
@@ -1361,17 +1670,15 @@ fn port_dot<'a>(linked: bool) -> Element<'a, Message> {
         container(Space::new())
             .width(8.0)
             .height(8.0)
-            .style(move |theme: &Theme| {
-                let palette = theme.palette();
-                container::Style {
-                    background: linked.then_some(Background::Color(palette.primary.base.color)),
-                    border: Border {
-                        color: palette.primary.base.color,
-                        width: 1.5,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                }
+            .style(move |theme: &Theme| container::Style {
+                background: linked
+                    .then_some(Background::Color(crate::ui::style::chrome::accent(theme))),
+                border: Border {
+                    color: crate::ui::style::chrome::accent(theme),
+                    width: 1.5,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
             }),
     )
     .width(PORT_W)
@@ -1407,15 +1714,14 @@ impl canvas::Program<Message> for Wires {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let palette = theme.palette();
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         frame.fill_rectangle(
             Point::ORIGIN,
             bounds.size(),
-            palette.background.base.color.scale_alpha(0.6),
+            crate::ui::style::chrome::surface(theme).scale_alpha(0.6),
         );
         let stroke = canvas::Stroke::default()
-            .with_color(palette.primary.base.color)
+            .with_color(crate::ui::style::chrome::accent(theme))
             .with_width(self.width);
         for (a, b) in &self.wires {
             frame.stroke(&wire_path(*a, *b), stroke);
@@ -1423,7 +1729,7 @@ impl canvas::Program<Message> for Wires {
         if let Some((a, b)) = self.pending {
             frame.stroke(
                 &wire_path(a, b),
-                stroke.with_color(palette.primary.weak.color),
+                stroke.with_color(crate::ui::style::chrome::lit(theme)),
             );
         }
         vec![frame.into_geometry()]
@@ -1432,9 +1738,121 @@ impl canvas::Program<Message> for Wires {
 
 /// Lays its content out in graph space and draws and hit-tests it through
 /// `zoom`, so every widget inside scales as one picture.
+///
+/// It also sees every event before the cards do, which is what gives the text
+/// fields Tab order and commit-on-leave: a text input has no focus-lost event.
 struct Zoomed<'a> {
     content: Element<'a, Message>,
     zoom: f32,
+    /// The text fields in Tab order.
+    fields: Vec<Port>,
+    /// Fields holding uncommitted text.
+    drafts: Vec<Port>,
+}
+
+#[derive(Default)]
+struct ZoomedState {
+    /// A field a press has just focused. Its text is selected when the button
+    /// comes up, as a press and any drag during it place the cursor themselves.
+    select_on_release: Option<Port>,
+}
+
+/// The tooltips of the cards, drawn through the same zoom as the cards. Its
+/// content is laid out relative to the canvas's top-left corner, `origin`.
+struct ZoomedOverlay<'a> {
+    inner: overlay::Element<'a, Message, Theme, iced::Renderer>,
+    zoom: f32,
+    origin: Point,
+}
+
+impl overlay::Overlay<Message, Theme, iced::Renderer> for ZoomedOverlay<'_> {
+    fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
+        let room = Size::new(
+            (bounds.width - self.origin.x).max(0.0) / self.zoom,
+            (bounds.height - self.origin.y).max(0.0) / self.zoom,
+        );
+        self.inner.as_overlay_mut().layout(renderer, room)
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+    ) {
+        let transformation = Transformation::translate(self.origin.x, self.origin.y)
+            * Transformation::scale(self.zoom);
+        renderer.with_transformation(transformation, |renderer| {
+            self.inner
+                .as_overlay()
+                .draw(renderer, theme, style, layout, cursor);
+        });
+    }
+}
+
+/// Finds the focused field.
+#[derive(Default)]
+struct FindFocused(Option<widget::Id>);
+
+impl Operation for FindFocused {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn Focusable,
+    ) {
+        if state.is_focused() {
+            self.0 = id.cloned();
+        }
+    }
+}
+
+/// Moves focus to one field.
+struct FocusField(widget::Id);
+
+impl Operation for FocusField {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn Focusable,
+    ) {
+        if id == Some(&self.0) {
+            state.focus();
+        } else {
+            state.unfocus();
+        }
+    }
+}
+
+/// Selects one field's text, so that typing replaces it.
+struct SelectField(widget::Id);
+
+impl Operation for SelectField {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn text_input(
+        &mut self,
+        id: Option<&widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn TextInput,
+    ) {
+        if id == Some(&self.0) {
+            state.select_all();
+        }
+    }
 }
 
 impl Zoomed<'_> {
@@ -1444,9 +1862,71 @@ impl Zoomed<'_> {
             * Transformation::scale(self.zoom)
             * Transformation::translate(-origin.x, -origin.y)
     }
+
+    fn run(
+        &mut self,
+        tree: &mut widget::Tree,
+        content: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], content, renderer, operation);
+    }
+
+    fn focused(
+        &mut self,
+        tree: &mut widget::Tree,
+        content: Layout<'_>,
+        renderer: &iced::Renderer,
+    ) -> Option<Port> {
+        let mut find = FindFocused::default();
+        self.run(tree, content, renderer, &mut find);
+        let id = find.0?;
+        self.fields
+            .iter()
+            .find(|port| field_id(port) == id)
+            .cloned()
+    }
+
+    /// Focuses `port` and selects its text.
+    fn enter_field(
+        &mut self,
+        tree: &mut widget::Tree,
+        content: Layout<'_>,
+        renderer: &iced::Renderer,
+        port: &Port,
+    ) {
+        // Focusing puts the cursor at the end, so it has to come first.
+        self.run(tree, content, renderer, &mut FocusField(field_id(port)));
+        self.run(tree, content, renderer, &mut SelectField(field_id(port)));
+    }
+
+    /// The field Tab goes to from `from`: the next on the same card, wrapping
+    /// at its ends.
+    fn tab_target(&self, from: &Port, backward: bool) -> Option<Port> {
+        let card: Vec<&Port> = self
+            .fields
+            .iter()
+            .filter(|port| port.node == from.node)
+            .collect();
+        let at = card.iter().position(|port| *port == from)?;
+        let count = card.len();
+        let next = if backward { at + count - 1 } else { at + 1 } % count;
+        card.get(next).map(|port| (*port).clone())
+    }
 }
 
 impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<ZoomedState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ZoomedState::default())
+    }
+
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fill, Length::Fill)
     }
@@ -1484,6 +1964,40 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
         let Some(content) = layout.children().next() else {
             return;
         };
+        if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers,
+            ..
+        }) = event
+        {
+            if let Some(from) = self.focused(tree, content, renderer) {
+                if let Some(to) = self.tab_target(&from, modifiers.shift()) {
+                    self.enter_field(tree, content, renderer, &to);
+                }
+                shell.publish(msg(GraphMsg::Commit(from)));
+                shell.capture_event();
+                shell.request_redraw();
+                return;
+            }
+        }
+        // Esc leaves the field (the text input's own handling) and abandons
+        // the edit, which the next click would otherwise commit.
+        if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            ..
+        }) = event
+        {
+            if let Some(port) = self.focused(tree, content, renderer) {
+                shell.publish(msg(GraphMsg::Discard(port)));
+            }
+        }
+        let pressed = matches!(
+            event,
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        );
+        let before = pressed
+            .then(|| self.focused(tree, content, renderer))
+            .flatten();
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -1493,6 +2007,53 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
             shell,
             &(*viewport * inverse),
         );
+        if pressed {
+            let now = self.focused(tree, content, renderer);
+            if self.drafts.iter().any(|port| Some(port) != now.as_ref()) {
+                shell.publish(msg(GraphMsg::Leave(now.clone())));
+            }
+            tree.state.downcast_mut::<ZoomedState>().select_on_release =
+                now.filter(|port| Some(port) != before.as_ref());
+        } else if matches!(
+            event,
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+        ) {
+            let entered = tree
+                .state
+                .downcast_mut::<ZoomedState>()
+                .select_on_release
+                .take();
+            if let Some(port) = entered {
+                self.run(tree, content, renderer, &mut SelectField(field_id(&port)));
+                shell.request_redraw();
+            }
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut widget::Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let origin = layout.position() + translation;
+        let inverse = self.transformation(layout.position()).inverse();
+        let shift = Point::ORIGIN - layout.position();
+        let zoom = self.zoom;
+        let inner = self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout.children().next()?,
+            renderer,
+            &(*viewport * inverse),
+            shift,
+        )?;
+        Some(overlay::Element::new(Box::new(ZoomedOverlay {
+            inner,
+            zoom,
+            origin,
+        })))
     }
 
     fn mouse_interaction(
@@ -1508,13 +2069,20 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
             .children()
             .next()
             .map_or(mouse::Interaction::None, |content| {
-                self.content.as_widget().mouse_interaction(
+                let interaction = self.content.as_widget().mouse_interaction(
                     &tree.children[0],
                     content,
                     cursor * inverse,
                     &(*viewport * inverse),
                     renderer,
-                )
+                );
+                // Card buttons, checkboxes and sliders show the plain arrow.
+                match interaction {
+                    mouse::Interaction::Pointer
+                    | mouse::Interaction::Grab
+                    | mouse::Interaction::Grabbing => mouse::Interaction::Idle,
+                    other => other,
+                }
             })
     }
 
@@ -1570,5 +2138,45 @@ impl Widget<Message, Theme, iced::Renderer> for Zoomed<'_> {
 impl<'a> From<Zoomed<'a>> for Element<'a, Message> {
     fn from(zoomed: Zoomed<'a>) -> Self {
         Element::new(zoomed)
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    fn op(name: &str) -> PaletteItem {
+        PaletteItem::Op(graph::spec(name).expect("library node"))
+    }
+
+    #[test]
+    fn same_entry_is_not_decided_by_the_label() {
+        let object = PaletteItem::Object(ObjectKind::Point);
+        assert!(object.same(object));
+        assert!(op("Point").same(op("Point")));
+        assert!(!object.same(op("Point")), "both are called Point");
+        assert!(!op("Point").same(op("Add")));
+    }
+
+    #[test]
+    fn tooltips_name_a_node_and_its_ports() {
+        let spec = graph::spec("Add");
+        assert_eq!(node_tip("Add".to_owned(), spec), "Add\na, b -> result");
+        assert_eq!(node_tip("Line".to_owned(), None), "Line");
+    }
+
+    #[test]
+    fn a_row_tooltip_shows_the_whole_value() {
+        let row = |value: Value| NodeRow {
+            field: "x".to_owned(),
+            label: "x".to_owned(),
+            value,
+            input: true,
+            output: false,
+            widget: RowWidget::Number,
+            group: None,
+        };
+        assert_eq!(row_tip(&row(json!(-12.75))), "x: -12.75");
+        assert_eq!(row_tip(&row(Value::Null)), "x");
     }
 }

@@ -37,6 +37,12 @@ pub struct RadiusDimensionCommand {
     source_handle: Option<Handle>,
 }
 
+impl Default for RadiusDimensionCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RadiusDimensionCommand {
     pub fn new() -> Self {
         Self {
@@ -128,6 +134,11 @@ impl CadCommand for RadiusDimensionCommand {
         "DIMRADIUS"
     }
 
+    /// A dimension's point prompts refuse unusable input this way (measured).
+    fn point_rejection(&self) -> Option<String> {
+        Some(t!("Invalid point input.").into_owned())
+    }
+
     fn prompt(&self) -> String {
         if self.awaiting_text {
             return t!("DIMRADIUS  Enter dimension text (blank = measured value):").into_owned();
@@ -136,10 +147,7 @@ impl CadCommand for RadiusDimensionCommand {
             return t!("DIMRADIUS  Specify text angle (degrees):").into_owned();
         }
         match self.step {
-            Step::SelectObject => {
-                t!("DIMRADIUS  Select arc or circle:")
-                    .into_owned()
-            }
+            Step::SelectObject => t!("DIMRADIUS  Select arc or circle:").into_owned(),
             Step::DimLine(_) => {
                 t!("DIMRADIUS  Specify dimension line location  [Mtext/Text/Angle]:").into_owned()
             }

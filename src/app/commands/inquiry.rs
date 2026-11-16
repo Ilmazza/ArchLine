@@ -113,9 +113,9 @@ impl OpenCADStudio {
                     Some(count) => self.command_line.push_output(
                         crate::tf!("SELECTPREVIOUS: {} object(s) selected.", count).as_ref(),
                     ),
-                    None => self.command_line.push_error(
-                        crate::t!("SELECTPREVIOUS: no previous selection.").as_ref(),
-                    ),
+                    None => self
+                        .command_line
+                        .push_error(crate::t!("SELECTPREVIOUS: no previous selection.").as_ref()),
                 }
                 self.refresh_properties();
             }
@@ -174,6 +174,8 @@ impl OpenCADStudio {
             //   spaces inside the expression don't end the input.
             // QUICKCALC / QC show or hide the QuickCalc pallet.
             "QUICKCALC" | "QC" => return Some(self.toggle_quick_calc()),
+            // ASSISTANT shows or hides the Assistant pallet.
+            "ASSISTANT" => return Some(self.toggle_assistant()),
             // COMMANDHISTORY shows or hides the Command History pallet.
             "COMMANDHISTORY" => {
                 let id = crate::ui::dock::PanelId::CommandHistory;
@@ -194,8 +196,8 @@ impl OpenCADStudio {
                 || cmd.starts_with("QC ") =>
             {
                 let expr = cmd
-                    .splitn(2, char::is_whitespace)
-                    .nth(1)
+                    .split_once(char::is_whitespace)
+                    .map(|x| x.1)
                     .unwrap_or("")
                     .trim();
                 if expr.is_empty() {
@@ -204,8 +206,7 @@ impl OpenCADStudio {
                     );
                 } else {
                     self.cal_context.base_unit = crate::app::quick_calc::base_unit(&self.tabs[i]);
-                    self.cal_context.sysvars =
-                        Some(crate::app::quick_calc::sysvars(&self.tabs[i]));
+                    self.cal_context.sysvars = Some(crate::app::quick_calc::sysvars(&self.tabs[i]));
                     match crate::app::calc::evaluate(expr, &mut self.cal_context) {
                         Ok(v) => {
                             let v = v.display();
@@ -442,17 +443,16 @@ impl OpenCADStudio {
                     .filter_map(|e| {
                         let h = e.common().handle.value();
                         match e {
-                            document::EntityType::LwPolyline(_) | document::EntityType::Polyline2D(_) => {
-                                Some((
-                                    h,
-                                    PeditTarget {
-                                        is_poly: true,
-                                        convertible: false,
-                                        mesh_size: None,
-                                        mesh_closed: None,
-                                    },
-                                ))
-                            }
+                            document::EntityType::LwPolyline(_)
+                            | document::EntityType::Polyline2D(_) => Some((
+                                h,
+                                PeditTarget {
+                                    is_poly: true,
+                                    convertible: false,
+                                    mesh_size: None,
+                                    mesh_closed: None,
+                                },
+                            )),
                             document::EntityType::Line(_) | document::EntityType::Arc(_) => Some((
                                 h,
                                 PeditTarget {
@@ -541,11 +541,11 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(cmd_obj));
             }
 
-            // Bare ATTEDIT (and the ATE alias) open the attribute editor dialog.
-            // If a single block with attributes is already selected it opens on
-            // that block; otherwise the pick command runs and the editor opens
-            // once a block is chosen (see `command_driver`).
-            "ATTEDIT" => {
+            // Bare ATTEDIT (and the ATE/EATTEDIT forms) open the attribute
+            // editor dialog. If a single block with attributes is already
+            // selected it opens on that block; otherwise the pick command runs
+            // and the editor opens once a block is chosen (see `command_driver`).
+            "ATTEDIT" | "EATTEDIT" => {
                 self.open_attedit_dialog();
             }
 
@@ -559,7 +559,8 @@ impl OpenCADStudio {
                     let selected: Vec<_> =
                         self.tabs[i].scene.selected_entities().into_iter().collect();
                     if selected.len() == 1 {
-                        if let Some(document::EntityType::Insert(_)) = selected.first().map(|(_, e)| e)
+                        if let Some(document::EntityType::Insert(_)) =
+                            selected.first().map(|(_, e)| e)
                         {
                             let handle = selected[0].0;
                             let _ =
@@ -1003,7 +1004,10 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
             cmd if cmd.starts_with("-DATAEXTRACTION _RUN ") => {
-                let path = cmd.trim_start_matches("-DATAEXTRACTION _RUN ").trim().to_string();
+                let path = cmd
+                    .trim_start_matches("-DATAEXTRACTION _RUN ")
+                    .trim()
+                    .to_string();
                 self.run_extraction_template(&path);
             }
 
@@ -1132,13 +1136,12 @@ impl OpenCADStudio {
         unpersisted_pre_document: Option<document::Document>,
     ) {
         if self.block_editor_preferences.locked {
-            self.command_line.push_error(
-                crate::t!("The Block Editor is locked by BLOCKEDITLOCK.").as_ref(),
-            );
+            self.command_line
+                .push_error(crate::t!("The Block Editor is locked by BLOCKEDITLOCK.").as_ref());
             return;
         }
         use crate::modules::draw::modify::block_edit::BlockEditSession;
-        self.tabs[i].action_bars=Default::default();
+        self.tabs[i].action_bars = Default::default();
         // Capture the camera before the editor reframes it, so leaving
         // the block editor returns the view exactly where it was (#425).
         let current_camera = self.tabs[i].scene.camera.borrow().clone();
@@ -1533,20 +1536,26 @@ fn add_selected_verb(entity: &document::EntityType) -> Option<&'static str> {
 fn entity_list_details(entity: &document::EntityType) -> String {
     use std::f64::consts::PI;
     match entity {
-        document::EntityType::Line(l) => crate::tf!(
-            "from ({:.4},{:.4},{:.4}) to ({:.4},{:.4},{:.4})  len={:.4}",
-            l.start.x,
-            l.start.y,
-            l.start.z,
-            l.end.x,
-            l.end.y,
-            l.end.z,
-            ((l.end.x - l.start.x).powi(2)
-                + (l.end.y - l.start.y).powi(2)
-                + (l.end.z - l.start.z).powi(2))
-            .sqrt()
-        )
-        .into_owned(),
+        document::EntityType::Line(l) => format!(
+            "{}  {}={}",
+            crate::tf!(
+                "from ({:.4},{:.4},{:.4}) to ({:.4},{:.4},{:.4})  len={:.4}",
+                l.start.x,
+                l.start.y,
+                l.start.z,
+                l.end.x,
+                l.end.y,
+                l.end.z,
+                ((l.end.x - l.start.x).powi(2)
+                    + (l.end.y - l.start.y).powi(2)
+                    + (l.end.z - l.start.z).powi(2))
+                .sqrt()
+            ),
+            crate::t!("Angle"),
+            crate::entities::common::format_direction(
+                (l.end.y - l.start.y).atan2(l.end.x - l.start.x)
+            )
+        ),
         document::EntityType::Circle(c) => crate::tf!(
             "center ({:.4},{:.4},{:.4})  r={:.4}  area={:.4}",
             c.center.x,

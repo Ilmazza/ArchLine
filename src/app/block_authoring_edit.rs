@@ -78,18 +78,88 @@ impl CadCommand for EditCommand {
 impl OpenCADStudio {
     pub(super) fn set_authoring_alignment_type(&mut self, value: &str) -> Task<Message> {
         let i = self.active_tab;
-        let Some(definition) = self.tabs[i].active_block_edit_session().map(|session| session.br_handle) else { return Task::none() };
-        let Some(parameter) = self.tabs[i].selected_authoring else { return Task::none() };
-        let perpendicular = if value.eq_ignore_ascii_case("Perpendicular") || value == crate::t!("Perpendicular").as_ref() { true }
-            else if value.eq_ignore_ascii_case("Tangent") || value == crate::t!("Tangent").as_ref() { false }
-            else { self.command_line.push_error(crate::t!("Choose Perpendicular or Tangent.").as_ref()); return Task::none() };
+        let Some(definition) = self.tabs[i]
+            .active_block_edit_session()
+            .map(|session| session.br_handle)
+        else {
+            return Task::none();
+        };
+        let Some(parameter) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
+        let perpendicular = if value.eq_ignore_ascii_case("Perpendicular")
+            || value == crate::t!("Perpendicular").as_ref()
+        {
+            true
+        } else if value.eq_ignore_ascii_case("Tangent") || value == crate::t!("Tangent").as_ref() {
+            false
+        } else {
+            self.command_line
+                .push_error(crate::t!("Choose Perpendicular or Tangent.").as_ref());
+            return Task::none();
+        };
         let mut staged = self.tabs[i].scene.document.clone();
-        match crate::scene::block_orientation_parameter::set_alignment_type(&mut staged, definition, parameter, perpendicular) {
+        match crate::scene::block_orientation_parameter::set_alignment_type(
+            &mut staged,
+            definition,
+            parameter,
+            perpendicular,
+        ) {
             Ok(changed) => {
                 if changed {
-                    self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Alignment type"));
-                    self.apply_action_document(i, staged);
-                    self.tabs[i].scene.bump_geometry();
+                    self.push_undo_snapshot(
+                        i,
+                        super::tab_document::HistoryLabel::Message("Alignment type"),
+                    );
+                    self.apply_action_document_and_bump(i, staged);
+                    self.tabs[i].dirty = true;
+                    self.finish_pending_history(i);
+                }
+                self.tabs[i].properties.edit_choice_open = None;
+                self.refresh_properties();
+            }
+            Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
+        }
+        Task::none()
+    }
+
+    pub(super) fn set_authoring_base_location(&mut self, value: &str) -> Task<Message> {
+        let i = self.active_tab;
+        let Some(definition) = self.tabs[i]
+            .active_block_edit_session()
+            .map(|session| session.br_handle)
+        else {
+            return Task::none();
+        };
+        let Some(parameter) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
+        let midpoint =
+            if value.eq_ignore_ascii_case("Midpoint") || value == crate::t!("Midpoint").as_ref() {
+                true
+            } else if value.eq_ignore_ascii_case("Startpoint")
+                || value == crate::t!("Startpoint").as_ref()
+            {
+                false
+            } else {
+                self.command_line
+                    .push_error(crate::t!("Choose Startpoint or Midpoint.").as_ref());
+                return Task::none();
+            };
+        let mut staged = self.tabs[i].scene.document.clone();
+        match crate::scene::block_distance_parameter::set_base_location(
+            &mut staged,
+            definition,
+            parameter,
+            midpoint,
+        ) {
+            Ok(changed) => {
+                if changed {
+                    self.push_undo_snapshot(
+                        i,
+                        super::tab_document::HistoryLabel::Message("Base location"),
+                    );
+                    self.apply_action_document_and_bump(i, staged);
                     self.tabs[i].dirty = true;
                     self.finish_pending_history(i);
                 }
@@ -110,15 +180,24 @@ impl OpenCADStudio {
         }
         use crate::scene::block_actions::options;
         let i = self.active_tab;
-        let Some(session) = self.tabs[i].active_block_edit_session() else { return Task::none() };
+        let Some(session) = self.tabs[i].active_block_edit_session() else {
+            return Task::none();
+        };
         let definition = session.br_handle;
-        let Some(handle) = self.tabs[i].selected_authoring else { return Task::none() };
+        let Some(handle) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
         let key = crate::ui::properties::FieldKey::Geom(field);
-        let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else { return Task::none() };
-        let Some(before) = options::offsets(&self.tabs[i].scene.document, handle) else { return Task::none() };
+        let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else {
+            return Task::none();
+        };
+        let Some(before) = options::offsets(&self.tabs[i].scene.document, handle) else {
+            return Task::none();
+        };
         let value = crate::app::expr_eval::eval_to_string(input).parse::<f64>();
         let Ok(value) = value else {
-            self.command_line.push_error(crate::t!("Enter a finite action override.").as_ref());
+            self.command_line
+                .push_error(crate::t!("Enter a finite action override.").as_ref());
             return Task::none();
         };
         let (multiplier, angle) = match field {
@@ -130,7 +209,9 @@ impl OpenCADStudio {
         match options::set(&mut staged, definition, handle, multiplier, angle) {
             Ok(true) => {
                 let staged = match crate::scene::block_actions::instance::refresh_after_edit(
-                    &staged, &self.tabs[i].scene.document, definition,
+                    &staged,
+                    &self.tabs[i].scene.document,
+                    definition,
                 ) {
                     Ok(staged) => staged,
                     Err(error) => {
@@ -138,15 +219,19 @@ impl OpenCADStudio {
                         return Task::none();
                     }
                 };
-                self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Edit block action override"));
-                self.apply_action_document(i, staged);
+                self.push_undo_snapshot(
+                    i,
+                    super::tab_document::HistoryLabel::Message("Edit block action override"),
+                );
+                self.apply_action_document_and_bump(i, staged);
                 self.tabs[i].dirty = true;
-                self.tabs[i].scene.bump_geometry();
                 self.finish_pending_history(i);
                 self.tabs[i].properties.edit_buf.remove(&key);
                 self.refresh_properties();
             }
-            Ok(false) => { self.tabs[i].properties.edit_buf.remove(&key); }
+            Ok(false) => {
+                self.tabs[i].properties.edit_buf.remove(&key);
+            }
             Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
         }
         Task::none()
@@ -155,11 +240,17 @@ impl OpenCADStudio {
     pub(super) fn commit_authoring_action_chain(&mut self) -> Task<Message> {
         use crate::scene::block_actions::{chain, instance};
         let i = self.active_tab;
-        let Some(session) = self.tabs[i].active_block_edit_session() else { return Task::none() };
+        let Some(session) = self.tabs[i].active_block_edit_session() else {
+            return Task::none();
+        };
         let definition = session.br_handle;
-        let Some(handle) = self.tabs[i].selected_authoring else { return Task::none() };
+        let Some(handle) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
         let key = crate::ui::properties::FieldKey::Geom("authoring_action_chain");
-        let Some(input) = self.tabs[i].properties.edit_buf.get(&key).cloned() else { return Task::none() };
+        let Some(input) = self.tabs[i].properties.edit_buf.get(&key).cloned() else {
+            return Task::none();
+        };
         let mut staged = self.tabs[i].scene.document.clone();
         match chain::set_by_name(&mut staged, definition, handle, &input) {
             Ok(true) => {
@@ -170,15 +261,19 @@ impl OpenCADStudio {
                         return Task::none();
                     }
                 };
-                self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Edit block action chain"));
-                self.apply_action_document(i, staged);
+                self.push_undo_snapshot(
+                    i,
+                    super::tab_document::HistoryLabel::Message("Edit block action chain"),
+                );
+                self.apply_action_document_and_bump(i, staged);
                 self.tabs[i].dirty = true;
-                self.tabs[i].scene.bump_geometry();
                 self.finish_pending_history(i);
                 self.tabs[i].properties.edit_buf.remove(&key);
                 self.refresh_properties();
             }
-            Ok(false) => { self.tabs[i].properties.edit_buf.remove(&key); }
+            Ok(false) => {
+                self.tabs[i].properties.edit_buf.remove(&key);
+            }
             Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
         }
         Task::none()
@@ -187,20 +282,47 @@ impl OpenCADStudio {
     pub(super) fn commit_authoring_action_base(&mut self, field: &'static str) -> Task<Message> {
         use crate::scene::block_actions::{instance, options};
         let i = self.active_tab;
-        let Some(session) = self.tabs[i].active_block_edit_session() else { return Task::none() };
+        let Some(session) = self.tabs[i].active_block_edit_session() else {
+            return Task::none();
+        };
         let definition = session.br_handle;
-        let Some(handle) = self.tabs[i].selected_authoring else { return Task::none() };
-        let Some(before) = options::base(&self.tabs[i].scene.document, handle) else { return Task::none() };
+        let Some(handle) = self.tabs[i].selected_authoring else {
+            return Task::none();
+        };
+        let Some(before) = options::base(&self.tabs[i].scene.document, handle) else {
+            return Task::none();
+        };
         let key = crate::ui::properties::FieldKey::Geom(field);
-        let editing_offset = matches!(field, "authoring_action_base_offset_x" | "authoring_action_base_offset_y");
-        let mut point = if editing_offset { DVec3::new(before.offset.x, before.offset.y, before.offset.z) }
-            else { DVec3::new(before.base_point.x, before.base_point.y, before.base_point.z) };
-        let dependent = if field == "authoring_action_base_dependent" { !before.dependent } else { before.dependent };
-        let point = if field == "authoring_action_base_dependent" { None } else {
-            if editing_offset != dependent { return Task::none() }
-            let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else { return Task::none() };
+        let editing_offset = matches!(
+            field,
+            "authoring_action_base_offset_x" | "authoring_action_base_offset_y"
+        );
+        let mut point = if editing_offset {
+            DVec3::new(before.offset.x, before.offset.y, before.offset.z)
+        } else {
+            DVec3::new(
+                before.base_point.x,
+                before.base_point.y,
+                before.base_point.z,
+            )
+        };
+        let dependent = if field == "authoring_action_base_dependent" {
+            !before.dependent
+        } else {
+            before.dependent
+        };
+        let point = if field == "authoring_action_base_dependent" {
+            None
+        } else {
+            if editing_offset != dependent {
+                return Task::none();
+            }
+            let Some(input) = self.tabs[i].properties.edit_buf.get(&key) else {
+                return Task::none();
+            };
             let Ok(value) = crate::app::expr_eval::eval_to_string(input).parse::<f64>() else {
-                self.command_line.push_error(crate::t!("Specify a finite action base point.").as_ref());
+                self.command_line
+                    .push_error(crate::t!("Specify a finite action base point.").as_ref());
                 return Task::none();
             };
             match field {
@@ -215,21 +337,31 @@ impl OpenCADStudio {
         let mut staged = self.tabs[i].scene.document.clone();
         let result = if editing_offset {
             options::set_base_offset(&mut staged, definition, handle, point.unwrap())
-        } else { options::set_base(&mut staged, definition, handle, dependent, point) };
+        } else {
+            options::set_base(&mut staged, definition, handle, dependent, point)
+        };
         match result {
-            Ok(true) => match instance::refresh_after_edit(&staged, &self.tabs[i].scene.document, definition) {
+            Ok(true) => match instance::refresh_after_edit(
+                &staged,
+                &self.tabs[i].scene.document,
+                definition,
+            ) {
                 Ok(staged) => {
-                    self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Edit block action base point"));
-                    self.apply_action_document(i, staged);
+                    self.push_undo_snapshot(
+                        i,
+                        super::tab_document::HistoryLabel::Message("Edit block action base point"),
+                    );
+                    self.apply_action_document_and_bump(i, staged);
                     self.tabs[i].dirty = true;
-                    self.tabs[i].scene.bump_geometry();
                     self.finish_pending_history(i);
                     self.tabs[i].properties.edit_buf.remove(&key);
                     self.refresh_properties();
                 }
                 Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
             },
-            Ok(false) => { self.tabs[i].properties.edit_buf.remove(&key); }
+            Ok(false) => {
+                self.tabs[i].properties.edit_buf.remove(&key);
+            }
             Err(error) => self.command_line.push_error(crate::t!(error).as_ref()),
         }
         Task::none()
@@ -410,9 +542,11 @@ impl OpenCADStudio {
                 }
             };
         }
-        self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("BEDIT Chain parameter actions"));
-        self.apply_action_document(i, document);
-        self.tabs[i].scene.bump_geometry();
+        self.push_undo_snapshot(
+            i,
+            super::tab_document::HistoryLabel::Message("BEDIT Chain parameter actions"),
+        );
+        self.apply_action_document_and_bump(i, document);
         self.tabs[i].dirty = true;
         self.refresh_properties();
         Task::none()
@@ -426,9 +560,11 @@ impl OpenCADStudio {
         let mut document = self.tabs[i].scene.document.clone();
         match toggle_authoring_value_set_flag(&mut document, handle, field) {
             Ok(true) => {
-                self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("BEDIT Parameter value set"));
-                self.tabs[i].scene.document = document;
-                self.tabs[i].scene.bump_geometry();
+                self.push_undo_snapshot(
+                    i,
+                    super::tab_document::HistoryLabel::Message("BEDIT Parameter value set"),
+                );
+                self.apply_action_document_and_bump(i, document);
                 self.tabs[i].dirty = true;
                 self.refresh_properties();
             }
@@ -450,9 +586,11 @@ impl OpenCADStudio {
         let mut document = self.tabs[i].scene.document.clone();
         match set_authoring_value_set_field(&mut document, handle, field, &input) {
             Ok(true) => {
-                self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("BEDIT Parameter value set"));
-                self.tabs[i].scene.document = document;
-                self.tabs[i].scene.bump_geometry();
+                self.push_undo_snapshot(
+                    i,
+                    super::tab_document::HistoryLabel::Message("BEDIT Parameter value set"),
+                );
+                self.apply_action_document_and_bump(i, document);
                 self.tabs[i].dirty = true;
                 self.tabs[i].properties.edit_buf.remove(&key);
                 self.refresh_properties();
@@ -473,10 +611,12 @@ impl OpenCADStudio {
     /// references of that definition are rebuilt from the new values, so the
     /// staged document goes back into the live one the way an action commit does.
     fn apply_parameters_manager_edit(&mut self, i: usize, staged: document::Document) {
-        self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Parameters Manager edit"));
-        self.apply_action_document(i, staged);
+        self.push_undo_snapshot(
+            i,
+            super::tab_document::HistoryLabel::Message("Parameters Manager edit"),
+        );
+        self.apply_action_document_and_bump(i, staged);
         self.tabs[i].dirty = true;
-        self.tabs[i].scene.bump_geometry();
         self.finish_pending_history(i);
         self.refresh_properties();
     }
@@ -501,12 +641,10 @@ impl OpenCADStudio {
             return Task::none();
         };
         let typed = self.tabs[i].parameters_panel.edit_buf.clone();
-        let editing_description =
-            edit.cell == crate::ui::window::parameters_manager::Cell::Description;
         // Opening a numeric cell and leaving it alone writes nothing; an empty
-        // field is the sign that nothing was typed into it. A description cell
-        // opens on its text, so an emptied field is a text to write.
-        if !editing_description && typed.trim().is_empty() {
+        // field is the sign that nothing was typed into it. A text cell opens
+        // on its text, so an emptied field is a text to write.
+        if !edit.cell.is_text() && typed.trim().is_empty() {
             self.clear_parameters_manager_cell(i);
             return Task::none();
         }
@@ -526,41 +664,48 @@ impl OpenCADStudio {
             return Task::none();
         }
         let mut staged = self.tabs[i].scene.document.clone();
-        let written = if editing_description {
-            manager::write_description(
+        let written = match edit.cell {
+            crate::ui::window::parameters_manager::Cell::Description => manager::write_description(
                 &mut staged,
                 definition,
                 edit.parameter,
                 edit.component,
                 &typed,
-            )
-        } else {
-            // The cells print in the drawing's units, so a typed value is read
-            // back in them too.
-            crate::entities::common::set_unit_context(
-                crate::entities::common::UnitContext::from_header(
-                    &self.tabs[i].scene.document.header,
-                ),
-            );
-            let Some(value) = crate::app::block_parameter_properties::parse_value(&typed) else {
-                // A refusal from the cell itself leaves the field open with what
-                // was typed in it, so the number only has to be corrected, not
-                // retyped. A refusal after the field has gone away has nothing
-                // left to correct.
-                if !keep_open {
-                    self.clear_parameters_manager_cell(i);
-                }
-                self.command_line
-                    .push_error(crate::t!("Specify a finite numeric parameter value.").as_ref());
-                return Task::none();
-            };
-            manager::write_number(
-                &mut staged,
-                definition,
-                edit.parameter,
-                edit.component,
-                value,
-            )
+            ),
+            crate::ui::window::parameters_manager::Cell::Order => {
+                manager::write_order(&mut staged, definition, edit.parameter, &typed)
+            }
+            crate::ui::window::parameters_manager::Cell::Expression
+            | crate::ui::window::parameters_manager::Cell::Value => {
+                // The cells print in the drawing's units, so a typed value is
+                // read back in them too.
+                crate::entities::common::set_unit_context(
+                    crate::entities::common::UnitContext::from_header(
+                        &self.tabs[i].scene.document.header,
+                    ),
+                );
+                let Some(value) = crate::app::block_parameter_properties::parse_value(&typed)
+                else {
+                    // A refusal from the cell itself leaves the field open with
+                    // what was typed in it, so the number only has to be
+                    // corrected, not retyped. A refusal after the field has gone
+                    // away has nothing left to correct.
+                    if !keep_open {
+                        self.clear_parameters_manager_cell(i);
+                    }
+                    self.command_line.push_error(
+                        crate::t!("Specify a finite numeric parameter value.").as_ref(),
+                    );
+                    return Task::none();
+                };
+                manager::write_number(
+                    &mut staged,
+                    definition,
+                    edit.parameter,
+                    edit.component,
+                    value,
+                )
+            }
         };
         match written {
             Ok(true) => {
@@ -655,10 +800,12 @@ impl OpenCADStudio {
         match result {
             Ok(changed) => {
                 if changed {
-                    self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Edit block parameter metadata"));
-                    self.tabs[i].scene.document = staged;
+                    self.push_undo_snapshot(
+                        i,
+                        super::tab_document::HistoryLabel::Message("Edit block parameter metadata"),
+                    );
+                    self.apply_action_document_and_bump(i, staged);
                     self.tabs[i].dirty = true;
-                    self.tabs[i].scene.bump_geometry();
                     self.finish_pending_history(i);
                 }
                 self.tabs[i]
@@ -1054,7 +1201,10 @@ impl OpenCADStudio {
         ) {
             Ok(changed) => {
                 if changed {
-                    self.push_undo_snapshot(i, super::tab_document::HistoryLabel::Message("Block authoring grip"));
+                    self.push_undo_snapshot(
+                        i,
+                        super::tab_document::HistoryLabel::Message("Block authoring grip"),
+                    );
                     // Keep the live entity-change recorder attached. Basepoint edits
                     // can also relocate INSERT attributes outside the edited block.
                     let doc = &mut self.tabs[i].scene.document;
@@ -1063,8 +1213,10 @@ impl OpenCADStudio {
                         .filter(|e| doc.get_entity(e.common().handle) != Some(*e))
                         .cloned()
                         .collect::<Vec<_>>();
+                    let mut delta = Vec::with_capacity(changed_entities.len());
                     for entity in changed_entities {
                         let handle = entity.common().handle;
+                        delta.push((handle, crate::scene::ChangeKind::Modified));
                         *doc.get_entity_mut(handle)
                             .expect("authoring edits retain entity identities") = entity;
                     }
@@ -1074,7 +1226,12 @@ impl OpenCADStudio {
                         }
                     }
                     doc.block_visibility_params = staged.block_visibility_params.clone();
-                    self.tabs[i].scene.bump_geometry();
+                    for &(h, _) in &delta {
+                        self.tabs[i].scene.reseed_derived_caches(h);
+                    }
+                    self.tabs[i]
+                        .scene
+                        .bump_entities_with_block_deps(&delta, &[definition], &[], false);
                     self.tabs[i].dirty = true;
                     self.finish_pending_history(i);
                 }
@@ -1118,7 +1275,8 @@ fn set_authoring_value_set_field(
     let (set_key, member) = rest
         .rsplit_once('_')
         .ok_or("Unknown parameter value-set field.")?;
-    let Some(document::objects::ObjectType::DynamicBlock(object)) = document.objects.get_mut(&handle)
+    let Some(document::objects::ObjectType::DynamicBlock(object)) =
+        document.objects.get_mut(&handle)
     else {
         return Err("Select an authoring parameter.");
     };
@@ -1217,7 +1375,8 @@ fn toggle_authoring_value_set_flag(
         "values" => 8,
         _ => return Err("Unknown parameter value-set option."),
     };
-    let Some(document::objects::ObjectType::DynamicBlock(object)) = document.objects.get_mut(&handle)
+    let Some(document::objects::ObjectType::DynamicBlock(object)) =
+        document.objects.get_mut(&handle)
     else {
         return Err("Select an authoring parameter.");
     };
@@ -1257,10 +1416,12 @@ mod tests {
         scene.define_block_raw(
             "PREVIEW_BASEPOINT",
             document::types::Vector3::new(2.0, 3.0, 0.0),
-            vec![document::EntityType::Line(document::entities::Line::from_points(
-                document::types::Vector3::ZERO,
-                document::types::Vector3::new(1.0, 0.0, 0.0),
-            ))],
+            vec![document::EntityType::Line(
+                document::entities::Line::from_points(
+                    document::types::Vector3::ZERO,
+                    document::types::Vector3::new(1.0, 0.0, 0.0),
+                ),
+            )],
         );
         let definition = scene
             .document

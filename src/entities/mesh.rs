@@ -3,12 +3,12 @@ use glam::Vec3;
 use kernel::geom2d::{triangulate, Tolerance};
 use kernel::space::{polygon, NurbsSurface3, Plane, Vec3 as KernelVec3};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     edit_prop as edit, edit_scalar_prop as edit_scalar, parse_f64, ro_prop as ro, square_grip,
     stepper_prop as stepper,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{GripApply, GripDef, PropSection, PropValue, Property};
 use crate::scene::model::wire_model::SnapHint;
@@ -685,14 +685,14 @@ impl Grippable for PolyfaceMesh {
         if let Some(v) = self.vertices.get_mut(grip_id) {
             match apply {
                 GripApply::Translate(d) => {
-                    v.location.x += d.x as f64;
-                    v.location.y += d.y as f64;
-                    v.location.z += d.z as f64;
+                    v.location.x += d.x;
+                    v.location.y += d.y;
+                    v.location.z += d.z;
                 }
                 GripApply::Absolute(p) => {
-                    v.location.x = p.x as f64;
-                    v.location.y = p.y as f64;
-                    v.location.z = p.z as f64;
+                    v.location.x = p.x;
+                    v.location.y = p.y;
+                    v.location.z = p.z;
                 }
             }
         }
@@ -1269,7 +1269,8 @@ fn append_feature_edge(
     }
 }
 
-static EDGE_SMOOTH_DEGREES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+static EDGE_SMOOTH_DEGREES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f80_0000);
 
 /// VSEDGESMOOTH: the crease angle in degrees (default 1). A mesh edge whose
 /// two faces meet flatter than this is not drawn in the shaded-with-edges
@@ -1301,7 +1302,8 @@ fn crease_edges(
     let normal = |face: &Vec<usize>| {
         let mut n = glam::DVec3::ZERO;
         for (k, &a) in face.iter().enumerate() {
-            let (Some(p), Some(q)) = (vertices.get(a), vertices.get(face[(k + 1) % face.len()])) else {
+            let (Some(p), Some(q)) = (vertices.get(a), vertices.get(face[(k + 1) % face.len()]))
+            else {
                 continue;
             };
             n.x += (p[1] - q[1]) * (p[2] + q[2]);
@@ -1528,14 +1530,14 @@ impl Grippable for Mesh {
         if let Some(v) = self.vertices.get_mut(grip_id) {
             match apply {
                 GripApply::Translate(d) => {
-                    v.x += d.x as f64;
-                    v.y += d.y as f64;
-                    v.z += d.z as f64;
+                    v.x += d.x;
+                    v.y += d.y;
+                    v.z += d.z;
                 }
                 GripApply::Absolute(p) => {
-                    v.x = p.x as f64;
-                    v.y = p.y as f64;
-                    v.z = p.z as f64;
+                    v.x = p.x;
+                    v.y = p.y;
+                    v.z = p.z;
                 }
             }
         }
@@ -1668,13 +1670,27 @@ mod crease_edge_tests {
             edges
         };
         // Two quads side by side in one plane share edge 1–4.
-        let flat = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0]];
+        let flat = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ];
         let faces = vec![vec![0, 1, 4, 3], vec![1, 2, 5, 4]];
         let kept = crease_edges(&flat, &faces, edges_of(&faces));
         assert!(!kept.contains(&edge_key(1, 4)));
         assert_eq!(kept.len(), 6, "the outline stays");
         // The second quad folded up by 90° keeps the shared edge.
-        let folded = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]];
+        let folded = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ];
         let kept = crease_edges(&folded, &faces, edges_of(&faces));
         assert!(kept.contains(&edge_key(1, 4)));
     }

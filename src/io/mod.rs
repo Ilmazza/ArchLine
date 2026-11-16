@@ -9,11 +9,14 @@ pub mod edit_lock;
 // its tests) is pure and compiles everywhere; the showSaveFilePicker half
 // inside is wasm-only.
 pub mod brep_build;
+pub mod crs;
 pub mod fbx;
 pub mod file_association;
 pub mod font_repo;
-pub mod georef;
 pub(crate) mod fs_access;
+pub mod geopdf;
+pub mod geopdf_export;
+pub mod georef;
 pub mod iges_import;
 pub mod iges_surfaces;
 pub mod line_read;
@@ -37,20 +40,25 @@ pub mod step_import;
 pub mod stl;
 pub mod svg_clipboard;
 pub mod svg_export;
+pub mod svg_import;
 pub mod tds_import;
 pub mod tds_legacy;
 pub mod thumbnail;
+pub(crate) mod transmit;
+pub(crate) mod transmit_zip;
 pub mod update_check;
 pub mod visual_styles;
-pub mod svg_import;
-pub mod wmf_import;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_recent;
+pub mod wmf_import;
 // Registered on every target so the pure helpers (and their tests) compile on
 // the native host; the OPFS half inside is wasm-only.
 pub(crate) mod web_autosave;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_drop;
+// Registered on every target so the pure helpers and unit tests compile on
+// native CI; the postMessage listener and JS transfers inside are wasm-only.
+pub(crate) mod host_bridge;
 #[cfg(target_arch = "wasm32")]
 mod web_worker;
 // Same split as web_autosave: the ?file= deep-link parser (and its tests) are
@@ -164,7 +172,10 @@ impl OpenLoadError {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn recovery_prompt(message: impl Into<String>, read_stats: Option<document::ReadStats>) -> Self {
+    fn recovery_prompt(
+        message: impl Into<String>,
+        read_stats: Option<document::ReadStats>,
+    ) -> Self {
         Self {
             message: message.into(),
             source_sha256: None,
@@ -204,8 +215,8 @@ pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
         .add_filter(
             crate::t!("CAD Files").as_ref(),
             &[
-                "dwg", "dxf", "dwt", "bak", "sv$", "DWG", "DXF", "DWT", "BAK",
-                "ifccad", "ifcx", "IFCCAD", "IFCX",
+                "dwg", "dxf", "dwt", "bak", "sv$", "DWG", "DXF", "DWT", "BAK", "ifccad", "ifcx",
+                "IFCCAD", "IFCX",
             ],
         )
         .add_filter(crate::t!("DWG Files").as_ref(), &["dwg", "DWG"])
@@ -219,7 +230,10 @@ pub async fn pick_open_path() -> Option<(PathBuf, u64)> {
             &["bak", "sv$", "BAK"],
         );
     for format in ocs_save::external_formats() {
-        dialog = dialog.add_filter(ocs_save::external_format_label(*format), format.extensions());
+        dialog = dialog.add_filter(
+            ocs_save::external_format_label(*format),
+            format.extensions(),
+        );
     }
     let handle = dialog
         .add_filter(crate::t!("All Files").as_ref(), &["*"])
@@ -351,6 +365,20 @@ pub async fn pick_datalink_csv_web() -> Option<(String, Vec<u8>)> {
     Some((name, bytes))
 }
 
+pub type OpenedDrawing = (
+    String,
+    PathBuf,
+    Document,
+    DerivedCaches,
+    Option<ocs_save::IfccadSession>,
+);
+
+fn is_ifccad_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(ocs_save::is_ifccad_extension)
+}
+
 /// Load a CAD file from a known path. Parsing and cache building run on a
 /// dedicated OS thread so the async executor stays free for rendering during
 /// the load. Writes phase markers into `phase` so the UI can show
@@ -361,7 +389,7 @@ pub async fn open_path_with_phase(
     path: PathBuf,
     progress: Arc<OpenProgressState>,
     model_bg: [f32; 4],
-) -> Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError> {
+) -> Result<OpenedDrawing, OpenLoadError> {
     open_path_with_phase_attempt(path, progress, model_bg, OpenAttempt::Strict).await
 }
 
@@ -370,7 +398,7 @@ pub async fn open_path_with_phase(
     _path: PathBuf,
     _progress: Arc<OpenProgressState>,
     _model_bg: [f32; 4],
-) -> Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError> {
+) -> Result<OpenedDrawing, OpenLoadError> {
     Err(OpenLoadError::from(
         "filesystem path opening is unavailable on this target",
     ))
@@ -383,7 +411,7 @@ pub async fn recover_path_with_phase(
     model_bg: [f32; 4],
     initial_error: String,
     initial_stats: Option<document::ReadStats>,
-) -> Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError> {
+) -> Result<OpenedDrawing, OpenLoadError> {
     open_path_with_phase_attempt(
         path,
         progress,
@@ -424,7 +452,7 @@ async fn open_path_with_phase_attempt(
     progress: Arc<OpenProgressState>,
     model_bg: [f32; 4],
     attempt: OpenAttempt,
-) -> Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError> {
+) -> Result<OpenedDrawing, OpenLoadError> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -474,7 +502,16 @@ async fn open_path_with_phase_attempt(
                             recoverable: false,
                         }
                     })?;
-                    let outcome = load_file_for_open(&path2, Some(parser_progress), &attempt)?;
+                    let (outcome, ifccad_session) = if is_ifccad_path(&path2) {
+                        let bytes = std::fs::read(&path2).map_err(|error| error.to_string())?;
+                        let (outcome, session) = ocs_save::read_ifccad_for_edit(&bytes)?;
+                        (finalize_loaded_outcome(&path2, outcome)?, session)
+                    } else {
+                        (
+                            load_file_for_open(&path2, Some(parser_progress), &attempt)?,
+                            None,
+                        )
+                    };
                     let read_stats = outcome.stats;
                     let mut doc = outcome.document;
                     let parse_ms = t_parse.elapsed().as_millis() as u32;
@@ -562,7 +599,7 @@ async fn open_path_with_phase_attempt(
                     caches.timings.caches_ms,
                     caches.timings.finalize_ms,
                 );
-                    Ok((doc, caches))
+                    Ok((doc, caches, ifccad_session))
                 })()
             }));
             let result = match attempted {
@@ -593,10 +630,10 @@ async fn open_path_with_phase_attempt(
             let _ = sender.send(result);
         })
         .map_err(|error| OpenLoadError::from(format!("failed to start parser thread: {error}")))?;
-    let (doc, caches) = receiver
+    let (doc, caches, ifccad_session) = receiver
         .await
         .map_err(|_| OpenLoadError::from("parser thread stopped without a result"))??;
-    Ok((name, path, doc, caches))
+    Ok((name, path, doc, caches, ifccad_session))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -634,7 +671,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 pub struct WebOpenOutcome {
     pub name: String,
     pub size_bytes: u64,
-    pub result: Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError>,
+    pub result: Result<OpenedDrawing, OpenLoadError>,
     pub recovery_bytes: Option<Arc<[u8]>>,
     pub cache_bytes: Option<Arc<[u8]>>,
     pub record_recent: bool,
@@ -646,7 +683,9 @@ pub async fn pick_and_load_web(progress: Arc<OpenProgressState>) -> WebOpenOutco
         .set_title(crate::t!("Open CAD file").as_ref())
         .add_filter(
             crate::t!("CAD Files").as_ref(),
-            &["dwg", "dxf", "dwt", "DWG", "DXF", "DWT", "ifccad", "ifcx", "IFCCAD", "IFCX"],
+            &[
+                "dwg", "dxf", "dwt", "DWG", "DXF", "DWT", "ifccad", "ifcx", "IFCCAD", "IFCX",
+            ],
         )
         .add_filter(
             crate::t!("Drawing Template (*.dwt)").as_ref(),
@@ -787,11 +826,15 @@ async fn load_web_bytes(
     recovery_mode: bool,
     initial_error: &str,
     mut initial_stats: Option<document::ReadStats>,
-) -> Result<(String, PathBuf, Document, DerivedCaches), OpenLoadError> {
+) -> Result<OpenedDrawing, OpenLoadError> {
     progress.set(crate::app::OPEN_PHASE_PARSING, 1000, 0, 1);
-    let (outcome, mut source_sha256) =
+    let (outcome, mut source_sha256, ifccad_session) = if is_ifccad_path(Path::new(name)) {
+        let (outcome, session) =
+            ocs_save::read_ifccad_for_edit(bytes).map_err(OpenLoadError::from)?;
+        (outcome, None, session)
+    } else {
         match web_worker::parse_document(name, bytes, recovery_mode, initial_error).await {
-            Ok(result) => result,
+            Ok((outcome, sha256)) => (outcome, sha256, None),
             Err(error) => {
                 let recoverable_parse_error = error.recovery_available;
                 let mut source_sha256 = error.source_sha256;
@@ -814,7 +857,8 @@ async fn load_web_bytes(
                     read_stats,
                 });
             }
-        };
+        }
+    };
     let mut outcome = outcome;
     if let Some(initial_stats) = initial_stats.take() {
         merge_read_diagnostics(&mut outcome.stats, initial_stats);
@@ -824,6 +868,7 @@ async fn load_web_bytes(
     crate::scene::center_native::import(&mut doc);
     if name.to_ascii_lowercase().ends_with(".dxf") {
         fix_dxf_layout_plot_settings(&mut doc);
+        fix_dxf_attribute_insertion(&mut doc);
     }
     fix_viewport_status_flags(&mut doc);
     fix_double_placed_dimension_pictures(&mut doc);
@@ -850,7 +895,7 @@ async fn load_web_bytes(
     caches.source_sha256 = source_sha256;
     progress.set(crate::app::OPEN_PHASE_FINALIZING, 9900, 1, 1);
     let path = PathBuf::from(name);
-    Ok((name.to_string(), path, doc, caches))
+    Ok((name.to_string(), path, doc, caches, ifccad_session))
 }
 
 /// Web: parse a *second* drawing (a block to insert, a layer-standards
@@ -866,6 +911,7 @@ async fn parse_web_document(name: &str, bytes: &[u8]) -> Result<Document, String
     crate::scene::center_native::import(&mut doc);
     if name.to_ascii_lowercase().ends_with(".dxf") {
         fix_dxf_layout_plot_settings(&mut doc);
+        fix_dxf_attribute_insertion(&mut doc);
     }
     fix_viewport_status_flags(&mut doc);
     fix_double_placed_dimension_pictures(&mut doc);
@@ -1011,6 +1057,7 @@ pub fn load_bytes(name: &str, bytes: Vec<u8>) -> Result<Document, String> {
                 .read()
                 .map_err(|e| e.to_string())?;
             fix_dxf_layout_plot_settings(&mut doc);
+            fix_dxf_attribute_insertion(&mut doc);
             fix_viewport_status_flags(&mut doc);
             fix_double_placed_dimension_pictures(&mut doc);
             fix_current_style_names(&mut doc);
@@ -1033,6 +1080,7 @@ pub fn load_bytes_finalized(path: &Path, bytes: Vec<u8>) -> Result<Document, Str
     resolve_raster_image_paths(&mut doc, path.parent());
     doc.source_path = Some(path.to_string_lossy().into_owned());
     crate::bim::migrate::migrate_document(&mut doc);
+    crate::scene::text::sysfont::load_drawing_fonts(path.parent(), &doc);
     // Opening is a field evaluation event (FIELDEVAL bit 1).
     crate::entities::field::update_fields(&mut doc, 1, None);
     Ok(doc)
@@ -1058,6 +1106,15 @@ fn sniff_dwg_or_dxf_bytes(bytes: &[u8]) -> &'static str {
     } else {
         "dxf"
     }
+}
+
+/// The folder of the drawing `doc` was read from, where resources stored
+/// relative to it are looked up first.
+pub(crate) fn drawing_dir(doc: &Document) -> Option<&Path> {
+    doc.source_path
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::parent)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1300,6 +1357,7 @@ fn finalize_loaded_outcome(
     materialize_missing_block_markers(doc);
     if outcome.stats.source_format == Some(document::SourceFormat::Dxf) {
         fix_dxf_layout_plot_settings(doc);
+        fix_dxf_attribute_insertion(doc);
     }
     fix_viewport_status_flags(doc);
     fix_double_placed_dimension_pictures(doc);
@@ -1310,6 +1368,7 @@ fn finalize_loaded_outcome(
     // ArchLine: old BIM records become transform-safe before the drawing can
     // be edited (`bim::migrate`).
     crate::bim::migrate::migrate_document(doc);
+    crate::scene::text::sysfont::load_drawing_fonts(path.parent(), doc);
     // Opening is a field evaluation event (FIELDEVAL bit 1).
     crate::entities::field::update_fields(doc, 1, None);
     Ok(outcome)
@@ -1462,13 +1521,18 @@ fn normalize_block_origins(doc: &mut Document) {
     // Evaluated dynamic origins share coordinates with reference parameter
     // caches and authoring frames. Translating only their bodies would move
     // grips on reopen and change the next evaluation's coordinate basis.
-    let dynamic_origins: std::collections::BTreeSet<_> = doc.entities()
+    let dynamic_origins: std::collections::BTreeSet<_> = doc
+        .entities()
         .filter_map(|entity| match entity {
-            EntityType::Insert(reference) => doc.dynamic_definition_for_insert(reference.common.handle)
-                .filter(|definition| crate::scene::block_basepoint::parameter(doc, *definition).is_some())
+            EntityType::Insert(reference) => doc
+                .dynamic_definition_for_insert(reference.common.handle)
+                .filter(|definition| {
+                    crate::scene::block_basepoint::parameter(doc, *definition).is_some()
+                })
                 .map(|_| reference.block_name.to_ascii_lowercase()),
             _ => None,
-        }).collect();
+        })
+        .collect();
 
     let blocks: Vec<_> = doc
         .block_records
@@ -1619,8 +1683,15 @@ fn resolve_raster_image_paths(doc: &mut Document, base_dir: Option<&Path>) {
         })
         .collect();
 
-    for e in doc.entities_mut() {
-        if let EntityType::RasterImage(img) = e {
+    // Mutable access drops an entity's verbatim record, so only images whose
+    // path actually changes are touched; the rest of the drawing stays raw.
+    let updates: Vec<(document::Handle, String)> = doc
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::RasterImage(img) => Some(img),
+            _ => None,
+        })
+        .filter_map(|img| {
             let raw = if !img.file_path.trim().is_empty() {
                 img.file_path.clone()
             } else {
@@ -1629,14 +1700,16 @@ fn resolve_raster_image_paths(doc: &mut Document, base_dir: Option<&Path>) {
                     .unwrap_or_default()
             };
             if raw.trim().is_empty() {
-                continue;
+                return None;
             }
-            if let Some(resolved) = resolve_image_file(&raw, base_dir) {
-                img.file_path = resolved;
-            } else {
-                // At least surface the stored path so the renderer can try it.
-                img.file_path = raw;
-            }
+            // Fall back to the stored path so the renderer can at least try it.
+            let path = resolve_image_file(&raw, base_dir).unwrap_or(raw);
+            (path != img.file_path).then_some((img.common.handle, path))
+        })
+        .collect();
+    for (handle, path) in updates {
+        if let Some(EntityType::RasterImage(img)) = doc.get_entity_mut(handle) {
+            img.file_path = path;
         }
     }
 
@@ -1674,7 +1747,7 @@ pub(crate) fn resolve_image_file(raw: &str, base_dir: Option<&Path>) -> Option<S
     if joined.is_file() {
         return Some(joined.to_string_lossy().into_owned());
     }
-    let name = raw.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(raw);
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
     let cand = base_dir.join(name);
     if cand.is_file() {
         return Some(cand.to_string_lossy().into_owned());
@@ -1693,7 +1766,9 @@ pub const SAVE_FORMAT_OPTIONS: &[&str] = &[
 
 /// The Save As format list: the DWG/DXF targets, then each listed converter.
 pub fn save_format_options() -> Vec<String> {
-    let converters = ocs_save::external_formats().iter().map(|format| ocs_save::external_format_label(*format));
+    let converters = ocs_save::external_formats()
+        .iter()
+        .map(|format| ocs_save::external_format_label(*format));
     SAVE_FORMAT_OPTIONS
         .iter()
         .copied()
@@ -1850,13 +1925,23 @@ pub fn drawing_properties_lost_on_save(
 /// bytes — that would be DROPPED when saving `doc` to `target_version` (or to
 /// DXF). Returns 0 for a same-version DWG save, where they round-trip verbatim.
 /// Used to warn the user before a lossy Save-As.
+///
+/// Also counts OLE2FRAMEs read from a file whose embedded compound file was
+/// changed: the writer then rebuilds it, and other DWG readers can reject the
+/// rebuilt object and drop the frame (#2862), whatever the target.
 pub fn dropped_on_save_count(
     doc: &document::Document,
     target_version: document::DxfVersion,
     is_dxf: bool,
 ) -> usize {
+    let rebuilt_ole = doc
+        .entities()
+        .filter(
+            |e| matches!(e, document::EntityType::Ole2Frame(ole) if ole.rewrites_source_storage()),
+        )
+        .count();
     if !is_dxf && doc.dwg_source_version == Some(target_version) {
-        return 0;
+        return rebuilt_ole;
     }
 
     let mut n = doc
@@ -1897,7 +1982,7 @@ pub fn dropped_on_save_count(
             n += 1;
         }
     }
-    n
+    n + rebuilt_ole
 }
 
 /// MTEXT data the pinned codec's writer has no place for in an older target.
@@ -2045,7 +2130,6 @@ impl SaveFailure {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn externally_modified(path: &Path) -> Self {
         Self {
             message: format!("{} changed on disk after it was opened", path.display()),
@@ -2129,8 +2213,12 @@ mod save_failure_tests {
                 .as_nanos()
         ));
 
-        let error = save_as_version(&document::Document::new(), &path, document::DxfVersion::AC1032)
-            .unwrap_err();
+        let error = save_as_version(
+            &document::Document::new(),
+            &path,
+            document::DxfVersion::AC1032,
+        )
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -2162,6 +2250,9 @@ mod save_failure_tests {
             Some(expected),
             None,
             false,
+            false,
+            None,
+            None,
         )
         .unwrap_err();
 
@@ -2197,11 +2288,48 @@ mod save_failure_tests {
             Some(expected),
             Some(reader),
             false,
+            false,
+            None,
+            None,
         )
         .unwrap_err();
 
         assert!(error.externally_modified);
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn create_only_save_refuses_even_a_matching_destination_fingerprint() {
+        let path = std::env::temp_dir().join(format!(
+            "ocs_create_only_{}_{}.dxf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // The destination appeared before verification captured its baseline.
+        // A matching fingerprint must not grant permission to replace it.
+        std::fs::write(&path, b"another application's drawing").unwrap();
+        let observed = super::edit_lock::FileFingerprint::capture(&path).unwrap();
+        let error = super::save_owned_as_version_atomic(
+            document::Document::new(),
+            &path,
+            document::DxfVersion::AC1032,
+            true,
+            Some(observed),
+            None,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.externally_modified);
+        assert_eq!(std::fs::read(&path).unwrap(), b"another application's drawing");
+        assert!(!path.with_extension("bak").exists());
         let _ = std::fs::remove_file(path);
     }
 }
@@ -2214,9 +2342,44 @@ mod save_failure_tests {
 /// picked from outside the plot styles folder is copied into it (unless a
 /// file of that name is already there), so the dialog lists it from now on
 /// and page setups naming it resolve after a restart.
-/// Pick a `.lin` linetype definition file and return its folder (where the
-/// shape files it names are looked for; none on the web) and text (#1588).
-pub async fn pick_linetype_file() -> Option<(Option<std::path::PathBuf>, String)> {
+/// Where a linetype export is written, or `None` when the user cancelled.
+pub async fn pick_linetype_export_path(suggested: String) -> Option<String> {
+    let handle = crate::sys::file_dialog()
+        .set_title(crate::t!("Export Linetypes").as_ref())
+        .add_filter(crate::t!("Linetype Files").as_ref(), &["lin", "LIN"])
+        .set_file_name(suggested)
+        .save_file()
+        .await?;
+    Some(crate::sys::handle_path(&handle).display().to_string())
+}
+
+/// A picked `.lin` linetype definition file: its file name, its folder
+/// (where the shape files it names are looked for; none on the web) and its
+/// text.
+#[derive(Debug, Clone)]
+pub struct PickedLinetypeFile {
+    pub name: String,
+    pub dir: Option<std::path::PathBuf>,
+    pub source: String,
+}
+
+impl PickedLinetypeFile {
+    /// The file at `path`, read as a picked one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read(path: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            dir: path.parent().map(Path::to_path_buf),
+            source: String::from_utf8_lossy(&std::fs::read(path)?).into_owned(),
+        })
+    }
+}
+
+/// Pick a `.lin` linetype definition file (#1588).
+pub async fn pick_linetype_file_named() -> Option<PickedLinetypeFile> {
     let handle = crate::sys::file_dialog()
         .set_title(crate::t!("Load Linetypes").as_ref())
         .add_filter(crate::t!("Linetype Files").as_ref(), &["lin", "LIN"])
@@ -2226,7 +2389,18 @@ pub async fn pick_linetype_file() -> Option<(Option<std::path::PathBuf>, String)
     let dir = handle.path().parent().map(Path::to_path_buf);
     #[cfg(target_arch = "wasm32")]
     let dir = None;
-    Some((dir, String::from_utf8_lossy(&handle.read().await).into_owned()))
+    Some(PickedLinetypeFile {
+        name: handle.file_name(),
+        dir,
+        source: String::from_utf8_lossy(&handle.read().await).into_owned(),
+    })
+}
+
+/// Pick a `.lin` linetype definition file and return its folder and text.
+pub async fn pick_linetype_file() -> Option<(Option<std::path::PathBuf>, String)> {
+    pick_linetype_file_named()
+        .await
+        .map(|file| (file.dir, file.source))
 }
 
 pub async fn pick_plot_style() -> Result<Option<plot_style::PlotStyleTable>, String> {
@@ -2271,8 +2445,8 @@ pub async fn pick_plot_style() -> Result<Option<plot_style::PlotStyleTable>, Str
     {
         let name = handle.file_name();
         let bytes: std::sync::Arc<Vec<u8>> = std::sync::Arc::new(handle.read().await);
-        let table = plot_style::PlotStyleTable::from_bytes(&name, &bytes)
-            .map_err(|e| e.to_string())?;
+        let table =
+            plot_style::PlotStyleTable::from_bytes(&name, &bytes).map_err(|e| e.to_string())?;
         plot_style::register_session_table(&name, bytes);
         Ok(Some(table))
     }
@@ -2398,8 +2572,18 @@ pub fn save_as_version(
     let clone_started = iced::time::Instant::now();
     let snapshot = doc.clone();
     let clone_ms = clone_started.elapsed().as_secs_f64() * 1000.0;
-    save_owned_as_version_inner(snapshot, path, version, false, false, clone_ms, |_| Ok(()))
-        .map_err(|error| error.to_string())
+    save_owned_as_version_inner(
+        snapshot,
+        path,
+        version,
+        false,
+        false,
+        clone_ms,
+        false,
+        None,
+        |_| Ok(()),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Save an owned document snapshot. Preparation, serialization, compression and
@@ -2415,23 +2599,64 @@ pub fn save_owned_as_version_atomic(
     expected_fingerprint: Option<edit_lock::FileFingerprint>,
     verify_reader: Option<std::fs::File>,
     allow_loss: bool,
+    require_new_destination: bool,
+    logical_path: Option<&Path>,
+    ifccad_session: Option<&ocs_save::IfccadSession>,
 ) -> Result<(), SaveFailure> {
-    save_owned_as_version_inner(doc, path, version, backup, allow_loss, 0.0, move |path| {
-        let Some(expected) = expected_fingerprint else {
-            return Ok(());
-        };
-        let current = match verify_reader {
-            Some(mut file) => match edit_lock::path_matches_file(path, &file) {
-                Ok(true) => edit_lock::FileFingerprint::capture_from(&mut file),
-                Ok(false) | Err(_) => return Err(SaveFailure::externally_modified(path)),
-            },
-            None => edit_lock::FileFingerprint::capture(path),
-        };
-        match current {
-            Ok(current) if current == expected => Ok(()),
-            _ => Err(SaveFailure::externally_modified(path)),
-        }
-    })
+    if let Some(logical) = logical_path {
+        verify_save_destination(logical, path)?;
+    }
+    save_owned_as_version_inner(
+        doc,
+        path,
+        version,
+        backup,
+        allow_loss,
+        0.0,
+        require_new_destination,
+        ifccad_session,
+        move |path| {
+            if let Some(logical) = logical_path {
+                verify_save_destination(logical, path)?;
+            }
+            let Some(expected) = expected_fingerprint else {
+                return Ok(());
+            };
+            let current = match verify_reader {
+                Some(mut file) => match edit_lock::path_matches_file(path, &file) {
+                    Ok(true) => edit_lock::FileFingerprint::capture_from(&mut file),
+                    Ok(false) | Err(_) => return Err(SaveFailure::externally_modified(path)),
+                },
+                None => edit_lock::FileFingerprint::capture(path),
+            };
+            match current {
+                Ok(current) if current == expected => Ok(()),
+                _ => Err(SaveFailure::externally_modified(path)),
+            }
+        },
+    )?;
+    if let Some(logical) = logical_path {
+        verify_save_destination(logical, path)?;
+    }
+    Ok(())
+}
+
+/// Keep a current drawing's logical name bound to the writer's destination.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn verify_save_destination(logical: &Path, physical: &Path) -> Result<(), SaveFailure> {
+    let extension = |path: &Path| {
+        path.extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+    };
+    if extension(logical) != extension(physical) {
+        return Err(SaveFailure::other(
+            "Current-file alias has a different destination extension; save to a new matching path",
+        ));
+    }
+    match (std::fs::canonicalize(logical), std::fs::canonicalize(physical)) {
+        (Ok(logical), Ok(physical)) if logical == physical => Ok(()),
+        _ => Err(SaveFailure::externally_modified(logical)),
+    }
 }
 
 fn save_owned_as_version_inner<F>(
@@ -2441,6 +2666,8 @@ fn save_owned_as_version_inner<F>(
     backup: bool,
     allow_loss: bool,
     clone_ms: f64,
+    require_new_destination: bool,
+    ifccad_session: Option<&ocs_save::IfccadSession>,
     before_replace: F,
 ) -> Result<(), SaveFailure>
 where
@@ -2461,6 +2688,11 @@ where
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+    if let Some(session) = ifccad_session {
+        session
+            .check_destination(&ext)
+            .map_err(SaveFailure::other)?;
+    }
     let write_started = iced::time::Instant::now();
     if ext == "dxf" {
         crate::entities::spline::complete_nurbs_for_dxf(&mut doc);
@@ -2471,9 +2703,11 @@ where
             .write_to_file(&temp_path)
             .map_err(|e| SaveFailure::other(e.to_string())),
         other => match ocs_save::external_format(other) {
-            Some(format) => ocs_save::write_external(&doc, format, allow_loss)
-                .and_then(|bytes| std::fs::write(&temp_path, bytes).map_err(|e| e.to_string()))
-                .map_err(SaveFailure::other),
+            Some(format) => {
+                ocs_save::write_external_for_edit(&doc, format, allow_loss, ifccad_session)
+                    .and_then(|bytes| std::fs::write(&temp_path, bytes).map_err(|e| e.to_string()))
+                    .map_err(SaveFailure::other)
+            }
             None => DwgWriter::write_to_file(&temp_path, &doc)
                 .map_err(|e| SaveFailure::other(e.to_string())),
         },
@@ -2486,11 +2720,14 @@ where
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
-    if backup {
+    if backup && !require_new_destination {
         write_backup(path);
     }
-    if let Err(error) = replace_save_file(&temp_path, path) {
+    if let Err(error) = replace_save_file(&temp_path, path, require_new_destination) {
         let _ = std::fs::remove_file(&temp_path);
+        if require_new_destination && error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(SaveFailure::externally_modified(path));
+        }
         return Err(SaveFailure::replacing(path, error));
     }
     if perf {
@@ -2528,12 +2765,28 @@ fn save_temp_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+fn replace_save_file(
+    temp_path: &Path,
+    path: &Path,
+    require_new_destination: bool,
+) -> std::io::Result<()> {
+    if require_new_destination {
+        // Both names are in the same directory. Creating a hard link is
+        // atomic and never replaces an existing name, including a symlink.
+        // Fail safely on filesystems that cannot support this operation.
+        std::fs::hard_link(temp_path, path)?;
+        let _ = std::fs::remove_file(temp_path);
+        return Ok(());
+    }
     std::fs::rename(temp_path, path)
 }
 
 #[cfg(target_os = "windows")]
-fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+fn replace_save_file(
+    temp_path: &Path,
+    path: &Path,
+    require_new_destination: bool,
+) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
     // The temp name starts with a dot, and a Samba share stores such files
@@ -2545,7 +2798,7 @@ fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
     // freshly written drawing for a moment without delete sharing, which
     // refuses the replace. Retry briefly before reporting the file in use.
     let mut attempt = 0;
-    while let Err(error) = replace_save_file_inner(temp_path, path) {
+    while let Err(error) = replace_save_file_inner(temp_path, path, require_new_destination) {
         attempt += 1;
         if attempt >= 10 || !replace_error_is_file_in_use(&error) {
             return Err(error);
@@ -2571,7 +2824,26 @@ fn replace_save_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn replace_save_file_inner(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+fn replace_save_file_inner(
+    temp_path: &Path,
+    path: &Path,
+    require_new_destination: bool,
+) -> std::io::Result<()> {
+    if require_new_destination {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let source: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Omitting MOVEFILE_REPLACE_EXISTING makes the final placement
+        // reject a name that appeared after the control request.
+        return if unsafe {
+            MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_WRITE_THROUGH)
+        } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+    }
     if !path.exists() {
         return std::fs::rename(temp_path, path);
     }
@@ -2598,6 +2870,28 @@ fn replace_save_file_inner(temp_path: &Path, path: &Path) -> std::io::Result<()>
 /// Save using the document's existing version.
 pub fn save(doc: &Document, path: &Path) -> Result<(), String> {
     save_as_version(doc, path, doc.version)
+}
+
+/// Write a WBLOCK snapshot, including retained IFCCAD entities for a whole drawing.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn save_wblock_snapshot(
+    doc: Document,
+    path: &Path,
+    ifccad_session: Option<&ocs_save::IfccadSession>,
+) -> Result<(), String> {
+    let version = doc.version;
+    save_owned_as_version_inner(
+        doc,
+        path,
+        version,
+        false,
+        false,
+        0.0,
+        false,
+        ifccad_session,
+        |_| Ok(()),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Serialize a document to an in-memory byte buffer, format chosen by `ext`
@@ -2715,11 +3009,20 @@ pub async fn serialize_prepared_document(
     prepared: &Document,
     ext: &str,
     allow_conversion_loss: bool,
+    ifccad_session: Option<&ocs_save::IfccadSession>,
 ) -> Result<Vec<u8>, String> {
+    if let Some(session) = ifccad_session {
+        session.check_destination(ext)?;
+    }
     // A converter writes inline: the worker only carries the DWG/DXF writers,
     // and the user's "Save anyway" lives on this side.
     if let Some(format) = ocs_save::external_format(ext) {
-        return ocs_save::write_external(prepared, format, allow_conversion_loss);
+        return ocs_save::write_external_for_edit(
+            prepared,
+            format,
+            allow_conversion_loss,
+            ifccad_session,
+        );
     }
     let encoded = match ocs_save::encode_request(prepared, ext) {
         Ok(encoded) => encoded,
@@ -3049,8 +3352,7 @@ fn fix_double_placed_dimension_pictures(doc: &mut Document) {
             continue;
         };
         let base = dimension.base();
-        let Some(placement) = crate::scene::render_graph::dimension_picture_placement(base)
-        else {
+        let Some(placement) = crate::scene::render_graph::dimension_picture_placement(base) else {
             continue;
         };
         let Some(record) = doc.block_records.get(&base.block_name) else {
@@ -3105,15 +3407,21 @@ fn fix_double_placed_dimension_pictures(doc: &mut Document) {
 /// Files from AutoCAD and other tools always set bit 15 for active viewports, leaving bit 0
 /// clear, so document reads every such viewport as off.  Correct that here after loading.
 fn fix_viewport_status_flags(doc: &mut Document) {
-    for entity in doc.entities_mut() {
-        if let EntityType::Viewport(vp) = entity {
-            let bits = vp.status.to_bits();
-            // If bit 0 is not set but bit 15 is, this is an external-format viewport:
-            // treat bit 15 as "on" and bit 14 as "locked".
-            if (bits & 0x0001) == 0 && (bits & 0x8000) != 0 {
-                vp.turn_on();
-                vp.status.locked = (bits & 0x4000) != 0;
-            }
+    // If bit 0 is not set but bit 15 is, this is an external-format viewport:
+    // treat bit 15 as "on" and bit 14 as "locked". Only those viewports are
+    // borrowed mutably, which keeps every other entity's verbatim record.
+    let fix: Vec<_> = doc
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::Viewport(vp) => Some((vp.common.handle, vp.status.to_bits())),
+            _ => None,
+        })
+        .filter(|(_, bits)| (bits & 0x0001) == 0 && (bits & 0x8000) != 0)
+        .collect();
+    for (handle, bits) in fix {
+        if let Some(EntityType::Viewport(vp)) = doc.get_entity_mut(handle) {
+            vp.turn_on();
+            vp.status.locked = (bits & 0x4000) != 0;
         }
     }
 }
@@ -3123,6 +3431,64 @@ fn fix_viewport_status_flags(doc: &mut Document) {
 /// The raw pairs are preserved on Layout, so trim and parse those authoritative
 /// values after loading. In particular, losing code 73 turns a 90°/270° sheet
 /// back to 0° and makes a landscape layout render as portrait (#505).
+/// A justified ATTDEF or ATTRIB keeps its text at its alignment point (DXF
+/// group 11); the insertion point (group 10) is derived from it and the
+/// text's size. A DXF may carry a stale group 10, which readers of DXF
+/// ignore but readers of DWG draw from, so it is recomputed on reading a
+/// DXF and a DWG written from it places the attribute where the DXF did
+/// (#2728).
+fn fix_dxf_attribute_insertion(doc: &mut Document) {
+    use crate::entities::attribute::{
+        attribute_text_start, definition_text_start, insertion_is_derived,
+    };
+    let stale = |stored: document::types::Vector3, derived: document::types::Vector3| {
+        (stored - derived).length() > 1e-9 * (1.0 + derived.length())
+    };
+    let attribute_start = |a: &document::entities::AttributeEntity| {
+        insertion_is_derived(a.horizontal_alignment, a.vertical_alignment, a.is_multiline)
+            .then(|| attribute_text_start(a))
+            .filter(|start| stale(a.insertion_point, *start))
+    };
+    // Only what changes is written back: an entity taken mutably loses the
+    // record it was read from.
+    let handles: Vec<document::Handle> = doc
+        .entities()
+        .filter(|e| match e {
+            EntityType::AttributeDefinition(a) => {
+                insertion_is_derived(a.horizontal_alignment, a.vertical_alignment, a.is_multiline)
+                    && stale(a.insertion_point, definition_text_start(a))
+            }
+            EntityType::AttributeEntity(a) => attribute_start(a).is_some(),
+            EntityType::Insert(insert) => insert
+                .attributes
+                .iter()
+                .any(|a| attribute_start(a).is_some()),
+            _ => false,
+        })
+        .map(|e| e.common().handle)
+        .collect();
+    for handle in handles {
+        match doc.get_entity_mut(handle) {
+            Some(EntityType::AttributeDefinition(a)) => {
+                a.insertion_point = definition_text_start(a)
+            }
+            Some(EntityType::AttributeEntity(a)) => {
+                if let Some(start) = attribute_start(a) {
+                    a.insertion_point = start;
+                }
+            }
+            Some(EntityType::Insert(insert)) => {
+                for a in &mut insert.attributes {
+                    if let Some(start) = attribute_start(a) {
+                        a.insertion_point = start;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn fix_dxf_layout_plot_settings(doc: &mut Document) {
     use document::objects::{ObjectType, PlotFlags};
 
@@ -3207,8 +3573,10 @@ mod dimension_arrow_save_tests {
         dimension.definition_point = Vector3::new(0.0, 20.0, 0.0);
         dimension.base.definition_point = dimension.definition_point;
         dimension.base.text_middle_point = Vector3::new(50.0, 20.0, 0.0);
-        doc.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(dimension))))
-            .unwrap();
+        doc.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(
+            dimension,
+        ))))
+        .unwrap();
         doc
     }
 
@@ -3616,8 +3984,11 @@ mod prepare_save_tests {
         marker.common.owner_handle = owner;
         doc.add_entity(EntityType::Block(marker)).unwrap();
         if let Some(tag) = attribute_tag {
-            let mut attdef =
-                document::entities::AttributeDefinition::new(tag.into(), "Prompt".into(), "".into());
+            let mut attdef = document::entities::AttributeDefinition::new(
+                tag.into(),
+                "Prompt".into(),
+                "".into(),
+            );
             attdef.common.handle = doc.allocate_handle();
             attdef.common.owner_handle = owner;
             doc.add_entity(EntityType::AttributeDefinition(attdef))
@@ -3647,8 +4018,16 @@ mod prepare_save_tests {
         crate::io::linetypes::populate_document(&mut doc);
         define(&mut doc, "TAGGED", Some("TAG"));
         define(&mut doc, "PLAIN", None);
-        doc.block_records.get_mut("TAGGED").unwrap().flags.has_attributes = false;
-        doc.block_records.get_mut("PLAIN").unwrap().flags.has_attributes = true;
+        doc.block_records
+            .get_mut("TAGGED")
+            .unwrap()
+            .flags
+            .has_attributes = false;
+        doc.block_records
+            .get_mut("PLAIN")
+            .unwrap()
+            .flags
+            .has_attributes = true;
         let version = doc.version;
         let prepared = prepare_document_for_save(doc.clone(), version);
         assert!(
@@ -3723,12 +4102,24 @@ mod prepare_save_tests {
             hyperlink_base: "C:/docs".into(),
             ..Default::default()
         };
-        assert_eq!(drawing_properties_lost_on_save(&info, "C:/docs", AC1015, false), 0);
+        assert_eq!(
+            drawing_properties_lost_on_save(&info, "C:/docs", AC1015, false),
+            0
+        );
         assert_eq!(drawing_properties_lost_on_save(&info, "", AC1015, false), 1);
-        assert_eq!(drawing_properties_lost_on_save(&info, "C:/docs", AC1014, false), 1);
+        assert_eq!(
+            drawing_properties_lost_on_save(&info, "C:/docs", AC1014, false),
+            1
+        );
         info.hyperlink_base.clear();
-        assert_eq!(drawing_properties_lost_on_save(&info, "D:/base", AC1015, false), 0);
-        assert_eq!(drawing_properties_lost_on_save(&info, "D:/base", AC1014, true), 1);
+        assert_eq!(
+            drawing_properties_lost_on_save(&info, "D:/base", AC1015, false),
+            0
+        );
+        assert_eq!(
+            drawing_properties_lost_on_save(&info, "D:/base", AC1014, true),
+            1
+        );
         assert_eq!(drawing_properties_lost_on_save(&info, "", AC1014, true), 0);
     }
 
@@ -3815,5 +4206,47 @@ mod dxf_annotation_scale_tests {
             doc.header.annotation_scale_value,
             default.header.annotation_scale_value
         );
+    }
+}
+
+#[cfg(test)]
+mod ole_save_loss_tests {
+    use document::types::Vector3;
+
+    /// An OLE2FRAME as read from a file, with a synthetic (non-image) payload.
+    fn read_frame() -> document::entities::Ole2Frame {
+        let image = super::ole_embed::EmbeddedImage {
+            bytes: vec![7; 600],
+            pixel_width: 1,
+            pixel_height: 1,
+            name: "synthetic.png".into(),
+        };
+        let built = super::ole_embed::build_embedded_ole(
+            &image,
+            Vector3::new(0.0, 10.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        );
+        let mut frame = document::entities::Ole2Frame::new();
+        frame.set_payload(&built.encoded_payload());
+        frame
+    }
+
+    fn dropped(frame: document::entities::Ole2Frame) -> usize {
+        let mut doc = document::Document::new();
+        doc.dwg_source_version = Some(document::DxfVersion::AC1032);
+        doc.add_entity(document::EntityType::Ole2Frame(Box::new(frame)))
+            .unwrap();
+        super::dropped_on_save_count(&doc, document::DxfVersion::AC1032, false)
+    }
+
+    // #2862: a rebuilt compound file is dropped by other DWG readers, so a
+    // read frame whose storage changed must be reported even on a same-version save.
+    #[test]
+    fn rebuilt_ole_storage_is_reported_as_a_save_loss() {
+        assert_eq!(dropped(read_frame()), 0);
+        let mut edited = read_frame();
+        edited.storage.trailing_records =
+            document::compound_file::BinaryRecord::split(&[1, 2, 3], 4096);
+        assert_eq!(dropped(edited), 1);
     }
 }

@@ -6,11 +6,11 @@ use document::entities::{
 use document::types::{Handle, Transform, Vector3};
 use document::xdata::{ExtendedDataRecord, XDataValue};
 
-use crate::command::EntityTransform;
 use crate::entities::common::{
     center_grip, edit_angle_prop, edit_prop, parse_f64, ro_prop, square_grip,
 };
 use crate::entities::traits::{Grippable, PropertyEditable, RenderConvertible, Transformable};
+use crate::entities::transform::EntityTransform;
 use crate::scene::convert::acad_to_render::{RenderEntity, RenderObject};
 use crate::scene::model::object::{
     GripApply, GripDef, GripMenuAction, GripMenuItem, PropSection, PropValue, Property,
@@ -249,7 +249,11 @@ fn arc_aligned_text_render(data: &ArcAlignedTextData) -> RenderEntity {
         let (axis_x, axis_y, normal) = plane_axes(data.normal);
         // The centre in the text plane's own coordinates.
         let dot = |a: Vector3, b: Vector3| a.x * b.x + a.y * b.y + a.z * b.z;
-        let (cx, cy, elevation) = (dot(center, axis_x), dot(center, axis_y), dot(center, normal));
+        let (cx, cy, elevation) = (
+            dot(center, axis_x),
+            dot(center, axis_y),
+            dot(center, normal),
+        );
         let size = data.text_size.abs();
         let x_scale = data.x_scale.abs().max(0.01);
         // Outward text stands on the arc reading clockwise; inward text hangs
@@ -366,7 +370,10 @@ fn arc_aligned_text_render(data: &ArcAlignedTextData) -> RenderEntity {
     RenderEntity {
         pick_tris: Vec::new(),
         object: RenderObject::Text(runs),
-        snap_pts: vec![(glam::DVec3::new(center.x, center.y, center.z), SnapHint::Center)],
+        snap_pts: vec![(
+            glam::DVec3::new(center.x, center.y, center.z),
+            SnapHint::Center,
+        )],
         tangent_geoms: vec![],
         key_vertices: vec![[center.x, center.y, center.z]],
         fill_tris: vec![],
@@ -720,6 +727,9 @@ fn camera_lines(document: &document::Document, view_handle: Handle) -> Vec<[f64;
 fn to_render(entity: &ExtendedEntity, document: &document::Document) -> Option<RenderEntity> {
     if let ExtendedEntityData::ArcAlignedText(data) = &entity.data {
         return Some(arc_aligned_text_render(data));
+    }
+    if let ExtendedEntityData::Arch(data) = &entity.data {
+        return crate::entities::civil::render(data, entity.common.handle.value(), document);
     }
     let (points, snaps, keys): (Vec<[f64; 3]>, Vec<(glam::DVec3, SnapHint)>, Vec<[f64; 3]>) =
         match &entity.data {
@@ -1625,6 +1635,83 @@ fn reference_properties(references: &[document::objects::ProxyObjectReference]) 
         .join("\n")
 }
 
+/// A Civil 3D alignment's start station, design speeds and station
+/// equations (raw station back, then the station ahead; a down arrow for
+/// stations that decrease after it).
+fn alignment_properties(data: &document::classes::arch::ArchEntityData) -> Vec<crate::scene::model::object::Property> {
+    let mut props = Vec::new();
+    if let Some(name) = data.alignment_name() {
+        props.push(ro_prop(t!("Name").as_ref(), "ext_civil_name", name));
+    }
+    if let Some(kind) = data.alignment_type() {
+        props.push(ro_prop(t!("Alignment Type").as_ref(), "ext_civil_alignment_type", format!("{kind:?}")));
+    }
+    if let Some(criteria) = data.alignment_criteria() {
+        props.push(ro_prop(t!("Criteria-Based Design").as_ref(), "ext_civil_criteria", yes_no(criteria.criteria_based_design)));
+    }
+    if let Some(offset) = data.alignment_offset_parameters() {
+        let side = if offset.left { t!("Left") } else { t!("Right") };
+        props.push(ro_prop(t!("Offset").as_ref(), "ext_civil_offset", format!("{:.3} {side}", offset.offset)));
+    }
+    if let Some(start) = data.alignment_start_station() {
+        props.push(ro_prop(t!("Start Station").as_ref(), "ext_civil_start_station", format!("{start:.3}")));
+    }
+    let speeds = data.alignment_design_speeds();
+    if !speeds.is_empty() {
+        let text = speeds.iter().map(|s| format!("{:.3}: {}", s.station, s.speed)).collect::<Vec<_>>().join("\n");
+        props.push(ro_prop(t!("Design Speeds").as_ref(), "ext_civil_design_speeds", text));
+    }
+    let equations = data.alignment_station_equations();
+    if !equations.is_empty() {
+        let text = equations
+            .iter()
+            .map(|e| format!("{:.3} → {:.3}{}", e.raw, e.ahead, if e.increasing { "" } else { " ↓" }))
+            .collect::<Vec<_>>()
+            .join("\n");
+        props.push(ro_prop(t!("Station Equations").as_ref(), "ext_civil_station_equations", text));
+    }
+    props
+}
+
+fn yes_no(flag: bool) -> String {
+    if flag { t!("Yes") } else { t!("No") }.into_owned()
+}
+
+/// What a Civil 3D object of `kind` keeps beyond its geometry: names,
+/// design settings, sample line stations.
+fn civil_properties(data: &document::classes::arch::ArchEntityData, kind: document::classes::civil::CivilKind) -> Vec<crate::scene::model::object::Property> {
+    use document::classes::civil::CivilKind;
+    let named = |(name, description): (String, String)| {
+        let mut props = vec![ro_prop(t!("Name").as_ref(), "ext_civil_name", name)];
+        if !description.is_empty() {
+            props.push(ro_prop(t!("Description").as_ref(), "ext_civil_description", description));
+        }
+        props
+    };
+    match kind {
+        CivilKind::Alignment => alignment_properties(data),
+        CivilKind::Profile => {
+            let mut props: Vec<_> = data.profile_name().map(|name| ro_prop(t!("Name").as_ref(), "ext_civil_name", name)).into_iter().collect();
+            if let Some(criteria) = data.profile_criteria() {
+                props.push(ro_prop(t!("Criteria-Based Design").as_ref(), "ext_civil_criteria", yes_no(criteria.criteria_based_design)));
+            }
+            props
+        }
+        CivilKind::Parcel => data.face_name().map(named).unwrap_or_default(),
+        CivilKind::Other if data.dxf_name == "AECC_FEATURE_LINE" => data.feature_line_name().map(named).unwrap_or_default(),
+        CivilKind::SampleLineGroup => data
+            .sample_lines()
+            .map(|lines| {
+                vec![
+                    ro_prop(t!("Stations").as_ref(), "ext_civil_stations", lines.stations.len().to_string()),
+                    ro_prop(t!("Swath Width").as_ref(), "ext_civil_swath", format!("{:.3} / {:.3}", lines.left, lines.right)),
+                ]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn properties(entity: &ExtendedEntity) -> Vec<PropSection> {
     match &entity.data {
         ExtendedEntityData::Camera { view_handle } => vec![PropSection {
@@ -1636,13 +1723,28 @@ fn properties(entity: &ExtendedEntity) -> Vec<PropSection> {
             )],
         }],
         ExtendedEntityData::SectionObject(data) => section_properties(entity, data),
-        ExtendedEntityData::Arch(data) => vec![PropSection {
-            title: t!("Class").into_owned(),
-            props: vec![
-                ro_prop(t!("Class").as_ref(), "ext_arch_class", data.dxf_name.clone()),
-                ro_prop(t!("Kind").as_ref(), "ext_arch_kind", format!("{:?}", data.kind)),
-            ],
-        }],
+        ExtendedEntityData::Arch(data) => {
+            let mut props = vec![
+                ro_prop(
+                    t!("Class").as_ref(),
+                    "ext_arch_class",
+                    data.dxf_name.clone(),
+                ),
+                ro_prop(
+                    t!("Kind").as_ref(),
+                    "ext_arch_kind",
+                    data.civil_kind()
+                        .map_or_else(|| format!("{:?}", data.kind), |kind| format!("Civil 3D {kind:?}")),
+                ),
+            ];
+            if let Some(kind) = data.civil_kind() {
+                props.extend(civil_properties(data, kind));
+            }
+            vec![PropSection {
+                title: t!("Class").into_owned(),
+                props,
+            }]
+        }
         ExtendedEntityData::ArcAlignedText(data) => arc_text_properties(data),
         ExtendedEntityData::RemoteText(data) => remote_text_properties(data),
         ExtendedEntityData::GeoPositionMarker(data) => geo_marker_properties(data),

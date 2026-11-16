@@ -31,6 +31,19 @@ use crate::ipc::transport::{recv, send};
 use crate::ipc::v4::client::{RunnerFrame, V4Client};
 use crate::ribbon::owned::{OwnedEntityClasses, OwnedPluginManifest, OwnedRibbonGroup};
 
+/// Bounds ONE notification-drain pass in `run_v4` (P1-20): callbacks run
+/// inline on the runner's read loop, so a chain of slow panel actions used to
+/// delay host requests for the whole queue length. The queue itself stays
+/// count-bounded; the remainder waits for the next pass.
+const DRAIN_WALL_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Maximum interactive commands a command-less `PanelAction` fans out to
+/// (P1-20): the whole registry was enumerated and each target received a
+/// full clone of the event and value maps inline. Beyond the cap the
+/// remainder is dropped with a loud notice — a plugin that needs broadcast
+/// semantics for its panel actions registers its owning command id.
+const MAX_PANEL_ACTION_TARGETS: usize = 16;
+
 /// Entry point for the plugin runner child process.
 ///
 /// Connects back to the host on `socket_name`, loads the cdylib at
@@ -146,9 +159,121 @@ fn run_v4(
     loop {
         // Drain any host notifications and dispatch them to the plugin's
         // state-only callback. Panics are caught so a bad callback does not
-        // tear down the connection.
-        while let Some((command_id, notification)) = client.try_recv_notification() {
+        // tear down the connection. One drain pass is bounded in wall time
+        // (P1-20): an on_dialog_action / on_notification callback that loops
+        // or stalls cannot monopolize the read loop and starve host requests;
+        // the rest of the queue waits for the next pass (the queue itself is
+        // count-bounded by the transport layer).
+        let drain_deadline = std::time::Instant::now() + DRAIN_WALL_BUDGET;
+        // Bounds BEFORE popping: the wall budget is what limits how much new
+        // work this pass takes on. Evaluating it only after `try_recv` had popped
+        // an item used to DROP that item without dispatching whenever a
+        // preceding callback had already run the pass over budget — a silent
+        // notification loss that the 2026-11-14 firetest diag round measured
+        // at ~16 lost SelectionChangedV4 in one run.
+        while std::time::Instant::now() < drain_deadline {
+            let Some((command_id, notification)) = client.try_recv_notification() else {
+                break;
+            };
             if notification_api_version(&notification) > api_version {
+                continue;
+            }
+            if let HostNotification::PanelAction {
+                panel_id,
+                control_id,
+                action,
+                value,
+            } = &notification
+            {
+                let mut updates_to_send: Vec<(
+                    String,
+                    std::collections::HashMap<String, crate::dialog::DialogValue>,
+                )> = Vec::new();
+                if api_version >= 17 {
+                    let mut registry = interactive.borrow_mut();
+                    let mut target_ids: Vec<u64> = if let Some(cid) = command_id {
+                        vec![cid]
+                    } else {
+                        registry.keys().copied().collect()
+                    };
+                    if target_ids.len() > MAX_PANEL_ACTION_TARGETS {
+                        eprintln!(
+                            "[runner] panel action fan-out to {} interactive commands exceeds \
+                             the {MAX_PANEL_ACTION_TARGETS} budget; the remainder is dropped",
+                            target_ids.len()
+                        );
+                        target_ids.truncate(MAX_PANEL_ACTION_TARGETS);
+                    }
+                    let (event_val, current_vals) = match value {
+                        Some(crate::dialog::DialogValue::Fields(map)) => {
+                            let mut map = map.clone();
+                            let ev = map
+                                .remove("__event_value__")
+                                .or_else(|| map.get(control_id).cloned());
+                            (ev, map)
+                        }
+                        other => (other.clone(), std::collections::HashMap::new()),
+                    };
+                    for cid in target_ids {
+                        if let Some(cmd) = registry.get_mut(&cid) {
+                            let event = crate::dialog::DialogEvent {
+                                control_id: control_id.clone(),
+                                action: action.clone(),
+                                value: event_val.clone(),
+                                current_values: current_vals.clone(),
+                            };
+                            if let Ok(crate::dialog::DialogActionResponse::UpdateValues(vals)) =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    cmd.on_dialog_action(event)
+                                }))
+                            {
+                                updates_to_send.push((panel_id.clone(), vals));
+                            }
+                        }
+                    }
+                }
+                let panel_id_owned = panel_id.clone();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    plugin.on_notification(command_id, notification)
+                }));
+                if api_version >= 7 {
+                    let mut registry = interactive.borrow_mut();
+                    let mut target_ids: Vec<u64> = if let Some(cid) = command_id {
+                        vec![cid]
+                    } else {
+                        registry.keys().copied().collect()
+                    };
+                    if target_ids.len() > MAX_PANEL_ACTION_TARGETS {
+                        eprintln!(
+                            "[runner] panel update fan-out to {} interactive commands exceeds \
+                             the {MAX_PANEL_ACTION_TARGETS} budget; the remainder is dropped",
+                            target_ids.len()
+                        );
+                        target_ids.truncate(MAX_PANEL_ACTION_TARGETS);
+                    }
+                    for cid in target_ids {
+                        if let Some(cmd) = registry.get_mut(&cid) {
+                            if let Ok(pending) =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    cmd.take_pending_panel_updates()
+                                }))
+                            {
+                                updates_to_send.extend(pending);
+                            }
+                        }
+                    }
+                }
+                if !updates_to_send.is_empty() {
+                    let mut proxy = client.plugin_host_api(0, interactive.clone());
+                    for (target_id, vals) in updates_to_send {
+                        let id_to_use = if target_id.is_empty() {
+                            panel_id_owned.as_str()
+                        } else {
+                            target_id.as_str()
+                        };
+                        let _ = crate::host::HostApi::update_panel(&mut proxy, id_to_use, vals);
+                    }
+                }
                 continue;
             }
             // API v15: a quad panel pick routes to the dedicated callback —
@@ -226,6 +351,7 @@ fn notification_api_version(notification: &crate::host::HostNotification) -> u32
     use crate::host::HostNotification as N;
     match notification {
         N::QuadAction { .. } => 15,
+        N::SelectionChangedDigest { .. } => 22,
         N::DocumentChangedRegions { .. } => 13,
         N::DocumentOpened { .. } => 9,
         N::CommandStateChanged { .. } | N::DrawingChanged { .. } => 7,
@@ -234,6 +360,23 @@ fn notification_api_version(notification: &crate::host::HostNotification) -> u32
         | N::SelectionChangedV4 { .. } => 4,
         _ => 0,
     }
+}
+
+/// `on_dialog_action` of the interactive command `command_id`; `None` when the
+/// command is gone or panics.
+fn run_dialog_action(
+    interactive: &InteractiveRegistry,
+    command_id: u64,
+    event: crate::dialog::DialogEvent,
+) -> crate::dialog::DialogActionResponse {
+    let mut registry = interactive.borrow_mut();
+    registry
+        .get_mut(&command_id)
+        .and_then(|cmd| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd.on_dialog_action(event)))
+                .ok()
+        })
+        .unwrap_or(crate::dialog::DialogActionResponse::None)
 }
 
 fn handle_host_request(
@@ -363,7 +506,9 @@ fn handle_host_request(
             };
             match result {
                 Some(Ok(b)) => HostResponse::Bool(b),
-                Some(Err(_)) => HostResponse::Error("is_selection_gathering() panicked".to_string()),
+                Some(Err(_)) => {
+                    HostResponse::Error("is_selection_gathering() panicked".to_string())
+                }
                 None => HostResponse::Error(format!("unknown interactive command {command_id}")),
             }
         }
@@ -378,7 +523,9 @@ fn handle_host_request(
             };
             match result {
                 Some(Ok(b)) => HostResponse::Bool(b),
-                Some(Err(_)) => HostResponse::Error("accepts_drag_selection() panicked".to_string()),
+                Some(Err(_)) => {
+                    HostResponse::Error("accepts_drag_selection() panicked".to_string())
+                }
                 None => HostResponse::Error(format!("unknown interactive command {command_id}")),
             }
         }
@@ -393,7 +540,9 @@ fn handle_host_request(
             };
             match result {
                 Some(Ok(b)) => HostResponse::Bool(b),
-                Some(Err(_)) => HostResponse::Error("selection_rejects_locked_layers() panicked".to_string()),
+                Some(Err(_)) => {
+                    HostResponse::Error("selection_rejects_locked_layers() panicked".to_string())
+                }
                 None => HostResponse::Error(format!("unknown interactive command {command_id}")),
             }
         }
@@ -416,14 +565,15 @@ fn handle_host_request(
             let result = {
                 let registry = interactive.borrow();
                 registry.get(&command_id).and_then(|cmd| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        cmd.modal_dialog()
-                    }))
-                    .ok()
-                    .flatten()
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd.modal_dialog()))
+                        .ok()
+                        .flatten()
                 })
             };
             HostResponse::ModalDialog(result)
+        }
+        HostRequest::DialogAction { command_id, event } => {
+            HostResponse::DialogAction(run_dialog_action(interactive, command_id, event))
         }
         HostRequest::ExecuteCode { .. } => {
             HostResponse::Error("ExecuteCode requires V4 protocol".to_string())
@@ -667,15 +817,16 @@ fn handle_host_request_v4(
             let result = {
                 let registry = interactive.borrow();
                 registry.get(&command_id).and_then(|cmd| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        cmd.modal_dialog()
-                    }))
-                    .ok()
-                    .flatten()
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd.modal_dialog()))
+                        .ok()
+                        .flatten()
                 })
             };
             Some(HostResponse::ModalDialog(result))
         }
+        HostRequest::DialogAction { command_id, event } => Some(HostResponse::DialogAction(
+            run_dialog_action(interactive, command_id, event),
+        )),
         HostRequest::ExecuteCode {
             command_id,
             source,
@@ -904,6 +1055,78 @@ mod tests {
             }
             other => panic!("expected unsupported error, got {other:?}"),
         }
+        drop(host_stream);
+    }
+
+    /// A command that replaces its dialog on a button and remembers the event.
+    struct DialogActionCommand {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl InteractiveCommand for DialogActionCommand {
+        fn prompt(&self) -> String {
+            String::new()
+        }
+        fn on_point(&mut self, _pt: [f64; 3]) -> CommandStep {
+            CommandStep::NeedPoint
+        }
+        fn on_dialog_action(
+            &mut self,
+            event: crate::dialog::DialogEvent,
+        ) -> crate::dialog::DialogActionResponse {
+            self.seen
+                .lock()
+                .expect("seen")
+                .push(event.control_id.clone());
+            if event.control_id == "next" {
+                crate::dialog::DialogActionResponse::ReplaceDialog(Box::new(
+                    crate::dialog::DialogDef::new("Page 2"),
+                ))
+            } else {
+                crate::dialog::DialogActionResponse::None
+            }
+        }
+    }
+
+    #[test]
+    fn dialog_action_reaches_the_command_and_returns_its_answer() {
+        let (host_stream, runner_stream) = connect_pair();
+        let client = V4Client::from_stream_for_test(runner_stream);
+        let interactive: InteractiveRegistry = Rc::new(RefCell::new(HashMap::new()));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        interactive.borrow_mut().insert(
+            7,
+            Box::new(DialogActionCommand { seen: seen.clone() }) as Box<dyn InteractiveCommand>,
+        );
+        let mut plugin = UnsupportedReplPlugin;
+        let event = |id: &str| crate::dialog::DialogEvent {
+            control_id: id.to_string(),
+            action: "click".to_string(),
+            value: None,
+            current_values: HashMap::new(),
+        };
+        let req = HostRequest::DialogAction {
+            command_id: 7,
+            event: event("next"),
+        };
+        match handle_host_request_v4(&mut plugin, &interactive, &client, 1, 19, req) {
+            Some(HostResponse::DialogAction(
+                crate::dialog::DialogActionResponse::ReplaceDialog(dialog),
+            )) => assert_eq!(dialog.title, "Page 2"),
+            other => panic!("expected the replaced dialog, got {other:?}"),
+        }
+        // An unknown command answers None instead of failing.
+        let req = HostRequest::DialogAction {
+            command_id: 8,
+            event: event("next"),
+        };
+        assert!(matches!(
+            handle_host_request_v4(&mut plugin, &interactive, &client, 2, 19, req),
+            Some(HostResponse::DialogAction(
+                crate::dialog::DialogActionResponse::None
+            ))
+        ));
+        assert_eq!(*seen.lock().expect("seen"), ["next"]);
         drop(host_stream);
     }
 
